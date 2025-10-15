@@ -1,0 +1,122 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*' # Запускать при push тега вида v1.0.0, v0.2.1, и т.д.
+  workflow_dispatch: # Позволяет запустить вручную из GitHub UI
+
+# Разрешения для создания релизов
+permissions:
+  contents: write
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS Intel
+          - platform: 'macos-latest'
+            args: '--target x86_64-apple-darwin'
+
+          # macOS ARM (Apple Silicon)
+          - platform: 'macos-latest'
+            args: '--target aarch64-apple-darwin'
+
+          # Windows
+          - platform: 'windows-latest'
+            args: ''
+
+          # Linux
+          - platform: 'ubuntu-22.04'
+            args: ''
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Установка Node.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      # Установка pnpm
+      - name: Install pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 8
+
+      # Установка Rust
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Для macOS добавляем оба таргета
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      # Кэширование Rust dependencies
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      # Установка системных зависимостей для Linux
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libasound2-dev \
+            pkg-config
+
+      # Установка frontend зависимостей
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      # Сборка и создание релиза с помощью Tauri Action
+      - name: Build and release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Ключи для подписи обновлений (добавьте их в GitHub Secrets)
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Voice to Text v__VERSION__'
+          releaseBody: |
+            См. CHANGELOG для деталей.
+
+            ## Установка
+
+            **macOS:**
+            - Скачайте `.dmg` файл
+            - Перетащите в Applications
+            - При первом запуске: Системные настройки → Конфиденциальность → Разрешить
+
+            **Windows:**
+            - Скачайте `.msi` или `.exe` файл
+            - Запустите установщик
+
+            **Linux:**
+            - `.deb` для Debian/Ubuntu: `sudo dpkg -i voice-to-text_*.deb`
+            - `.AppImage` для других дистрибутивов: сделать исполняемым и запустить
+
+            ---
+
+            🎉 Обновления будут устанавливаться автоматически!
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}

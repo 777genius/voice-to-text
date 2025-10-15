@@ -35,6 +35,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_log::Builder::default()
                 .level(if cfg!(debug_assertions) {
@@ -59,6 +61,12 @@ pub fn run() {
             commands::start_microphone_test,
             commands::stop_microphone_test,
             commands::register_recording_hotkey,
+            commands::check_for_updates,
+            commands::install_update,
+            commands::get_available_whisper_models,
+            commands::check_whisper_model,
+            commands::download_whisper_model,
+            commands::delete_whisper_model,
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]
@@ -66,10 +74,28 @@ pub fn run() {
                 log::info!("Voice to Text application started in debug mode");
             }
 
+            // Создаем system tray иконку
+            if let Err(e) = presentation::tray::create_tray(app.handle()) {
+                log::error!("Failed to create system tray: {}", e);
+            }
+
             // Окно скрыто при старте независимо от режима
             // Открывается по горячей клавише (не забирает фокус)
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.hide();
+
+                // Настраиваем обработчик закрытия окна
+                // При попытке закрыть - скрываем вместо завершения приложения
+                let window_clone = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        // Отменяем закрытие
+                        api.prevent_close();
+                        // Скрываем окно
+                        let _ = window_clone.hide();
+                        log::debug!("Window hidden instead of closed (app still running in tray)");
+                    }
+                });
             }
 
             // Загружаем сохраненные конфигурации
@@ -148,6 +174,10 @@ pub fn run() {
                     }
                 }
             });
+
+            // Запускаем фоновую проверку обновлений (каждые 6 часов)
+            log::info!("Starting background update checker");
+            infrastructure::updater::start_background_update_check(app.handle().clone());
 
             Ok(())
         })

@@ -47,6 +47,11 @@ onMounted(async () => {
     console.error('Failed to load config:', err);
     errorMessage.value = String(err);
   }
+
+  // Подписываемся на событие о доступных обновлениях из фоновой проверки
+  updateAvailableUnlisten = await listen<string>('update:available', (event) => {
+    updateAvailable.value = event.payload;
+  });
 });
 
 // Сохранение конфигурации
@@ -131,6 +136,45 @@ const stopMicrophoneTest = async () => {
   }
 };
 
+// Обновления приложения
+const isCheckingUpdates = ref(false);
+const updateAvailable = ref<string | null>(null);
+const updateError = ref('');
+
+// Проверка обновлений
+const checkForUpdates = async () => {
+  isCheckingUpdates.value = true;
+  updateError.value = '';
+  updateAvailable.value = null;
+
+  try {
+    const version = await invoke<string | null>('check_for_updates');
+    if (version) {
+      updateAvailable.value = version;
+    } else {
+      updateError.value = 'Вы используете последнюю версию';
+    }
+  } catch (err) {
+    console.error('Failed to check for updates:', err);
+    updateError.value = String(err);
+  } finally {
+    isCheckingUpdates.value = false;
+  }
+};
+
+// Установка обновления
+const installUpdate = async () => {
+  try {
+    await invoke('install_update');
+  } catch (err) {
+    console.error('Failed to install update:', err);
+    updateError.value = String(err);
+  }
+};
+
+// Слушаем событие о доступном обновлении из фоновой проверки
+let updateAvailableUnlisten: UnlistenFn | null = null;
+
 // Воспроизведение аудио буфера
 const playAudioBuffer = (samples: number[]) => {
   const audioContext = new AudioContext({ sampleRate: 16000 });
@@ -151,6 +195,9 @@ const playAudioBuffer = (samples: number[]) => {
 onUnmounted(() => {
   if (testLevelUnlisten) {
     testLevelUnlisten();
+  }
+  if (updateAvailableUnlisten) {
+    updateAvailableUnlisten();
   }
 });
 </script>
@@ -265,6 +312,44 @@ onUnmounted(() => {
           </div>
 
           <div v-if="testError" class="error-message">{{ testError }}</div>
+        </div>
+
+        <!-- Обновления приложения -->
+        <div class="setting-group">
+          <label class="setting-label">Обновления приложения</label>
+          <p class="setting-hint">
+            Приложение автоматически проверяет обновления каждые 6 часов в фоновом режиме.
+            Вы также можете проверить обновления вручную.
+          </p>
+
+          <div class="update-controls">
+            <button
+              class="button-update"
+              :disabled="isCheckingUpdates"
+              @click="checkForUpdates"
+            >
+              {{ isCheckingUpdates ? 'Проверка...' : 'Проверить обновления' }}
+            </button>
+
+            <!-- Индикатор доступного обновления -->
+            <div v-if="updateAvailable" class="update-available">
+              <div class="update-info">
+                <span class="update-icon">🎉</span>
+                <div>
+                  <div class="update-title">Доступна новая версия {{ updateAvailable }}</div>
+                  <div class="update-subtitle">Нажмите кнопку ниже чтобы установить</div>
+                </div>
+              </div>
+              <button class="button-install" @click="installUpdate">
+                Установить и перезапустить
+              </button>
+            </div>
+
+            <!-- Сообщения об обновлениях -->
+            <div v-if="updateError && !updateAvailable" class="update-message">
+              {{ updateError }}
+            </div>
+          </div>
         </div>
 
         <!-- Messages -->
@@ -612,6 +697,97 @@ onUnmounted(() => {
   height: 100%;
   background: linear-gradient(90deg, #4caf50, #8bc34a, #ffc107, #ff9800, #f44336);
   transition: width 0.1s ease-out;
+  border-radius: var(--radius-sm);
+}
+
+/* Updates Section */
+.update-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  margin-top: var(--spacing-sm);
+}
+
+.button-update {
+  padding: var(--spacing-sm) var(--spacing-sm);
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background: var(--color-accent);
+  color: var(--color-text);
+  align-self: flex-start;
+}
+
+.button-update:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+  transform: translateY(-1px);
+}
+
+.button-update:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.update-available {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-md);
+  background: rgba(76, 175, 80, 0.15);
+  border: 1px solid rgba(76, 175, 80, 0.3);
+  border-radius: var(--radius-md);
+}
+
+.update-info {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+}
+
+.update-icon {
+  font-size: 24px;
+  line-height: 1;
+}
+
+.update-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text);
+  margin-bottom: 4px;
+}
+
+.update-subtitle {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.button-install {
+  padding: var(--spacing-sm) var(--spacing-sm);
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  background: #4caf50;
+  color: white;
+  transition: all 0.2s ease;
+  align-self: flex-start;
+}
+
+.button-install:hover {
+  background: #45a049;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(76, 175, 80, 0.3);
+}
+
+.update-message {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  padding: var(--spacing-sm);
+  background: rgba(255, 255, 255, 0.05);
   border-radius: var(--radius-sm);
 }
 </style>

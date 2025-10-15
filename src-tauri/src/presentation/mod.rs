@@ -4,6 +4,7 @@
 pub mod commands;
 pub mod state;
 pub mod events;
+pub mod tray;
 
 pub use state::AppState;
 pub use events::*;

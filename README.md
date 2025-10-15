@@ -74,15 +74,18 @@ src/
 
 ## Features
 
-- Global hotkey support (Cmd+Shift+V)
-- Real-time transcription with partial results
-- Auto-copy to clipboard
-- Support for multiple STT providers:
-  - Mock (for testing)
-  - Deepgram (cloud, planned)
-  - Whisper.cpp (offline, planned)
-- Privacy-focused: local processing option
-- Minimal, beautiful UI
+- **System Tray Integration**: Runs in background, accessible from tray icon
+- **Global Hotkey**: Quick access with customizable hotkeys (default: Cmd+Shift+X / Ctrl+Shift+X)
+- **Auto-Updates**: Automatic update checks every 6 hours with secure cryptographic signatures
+- **Real-time Transcription**: Partial and final results from cloud providers
+- **Auto-copy to Clipboard**: Instant access to transcribed text
+- **Multiple STT Providers**:
+  - **Deepgram** (Nova-2/3, low latency, high quality) ✅
+  - **AssemblyAI** (Universal-Streaming v3) ✅
+  - Whisper.cpp (offline, stub) 🚧
+- **Cross-Platform**: macOS, Windows, Linux support
+- **Privacy-Focused**: API keys from environment variables, no cloud storage
+- **Beautiful UI**: Minimal design with glass morphism effects
 
 ## Getting Started
 
@@ -157,20 +160,25 @@ pnpm tauri:build
 ### Completed ✅
 - Clean Architecture foundation
 - Domain layer with interfaces and value objects
-- Mock implementations for testing
-- Vue 3 frontend with Pinia store
-- Tauri commands and event system
-- Recording popover UI
-
-### TODO 📋
-- WebRTC VAD integration for silence detection
-- Real Deepgram provider implementation
-- Real Whisper.cpp integration
-- System audio capture (cpal)
+- Real Deepgram provider implementation (Nova-2/3)
+- Real AssemblyAI provider implementation
+- System audio capture (cpal with automatic resampling)
 - Global hotkey registration
-- Settings UI
+- Settings UI with microphone test
+- **System Tray integration**
+- **Background mode (always running)**
+- **Auto-updates via GitHub Releases**
+- **Cross-platform support (macOS, Windows, Linux)**
+- WebSocket streaming for real-time transcription
+- VAD (Voice Activity Detection) with silence timeout
 - Transcription history
 - Multi-language support
+
+### TODO 📋
+- Whisper.cpp local implementation (currently stub)
+- Transcription history UI
+- Auto-start on system boot
+- More STT provider integrations
 
 ## Platform Support
 

@@ -589,3 +589,149 @@ pub async fn register_recording_hotkey(
     log::info!("Successfully registered hotkey: {}", hotkey);
     Ok(())
 }
+
+//
+// Update Commands
+//
+
+/// Check for application updates
+#[tauri::command]
+pub async fn check_for_updates(app_handle: AppHandle) -> Result<Option<String>, String> {
+    log::info!("Command: check_for_updates");
+    crate::infrastructure::updater::check_for_update(app_handle).await
+}
+
+/// Check and install application update with user confirmation
+#[tauri::command]
+pub async fn install_update(app_handle: AppHandle) -> Result<String, String> {
+    log::info!("Command: install_update");
+    crate::infrastructure::updater::check_and_install_update(app_handle).await
+}
+
+//
+// Whisper Model Management Commands
+//
+
+use crate::infrastructure::models::{
+    WhisperModelInfo, download_model, get_available_models,
+    is_model_downloaded, get_model_size, delete_model,
+};
+
+/// Get list of available Whisper models
+#[tauri::command]
+pub async fn get_available_whisper_models() -> Result<Vec<WhisperModelInfo>, String> {
+    log::debug!("Command: get_available_whisper_models");
+
+    let mut models = get_available_models();
+
+    // Обогащаем данными о локальном наличии
+    for model in &mut models {
+        let is_downloaded = is_model_downloaded(&model.name);
+        let local_size = if is_downloaded {
+            get_model_size(&model.name)
+        } else {
+            None
+        };
+
+        // Добавляем информацию в description если модель скачана
+        if is_downloaded {
+            if let Some(size) = local_size {
+                model.description = format!("{} (Скачана, {} на диске)",
+                    model.description, format_size_human(size));
+            } else {
+                model.description = format!("{} (Скачана)", model.description);
+            }
+        }
+    }
+
+    Ok(models)
+}
+
+/// Check if specific Whisper model is downloaded
+#[tauri::command]
+pub async fn check_whisper_model(model_name: String) -> Result<bool, String> {
+    log::debug!("Command: check_whisper_model - model: {}", model_name);
+    Ok(is_model_downloaded(&model_name))
+}
+
+/// Download Whisper model with progress tracking
+#[tauri::command]
+pub async fn download_whisper_model(
+    app_handle: AppHandle,
+    model_name: String,
+) -> Result<String, String> {
+    log::info!("Command: download_whisper_model - model: {}", model_name);
+
+    // Проверяем что модель еще не скачана
+    if is_model_downloaded(&model_name) {
+        return Err(format!("Model '{}' is already downloaded", model_name));
+    }
+
+    // Эмитируем событие начала загрузки
+    let _ = app_handle.emit("whisper-model:download-started", model_name.clone());
+
+    // Создаем callback для отслеживания прогресса
+    let app_handle_progress = app_handle.clone();
+    let model_name_progress = model_name.clone();
+
+    let progress_callback = move |downloaded: u64, total: u64| {
+        let progress = if total > 0 {
+            (downloaded as f64 / total as f64 * 100.0) as u8
+        } else {
+            0
+        };
+
+        #[derive(Clone, serde::Serialize)]
+        struct DownloadProgressPayload {
+            model_name: String,
+            downloaded: u64,
+            total: u64,
+            progress: u8,
+        }
+
+        let _ = app_handle_progress.emit("whisper-model:download-progress", DownloadProgressPayload {
+            model_name: model_name_progress.clone(),
+            downloaded,
+            total,
+            progress,
+        });
+    };
+
+    // Загружаем модель
+    let model_path = download_model(&model_name, progress_callback)
+        .await
+        .map_err(|e| format!("Failed to download model: {}", e))?;
+
+    // Эмитируем событие завершения загрузки
+    let _ = app_handle.emit("whisper-model:download-completed", model_name.clone());
+
+    log::info!("Model '{}' downloaded successfully to {:?}", model_name, model_path);
+    Ok(format!("Model '{}' downloaded successfully", model_name))
+}
+
+/// Delete Whisper model
+#[tauri::command]
+pub async fn delete_whisper_model(model_name: String) -> Result<String, String> {
+    log::info!("Command: delete_whisper_model - model: {}", model_name);
+
+    delete_model(&model_name)
+        .map_err(|e| format!("Failed to delete model: {}", e))?;
+
+    Ok(format!("Model '{}' deleted successfully", model_name))
+}
+
+fn format_size_human(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.0} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.0} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
