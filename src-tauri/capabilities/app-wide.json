@@ -1,0 +1,16 @@
+{
+    "$schema": "../gen/schemas/desktop-schema.json",
+    "identifier": "app-wide",
+    "description": "App-wide capabilities: global hotkey and auto-updater",
+    "windows": ["main"],
+    "permissions": [
+        "core:window:allow-start-dragging",
+        "global-shortcut:default",
+        "global-shortcut:allow-register",
+        "global-shortcut:allow-unregister",
+        "global-shortcut:allow-is-registered",
+        "updater:default",
+        "updater:allow-check",
+        "updater:allow-download-and-install"
+    ]
+}

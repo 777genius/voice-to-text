@@ -1,0 +1,88 @@
+[package]
+name = "voice-to-text"
+version = "0.1.0"
+description = "Privacy-focused voice-to-text application with offline support"
+authors = ["Voice to Text Contributors"]
+license = "MIT"
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.4.1", features = [] }
+
+[dependencies]
+# Core
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+
+# Tauri core and plugins
+tauri = { version = "2.8.5", features = ["tray-icon"] }
+tauri-plugin-log = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-updater = "2"
+
+# Async runtime
+tokio = { version = "1.41", features = ["full"] }
+async-trait = "0.1"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Audio capture and processing
+cpal = "0.15"  # Cross-platform audio I/O
+rubato = "0.15"  # Sample rate conversion
+webrtc-vad = "0.4"  # Voice Activity Detection
+
+# HTTP client for cloud ASR providers
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls-native-roots"] }
+
+# WebSocket for streaming
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"  # Stream utilities for WebSocket
+http = "1.1"  # HTTP types for WebSocket headers
+
+# Async channels
+async-channel = "2.3"
+
+# Encoding
+base64 = "0.22"  # Base64 encoding for audio data
+
+# URL encoding
+serde_urlencoded = "0.7"
+
+# System directories
+dirs = "5.0"  # User directories (config, data, cache)
+
+# Environment variables
+dotenv = "0.15"  # Load .env file
+
+# Platform-specific dependencies
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri = { version = "2.8.5", features = ["tray-icon", "macos-private-api"] }
+
+[dev-dependencies]
+tokio-test = "0.4"  # Utilities for testing async code
+wiremock = "0.6"  # HTTP mocking for tests
+mockito = "1.4"  # Simple HTTP mocking
+criterion = { version = "0.5", features = ["html_reports"] }  # Benchmarking framework
+env_logger = "0.11"  # Logging for examples
+minimp3 = "0.5"  # MP3 decoder for audio tests
+rubato = "0.15"  # Sample rate conversion for audio tests
+dotenv = "0.15"  # Load .env variables for tests
+
+[[bench]]
+name = "deepgram_benchmarks"
+harness = false
+
+[[example]]
+name = "test_deepgram_connection"

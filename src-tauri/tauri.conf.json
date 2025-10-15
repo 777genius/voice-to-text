@@ -1,0 +1,93 @@
+{
+    "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+    "productName": "Voice to Text",
+    "version": "0.1.0",
+    "identifier": "com.voicetotext.app",
+    "build": {
+        "frontendDist": "../dist",
+        "devUrl": "http://localhost:1420",
+        "beforeDevCommand": "pnpm dev",
+        "beforeBuildCommand": "pnpm build"
+    },
+    "app": {
+        "withGlobalTauri": true,
+        "windows": [{
+            "label": "main",
+            "title": "Voice to Text",
+            "width": 400,
+            "height": 330,
+            "minWidth": 400,
+            "minHeight": 300,
+            "maxWidth": 400,
+            "maxHeight": 550,
+            "resizable": false,
+            "fullscreen": false,
+            "decorations": false,
+            "transparent": true,
+            "alwaysOnTop": true,
+            "center": true,
+            "skipTaskbar": true,
+            "visible": false,
+            "focus": false
+        }],
+        "security": {
+            "csp": null
+        }
+    },
+    "bundle": {
+        "active": true,
+        "targets": "all",
+        "createUpdaterArtifacts": true,
+        "icon": [
+            "icons/32x32.png",
+            "icons/128x128.png",
+            "icons/128x128@2x.png",
+            "icons/icon.icns",
+            "icons/icon.ico"
+        ],
+        "macOS": {
+            "entitlements": "entitlements.plist",
+            "exceptionDomain": null,
+            "frameworks": [],
+            "providerShortName": null,
+            "signingIdentity": null
+        },
+        "windows": {
+            "certificateThumbprint": null,
+            "digestAlgorithm": "sha256",
+            "timestampUrl": "",
+            "webviewInstallMode": {
+                "type": "downloadBootstrapper"
+            },
+            "wix": {
+                "language": "en-US"
+            },
+            "nsis": {
+                "installerIcon": "icons/icon.ico",
+                "headerImage": null,
+                "sidebarImage": null,
+                "installMode": "currentUser",
+                "languages": ["en-US", "ru-RU"],
+                "displayLanguageSelector": false
+            }
+        },
+        "linux": {
+            "deb": {
+                "depends": []
+            },
+            "appimage": {
+                "bundleMediaFramework": false
+            }
+        }
+    },
+    "plugins": {
+        "updater": {
+            "active": true,
+            "dialog": true,
+            "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IFRERVBMT1kgS0VZIERVU0NSSVBUSU9OCnRoaXMtaXMtYS1wbGFjZWhvbGRlci1rZXktcGxlYXNlLWdlbmVyYXRlLXlvdXItb3duLXVzaW5nLXRhdXJpLWNsaQ==",
+            "endpoints": [
+                "https://your-update-server.com/{{target}}/{{arch}}/{{current_version}}"
+            ]
+        }
+    }
+}

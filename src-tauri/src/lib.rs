@@ -1,0 +1,156 @@
+// Clean Architecture layers
+pub mod domain;
+pub mod application;
+pub mod infrastructure;
+mod presentation;
+
+use presentation::commands;
+use presentation::state::AppState;
+use tauri::Manager;
+use infrastructure::ConfigStore;
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    // Загружаем переменные окружения из .env файла (если есть)
+    match dotenv::dotenv() {
+        Ok(path) => println!("✅ Loaded .env file from: {:?}", path),
+        Err(e) => println!("ℹ️  No .env file loaded: {}", e),
+    }
+
+    // Debug: показываем что API ключи загрузились
+    #[cfg(debug_assertions)]
+    {
+        if std::env::var("DEEPGRAM_API_KEY").is_ok() {
+            println!("✅ DEEPGRAM_API_KEY is set");
+        } else {
+            println!("⚠️  DEEPGRAM_API_KEY is NOT set");
+        }
+        if std::env::var("ASSEMBLYAI_API_KEY").is_ok() {
+            println!("✅ ASSEMBLYAI_API_KEY is set");
+        } else {
+            println!("⚠️  ASSEMBLYAI_API_KEY is NOT set");
+        }
+    }
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(
+            tauri_plugin_log::Builder::default()
+                .level(if cfg!(debug_assertions) {
+                    log::LevelFilter::Debug
+                } else {
+                    log::LevelFilter::Info
+                })
+                .build(),
+        )
+        .manage(AppState::default())
+        .invoke_handler(tauri::generate_handler![
+            commands::start_recording,
+            commands::stop_recording,
+            commands::get_recording_status,
+            commands::toggle_window,
+            commands::toggle_recording_with_window,
+            commands::minimize_window,
+            commands::get_stt_config,
+            commands::update_stt_config,
+            commands::get_app_config,
+            commands::update_app_config,
+            commands::start_microphone_test,
+            commands::stop_microphone_test,
+            commands::register_recording_hotkey,
+        ])
+        .setup(|app| {
+            #[cfg(debug_assertions)]
+            {
+                log::info!("Voice to Text application started in debug mode");
+            }
+
+            // Окно скрыто при старте независимо от режима
+            // Открывается по горячей клавише (не забирает фокус)
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.hide();
+            }
+
+            // Загружаем сохраненные конфигурации
+            // API ключи загружаются из переменных окружения (.env)
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                // Загружаем STT конфигурацию
+                if let Ok(mut saved_config) = ConfigStore::load_config().await {
+                    // Подставляем API ключ из переменных окружения если он не задан
+                    if saved_config.api_key.is_none() {
+                        use crate::domain::SttProviderType;
+                        saved_config.api_key = match saved_config.provider {
+                            SttProviderType::AssemblyAI => {
+                                std::env::var("ASSEMBLYAI_API_KEY").ok()
+                            }
+                            SttProviderType::Deepgram => {
+                                std::env::var("DEEPGRAM_API_KEY").ok()
+                            }
+                            SttProviderType::GoogleCloud => {
+                                std::env::var("GOOGLE_CLOUD_API_KEY").ok()
+                            }
+                            _ => None,
+                        };
+                        if saved_config.api_key.is_some() {
+                            log::info!("Loaded API key from environment for {:?}", saved_config.provider);
+                        }
+                    }
+
+                    if let Some(state) = app_handle.try_state::<AppState>() {
+                        if let Err(e) = state.transcription_service.update_config(saved_config.clone()).await {
+                            log::error!("Failed to load saved STT config: {}", e);
+                        } else {
+                            // Синхронизируем с AppConfig
+                            state.config.write().await.stt = saved_config;
+                            log::info!("Loaded saved STT configuration");
+                        }
+                    }
+                }
+
+                // Загружаем конфигурацию приложения
+                if let Ok(saved_app_config) = ConfigStore::load_app_config().await {
+                    if let Some(state) = app_handle.try_state::<AppState>() {
+                        // Обновляем AppConfig в state
+                        *state.config.write().await = saved_app_config.clone();
+
+                        // Обновляем чувствительность микрофона в сервисе
+                        state.transcription_service
+                            .set_microphone_sensitivity(saved_app_config.microphone_sensitivity)
+                            .await;
+
+                        log::info!("Loaded saved app configuration (sensitivity: {}%)",
+                            saved_app_config.microphone_sensitivity);
+                    }
+                }
+            });
+
+            // Регистрируем горячую клавишу для записи
+            let app_handle_for_hotkey = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                // Ждем небольшую задержку чтобы конфигурация успела загрузиться
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+                // Вызываем команду регистрации горячей клавиши
+                if let Some(state) = app_handle_for_hotkey.try_state::<AppState>() {
+                    let handle = app_handle_for_hotkey.clone();
+                    match commands::register_recording_hotkey(state, handle).await {
+                        Ok(_) => log::info!("Recording hotkey registered successfully"),
+                        Err(e) => {
+                            log::error!("Failed to register recording hotkey: {}", e);
+                            log::warn!("⚠️  Please change the hotkey in Settings to a different combination.");
+                            #[cfg(target_os = "macos")]
+                            log::warn!("    Recommended: Cmd+Shift+X, Alt+X, or Cmd+Shift+R");
+                            #[cfg(not(target_os = "macos"))]
+                            log::warn!("    Recommended: Ctrl+Shift+X, Alt+X, or Ctrl+Shift+R");
+                        }
+                    }
+                }
+            });
+
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

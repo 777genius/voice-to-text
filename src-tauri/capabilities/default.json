@@ -1,0 +1,27 @@
+{
+    "$schema": "../gen/schemas/desktop-schema.json",
+    "identifier": "default",
+    "description": "Enables permissions for voice-to-text app: window management, global shortcut, clipboard, and events",
+    "windows": [
+        "main"
+    ],
+    "permissions": [
+        "core:default",
+        "core:window:default",
+        "core:window:allow-show",
+        "core:window:allow-hide",
+        "core:window:allow-center",
+        "core:window:allow-minimize",
+        "core:window:allow-set-always-on-top",
+        "core:window:allow-set-focus",
+        "core:window:allow-start-dragging",
+        "core:event:default",
+        "global-shortcut:default",
+        "global-shortcut:allow-register",
+        "global-shortcut:allow-unregister",
+        "global-shortcut:allow-is-registered",
+        "clipboard-manager:default",
+        "clipboard-manager:allow-read-text",
+        "clipboard-manager:allow-write-text"
+    ]
+}
