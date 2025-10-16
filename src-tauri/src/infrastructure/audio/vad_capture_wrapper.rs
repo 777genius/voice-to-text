@@ -90,8 +90,16 @@ impl AudioCapture for VadCaptureWrapper {
                 return;
             }
 
-            // Add samples to frame buffer
-            let mut buffer = frame_buffer.lock().unwrap();
+            // Add samples to frame buffer (защита от poisoned mutex)
+            let mut buffer = match frame_buffer.lock() {
+                Ok(b) => b,
+                Err(e) => {
+                    log::error!("VAD frame buffer poisoned: {}", e);
+                    log::error!("Passing through audio without VAD processing");
+                    on_chunk(chunk); // передаем оригинальный chunk без VAD
+                    return;
+                }
+            };
             buffer.extend_from_slice(&chunk.data);
 
             // Process complete 30ms frames (480 samples @ 16kHz)
@@ -100,8 +108,17 @@ impl AudioCapture for VadCaptureWrapper {
             while buffer.len() >= VAD_FRAME_SIZE {
                 let frame: Vec<i16> = buffer.drain(..VAD_FRAME_SIZE).collect();
 
-                // Run VAD on this frame
-                let mut vad_guard = vad.lock().unwrap();
+                // Run VAD on this frame (защита от poisoned mutex)
+                let mut vad_guard = match vad.lock() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        log::error!("VAD processor poisoned: {}", e);
+                        log::error!("Passing through audio chunk without VAD");
+                        on_chunk(AudioChunk::new(frame, 16000, 1));
+                        continue;
+                    }
+                };
+
                 let vad_result = match vad_guard.process_samples(&frame) {
                     Ok(result) => result,
                     Err(e) => {
@@ -126,13 +143,23 @@ impl AudioCapture for VadCaptureWrapper {
                     }
                     VadResult::SilenceTimeout => {
                         // Silence timeout reached - trigger callback (только один раз)
-                        let mut already_triggered = timeout_flag.lock().unwrap();
+                        let mut already_triggered = match timeout_flag.lock() {
+                            Ok(f) => f,
+                            Err(e) => {
+                                log::error!("VAD timeout flag poisoned: {}", e);
+                                // Все равно передаем аудио
+                                on_chunk(AudioChunk::new(frame, 16000, 1));
+                                continue;
+                            }
+                        };
 
                         if !*already_triggered {
                             // Получаем настоящий timeout из VAD для логирования
                             let timeout_ms = {
-                                let vad_guard = vad.lock().unwrap();
-                                vad_guard.timeout().as_millis()
+                                match vad.lock() {
+                                    Ok(vad_guard) => vad_guard.timeout().as_millis(),
+                                    Err(_) => 0, // fallback если mutex poisoned
+                                }
                             };
 
                             log::info!("VAD: Silence timeout reached ({}ms)", timeout_ms);

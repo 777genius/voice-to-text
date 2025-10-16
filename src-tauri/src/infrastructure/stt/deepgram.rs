@@ -10,7 +10,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message, WebSocketStream, Ma
 use tokio::net::TcpStream;
 
 use crate::domain::{
-    AudioChunk, SttConfig, SttError, SttProvider, SttResult, Transcription, TranscriptionCallback,
+    AudioChunk, ErrorCallback, SttConfig, SttError, SttProvider, SttResult, Transcription, TranscriptionCallback,
 };
 
 /// Deepgram cloud STT provider
@@ -43,6 +43,9 @@ pub struct DeepgramProvider {
     audio_buffer: Vec<i16>,
     on_partial_callback: Option<TranscriptionCallback>, // сохраняем для resume
     on_final_callback: Option<TranscriptionCallback>,
+    on_error_callback: Option<ErrorCallback>,
+    sent_chunks_count: usize, // счетчик отправленных чанков для диагностики
+    sent_bytes_total: usize, // общее количество отправленных байт
 }
 
 impl DeepgramProvider {
@@ -59,6 +62,9 @@ impl DeepgramProvider {
             audio_buffer: Vec::new(),
             on_partial_callback: None,
             on_final_callback: None,
+            on_error_callback: None,
+            sent_chunks_count: 0,
+            sent_bytes_total: 0,
         }
     }
 }
@@ -89,6 +95,7 @@ impl SttProvider for DeepgramProvider {
         &mut self,
         on_partial: TranscriptionCallback,
         on_final: TranscriptionCallback,
+        on_error: ErrorCallback,
     ) -> SttResult<()> {
         log::info!("DeepgramProvider: Starting stream");
 
@@ -161,6 +168,7 @@ impl SttProvider for DeepgramProvider {
         // Клонируем callbacks для передачи в receiver задачу
         let on_partial_for_receiver = on_partial.clone();
         let on_final_for_receiver = on_final.clone();
+        let on_error_for_receiver = on_error.clone();
 
         // Запускаем фоновую задачу для приема сообщений
         let session_notify = self.session_ready.clone();
@@ -192,6 +200,26 @@ impl SttProvider for DeepgramProvider {
                     }
                     Ok(Message::Close(frame)) => {
                         log::info!("Deepgram WebSocket closed: {:?}", frame);
+
+                        // Проверяем тип закрытия - если это ошибка, уведомляем UI
+                        if let Some(close_frame) = &frame {
+                            // Определяем тип ошибки по сообщению
+                            let reason = close_frame.reason.to_string();
+                            let error_type = if reason.contains("timeout") || reason.contains("net0001") {
+                                "timeout"
+                            } else if reason.contains("auth") || reason.contains("401") {
+                                "authentication"
+                            } else {
+                                "connection"
+                            };
+
+                            // Вызываем error callback если это не нормальное закрытие
+                            if close_frame.code != tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal {
+                                log::error!("Deepgram connection closed with error: {} (type: {})", reason, error_type);
+                                on_error_for_receiver(reason.clone(), error_type.to_string());
+                            }
+                        }
+
                         break;
                     }
                     Ok(Message::Binary(data)) => {
@@ -247,9 +275,14 @@ impl SttProvider for DeepgramProvider {
         self.is_streaming = true;
         self.is_paused = false;
 
+        // Сбрасываем счетчики при новом соединении
+        self.sent_chunks_count = 0;
+        self.sent_bytes_total = 0;
+
         // Сохраняем callbacks для возможности resume
         self.on_partial_callback = Some(on_partial);
         self.on_final_callback = Some(on_final);
+        self.on_error_callback = Some(on_error);
 
         // Примечание: Deepgram отправляет Metadata только после получения аудио данных
         // Поэтому мы не ждем Metadata здесь, а считаем что соединение установлено успешно
@@ -291,9 +324,32 @@ impl SttProvider for DeepgramProvider {
             self.audio_buffer.clear();
 
             // Отправляем бинарные данные (обрабатываем ошибку если соединение закрыто)
+            let send_start = std::time::Instant::now();
+            let bytes_len = bytes.len();
+
             let mut write_guard = write.lock().await;
             match write_guard.send(Message::Binary(bytes)).await {
-                Ok(_) => {},
+                Ok(_) => {
+                    let send_duration = send_start.elapsed();
+
+                    // Обновляем счетчики
+                    self.sent_chunks_count += 1;
+                    self.sent_bytes_total += bytes_len;
+
+                    // Логируем каждый 10-й чанк для диагностики
+                    if self.sent_chunks_count % 10 == 0 {
+                        log::debug!("Sent chunk #{} to Deepgram: {} bytes ({:.2} KB total, took {:.1}ms)",
+                            self.sent_chunks_count, bytes_len,
+                            self.sent_bytes_total as f64 / 1024.0,
+                            send_duration.as_millis());
+                    }
+
+                    // Предупреждаем если отправка медленная (>100ms может быть проблемой сети)
+                    if send_duration.as_millis() > 100 {
+                        log::warn!("Slow WebSocket send detected: chunk #{} took {:.1}ms (network issue?)",
+                            self.sent_chunks_count, send_duration.as_millis());
+                    }
+                },
                 Err(e) => {
                     log::debug!("Could not send audio data (connection closed): {}", e);
                     // Соединение закрыто - отмечаем что больше не стримим
@@ -313,6 +369,11 @@ impl SttProvider for DeepgramProvider {
             log::warn!("Stream not active");
             return Ok(());
         }
+
+        // Логируем статистику отправки перед остановкой
+        log::info!("Deepgram session stats: sent {} chunks, {:.2} KB total",
+            self.sent_chunks_count,
+            self.sent_bytes_total as f64 / 1024.0);
 
         // Отправляем остатки буфера (игнорируем ошибки если соединение уже закрыто)
         if !self.audio_buffer.is_empty() {
@@ -372,13 +433,18 @@ impl SttProvider for DeepgramProvider {
         self.is_paused = false;
         self.on_partial_callback = None;
         self.on_final_callback = None;
+        self.on_error_callback = None;
+        self.sent_chunks_count = 0;
+        self.sent_bytes_total = 0;
 
         log::info!("Deepgram stream stopped");
         Ok(())
     }
 
     async fn abort(&mut self) -> SttResult<()> {
-        log::info!("DeepgramProvider: Aborting stream");
+        log::info!("DeepgramProvider: Aborting stream (sent {} chunks, {:.2} KB)",
+            self.sent_chunks_count,
+            self.sent_bytes_total as f64 / 1024.0);
 
         // Останавливаем keepalive задачу
         if let Some(task) = self.keepalive_task.take() {
@@ -398,6 +464,9 @@ impl SttProvider for DeepgramProvider {
         self.audio_buffer.clear();
         self.on_partial_callback = None;
         self.on_final_callback = None;
+        self.on_error_callback = None;
+        self.sent_chunks_count = 0;
+        self.sent_bytes_total = 0;
 
         log::info!("Deepgram stream aborted");
         Ok(())
@@ -433,6 +502,7 @@ impl SttProvider for DeepgramProvider {
         &mut self,
         on_partial: TranscriptionCallback,
         on_final: TranscriptionCallback,
+        on_error: ErrorCallback,
     ) -> SttResult<()> {
         log::info!("DeepgramProvider: Resuming stream from pause");
 
@@ -454,6 +524,7 @@ impl SttProvider for DeepgramProvider {
         // Обновляем callbacks
         self.on_partial_callback = Some(on_partial);
         self.on_final_callback = Some(on_final);
+        self.on_error_callback = Some(on_error);
 
         // Пересоздаем session_ready для новой сессии записи
         self.session_ready = Arc::new(Notify::new());

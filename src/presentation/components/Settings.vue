@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, onMounted, onUnmounted, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { SttProviderType, type SttConfig } from '../../types';
+import ModelManager from './ModelManager.vue';
 
 const emit = defineEmits<{
   close: []
@@ -11,12 +12,25 @@ const emit = defineEmits<{
 // Состояние
 const currentProvider = ref<SttProviderType>(SttProviderType.Deepgram);
 const currentLanguage = ref('ru');
+const whisperModel = ref('small'); // Модель по умолчанию
 const microphoneSensitivity = ref(95); // 0-200, default 95
 const recordingHotkey = ref('CmdOrCtrl+Shift+X');
 const isSaving = ref(false);
 const saveMessage = ref('');
 const errorMessage = ref('');
 const isDragging = ref(false);
+
+// Показывать ли настройки Whisper
+const isWhisperProvider = computed(() => currentProvider.value === SttProviderType.WhisperLocal);
+
+// Доступные модели Whisper
+const whisperModels = [
+  { value: 'tiny', label: 'Tiny - самая быстрая' },
+  { value: 'base', label: 'Base - баланс скорости и качества' },
+  { value: 'small', label: 'Small - рекомендуется' },
+  { value: 'medium', label: 'Medium - высокое качество' },
+  { value: 'large', label: 'Large - максимальное качество' },
+];
 
 // Состояние теста микрофона
 const isTesting = ref(false);
@@ -30,6 +44,11 @@ onMounted(async () => {
     const config = await invoke<SttConfig>('get_stt_config');
     currentProvider.value = config.provider as SttProviderType;
     currentLanguage.value = config.language;
+
+    // Загружаем модель Whisper если указана
+    if (config.model) {
+      whisperModel.value = config.model;
+    }
 
     // Загружаем чувствительность микрофона и горячую клавишу из app config
     try {
@@ -61,10 +80,25 @@ const saveConfig = async () => {
   errorMessage.value = '';
 
   try {
+    // Для Whisper проверяем что модель скачана
+    if (currentProvider.value === SttProviderType.WhisperLocal) {
+      const isDownloaded = await invoke<boolean>('check_whisper_model', {
+        modelName: whisperModel.value,
+      });
+
+      if (!isDownloaded) {
+        errorMessage.value = `Модель ${whisperModel.value} не скачана. Пожалуйста, скачайте модель перед сохранением.`;
+        isSaving.value = false;
+        return;
+      }
+    }
+
     // Обновляем конфигурацию STT (API ключи загружаются автоматически из .env)
     await invoke('update_stt_config', {
       provider: currentProvider.value,
       language: currentLanguage.value,
+      apiKey: null,
+      model: currentProvider.value === SttProviderType.WhisperLocal ? whisperModel.value : null,
     });
 
     // Обновляем настройки приложения (чувствительность микрофона и горячая клавиша)
@@ -215,11 +249,13 @@ onUnmounted(() => {
         <div class="setting-group">
           <label class="setting-label">Speech-to-Text Provider</label>
           <select v-model="currentProvider" class="setting-select">
+            <option :value="SttProviderType.WhisperLocal">Whisper Local (оффлайн, требует cmake)</option>
             <option :value="SttProviderType.AssemblyAI">AssemblyAI (онлайн)</option>
             <option :value="SttProviderType.Deepgram">Deepgram (онлайн, Nova-2/3)</option>
           </select>
           <p class="setting-hint">
-            AssemblyAI и Deepgram — облачные сервисы с высоким качеством.
+            <strong>Whisper Local:</strong> работает полностью оффлайн, высокое качество. Требует установки cmake и загрузки модели.<br>
+            <strong>AssemblyAI и Deepgram:</strong> облачные сервисы с высоким качеством.
             Deepgram автоматически выбирает модель: Nova-3 для английского, Nova-2 для русского.
           </p>
         </div>
@@ -234,6 +270,29 @@ onUnmounted(() => {
             <option value="fr">Français</option>
             <option value="de">Deutsch</option>
           </select>
+        </div>
+
+        <!-- Whisper Model Selection (только для WhisperLocal) -->
+        <div v-if="isWhisperProvider" class="setting-group">
+          <label class="setting-label">Модель Whisper</label>
+          <select v-model="whisperModel" class="setting-select">
+            <option
+              v-for="model in whisperModels"
+              :key="model.value"
+              :value="model.value"
+            >
+              {{ model.label }}
+            </option>
+          </select>
+          <p class="setting-hint">
+            Выберите модель для транскрибации. Модель должна быть скачана перед использованием.
+            Для загрузки моделей используйте менеджер ниже.
+          </p>
+        </div>
+
+        <!-- Model Manager (только для WhisperLocal) -->
+        <div v-if="isWhisperProvider" class="setting-group">
+          <ModelManager />
         </div>
 
         <!-- Горячая клавиша для записи -->

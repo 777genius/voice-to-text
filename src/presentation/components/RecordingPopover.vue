@@ -186,8 +186,11 @@ const minimizeWindow = async () => {
           {{ store.displayText }}
         </p>
 
-        <div v-if="store.error" class="error-message">
-          {{ store.error }}
+        <div v-if="store.error || store.hasError" class="error-container">
+          <div class="error-icon">⚠️</div>
+          <div class="error-message">
+            {{ store.error || 'Произошла ошибка. Попробуйте снова.' }}
+          </div>
         </div>
       </div>
 
@@ -423,13 +426,39 @@ const minimizeWindow = async () => {
   color: var(--color-accent);
 }
 
+.error-container {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-sm);
+  background: rgba(244, 67, 54, 0.15);
+  border: 1px solid rgba(244, 67, 54, 0.3);
+  border-radius: var(--radius-sm);
+  animation: shake 0.5s ease-in-out;
+}
+
+.error-icon {
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
 .error-message {
   font-size: 12px;
   color: var(--color-error);
-  text-align: center;
-  padding: var(--spacing-xs);
-  background: rgba(244, 67, 54, 0.1);
-  border-radius: var(--radius-sm);
+  line-height: 1.4;
+  flex: 1;
+}
+
+@keyframes shake {
+  0%, 100% {
+    transform: translateX(0);
+  }
+  25% {
+    transform: translateX(-5px);
+  }
+  75% {
+    transform: translateX(5px);
+  }
 }
 
 .controls {

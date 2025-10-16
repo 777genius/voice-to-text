@@ -77,6 +77,7 @@ impl SttProvider for AssemblyAIProvider {
         &mut self,
         on_partial: TranscriptionCallback,
         on_final: TranscriptionCallback,
+        _on_error: crate::domain::ErrorCallback,
     ) -> SttResult<()> {
         log::info!("AssemblyAI Provider: Starting stream (v3 endpoint)");
 

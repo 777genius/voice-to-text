@@ -2,8 +2,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::domain::{
-    AudioCapture, AudioConfig, AudioLevelCallback, RecordingStatus, SttConfig, SttProvider, SttProviderFactory,
-    TranscriptionCallback,
+    AudioCapture, AudioConfig, AudioLevelCallback, ErrorCallback, RecordingStatus, SttConfig, SttProvider,
+    SttProviderFactory, TranscriptionCallback,
 };
 
 type Result<T> = anyhow::Result<T>;
@@ -49,6 +49,7 @@ impl TranscriptionService {
         on_partial: TranscriptionCallback,
         on_final: TranscriptionCallback,
         on_audio_level: AudioLevelCallback,
+        on_error: ErrorCallback,
     ) -> Result<()> {
         let mut status = self.status.write().await;
 
@@ -87,7 +88,7 @@ impl TranscriptionService {
             let mut provider_opt = self.stt_provider.write().await;
             if let Some(provider) = provider_opt.as_mut() {
                 provider
-                    .resume_stream(on_partial.clone(), on_final.clone())
+                    .resume_stream(on_partial.clone(), on_final.clone(), on_error.clone())
                     .await
                     .map_err(|e| {
                         let status_arc = self.status.clone();
@@ -119,7 +120,7 @@ impl TranscriptionService {
                 })?;
 
             provider
-                .start_stream(on_partial.clone(), on_final.clone())
+                .start_stream(on_partial.clone(), on_final.clone(), on_error.clone())
                 .await
                 .map_err(|e| {
                     let status_arc = self.status.clone();
@@ -142,6 +143,7 @@ impl TranscriptionService {
         let stt_provider = self.stt_provider.clone();
         let status_arc = self.status.clone();
         let sensitivity_arc = self.microphone_sensitivity.clone();
+        let on_error_for_processor = on_error.clone();
 
         tokio::spawn(async move {
             let mut chunk_count = 0;
@@ -204,12 +206,49 @@ impl TranscriptionService {
                     }
 
                     if let Err(e) = provider.send_audio(&chunk).await {
-                        // Если соединение закрыто - это ожидаемо, логируем debug и выходим
-                        if e.to_string().contains("WebSocket connection closed") {
-                            log::debug!("STT connection closed, stopping audio processing");
+                        let error_msg = e.to_string();
+
+                        // Определяем тип ошибки и критичность
+                        let (error_type, is_critical) = if error_msg.contains("WebSocket connection closed")
+                            || error_msg.contains("connection")
+                        {
+                            // Временная ошибка сети - продолжаем обработку
+                            // Deepgram может восстановиться когда сеть вернется
+                            ("connection", false)
+                        } else if error_msg.contains("timeout") {
+                            // Timeout тоже временный - сеть может быть медленной
+                            ("timeout", false)
+                        } else if error_msg.contains("API key") || error_msg.contains("auth") || error_msg.contains("401") {
+                            // Критическая ошибка - неверные credentials
+                            ("authentication", true)
+                        } else if error_msg.contains("configuration") || error_msg.contains("invalid") {
+                            // Критическая ошибка - неверная конфигурация
+                            ("configuration", true)
+                        } else {
+                            // Неизвестная ошибка - считаем некритической
+                            ("processing", false)
+                        };
+
+                        if is_critical {
+                            log::error!("STT critical error ({}): {}", error_type, error_msg);
+
+                            // Вызываем error callback для уведомления UI
+                            on_error_for_processor(error_msg.clone(), error_type.to_string());
+
+                            // Меняем статус на Error
+                            *status_arc.write().await = RecordingStatus::Error;
+
+                            // Останавливаем обработку при критической ошибке
                             break;
+                        } else {
+                            // Временная ошибка - логируем как warning и продолжаем
+                            log::warn!("STT temporary error ({}): {} - continuing processing",
+                                error_type, error_msg);
+
+                            // Увеличиваем счетчик временных ошибок
+                            // Если их слишком много подряд - останавливаемся
+                            // (пока просто пропускаем чанк)
                         }
-                        log::error!("Error sending audio chunk #{}: {}", chunk_count, e);
                     }
                 }
             }

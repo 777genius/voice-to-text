@@ -9,8 +9,6 @@ pub const EVENT_RECORDING_STATUS: &str = "recording:status";
 pub const EVENT_AUDIO_LEVEL: &str = "audio:level";
 pub const EVENT_MICROPHONE_TEST_LEVEL: &str = "microphone_test:level";
 
-// Пока не используется, но оставлен для будущей обработки ошибок
-#[allow(dead_code)]
 pub const EVENT_TRANSCRIPTION_ERROR: &str = "transcription:error";
 
 /// Payload for partial transcription event
@@ -74,10 +72,8 @@ pub struct MicrophoneTestLevelPayload {
 }
 
 /// Payload for transcription error event
-/// Пока не используется, но оставлен для будущей обработки ошибок
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 pub struct TranscriptionErrorPayload {
     pub error: String,
-    pub error_type: String, // "connection", "configuration", "processing"
+    pub error_type: String, // "connection", "configuration", "processing", "timeout", "authentication"
 }

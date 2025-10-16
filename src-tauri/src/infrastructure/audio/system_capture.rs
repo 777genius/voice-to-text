@@ -219,8 +219,15 @@ impl AudioCapture for SystemAudioCapture {
                         pcm_samples = Self::stereo_to_mono(&pcm_samples);
                     }
 
-                    // 3. Add to input buffer
-                    let mut buffer = input_buffer_clone.lock().unwrap();
+                    // 3. Add to input buffer (защита от poisoned mutex)
+                    let mut buffer = match input_buffer_clone.lock() {
+                        Ok(b) => b,
+                        Err(e) => {
+                            log::error!("Audio input buffer poisoned (panic in other thread): {}", e);
+                            log::error!("Audio capture stopping due to unrecoverable error");
+                            return;
+                        }
+                    };
                     buffer.extend_from_slice(&pcm_samples);
 
                     // 4. Process chunks of fixed size for resampler
@@ -238,8 +245,16 @@ impl AudioCapture for SystemAudioCapture {
                             // Prepare input for resampler (channels x samples)
                             let resampler_input = vec![float_chunk];
 
-                            // Resample
-                            let mut resampler_guard = rs.lock().unwrap();
+                            // Resample (защита от poisoned mutex)
+                            let mut resampler_guard = match rs.lock() {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    log::error!("Resampler mutex poisoned: {}", e);
+                                    log::error!("Skipping audio chunk due to resampler error");
+                                    continue; // пропускаем этот чанк
+                                }
+                            };
+
                             match resampler_guard.process(&resampler_input, None) {
                                 Ok(output) => {
                                     // Convert back to i16
@@ -247,7 +262,7 @@ impl AudioCapture for SystemAudioCapture {
                                 }
                                 Err(e) => {
                                     log::error!("Resampling error: {}", e);
-                                    return;
+                                    continue; // пропускаем этот чанк
                                 }
                             }
                         } else {

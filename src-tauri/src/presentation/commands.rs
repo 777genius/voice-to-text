@@ -5,7 +5,7 @@ use crate::domain::{RecordingStatus, AudioCapture};
 use crate::infrastructure::ConfigStore;
 use crate::presentation::{
     events::*, AppState, AudioLevelPayload, FinalTranscriptionPayload, PartialTranscriptionPayload,
-    RecordingStatusPayload, MicrophoneTestLevelPayload,
+    RecordingStatusPayload, MicrophoneTestLevelPayload, TranscriptionErrorPayload,
 };
 
 /// Start recording voice
@@ -85,6 +85,32 @@ pub async fn start_recording(
         let _ = app_handle.emit(EVENT_AUDIO_LEVEL, payload);
     });
 
+    let app_handle_error = app_handle.clone();
+
+    // Callback for error handling
+    let on_error = Arc::new(move |error: String, error_type: String| {
+        let app_handle = app_handle_error.clone();
+
+        tokio::spawn(async move {
+            log::error!("STT error occurred: {} (type: {})", error, error_type);
+
+            // Emit error event to frontend
+            let payload = TranscriptionErrorPayload { error, error_type };
+            if let Err(e) = app_handle.emit(EVENT_TRANSCRIPTION_ERROR, payload) {
+                log::error!("Failed to emit transcription error event: {}", e);
+            }
+
+            // Emit Error status
+            let _ = app_handle.emit(
+                EVENT_RECORDING_STATUS,
+                RecordingStatusPayload {
+                    status: RecordingStatus::Error,
+                    stopped_via_hotkey: false,
+                },
+            );
+        });
+    });
+
     // Emit Starting status immediately
     log::debug!("Emitting status: Starting (stopped_via_hotkey: false)");
     let _ = app_handle.emit(
@@ -98,7 +124,7 @@ pub async fn start_recording(
     // Start recording (async - WebSocket connect, audio capture start)
     state
         .transcription_service
-        .start_recording(on_partial, on_final, on_audio_level)
+        .start_recording(on_partial, on_final, on_audio_level, on_error)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -252,8 +278,9 @@ pub async fn update_stt_config(
     provider: String,
     language: String,
     api_key: Option<String>,
+    model: Option<String>,
 ) -> Result<(), String> {
-    log::info!("Command: update_stt_config - provider: {}, language: {}", provider, language);
+    log::info!("Command: update_stt_config - provider: {}, language: {}, model: {:?}", provider, language, model);
 
     // Парсим provider type
     let provider_type = match provider.to_lowercase().as_str() {
@@ -272,6 +299,11 @@ pub async fn update_stt_config(
     // Обновляем только переданные параметры
     config.provider = provider_type;
     config.language = language;
+
+    // Обновляем модель если передана
+    if let Some(model_name) = model {
+        config.model = Some(model_name);
+    }
 
     // Автоматически устанавливаем keep_connection_alive в зависимости от провайдера
     // Deepgram: безопасно (биллит по длительности аудио, не по времени соединения)

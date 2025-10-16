@@ -50,6 +50,10 @@ pub struct AppState {
 
     /// Microphone test state
     pub microphone_test: Arc<RwLock<MicrophoneTestState>>,
+
+    /// Receiver для VAD silence timeout событий
+    /// Используется в setup для установки обработчика
+    pub vad_timeout_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<()>>>,
 }
 
 impl AppState {
@@ -64,6 +68,9 @@ impl AppState {
                 let stt_factory = Arc::new(DefaultSttProviderFactory::new());
                 let service = Arc::new(TranscriptionService::new(Box::new(mock), stt_factory));
 
+                // Создаем dummy channel для VAD (не будет использоваться с mock)
+                let (_vad_tx, vad_rx) = tokio::sync::mpsc::unbounded_channel();
+
                 return Self {
                     transcription_service: service,
                     config: Arc::new(RwLock::new(AppConfig::default())),
@@ -71,6 +78,7 @@ impl AppState {
                     partial_transcription: Arc::new(RwLock::new(None)),
                     final_transcription: Arc::new(RwLock::new(None)),
                     microphone_test: Arc::new(RwLock::new(MicrophoneTestState::default())),
+                    vad_timeout_rx: Arc::new(tokio::sync::Mutex::new(vad_rx)),
                 };
             }
         };
@@ -85,6 +93,9 @@ impl AppState {
                 let stt_factory = Arc::new(DefaultSttProviderFactory::new());
                 let service = Arc::new(TranscriptionService::new(Box::new(system_audio), stt_factory));
 
+                // Создаем dummy channel для VAD (не будет использоваться без VAD)
+                let (_vad_tx, vad_rx) = tokio::sync::mpsc::unbounded_channel();
+
                 return Self {
                     transcription_service: service,
                     config: Arc::new(RwLock::new(app_config)),
@@ -92,18 +103,21 @@ impl AppState {
                     partial_transcription: Arc::new(RwLock::new(None)),
                     final_transcription: Arc::new(RwLock::new(None)),
                     microphone_test: Arc::new(RwLock::new(MicrophoneTestState::default())),
+                    vad_timeout_rx: Arc::new(tokio::sync::Mutex::new(vad_rx)),
                 };
             }
         };
 
+        // Создаем channel для VAD timeout событий
+        let (vad_tx, vad_rx) = tokio::sync::mpsc::unbounded_channel();
+
         // Wrap system audio with VAD
         let mut vad_wrapper = VadCaptureWrapper::new(Box::new(system_audio), vad);
 
-        // Set silence timeout callback (optional: emit event to UI)
-        vad_wrapper.set_silence_timeout_callback(Arc::new(|| {
-            log::info!("VAD silence timeout triggered - auto-stopping recording");
-            // TODO: Emit Tauri event to UI if needed
-            // app_handle.emit("vad-silence-timeout", {})
+        // Устанавливаем callback который отправляет событие в channel
+        vad_wrapper.set_silence_timeout_callback(Arc::new(move || {
+            log::info!("VAD silence timeout triggered - sending notification");
+            let _ = vad_tx.send(());
         }));
 
         let audio_capture = Box::new(vad_wrapper);
@@ -121,7 +135,57 @@ impl AppState {
             partial_transcription: Arc::new(RwLock::new(None)),
             final_transcription: Arc::new(RwLock::new(None)),
             microphone_test: Arc::new(RwLock::new(MicrophoneTestState::default())),
+            vad_timeout_rx: Arc::new(tokio::sync::Mutex::new(vad_rx)),
         }
+    }
+
+    /// Запускает обработчик VAD timeout событий (вызывается из setup)
+    /// Слушает channel и автоматически останавливает запись
+    pub fn start_vad_timeout_handler(&self, app_handle: tauri::AppHandle) {
+        let service = self.transcription_service.clone();
+        let rx = self.vad_timeout_rx.clone();
+
+        tauri::async_runtime::spawn(async move {
+            let mut rx_guard = rx.lock().await;
+
+            while let Some(_) = rx_guard.recv().await {
+                log::info!("VAD silence timeout detected - auto-stopping recording");
+
+                // Проверяем что действительно идет запись
+                let status = service.get_status().await;
+                if status != crate::domain::RecordingStatus::Recording {
+                    log::debug!("VAD timeout ignored - not recording (status: {:?})", status);
+                    continue;
+                }
+
+                // Останавливаем запись
+                match service.stop_recording().await {
+                    Ok(_) => {
+                        log::info!("Recording stopped successfully by VAD timeout");
+
+                        // Эмитим событие в UI
+                        use tauri::Emitter;
+                        let _ = app_handle.emit(
+                            crate::presentation::events::EVENT_RECORDING_STATUS,
+                            crate::presentation::RecordingStatusPayload {
+                                status: crate::domain::RecordingStatus::Idle,
+                                stopped_via_hotkey: false,
+                            },
+                        );
+
+                        // Также эмитим специальное событие VAD timeout (для информирования)
+                        let _ = app_handle.emit("vad-silence-timeout", ());
+                    }
+                    Err(e) => {
+                        log::error!("Failed to stop recording on VAD timeout: {}", e);
+                    }
+                }
+            }
+
+            log::warn!("VAD timeout handler exited");
+        });
+
+        log::info!("VAD auto-stop handler started");
     }
 }
 

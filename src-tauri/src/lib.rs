@@ -175,6 +175,11 @@ pub fn run() {
                 }
             });
 
+            // Запускаем обработчик VAD timeout событий
+            if let Some(state) = app.try_state::<AppState>() {
+                state.start_vad_timeout_handler(app.handle().clone());
+            }
+
             // Запускаем фоновую проверку обновлений (каждые 6 часов)
             log::info!("Starting background update checker");
             infrastructure::updater::start_background_update_check(app.handle().clone());

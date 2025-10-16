@@ -9,7 +9,9 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "tauri:dev:whisper": "tauri dev --features whisper",
+    "tauri:build:whisper": "tauri build --features whisper"
   },
   "dependencies": {
     "vue": "^3.4.0",

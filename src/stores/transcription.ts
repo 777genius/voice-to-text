@@ -9,9 +9,11 @@ import {
   PartialTranscriptionPayload,
   FinalTranscriptionPayload,
   RecordingStatusPayload,
+  TranscriptionErrorPayload,
   EVENT_TRANSCRIPTION_PARTIAL,
   EVENT_TRANSCRIPTION_FINAL,
   EVENT_RECORDING_STATUS,
+  EVENT_TRANSCRIPTION_ERROR,
 } from '../types';
 
 export const useTranscriptionStore = defineStore('transcription', () => {
@@ -36,6 +38,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   let unlistenPartial: UnlistenFn | null = null;
   let unlistenFinal: UnlistenFn | null = null;
   let unlistenStatus: UnlistenFn | null = null;
+  let unlistenError: UnlistenFn | null = null;
 
   // Computed
   const isStarting = computed(() => status.value === RecordingStatus.Starting);
@@ -327,6 +330,46 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         }
       );
 
+      // Listen to transcription error events
+      unlistenError = await listen<TranscriptionErrorPayload>(
+        EVENT_TRANSCRIPTION_ERROR,
+        (event) => {
+          console.error('Transcription error received:', event.payload);
+
+          // Останавливаем все анимации
+          if (partialAnimationTimer) {
+            clearInterval(partialAnimationTimer);
+            partialAnimationTimer = null;
+          }
+          if (accumulatedAnimationTimer) {
+            clearInterval(accumulatedAnimationTimer);
+            accumulatedAnimationTimer = null;
+          }
+
+          // Формируем понятное сообщение на русском
+          let errorMessage = '';
+          switch (event.payload.error_type) {
+            case 'timeout':
+              errorMessage = 'Превышен таймаут ожидания. Проверьте подключение к интернету.';
+              break;
+            case 'connection':
+              errorMessage = 'Проблема с подключением. Проверьте интернет и попробуйте снова.';
+              break;
+            case 'authentication':
+              errorMessage = 'Ошибка авторизации. Проверьте API ключ в настройках.';
+              break;
+            case 'processing':
+              errorMessage = 'Ошибка обработки аудио. Попробуйте перезапустить запись.';
+              break;
+            default:
+              errorMessage = `Ошибка: ${event.payload.error}`;
+          }
+
+          error.value = errorMessage;
+          status.value = RecordingStatus.Error;
+        }
+      );
+
       console.log('Event listeners initialized successfully');
     } catch (err) {
       console.error('Failed to initialize event listeners:', err);
@@ -401,6 +444,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     if (unlistenStatus) {
       unlistenStatus();
       unlistenStatus = null;
+    }
+    if (unlistenError) {
+      unlistenError();
+      unlistenError = null;
     }
 
     // Очищаем таймеры анимации
