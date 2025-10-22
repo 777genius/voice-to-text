@@ -84,6 +84,7 @@ env_logger = "0.11"  # Logging for examples
 minimp3 = "0.5"  # MP3 decoder for audio tests
 rubato = "0.15"  # Sample rate conversion for audio tests
 dotenv = "0.15"  # Load .env variables for tests
+serial_test = "3.2"  # Run tests sequentially to avoid race conditions
 
 [[bench]]
 name = "deepgram_benchmarks"

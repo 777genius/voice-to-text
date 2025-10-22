@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -22,6 +22,25 @@ let unlistenAudioLevel: UnlistenFn | null = null;
 let unlistenHotkey: UnlistenFn | null = null;
 let unlistenAutoHide: UnlistenFn | null = null;
 
+// Ref для элемента транскрипции (для автоскролла)
+const transcriptionTextRef = ref<HTMLElement | null>(null);
+
+// Автоскролл вниз при обновлении текста (если скролл уже внизу)
+watch(() => store.displayText, () => {
+  nextTick(() => {
+    const el = transcriptionTextRef.value;
+    if (!el) return;
+
+    // Проверяем находится ли скролл внизу (в пределах 50px от конца)
+    const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
+
+    // Если скролл уже внизу, автоматически скролим вниз чтобы видеть новый текст
+    if (isNearBottom) {
+      el.scrollTop = el.scrollHeight;
+    }
+  });
+});
+
 onMounted(async () => {
   await store.initialize();
 
@@ -43,25 +62,26 @@ onMounted(async () => {
     await handleHotkeyToggle();
   });
 
-  // Слушаем статус для автоскрытия окна при остановке через hotkey
+  // Слушаем статус для звука и автоскрытия окна при остановке
   unlistenAutoHide = await listen<{ status: string; stopped_via_hotkey?: boolean }>('recording:status', async (event) => {
-    // Автоматически скрываем окно когда запись остановлена через hotkey
-    if (event.payload.status === 'Idle' && event.payload.stopped_via_hotkey) {
-      console.log('[AutoHide] Recording stopped via hotkey, playing sound and hiding window');
-
-      // Проигрываем звук завершения записи
+    // Проигрываем звук при ЛЮБОЙ остановке записи (через hotkey, кнопку, или автоматически)
+    if (event.payload.status === 'Idle') {
+      console.log('[Sound] Recording stopped, playing done sound');
       playDoneSound();
 
-      // Скрываем окно (небольшая задержка чтобы звук успел начать играть)
-      setTimeout(async () => {
-        try {
-          const window = getCurrentWebviewWindow();
-          await window.hide();
-          console.log('[AutoHide] Window hidden successfully');
-        } catch (err) {
-          console.error('[AutoHide] Failed to hide window:', err);
-        }
-      }, 50);
+      // Автоматически скрываем окно ТОЛЬКО когда запись остановлена через hotkey
+      if (event.payload.stopped_via_hotkey) {
+        console.log('[AutoHide] Stopped via hotkey, hiding window');
+        setTimeout(async () => {
+          try {
+            const window = getCurrentWebviewWindow();
+            await window.hide();
+            console.log('[AutoHide] Window hidden successfully');
+          } catch (err) {
+            console.error('[AutoHide] Failed to hide window:', err);
+          }
+        }, 50);
+      }
     }
   });
 });
@@ -182,7 +202,7 @@ const minimizeWindow = async () => {
           </div>
         </div>
 
-        <p class="transcription-text" :class="{ recording: store.isRecording }">
+        <p ref="transcriptionTextRef" class="transcription-text" :class="{ recording: store.isRecording }">
           {{ store.displayText }}
         </p>
 

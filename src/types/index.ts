@@ -20,6 +20,8 @@ export interface PartialTranscriptionPayload {
   text: string;
   timestamp: number;
   is_segment_final: boolean; // true когда сегмент финализирован (но речь продолжается)
+  start: number; // start время utterance в секундах (от Deepgram)
+  duration: number; // длительность utterance в секундах (от Deepgram)
 }
 
 export interface FinalTranscriptionPayload {

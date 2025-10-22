@@ -137,3 +137,102 @@ impl Default for AppConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stt_provider_type_default() {
+        assert_eq!(SttProviderType::default(), SttProviderType::Deepgram);
+    }
+
+    #[test]
+    fn test_stt_config_default() {
+        let config = SttConfig::default();
+        assert_eq!(config.provider, SttProviderType::Deepgram);
+        assert_eq!(config.language, "ru");
+        assert!(!config.auto_detect_language);
+        assert!(config.enable_punctuation);
+        assert!(!config.filter_profanity);
+        assert!(config.api_key.is_none());
+        assert!(config.model.is_none());
+        assert!(!config.keep_connection_alive);
+    }
+
+    #[test]
+    fn test_stt_config_new() {
+        let config = SttConfig::new(SttProviderType::AssemblyAI);
+        assert_eq!(config.provider, SttProviderType::AssemblyAI);
+        assert_eq!(config.language, "ru");
+    }
+
+    #[test]
+    fn test_stt_config_with_language() {
+        let config = SttConfig::new(SttProviderType::Deepgram)
+            .with_language("en");
+        assert_eq!(config.language, "en");
+    }
+
+    #[test]
+    fn test_stt_config_with_api_key() {
+        let config = SttConfig::new(SttProviderType::Deepgram)
+            .with_api_key("test_key_123");
+        assert_eq!(config.api_key, Some("test_key_123".to_string()));
+    }
+
+    #[test]
+    fn test_stt_config_with_model() {
+        let config = SttConfig::new(SttProviderType::WhisperLocal)
+            .with_model("base");
+        assert_eq!(config.model, Some("base".to_string()));
+    }
+
+    #[test]
+    fn test_stt_config_builder_chain() {
+        let config = SttConfig::new(SttProviderType::Deepgram)
+            .with_language("en")
+            .with_api_key("my_key")
+            .with_model("nova-2");
+
+        assert_eq!(config.provider, SttProviderType::Deepgram);
+        assert_eq!(config.language, "en");
+        assert_eq!(config.api_key, Some("my_key".to_string()));
+        assert_eq!(config.model, Some("nova-2".to_string()));
+    }
+
+    #[test]
+    fn test_app_config_default() {
+        let config = AppConfig::default();
+        assert_eq!(config.recording_hotkey, "CmdOrCtrl+Shift+X");
+        assert!(config.auto_copy_to_clipboard);
+        assert!(config.auto_close_window);
+        assert_eq!(config.vad_silence_timeout_ms, 3000);
+        assert_eq!(config.microphone_sensitivity, 95);
+        assert!(config.keep_history);
+        assert_eq!(config.max_history_items, 20);
+    }
+
+    #[test]
+    fn test_stt_provider_type_equality() {
+        assert_eq!(SttProviderType::Deepgram, SttProviderType::Deepgram);
+        assert_ne!(SttProviderType::Deepgram, SttProviderType::AssemblyAI);
+    }
+
+    #[test]
+    fn test_stt_config_clone() {
+        let config1 = SttConfig::new(SttProviderType::Deepgram)
+            .with_api_key("key123");
+        let config2 = config1.clone();
+        assert_eq!(config1.provider, config2.provider);
+        assert_eq!(config1.api_key, config2.api_key);
+    }
+
+    #[test]
+    fn test_app_config_clone() {
+        let config1 = AppConfig::default();
+        let config2 = config1.clone();
+        assert_eq!(config1.recording_hotkey, config2.recording_hotkey);
+        assert_eq!(config1.microphone_sensitivity, config2.microphone_sensitivity);
+    }
+}

@@ -207,6 +207,8 @@ mod whisper_impl {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_else(|_| std::time::Duration::from_secs(0))
                     .as_secs() as i64,
+                start: 0.0, // Whisper Local не предоставляет start время
+                duration: 0.0, // Whisper Local не предоставляет duration
             };
 
             callback(transcription);

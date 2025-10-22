@@ -159,6 +159,8 @@ async fn test_assemblyai_callbacks() {
         is_final: false,
         language: Some("en".to_string()),
         timestamp: 0,
+        start: 0.0,
+        duration: 0.0,
     };
 
     on_partial(test_transcription.clone());
@@ -346,8 +348,12 @@ async fn test_real_mp3_transcription_assemblyai() {
         *f_text.lock().unwrap() = t.text.clone();
     });
 
+    let on_error = Arc::new(|msg: String, err_type: String| {
+        eprintln!("❌ Error: {} (type: {})", msg, err_type);
+    });
+
     println!("🔗 Подключаемся к AssemblyAI...");
-    provider.start_stream(on_partial, on_final).await.unwrap();
+    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
 
     println!("📤 Отправляем аудио чанками...");
 
@@ -462,8 +468,12 @@ async fn test_real_mp3_long_transcription_assemblyai() {
         f_texts.lock().unwrap().push(t.text.clone());
     });
 
+    let on_error = Arc::new(|msg: String, err_type: String| {
+        eprintln!("❌ Error: {} (type: {})", msg, err_type);
+    });
+
     println!("🔗 Подключаемся к AssemblyAI...");
-    provider.start_stream(on_partial, on_final).await.unwrap();
+    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
 
     println!("📤 Отправляем аудио чанками...");
 

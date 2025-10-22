@@ -110,3 +110,75 @@ impl ConfigStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::SttProviderType;
+    use serial_test::serial;
+
+    #[tokio::test]
+    #[serial]
+    async fn test_save_and_load_stt_config() {
+        let _ = ConfigStore::delete_config().await;
+
+        let mut config = SttConfig::default();
+        config.provider = SttProviderType::Deepgram;
+        config.api_key = Some("test-key".to_string());
+        config.language = "ru".to_string();
+
+        ConfigStore::save_config(&config).await.unwrap();
+        let loaded = ConfigStore::load_config().await.unwrap();
+
+        assert_eq!(loaded.provider, config.provider);
+        assert_eq!(loaded.api_key, config.api_key);
+        assert_eq!(loaded.language, config.language);
+
+        ConfigStore::delete_config().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_load_nonexistent_config_returns_default() {
+        let _ = ConfigStore::delete_config().await;
+
+        let loaded = ConfigStore::load_config().await.unwrap();
+        assert_eq!(loaded.provider, SttConfig::default().provider);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_save_and_load_app_config() {
+        let _ = ConfigStore::delete_app_config().await;
+
+        let mut config = AppConfig::default();
+        config.auto_copy_to_clipboard = true;
+        config.vad_silence_timeout_ms = 2500;
+
+        ConfigStore::save_app_config(&config).await.unwrap();
+        let loaded = ConfigStore::load_app_config().await.unwrap();
+
+        assert_eq!(loaded.auto_copy_to_clipboard, config.auto_copy_to_clipboard);
+        assert_eq!(loaded.vad_silence_timeout_ms, config.vad_silence_timeout_ms);
+
+        ConfigStore::delete_app_config().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_delete_config_is_safe() {
+        // Удаление несуществующего конфига должно быть безопасным
+        let result = ConfigStore::delete_config().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_config_paths() {
+        let stt_path = ConfigStore::config_path().unwrap();
+        let app_path = ConfigStore::app_config_path().unwrap();
+
+        assert!(stt_path.to_str().unwrap().contains("stt_config.json"));
+        assert!(app_path.to_str().unwrap().contains("app_config.json"));
+    }
+}

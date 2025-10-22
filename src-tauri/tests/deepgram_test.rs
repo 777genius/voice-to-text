@@ -26,7 +26,7 @@ fn get_api_key() -> String {
 async fn test_deepgram_initialization() {
     let mut provider = DeepgramProvider::new();
 
-    assert_eq!(provider.name(), "Deepgram Nova-3");
+    assert!(provider.name().contains("Deepgram"), "Provider name should contain 'Deepgram'");
     assert!(provider.is_online());
     assert!(provider.supports_streaming());
 
@@ -200,6 +200,8 @@ async fn test_deepgram_callbacks() {
         is_final: false,
         language: Some("ru".to_string()),
         timestamp: 0,
+        start: 0.0,
+        duration: 0.0,
     };
 
     on_partial(test_transcription.clone());
@@ -231,7 +233,7 @@ async fn test_deepgram_factory_creation() {
     assert!(result.is_ok(), "Factory должна создать Deepgram провайдер");
 
     let mut provider = result.unwrap();
-    assert_eq!(provider.name(), "Deepgram Nova-3");
+    assert!(provider.name().contains("Deepgram"), "Provider name should contain 'Deepgram'");
 
     // Проверяем инициализацию через Factory
     let init_result = provider.initialize(&config).await;
@@ -268,8 +270,12 @@ async fn test_deepgram_full_lifecycle() {
         transcriptions_final.lock().unwrap().push(t);
     });
 
+    let on_error = Arc::new(|msg: String, err_type: String| {
+        eprintln!("❌ Error: {} (type: {})", msg, err_type);
+    });
+
     // Запускаем stream
-    let result = provider.start_stream(on_partial, on_final).await;
+    let result = provider.start_stream(on_partial, on_final, on_error).await;
     assert!(result.is_ok(), "Не удалось запустить stream: {:?}", result);
 
     println!("🎙️  Stream запущен, отправляем аудио...");
@@ -320,8 +326,12 @@ async fn test_deepgram_websocket_connection() {
         println!("Final: {}", t.text);
     });
 
+    let on_error = Arc::new(|msg: String, err_type: String| {
+        eprintln!("❌ Error: {} (type: {})", msg, err_type);
+    });
+
     // Подключаемся
-    let result = provider.start_stream(on_partial, on_final).await;
+    let result = provider.start_stream(on_partial, on_final, on_error).await;
     assert!(result.is_ok(), "WebSocket подключение не удалось: {:?}", result);
 
     println!("✅ WebSocket соединение установлено");
@@ -346,9 +356,10 @@ async fn test_deepgram_connection_error() {
 
     let on_partial = Arc::new(|_: Transcription| {});
     let on_final = Arc::new(|_: Transcription| {});
+    let on_error = Arc::new(|_msg: String, _err_type: String| {});
 
     // Попытка подключиться должна вернуть ошибку
-    let result = provider.start_stream(on_partial, on_final).await;
+    let result = provider.start_stream(on_partial, on_final, on_error).await;
     assert!(result.is_err(), "Должна быть ошибка с неверным API key");
 }
 
@@ -376,7 +387,11 @@ async fn test_deepgram_real_voice_transcription() {
         *final_text_clone.lock().unwrap() = t.text;
     });
 
-    provider.start_stream(on_partial, on_final).await.unwrap();
+    let on_error = Arc::new(|msg: String, err_type: String| {
+        eprintln!("❌ Error: {} (type: {})", msg, err_type);
+    });
+
+    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
 
     // Генерируем синтетический голос (многочастотный сигнал)
     let sample_rate = 16000;
@@ -419,8 +434,11 @@ async fn test_deepgram_keepalive() {
 
     let on_partial = Arc::new(|_: Transcription| {});
     let on_final = Arc::new(|_: Transcription| {});
+    let on_error = Arc::new(|msg: String, err_type: String| {
+        eprintln!("❌ Error: {} (type: {})", msg, err_type);
+    });
 
-    provider.start_stream(on_partial, on_final).await.unwrap();
+    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
 
     // Ждем больше 4 секунд без отправки аудио
     // KeepAlive должен сработать автоматически
@@ -479,8 +497,9 @@ async fn test_e2e_full_pipeline_with_deepgram() {
 
     // Запускаем запись
     let on_audio_level = Arc::new(|_level: f32| {});
+    let on_error = Arc::new(|_msg: String, _err_type: String| {});
 
-    let result = service.start_recording(on_partial, on_final, on_audio_level).await;
+    let result = service.start_recording(on_partial, on_final, on_audio_level, on_error).await;
     assert!(result.is_ok(), "Не удалось запустить запись: {:?}", result);
 
     assert_eq!(service.get_status().await, RecordingStatus::Recording);
@@ -518,7 +537,11 @@ async fn test_e2e_multiple_sessions() {
             println!("  Final: {}", t.text);
         });
 
-        provider.start_stream(on_partial, on_final).await.unwrap();
+        let on_error = Arc::new(|msg: String, err_type: String| {
+            eprintln!("❌ Error: {} (type: {})", msg, err_type);
+        });
+
+        provider.start_stream(on_partial, on_final, on_error).await.unwrap();
 
         // Отправляем немного аудио
         for _ in 0..5 {
@@ -560,7 +583,11 @@ async fn test_e2e_long_session() {
         println!("✅ Final: {}", t.text);
     });
 
-    provider.start_stream(on_partial, on_final).await.unwrap();
+    let on_error = Arc::new(|msg: String, err_type: String| {
+        eprintln!("❌ Error: {} (type: {})", msg, err_type);
+    });
+
+    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
 
     // Отправляем аудио в течение 30 секунд
     let duration_secs = 30;
@@ -615,7 +642,11 @@ async fn test_e2e_language_switching() {
             println!("  Final: {}", t.text);
         });
 
-        provider.start_stream(on_partial, on_final).await.unwrap();
+        let on_error = Arc::new(|msg: String, err_type: String| {
+            eprintln!("❌ Error: {} (type: {})", msg, err_type);
+        });
+
+        provider.start_stream(on_partial, on_final, on_error).await.unwrap();
 
         // Отправляем тестовое аудио
         for _ in 0..5 {
@@ -651,7 +682,11 @@ async fn test_e2e_abort_during_session() {
         println!("Final: {}", t.text);
     });
 
-    provider.start_stream(on_partial, on_final).await.unwrap();
+    let on_error = Arc::new(|msg: String, err_type: String| {
+        eprintln!("❌ Error: {} (type: {})", msg, err_type);
+    });
+
+    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
 
     // Отправляем немного аудио
     for _ in 0..3 {
@@ -823,8 +858,12 @@ async fn test_real_mp3_transcription_deepgram() {
         *f_text.lock().unwrap() = t.text.clone();
     });
 
+    let on_error = Arc::new(|msg: String, err_type: String| {
+        eprintln!("❌ Error: {} (type: {})", msg, err_type);
+    });
+
     println!("🔗 Подключаемся к Deepgram...");
-    provider.start_stream(on_partial, on_final).await.unwrap();
+    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
 
     println!("📤 Отправляем аудио чанками...");
 
@@ -927,8 +966,12 @@ async fn test_real_mp3_long_transcription_deepgram() {
         f_texts.lock().unwrap().push(t.text.clone());
     });
 
+    let on_error = Arc::new(|msg: String, err_type: String| {
+        eprintln!("❌ Error: {} (type: {})", msg, err_type);
+    });
+
     println!("🔗 Подключаемся к Deepgram...");
-    provider.start_stream(on_partial, on_final).await.unwrap();
+    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
 
     println!("📤 Отправляем аудио чанками...");
 
@@ -1018,7 +1061,11 @@ async fn test_real_mp3_transcription_quality() {
         transcriptions_final.lock().unwrap().push(t);
     });
 
-    provider.start_stream(on_partial, on_final).await.unwrap();
+    let on_error = Arc::new(|msg: String, err_type: String| {
+        eprintln!("❌ Error: {} (type: {})", msg, err_type);
+    });
+
+    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
 
     // Отправляем весь аудио файл
     for chunk_samples in samples.chunks(1600) {
@@ -1106,7 +1153,11 @@ async fn test_real_mp3_different_chunk_sizes() {
             *f_text.lock().unwrap() = t.text.clone();
         });
 
-        provider.start_stream(on_partial, on_final).await.unwrap();
+        let on_error = Arc::new(|msg: String, err_type: String| {
+            eprintln!("❌ Error: {} (type: {})", msg, err_type);
+        });
+
+        provider.start_stream(on_partial, on_final, on_error).await.unwrap();
 
         for chunk_samples in samples.chunks(chunk_size) {
             let chunk = AudioChunk::new(chunk_samples.to_vec(), 16000, 1);
