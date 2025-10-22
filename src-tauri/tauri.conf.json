@@ -36,7 +36,7 @@
     },
     "bundle": {
         "active": true,
-        "targets": "all",
+        "targets": ["deb", "appimage", "msi", "dmg", "app"],
         "createUpdaterArtifacts": true,
         "icon": [
             "icons/32x32.png",
@@ -61,14 +61,6 @@
             },
             "wix": {
                 "language": "en-US"
-            },
-            "nsis": {
-                "installerIcon": "icons/icon.ico",
-                "headerImage": null,
-                "sidebarImage": null,
-                "installMode": "currentUser",
-                "languages": ["en-US"],
-                "displayLanguageSelector": false
             }
         },
         "linux": {
