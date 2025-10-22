@@ -25,6 +25,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const error = ref<string | null>(null);
   const lastFinalizedText = ref<string>(''); // последний финализированный текст (для дедупликации)
 
+  // Отслеживание utterances по start времени
+  const currentUtteranceStart = ref<number>(-1); // start время текущей utterance (-1 = нет активной)
+
   // Анимированный текст для эффекта печати
   const animatedPartialText = ref<string>('');
   const animatedAccumulatedText = ref<string>('');
@@ -80,7 +83,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     return '';
   });
 
-  // Функция для анимации partial текста посимвольно
+  // Функция для анимации partial текста пословно (избегаем дергания при переносах)
   function animatePartialText(targetText: string): void {
     // Очищаем предыдущий таймер если есть
     if (partialAnimationTimer) {
@@ -99,20 +102,23 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       return;
     }
 
-    // Начинаем с текущей длины (чтобы не повторять уже показанные символы)
-    let currentIndex = animatedPartialText.value.length;
-
     // Если текст полностью новый - начинаем с нуля
     if (!targetText.startsWith(animatedPartialText.value)) {
-      currentIndex = 0;
       animatedPartialText.value = '';
     }
 
-    // Посимвольная анимация каждые 30мс
+    // Находим добавленную часть текста
+    const addedText = targetText.slice(animatedPartialText.value.length);
+
+    // Разбиваем добавленный текст на слова (сохраняя пробелы)
+    const words = addedText.split(/(\s+)/);
+    let wordIndex = 0;
+
+    // Пословная анимация каждые 15мс (быстрее и без дерганий)
     partialAnimationTimer = setInterval(() => {
-      if (currentIndex < targetText.length) {
-        animatedPartialText.value = targetText.slice(0, currentIndex + 1);
-        currentIndex++;
+      if (wordIndex < words.length) {
+        animatedPartialText.value += words[wordIndex];
+        wordIndex++;
       } else {
         // Анимация завершена - очищаем таймер
         if (partialAnimationTimer) {
@@ -120,10 +126,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           partialAnimationTimer = null;
         }
       }
-    }, 30);
+    }, 15);
   }
 
-  // Функция для анимации accumulated текста посимвольно
+  // Функция для анимации accumulated текста пословно (избегаем дергания при переносах)
   function animateAccumulatedText(targetText: string): void {
     // Очищаем предыдущий таймер если есть
     if (accumulatedAnimationTimer) {
@@ -142,20 +148,23 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       return;
     }
 
-    // Начинаем с текущей длины (чтобы не повторять уже показанные символы)
-    let currentIndex = animatedAccumulatedText.value.length;
-
     // Если текст полностью новый - начинаем с нуля
     if (!targetText.startsWith(animatedAccumulatedText.value)) {
-      currentIndex = 0;
       animatedAccumulatedText.value = '';
     }
 
-    // Посимвольная анимация каждые 30мс
+    // Находим добавленную часть текста
+    const addedText = targetText.slice(animatedAccumulatedText.value.length);
+
+    // Разбиваем добавленный текст на слова (сохраняя пробелы)
+    const words = addedText.split(/(\s+)/);
+    let wordIndex = 0;
+
+    // Пословная анимация каждые 15мс (быстрее и без дерганий)
     accumulatedAnimationTimer = setInterval(() => {
-      if (currentIndex < targetText.length) {
-        animatedAccumulatedText.value = targetText.slice(0, currentIndex + 1);
-        currentIndex++;
+      if (wordIndex < words.length) {
+        animatedAccumulatedText.value += words[wordIndex];
+        wordIndex++;
       } else {
         // Анимация завершена - очищаем таймер
         if (accumulatedAnimationTimer) {
@@ -163,7 +172,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           accumulatedAnimationTimer = null;
         }
       }
-    }, 30);
+    }, 15);
   }
 
   // Actions
@@ -179,44 +188,55 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       unlistenPartial = await listen<PartialTranscriptionPayload>(
         EVENT_TRANSCRIPTION_PARTIAL,
         (event) => {
-          console.log('Received partial transcription:', event.payload);
+          // Детальное логирование для отладки
+          console.log('📝 PARTIAL EVENT:', {
+            text: event.payload.text,
+            is_segment_final: event.payload.is_segment_final,
+            start: event.payload.start,
+            duration: event.payload.duration,
+            timestamp: event.payload.timestamp,
+            current_utterance_start: currentUtteranceStart.value,
+            current_accumulated: accumulatedText.value,
+            current_partial: partialText.value,
+            last_finalized: lastFinalizedText.value
+          });
 
-          // если сегмент финализирован - добавляем к накопленному тексту
+          // Если сегмент финализирован (is_final=true, но не speech_final)
           if (event.payload.is_segment_final) {
-            console.log('Segment finalized:', event.payload.text);
-            console.log('Last finalized text:', lastFinalizedText.value);
+            const newText = event.payload.text;
 
-            let newText = event.payload.text;
-
-            // Deepgram может отправлять весь накопленный текст сессии
-            // Проверяем, не дублируется ли текст
-            if (lastFinalizedText.value && newText.startsWith(lastFinalizedText.value)) {
-              // Текст начинается с уже обработанного - берем только новую часть
-              const newPart = newText.slice(lastFinalizedText.value.length).trim();
-              console.log('Detected duplicate text, extracted new part:', newPart);
-
-              if (newPart) {
-                accumulatedText.value = accumulatedText.value
-                  ? `${accumulatedText.value} ${newPart}`
-                  : newPart;
-                lastFinalizedText.value = newText; // сохраняем полный текст для следующей проверки
-
-                // Запускаем анимацию для accumulated текста
-                animateAccumulatedText(accumulatedText.value);
-              }
-            } else {
-              // Это новый независимый сегмент
-              accumulatedText.value = accumulatedText.value
-                ? `${accumulatedText.value} ${newText}`
-                : newText;
-              lastFinalizedText.value = newText;
-
-              // Запускаем анимацию для accumulated текста
-              animateAccumulatedText(accumulatedText.value);
+            // Проверка на точный дубликат (защита от повторной отправки того же сегмента)
+            if (newText === lastFinalizedText.value) {
+              console.log('⚠️ Exact duplicate segment detected, skipping:', newText);
+              return;
             }
 
-            partialText.value = ''; // очищаем промежуточный текст
-            animatedPartialText.value = ''; // очищаем анимированный partial текст
+            // Финализировали utterance - добавляем к накопленному тексту
+            const oldAccumulated = accumulatedText.value;
+            console.log('🔒 [BEFORE ACCUMULATE] accumulated:', oldAccumulated);
+            console.log('🔒 [BEFORE ACCUMULATE] newText:', newText);
+
+            accumulatedText.value = accumulatedText.value
+              ? `${accumulatedText.value} ${newText}`
+              : newText;
+
+            lastFinalizedText.value = newText;
+
+            console.log('🔒 [AFTER ACCUMULATE] accumulated:', accumulatedText.value);
+            console.log('🔒 Utterance finalized and accumulated:', {
+              utterance: newText,
+              start: event.payload.start,
+              total_accumulated: accumulatedText.value,
+              currentUtteranceStart: currentUtteranceStart.value
+            });
+
+            // Запускаем анимацию для accumulated текста
+            animateAccumulatedText(accumulatedText.value);
+
+            // Очищаем промежуточный текст (НЕ сбрасываем utterance start!)
+            // currentUtteranceStart сохраняется чтобы определить когда придет новая utterance
+            partialText.value = '';
+            animatedPartialText.value = '';
 
             // Останавливаем анимацию partial текста
             if (partialAnimationTimer) {
@@ -224,11 +244,59 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               partialAnimationTimer = null;
             }
           } else {
-            // промежуточный результат - просто обновляем
-            partialText.value = event.payload.text;
+            // Промежуточный результат (is_final=false)
+            // Deepgram отправляет НАКОПЛЕННЫЙ текст utterance, поэтому просто ЗАМЕНЯЕМ
 
-            // Запускаем анимацию для partial текста
-            animatePartialText(event.payload.text);
+            // Если это та же utterance (start совпадает) - просто обновляем partial текст
+            if (currentUtteranceStart.value === event.payload.start || currentUtteranceStart.value === -1) {
+              currentUtteranceStart.value = event.payload.start;
+              partialText.value = event.payload.text;
+
+              console.log('📝 Interim update (same utterance):', {
+                start: event.payload.start,
+                text: event.payload.text
+              });
+
+              // Запускаем анимацию для partial текста
+              animatePartialText(event.payload.text);
+            } else {
+              // Новая utterance началась (start изменился)
+              // Это означает что предыдущая utterance должна была быть финализирована, но не была
+              console.warn('⚠️ Utterance start changed without finalization!', {
+                old_start: currentUtteranceStart.value,
+                new_start: event.payload.start,
+                old_partial: partialText.value,
+                new_text: event.payload.text,
+                accumulated_text: accumulatedText.value
+              });
+
+              // Сохраняем accumulated текст от предыдущей utterance если он есть
+              if (accumulatedText.value) {
+                const oldFinalText = finalText.value;
+                console.log('💾 [BEFORE SAVE] finalText:', oldFinalText);
+                console.log('💾 [BEFORE SAVE] accumulated:', accumulatedText.value);
+
+                finalText.value = finalText.value
+                  ? `${finalText.value} ${accumulatedText.value}`
+                  : accumulatedText.value;
+
+                console.log('💾 [AFTER SAVE] finalText:', finalText.value);
+                console.log('💾 Successfully saved accumulated text to finalText');
+
+                accumulatedText.value = '';
+                animatedAccumulatedText.value = '';
+                lastFinalizedText.value = '';
+              } else {
+                console.log('💾 [SKIP] No accumulated text to save (already empty)');
+              }
+
+              // Начинаем новую utterance
+              currentUtteranceStart.value = event.payload.start;
+              partialText.value = event.payload.text;
+
+              // Запускаем анимацию для partial текста
+              animatePartialText(event.payload.text);
+            }
           }
         }
       );
@@ -237,31 +305,57 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       unlistenFinal = await listen<FinalTranscriptionPayload>(
         EVENT_TRANSCRIPTION_FINAL,
         async (event) => {
-          console.log('Received final transcription:', event.payload);
+          // Детальное логирование для отладки
+          console.log('✅ FINAL EVENT (speech_final=true):', {
+            text: event.payload.text,
+            confidence: event.payload.confidence,
+            language: event.payload.language,
+            timestamp: event.payload.timestamp,
+            current_accumulated: accumulatedText.value,
+            current_final: finalText.value,
+            current_partial: partialText.value
+          });
 
           // Deepgram отправляет финальный сегмент когда вся речь завершена (speech_final=true)
-          // К этому моменту все сегменты уже накоплены в accumulatedText
+          // Нужно собрать полный текст utterance: accumulated + последний сегмент
           if (event.payload.text) {
-            // Если это первый final сегмент - используем весь накопленный текст
-            // (финализированные сегменты уже есть в accumulatedText, не дублируем!)
-            if (!finalText.value && accumulatedText.value) {
-              finalText.value = accumulatedText.value;
-            } else if (finalText.value) {
-              // Уже есть финальный текст - добавляем новый сегмент
-              finalText.value = `${finalText.value} ${event.payload.text}`;
-            } else {
-              // Нет ни накопленного, ни финального - просто используем пришедший
-              finalText.value = event.payload.text;
-            }
+            // Собираем полный текст текущей utterance
+            const currentUtteranceText = accumulatedText.value && event.payload.text
+              ? `${accumulatedText.value} ${event.payload.text}`.trim()
+              : (accumulatedText.value || event.payload.text);
+
+            console.log('🔗 [SPEECH_FINAL] Combining utterance:', {
+              accumulated: accumulatedText.value,
+              last_segment: event.payload.text,
+              combined: currentUtteranceText
+            });
+
+            const oldFinalText = finalText.value;
+            console.log('📋 [BEFORE ADD] finalText:', oldFinalText);
+            console.log('📋 [BEFORE ADD] currentUtteranceText:', currentUtteranceText);
+
+            // Добавляем к финальному тексту
+            finalText.value = finalText.value
+              ? `${finalText.value} ${currentUtteranceText}`
+              : currentUtteranceText;
+
+            console.log('📋 [AFTER ADD] finalText:', finalText.value);
+            console.log('📋 Successfully added utterance to finalText');
+
+            console.log('🧹 [CLEANUP] Clearing all temporary data after speech_final');
+            console.log('🧹 [CLEANUP] Before: accumulated=', accumulatedText.value, 'partial=', partialText.value);
 
             // Очищаем промежуточные данные после финализации сегмента
             partialText.value = '';
             accumulatedText.value = '';
             lastFinalizedText.value = '';
+            currentUtteranceStart.value = -1;
 
             // Очищаем анимированные тексты
             animatedPartialText.value = '';
             animatedAccumulatedText.value = '';
+
+            console.log('🧹 [CLEANUP] After: all cleared, currentUtteranceStart reset to -1');
 
             // Останавливаем все анимации
             if (partialAnimationTimer) {
@@ -273,15 +367,16 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               accumulatedAnimationTimer = null;
             }
 
-            console.log('Updated final text:', finalText.value);
-
             // Auto-copy to clipboard с накопленным текстом
             try {
               await writeText(finalText.value);
-              console.log('Copied to clipboard:', finalText.value);
+              console.log('📋 Copied to clipboard:', finalText.value);
             } catch (err) {
               console.error('Failed to copy to clipboard:', err);
             }
+          } else {
+            console.warn('⚠️ [SPEECH_FINAL] event.payload.text is empty, skipping');
+            console.log('⚠️ [SPEECH_FINAL] Event payload:', event.payload);
           }
         }
       );
@@ -309,6 +404,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             accumulatedText.value = '';
             finalText.value = '';
             lastFinalizedText.value = '';
+            currentUtteranceStart.value = -1;
             error.value = null;
 
             // Очищаем анимированный текст
@@ -385,6 +481,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       accumulatedText.value = '';
       finalText.value = '';
       lastFinalizedText.value = '';
+      currentUtteranceStart.value = -1;
       status.value = RecordingStatus.Recording;
 
       // Очищаем анимированный текст

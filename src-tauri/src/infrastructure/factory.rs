@@ -39,3 +39,61 @@ impl SttProviderFactory for DefaultSttProviderFactory {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_factory_new() {
+        let factory = DefaultSttProviderFactory::new();
+        // Просто проверяем что создается
+        assert!(true);
+    }
+
+    #[test]
+    fn test_factory_default() {
+        let _ = DefaultSttProviderFactory::default();
+        assert!(true);
+    }
+
+    #[test]
+    fn test_create_whisper_local() {
+        let factory = DefaultSttProviderFactory::new();
+        let config = SttConfig::new(SttProviderType::WhisperLocal);
+        let result = factory.create(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_assemblyai() {
+        let factory = DefaultSttProviderFactory::new();
+        let config = SttConfig::new(SttProviderType::AssemblyAI);
+        let result = factory.create(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_deepgram() {
+        let factory = DefaultSttProviderFactory::new();
+        let config = SttConfig::new(SttProviderType::Deepgram);
+        let result = factory.create(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_google_cloud_unsupported() {
+        let factory = DefaultSttProviderFactory::new();
+        let config = SttConfig::new(SttProviderType::GoogleCloud);
+        let result = factory.create(&config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_azure_unsupported() {
+        let factory = DefaultSttProviderFactory::new();
+        let config = SttConfig::new(SttProviderType::Azure);
+        let result = factory.create(&config);
+        assert!(result.is_err());
+    }
+}

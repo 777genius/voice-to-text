@@ -13,6 +13,18 @@ const doneAudio = new Audio(doneSoundUrl);
 showAudio.volume = 0.5;
 doneAudio.volume = 0.5;
 
+// Освобождаем медиа-контроль после окончания звука
+// Это предотвращает перехват системных медиа-кнопок приложением
+showAudio.addEventListener('ended', () => {
+  showAudio.pause();
+  showAudio.currentTime = 0;
+});
+
+doneAudio.addEventListener('ended', () => {
+  doneAudio.pause();
+  doneAudio.currentTime = 0;
+});
+
 /**
  * Проигрывает звук при открытии окна
  */

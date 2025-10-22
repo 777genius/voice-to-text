@@ -606,19 +606,25 @@ impl DeepgramProvider {
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .unwrap_or_else(|_| std::time::Duration::from_secs(0))
                                         .as_secs() as i64,
+                                    start, // передаем start время из Deepgram
+                                    duration, // передаем duration из Deepgram
                                 };
+
+                                // Детальное логирование для отладки
+                                log::info!("🔍 DEEPGRAM MSG: is_final={}, speech_final={}, text='{}', confidence={:?}, start={:.2}s, duration={:.2}s",
+                                    is_final, speech_final, text, confidence, start, duration);
 
                                 // Отправляем как final только когда ВСЯ речь завершена (speech_final=true)
                                 if is_final && speech_final {
-                                    log::info!("✅ Final transcript: '{}' (confidence: {:?})", text, confidence);
+                                    log::info!("✅ Final transcript (speech_final=true): '{}' → вызываем on_final callback", text);
                                     on_final(transcription);
                                 } else {
                                     // Все остальные (промежуточные и финализированные сегменты) - как partial
                                     // UI различит по флагу is_final
                                     if is_final {
-                                        log::info!("🔒 Segment finalized: '{}' (confidence: {:?})", text, confidence);
+                                        log::info!("🔒 Segment finalized (is_final=true, speech_final=false): '{}' → вызываем on_partial callback", text);
                                     } else {
-                                        log::info!("📝 Partial transcript: '{}' (confidence: {:?})", text, confidence);
+                                        log::info!("📝 Partial transcript (is_final=false): '{}' → вызываем on_partial callback", text);
                                     }
                                     on_partial(transcription);
                                 }
@@ -661,5 +667,261 @@ impl DeepgramProvider {
                 log::warn!("Deepgram message without type field");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::SttProviderType;
+
+    #[test]
+    fn test_provider_creation() {
+        let provider = DeepgramProvider::new();
+        assert!(!provider.is_streaming);
+        assert!(!provider.is_paused);
+        assert_eq!(provider.audio_buffer.len(), 0);
+        assert_eq!(provider.sent_chunks_count, 0);
+    }
+
+    #[test]
+    fn test_provider_default() {
+        let provider = DeepgramProvider::default();
+        assert!(!provider.is_streaming);
+    }
+
+    #[test]
+    fn test_provider_name() {
+        let provider = DeepgramProvider::new();
+        assert!(provider.name().contains("Deepgram"));
+    }
+
+    #[test]
+    fn test_provider_is_online() {
+        let provider = DeepgramProvider::new();
+        assert!(provider.is_online());
+    }
+
+    #[test]
+    fn test_provider_supports_keep_alive() {
+        let provider = DeepgramProvider::new();
+        assert!(provider.supports_keep_alive());
+    }
+
+    #[test]
+    fn test_connection_alive_requires_streaming_and_paused() {
+        let mut provider = DeepgramProvider::new();
+
+        // Изначально не живо
+        assert!(!provider.is_connection_alive());
+
+        // Только streaming - не живо
+        provider.is_streaming = true;
+        assert!(!provider.is_connection_alive());
+
+        // Streaming + paused - живо!
+        provider.is_paused = true;
+        assert!(provider.is_connection_alive());
+
+        // Только paused - не живо
+        provider.is_streaming = false;
+        assert!(!provider.is_connection_alive());
+    }
+
+    #[tokio::test]
+    async fn test_initialize_without_api_key() {
+        let mut provider = DeepgramProvider::new();
+        let config = SttConfig::default();
+
+        let result = provider.initialize(&config).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SttError::Configuration(_)));
+    }
+
+    #[tokio::test]
+    async fn test_initialize_with_api_key() {
+        let mut provider = DeepgramProvider::new();
+
+        let config = SttConfig::new(SttProviderType::Deepgram)
+            .with_api_key("test-key-123");
+
+        let result = provider.initialize(&config).await;
+        assert!(result.is_ok());
+        assert_eq!(provider.api_key, Some("test-key-123".to_string()));
+        assert!(provider.config.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_abort_clears_state() {
+        let mut provider = DeepgramProvider::new();
+
+        // Устанавливаем состояние
+        provider.is_streaming = true;
+        provider.is_paused = true;
+        provider.audio_buffer = vec![1, 2, 3];
+        provider.sent_chunks_count = 10;
+        provider.sent_bytes_total = 1000;
+
+        provider.abort().await.unwrap();
+
+        // Проверяем что всё очистилось
+        assert!(!provider.is_streaming);
+        assert!(!provider.is_paused);
+        assert_eq!(provider.audio_buffer.len(), 0);
+        assert_eq!(provider.sent_chunks_count, 0);
+        assert_eq!(provider.sent_bytes_total, 0);
+    }
+
+    #[tokio::test]
+    async fn test_pause_stream_requires_streaming() {
+        let mut provider = DeepgramProvider::new();
+
+        // Попытка паузы без streaming
+        let result = provider.pause_stream().await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SttError::Processing(_)));
+    }
+
+    #[tokio::test]
+    async fn test_pause_stream_when_streaming() {
+        let mut provider = DeepgramProvider::new();
+        provider.is_streaming = true;
+        provider.audio_buffer = vec![1, 2, 3];
+
+        let result = provider.pause_stream().await;
+        assert!(result.is_ok());
+        assert!(provider.is_paused);
+        assert_eq!(provider.audio_buffer.len(), 0); // Буфер очищен
+    }
+
+    #[tokio::test]
+    async fn test_resume_requires_streaming_and_paused() {
+        let mut provider = DeepgramProvider::new();
+
+        let on_partial = Arc::new(|_: Transcription| {});
+        let on_final = Arc::new(|_: Transcription| {});
+        let on_error = Arc::new(|_: String, _: String| {});
+
+        // Не streaming - ошибка
+        let result = provider.resume_stream(on_partial.clone(), on_final.clone(), on_error.clone()).await;
+        assert!(result.is_err());
+
+        // Streaming но не paused - ошибка
+        provider.is_streaming = true;
+        let result = provider.resume_stream(on_partial.clone(), on_final.clone(), on_error.clone()).await;
+        assert!(result.is_err());
+
+        // Streaming + paused - успех!
+        provider.is_paused = true;
+        provider.audio_buffer = vec![1, 2, 3];
+        let result = provider.resume_stream(on_partial, on_final, on_error).await;
+        assert!(result.is_ok());
+        assert!(!provider.is_paused);
+        assert_eq!(provider.audio_buffer.len(), 0); // Буфер очищен
+    }
+
+    #[test]
+    fn test_handle_message_results() {
+        let partial_called = Arc::new(std::sync::Mutex::new(false));
+        let final_called = Arc::new(std::sync::Mutex::new(false));
+
+        let p_called = partial_called.clone();
+        let on_partial: TranscriptionCallback = Arc::new(move |_: Transcription| {
+            *p_called.lock().unwrap() = true;
+        });
+
+        let f_called = final_called.clone();
+        let on_final: TranscriptionCallback = Arc::new(move |_: Transcription| {
+            *f_called.lock().unwrap() = true;
+        });
+
+        // Тест с partial result (is_final=false)
+        let json = json!({
+            "type": "Results",
+            "is_final": false,
+            "speech_final": false,
+            "channel": {
+                "alternatives": [
+                    {
+                        "transcript": "test",
+                        "confidence": 0.95
+                    }
+                ]
+            }
+        });
+
+        DeepgramProvider::handle_message(json, &on_partial, &on_final);
+        assert!(*partial_called.lock().unwrap());
+        assert!(!*final_called.lock().unwrap());
+    }
+
+    #[test]
+    fn test_handle_message_final() {
+        let final_called = Arc::new(std::sync::Mutex::new(false));
+
+        let on_partial: TranscriptionCallback = Arc::new(|_: Transcription| {});
+
+        let f_called = final_called.clone();
+        let on_final: TranscriptionCallback = Arc::new(move |_: Transcription| {
+            *f_called.lock().unwrap() = true;
+        });
+
+        // Тест с final result (is_final=true, speech_final=true)
+        let json = json!({
+            "type": "Results",
+            "is_final": true,
+            "speech_final": true,
+            "channel": {
+                "alternatives": [
+                    {
+                        "transcript": "final text",
+                        "confidence": 0.98
+                    }
+                ]
+            }
+        });
+
+        DeepgramProvider::handle_message(json, &on_partial, &on_final);
+        assert!(*final_called.lock().unwrap());
+    }
+
+    #[test]
+    fn test_handle_message_empty_text() {
+        let called = Arc::new(std::sync::Mutex::new(false));
+        let c = called.clone();
+
+        let on_partial: TranscriptionCallback = Arc::new(move |_: Transcription| {
+            *c.lock().unwrap() = true;
+        });
+        let on_final: TranscriptionCallback = Arc::new(|_: Transcription| {});
+
+        // Пустой текст не должен вызывать callbacks
+        let json = json!({
+            "type": "Results",
+            "is_final": false,
+            "channel": {
+                "alternatives": [
+                    {"transcript": ""}
+                ]
+            }
+        });
+
+        DeepgramProvider::handle_message(json, &on_partial, &on_final);
+        assert!(!*called.lock().unwrap());
+    }
+
+    #[test]
+    fn test_handle_message_metadata() {
+        let on_partial: TranscriptionCallback = Arc::new(|_: Transcription| {});
+        let on_final: TranscriptionCallback = Arc::new(|_: Transcription| {});
+
+        // Metadata сообщение не должно паниковать
+        let json = json!({
+            "type": "Metadata",
+            "request_id": "test-123"
+        });
+
+        DeepgramProvider::handle_message(json, &on_partial, &on_final);
+        // Просто проверяем что не упали
     }
 }

@@ -17,6 +17,8 @@ pub struct PartialTranscriptionPayload {
     pub text: String,
     pub timestamp: i64,
     pub is_segment_final: bool, // true когда сегмент финализирован (is_final=true в Deepgram)
+    pub start: f64, // start время utterance в секундах (от Deepgram)
+    pub duration: f64, // длительность utterance в секундах (от Deepgram)
 }
 
 impl From<Transcription> for PartialTranscriptionPayload {
@@ -25,6 +27,8 @@ impl From<Transcription> for PartialTranscriptionPayload {
             text: t.text,
             timestamp: t.timestamp,
             is_segment_final: t.is_final, // передаем флаг финализации сегмента
+            start: t.start,
+            duration: t.duration,
         }
     }
 }

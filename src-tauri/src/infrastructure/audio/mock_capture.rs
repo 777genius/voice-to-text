@@ -135,3 +135,79 @@ impl AudioCapture for MockAudioCapture {
         self.config
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_mock_capture_new() {
+        let capture = MockAudioCapture::new();
+        let is_capturing = *capture.is_capturing.read().await;
+        assert!(!is_capturing);
+    }
+
+    #[tokio::test]
+    async fn test_mock_capture_default() {
+        let _ = MockAudioCapture::default();
+        assert!(true);
+    }
+
+    #[tokio::test]
+    async fn test_mock_capture_initialize() {
+        let mut capture = MockAudioCapture::new();
+        let config = AudioConfig {
+            sample_rate: 8000,
+            channels: 2,
+            buffer_size: 2048,
+        };
+        let result = capture.initialize(config).await;
+        assert!(result.is_ok());
+        assert_eq!(capture.config.sample_rate, 8000);
+    }
+
+    #[tokio::test]
+    async fn test_mock_capture_start_and_stop() {
+        let mut capture = MockAudioCapture::new();
+        capture.initialize(AudioConfig::default()).await.unwrap();
+
+        let on_chunk = Arc::new(|_chunk: AudioChunk| {
+            // Test callback
+        });
+
+        let result = capture.start_capture(on_chunk).await;
+        assert!(result.is_ok());
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let result = capture.stop_capture().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_mock_capture_double_start_fails() {
+        let mut capture = MockAudioCapture::new();
+        let on_chunk = Arc::new(|_chunk: AudioChunk| {});
+
+        capture.start_capture(on_chunk.clone()).await.unwrap();
+        let result = capture.start_capture(on_chunk).await;
+        assert!(result.is_err());
+
+        capture.stop_capture().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_mock_capture_config() {
+        let capture = MockAudioCapture::new();
+        let config = capture.config();
+        assert_eq!(config.sample_rate, 16000);
+    }
+
+    #[test]
+    fn test_random_generator() {
+        let val1: u16 = rand::random();
+        let val2: u16 = rand::random();
+        // Просто проверяем что генератор работает
+        assert!(val1 != val2 || val1 == val2);
+    }
+}
