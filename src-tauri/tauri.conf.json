@@ -67,7 +67,7 @@
                 "headerImage": null,
                 "sidebarImage": null,
                 "installMode": "currentUser",
-                "languages": ["en-US", "ru-RU"],
+                "languages": ["en-US"],
                 "displayLanguageSelector": false
             }
         },
