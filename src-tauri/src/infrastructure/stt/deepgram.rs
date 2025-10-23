@@ -12,6 +12,7 @@ use tokio::net::TcpStream;
 use crate::domain::{
     AudioChunk, ErrorCallback, SttConfig, SttError, SttProvider, SttResult, Transcription, TranscriptionCallback,
 };
+use crate::infrastructure::embedded_keys;
 
 /// Deepgram cloud STT provider
 ///
@@ -80,13 +81,24 @@ impl SttProvider for DeepgramProvider {
     async fn initialize(&mut self, config: &SttConfig) -> SttResult<()> {
         log::info!("DeepgramProvider: Initializing");
 
-        if config.api_key.is_none() {
-            return Err(SttError::Configuration(
-                "API key is required for Deepgram".to_string(),
-            ));
-        }
+        // Приоритет: пользовательский ключ → встроенный ключ
+        let api_key = config.deepgram_api_key.clone()
+            .or_else(|| {
+                // Fallback на встроенный ключ
+                if embedded_keys::has_embedded_deepgram_key() {
+                    Some(embedded_keys::EMBEDDED_DEEPGRAM_KEY.to_string())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| SttError::Configuration(
+                "Deepgram API key is required (either user key or embedded key)".to_string(),
+            ))?;
 
-        self.api_key = config.api_key.clone();
+        log::info!("DeepgramProvider: Using {} API key",
+            if config.deepgram_api_key.is_some() { "user" } else { "embedded" });
+
+        self.api_key = Some(api_key);
         self.config = Some(config.clone());
         Ok(())
     }

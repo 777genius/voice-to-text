@@ -11,6 +11,7 @@ use tokio::net::TcpStream;
 use crate::domain::{
     AudioChunk, SttConfig, SttError, SttProvider, SttResult, Transcription, TranscriptionCallback,
 };
+use crate::infrastructure::embedded_keys;
 
 /// AssemblyAI Universal-Streaming STT provider (v3)
 ///
@@ -62,13 +63,24 @@ impl SttProvider for AssemblyAIProvider {
     async fn initialize(&mut self, config: &SttConfig) -> SttResult<()> {
         log::info!("AssemblyAI Provider: Initializing (v3)");
 
-        if config.api_key.is_none() {
-            return Err(SttError::Configuration(
-                "API key is required for AssemblyAI".to_string(),
-            ));
-        }
+        // Приоритет: пользовательский ключ → встроенный ключ
+        let api_key = config.assemblyai_api_key.clone()
+            .or_else(|| {
+                // Fallback на встроенный ключ
+                if embedded_keys::has_embedded_assemblyai_key() {
+                    Some(embedded_keys::EMBEDDED_ASSEMBLYAI_KEY.to_string())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| SttError::Configuration(
+                "AssemblyAI API key is required (either user key or embedded key)".to_string(),
+            ))?;
 
-        self.api_key = config.api_key.clone();
+        log::info!("AssemblyAI Provider: Using {} API key",
+            if config.assemblyai_api_key.is_some() { "user" } else { "embedded" });
+
+        self.api_key = Some(api_key);
         self.config = Some(config.clone());
         Ok(())
     }

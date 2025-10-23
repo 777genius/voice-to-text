@@ -7,6 +7,7 @@ pub mod factory;
 pub mod config_store;
 pub mod updater;
 pub mod models;
+pub mod embedded_keys; // API ключи встроенные в build
 
 pub use factory::*;
 pub use config_store::ConfigStore;

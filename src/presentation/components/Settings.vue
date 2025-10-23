@@ -20,6 +20,12 @@ const saveMessage = ref('');
 const errorMessage = ref('');
 const isDragging = ref(false);
 
+// API ключи (опциональные - если пусто, используется встроенный)
+const deepgramApiKey = ref('');
+const assemblyaiApiKey = ref('');
+const showDeepgramKey = ref(false);
+const showAssemblyAIKey = ref(false);
+
 // Показывать ли настройки Whisper
 const isWhisperProvider = computed(() => currentProvider.value === SttProviderType.WhisperLocal);
 
@@ -44,6 +50,10 @@ onMounted(async () => {
     const config = await invoke<SttConfig>('get_stt_config');
     currentProvider.value = config.provider as SttProviderType;
     currentLanguage.value = config.language;
+
+    // Загружаем пользовательские API ключи если они есть
+    deepgramApiKey.value = config.deepgram_api_key || '';
+    assemblyaiApiKey.value = config.assemblyai_api_key || '';
 
     // Загружаем модель Whisper если указана
     if (config.model) {
@@ -93,11 +103,13 @@ const saveConfig = async () => {
       }
     }
 
-    // Обновляем конфигурацию STT (API ключи загружаются автоматически из .env)
+    // Обновляем конфигурацию STT
+    // API ключи: если пусто - используется встроенный ключ
     await invoke('update_stt_config', {
       provider: currentProvider.value,
       language: currentLanguage.value,
-      apiKey: null,
+      deepgramApiKey: deepgramApiKey.value || null,
+      assemblyaiApiKey: assemblyaiApiKey.value || null,
       model: currentProvider.value === SttProviderType.WhisperLocal ? whisperModel.value : null,
     });
 
@@ -270,6 +282,56 @@ onUnmounted(() => {
             <option value="fr">Français</option>
             <option value="de">Deutsch</option>
           </select>
+        </div>
+
+        <!-- API Keys (опционально для облачных провайдеров) -->
+        <div v-if="currentProvider === SttProviderType.Deepgram || currentProvider === SttProviderType.AssemblyAI" class="setting-group">
+          <label class="setting-label">API Keys (опционально)</label>
+
+          <!-- Deepgram API Key -->
+          <div v-if="currentProvider === SttProviderType.Deepgram" class="api-key-field">
+            <label class="setting-sublabel">Deepgram API Key</label>
+            <div class="input-with-button">
+              <input
+                :type="showDeepgramKey ? 'text' : 'password'"
+                v-model="deepgramApiKey"
+                class="setting-input"
+                placeholder="Оставьте пустым для использования встроенного ключа"
+              />
+              <button
+                class="toggle-visibility-button"
+                @click="showDeepgramKey = !showDeepgramKey"
+                type="button"
+              >
+                {{ showDeepgramKey ? '👁️' : '👁️‍🗨️' }}
+              </button>
+            </div>
+          </div>
+
+          <!-- AssemblyAI API Key -->
+          <div v-if="currentProvider === SttProviderType.AssemblyAI" class="api-key-field">
+            <label class="setting-sublabel">AssemblyAI API Key</label>
+            <div class="input-with-button">
+              <input
+                :type="showAssemblyAIKey ? 'text' : 'password'"
+                v-model="assemblyaiApiKey"
+                class="setting-input"
+                placeholder="Оставьте пустым для использования встроенного ключа"
+              />
+              <button
+                class="toggle-visibility-button"
+                @click="showAssemblyAIKey = !showAssemblyAIKey"
+                type="button"
+              >
+                {{ showAssemblyAIKey ? '👁️' : '👁️‍🗨️' }}
+              </button>
+            </div>
+          </div>
+
+          <p class="setting-hint">
+            Можете указать свой API ключ или оставить пустым для использования встроенного ключа.
+            Свой ключ нужен если хотите использовать собственные квоты и лимиты.
+          </p>
         </div>
 
         <!-- Whisper Model Selection (только для WhisperLocal) -->
@@ -848,5 +910,49 @@ onUnmounted(() => {
   padding: var(--spacing-sm);
   background: rgba(255, 255, 255, 0.05);
   border-radius: var(--radius-sm);
+}
+
+/* API Key Fields */
+.api-key-field {
+  margin-bottom: var(--spacing-sm);
+}
+
+.setting-sublabel {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  margin-bottom: var(--spacing-xs);
+}
+
+.input-with-button {
+  display: flex;
+  gap: var(--spacing-xs);
+  align-items: center;
+}
+
+.input-with-button .setting-input {
+  flex: 1;
+}
+
+.toggle-visibility-button {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-sm);
+  padding: var(--spacing-xs);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  transition: all 0.2s ease;
+  min-width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.toggle-visibility-button:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--color-accent);
 }
 </style>

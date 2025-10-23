@@ -69,7 +69,9 @@ export interface SttConfig {
   auto_detect_language: boolean;
   enable_punctuation: boolean;
   filter_profanity: boolean;
-  api_key?: string;
+  deepgram_api_key?: string;
+  assemblyai_api_key?: string;
+  api_key?: string; // deprecated
   model?: string;
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "voice-to-text"
-version = "0.1.0"
+version = "0.2.0"
 description = "Privacy-focused voice-to-text application with offline support"
 authors = ["Voice to Text Contributors"]
 license = "MIT"
@@ -16,6 +16,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.4.1", features = [] }
+dotenv = "0.15"  # Load .env file during build
 
 [dependencies]
 # Core

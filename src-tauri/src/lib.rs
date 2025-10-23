@@ -11,25 +11,12 @@ use infrastructure::ConfigStore;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Загружаем переменные окружения из .env файла (если есть)
+    // Загружаем переменные окружения из .env файла (если есть) для dev режима
+    // API ключи теперь встроены в build через embedded_keys.rs
+    #[cfg(debug_assertions)]
     match dotenv::dotenv() {
         Ok(path) => println!("✅ Loaded .env file from: {:?}", path),
         Err(e) => println!("ℹ️  No .env file loaded: {}", e),
-    }
-
-    // Debug: показываем что API ключи загрузились
-    #[cfg(debug_assertions)]
-    {
-        if std::env::var("DEEPGRAM_API_KEY").is_ok() {
-            println!("✅ DEEPGRAM_API_KEY is set");
-        } else {
-            println!("⚠️  DEEPGRAM_API_KEY is NOT set");
-        }
-        if std::env::var("ASSEMBLYAI_API_KEY").is_ok() {
-            println!("✅ ASSEMBLYAI_API_KEY is set");
-        } else {
-            println!("⚠️  ASSEMBLYAI_API_KEY is NOT set");
-        }
     }
 
     tauri::Builder::default()
@@ -99,30 +86,13 @@ pub fn run() {
             }
 
             // Загружаем сохраненные конфигурации
-            // API ключи загружаются из переменных окружения (.env)
+            // API ключи теперь берутся из embedded_keys.rs (встроены в build) или из пользовательской конфигурации
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 // Загружаем STT конфигурацию
-                if let Ok(mut saved_config) = ConfigStore::load_config().await {
-                    // Подставляем API ключ из переменных окружения если он не задан
-                    if saved_config.api_key.is_none() {
-                        use crate::domain::SttProviderType;
-                        saved_config.api_key = match saved_config.provider {
-                            SttProviderType::AssemblyAI => {
-                                std::env::var("ASSEMBLYAI_API_KEY").ok()
-                            }
-                            SttProviderType::Deepgram => {
-                                std::env::var("DEEPGRAM_API_KEY").ok()
-                            }
-                            SttProviderType::GoogleCloud => {
-                                std::env::var("GOOGLE_CLOUD_API_KEY").ok()
-                            }
-                            _ => None,
-                        };
-                        if saved_config.api_key.is_some() {
-                            log::info!("Loaded API key from environment for {:?}", saved_config.provider);
-                        }
-                    }
+                if let Ok(saved_config) = ConfigStore::load_config().await {
+                    // API ключи теперь обрабатываются напрямую в провайдерах
+                    // Приоритет: пользовательские ключи (deepgram_api_key/assemblyai_api_key) → встроенные ключи
 
                     if let Some(state) = app_handle.try_state::<AppState>() {
                         if let Err(e) = state.transcription_service.update_config(saved_config.clone()).await {

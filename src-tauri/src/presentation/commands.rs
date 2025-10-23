@@ -277,7 +277,8 @@ pub async fn update_stt_config(
     state: State<'_, AppState>,
     provider: String,
     language: String,
-    api_key: Option<String>,
+    deepgram_api_key: Option<String>,
+    assemblyai_api_key: Option<String>,
     model: Option<String>,
 ) -> Result<(), String> {
     log::info!("Command: update_stt_config - provider: {}, language: {}, model: {:?}", provider, language, model);
@@ -292,8 +293,7 @@ pub async fn update_stt_config(
         _ => return Err(format!("Unknown STT provider: {}", provider)),
     };
 
-    // ВАЖНО: Загружаем существующую конфигурацию из файла (если есть)
-    // чтобы не потерять сохраненный API ключ при изменении других настроек
+    // Загружаем существующую конфигурацию из файла (если есть)
     let mut config = ConfigStore::load_config().await.unwrap_or_default();
 
     // Обновляем только переданные параметры
@@ -313,36 +313,26 @@ pub async fn update_stt_config(
     log::debug!("Setting keep_connection_alive={} for provider {:?}",
         config.keep_connection_alive, provider_type);
 
-    // Логика обработки API ключа:
-    // 1. Если передан новый ключ (непустой) - обновляем его
-    // 2. Если не передан - пытаемся загрузить из переменных окружения
-    // 3. Иначе оставляем существующий из конфига
-    let has_new_key = api_key.as_ref().map_or(false, |k| !k.trim().is_empty());
-
-    if has_new_key {
-        // Передан новый непустой ключ - используем его
-        config.api_key = api_key.clone();
-        log::debug!("Using new API key provided in request");
-    } else if config.api_key.is_none() {
-        // Ключ отсутствует - пытаемся загрузить из .env
-        config.api_key = match provider_type {
-            SttProviderType::AssemblyAI => {
-                std::env::var("ASSEMBLYAI_API_KEY").ok()
-            }
-            SttProviderType::Deepgram => {
-                std::env::var("DEEPGRAM_API_KEY").ok()
-            }
-            SttProviderType::GoogleCloud => {
-                std::env::var("GOOGLE_CLOUD_API_KEY").ok()
-            }
-            _ => None,
-        };
-        if config.api_key.is_some() {
-            log::debug!("Loaded API key from environment variable");
+    // Обновляем пользовательские API ключи если они переданы
+    // Пустая строка означает "очистить" (использовать встроенный ключ)
+    if let Some(key) = deepgram_api_key {
+        if key.trim().is_empty() {
+            config.deepgram_api_key = None; // Очистить (будет использован встроенный)
+            log::debug!("Deepgram API key cleared (will use embedded key)");
+        } else {
+            config.deepgram_api_key = Some(key);
+            log::debug!("Deepgram API key updated");
         }
-    } else {
-        // Ключ не передан - оставляем существующий без изменений
-        log::debug!("Keeping existing API key from config file");
+    }
+
+    if let Some(key) = assemblyai_api_key {
+        if key.trim().is_empty() {
+            config.assemblyai_api_key = None; // Очистить (будет использован встроенный)
+            log::debug!("AssemblyAI API key cleared (will use embedded key)");
+        } else {
+            config.assemblyai_api_key = Some(key);
+            log::debug!("AssemblyAI API key updated");
+        }
     }
 
     // Обновляем конфигурацию в сервисе

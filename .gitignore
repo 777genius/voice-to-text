@@ -31,3 +31,6 @@ src-tauri/WixTools
 .env
 .env.local
 .env.*.local
+
+# Generated files (auto-generated during build)
+src-tauri/src/infrastructure/embedded_keys.rs

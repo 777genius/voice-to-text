@@ -40,7 +40,16 @@ pub struct SttConfig {
     /// Enable profanity filter
     pub filter_profanity: bool,
 
-    /// API key for cloud providers
+    /// API key для Deepgram (если пользователь хочет использовать свой ключ)
+    /// Если None, используется встроенный ключ из embedded_keys
+    pub deepgram_api_key: Option<String>,
+
+    /// API key для AssemblyAI (если пользователь хочет использовать свой ключ)
+    /// Если None, используется встроенный ключ из embedded_keys
+    pub assemblyai_api_key: Option<String>,
+
+    /// API key for cloud providers (deprecated, используйте deepgram_api_key или assemblyai_api_key)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
 
     /// Model name/ID for local providers
@@ -60,6 +69,8 @@ impl Default for SttConfig {
             auto_detect_language: false,
             enable_punctuation: true,
             filter_profanity: false,
+            deepgram_api_key: None,
+            assemblyai_api_key: None,
             api_key: None,
             model: None,
             keep_connection_alive: false, // Безопасно по умолчанию для всех провайдеров
@@ -155,6 +166,8 @@ mod tests {
         assert!(!config.auto_detect_language);
         assert!(config.enable_punctuation);
         assert!(!config.filter_profanity);
+        assert!(config.deepgram_api_key.is_none());
+        assert!(config.assemblyai_api_key.is_none());
         assert!(config.api_key.is_none());
         assert!(config.model.is_none());
         assert!(!config.keep_connection_alive);
