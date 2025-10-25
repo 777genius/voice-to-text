@@ -332,7 +332,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
           // Deepgram отправляет финальный сегмент когда вся речь завершена (speech_final=true)
           // Нужно собрать полный текст utterance: accumulated + последний сегмент
-          if (event.payload.text) {
+          if (event.payload.text || accumulatedText.value) {
             // Собираем полный текст текущей utterance
             const currentUtteranceText = accumulatedText.value && event.payload.text
               ? `${accumulatedText.value} ${event.payload.text}`.trim()
