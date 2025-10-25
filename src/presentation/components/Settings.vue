@@ -15,10 +15,16 @@ const currentLanguage = ref('ru');
 const whisperModel = ref('small'); // Модель по умолчанию
 const microphoneSensitivity = ref(95); // 0-200, default 95
 const recordingHotkey = ref('CmdOrCtrl+Shift+X');
+const autoCopyToClipboard = ref(true);
+const autoPasteText = ref(false);
 const isSaving = ref(false);
 const saveMessage = ref('');
 const errorMessage = ref('');
 const isDragging = ref(false);
+
+// Accessibility permission (для macOS)
+const hasAccessibilityPermission = ref(true);
+const isMacOS = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
 
 // API ключи (опциональные - если пусто, используется встроенный)
 const deepgramApiKey = ref('');
@@ -44,6 +50,10 @@ const testAudioLevel = ref(0);
 const testError = ref('');
 let testLevelUnlisten: UnlistenFn | null = null;
 
+// Выбор аудио устройства
+const availableAudioDevices = ref<string[]>([]);
+const selectedAudioDevice = ref<string>(''); // Пустая строка = default устройство
+
 // Загрузка текущей конфигурации
 onMounted(async () => {
   try {
@@ -64,13 +74,31 @@ onMounted(async () => {
     try {
       const appConfig = await invoke<any>('get_app_config');
       console.log('Loaded app config:', appConfig);
-      console.log('Microphone sensitivity from config:', appConfig.microphone_sensitivity);
       microphoneSensitivity.value = appConfig.microphone_sensitivity ?? 95;
       recordingHotkey.value = appConfig.recording_hotkey ?? 'Ctrl+X';
-      console.log('Set microphoneSensitivity.value to:', microphoneSensitivity.value);
-      console.log('Set recordingHotkey.value to:', recordingHotkey.value);
+      autoCopyToClipboard.value = appConfig.auto_copy_to_clipboard ?? true;
+      autoPasteText.value = appConfig.auto_paste_text ?? false;
+      selectedAudioDevice.value = appConfig.selected_audio_device ?? '';
     } catch (err) {
       console.log('App config not loaded, using defaults');
+    }
+
+    // Загружаем список доступных аудио устройств
+    try {
+      availableAudioDevices.value = await invoke<string[]>('get_audio_devices');
+      console.log('Available audio devices:', availableAudioDevices.value);
+    } catch (err) {
+      console.error('Failed to load audio devices:', err);
+    }
+
+    // Проверяем Accessibility разрешение на macOS
+    if (isMacOS) {
+      try {
+        hasAccessibilityPermission.value = await invoke<boolean>('check_accessibility_permission');
+        console.log('Accessibility permission:', hasAccessibilityPermission.value);
+      } catch (err) {
+        console.error('Failed to check accessibility permission:', err);
+      }
     }
   } catch (err) {
     console.error('Failed to load config:', err);
@@ -113,12 +141,19 @@ const saveConfig = async () => {
       model: currentProvider.value === SttProviderType.WhisperLocal ? whisperModel.value : null,
     });
 
-    // Обновляем настройки приложения (чувствительность микрофона и горячая клавиша)
-    console.log('Saving microphone sensitivity:', microphoneSensitivity.value);
-    console.log('Saving recording hotkey:', recordingHotkey.value);
+    // Обновляем настройки приложения (чувствительность микрофона, горячая клавиша, auto-copy/paste)
+    console.log('Saving app config:', {
+      sensitivity: microphoneSensitivity.value,
+      hotkey: recordingHotkey.value,
+      autoCopy: autoCopyToClipboard.value,
+      autoPaste: autoPasteText.value,
+    });
     await invoke('update_app_config', {
       microphoneSensitivity: microphoneSensitivity.value,
       recordingHotkey: recordingHotkey.value,
+      autoCopyToClipboard: autoCopyToClipboard.value,
+      autoPasteText: autoPasteText.value,
+      selectedAudioDevice: selectedAudioDevice.value,
     });
     console.log('App config saved successfully');
 
@@ -131,6 +166,21 @@ const saveConfig = async () => {
   }
 };
 
+// Открыть настройки Accessibility
+const openAccessibilitySettings = async () => {
+  try {
+    await invoke('request_accessibility_permission');
+    // После открытия настроек даем пользователю время и проверяем снова через 2 секунды
+    setTimeout(async () => {
+      if (isMacOS) {
+        hasAccessibilityPermission.value = await invoke<boolean>('check_accessibility_permission');
+      }
+    }, 2000);
+  } catch (err) {
+    console.error('Failed to open accessibility settings:', err);
+    errorMessage.value = String(err);
+  }
+};
 
 // Тест микрофона
 const startMicrophoneTest = async () => {
@@ -143,9 +193,10 @@ const startMicrophoneTest = async () => {
       testAudioLevel.value = event.payload.level;
     });
 
-    // Запускаем тест с текущей чувствительностью из настроек
+    // Запускаем тест с текущей чувствительностью и выбранным устройством
     await invoke('start_microphone_test', {
-      sensitivity: microphoneSensitivity.value
+      sensitivity: microphoneSensitivity.value,
+      deviceName: selectedAudioDevice.value || null,
     });
     isTesting.value = true;
   } catch (err) {
@@ -387,12 +438,62 @@ onUnmounted(() => {
             class="sensitivity-slider no-drag"
           />
           <div class="sensitivity-labels">
-            <span class="label-low">Низкая (только громкие звуки)</span>
-            <span class="label-high">Максимальная (весь сигнал)</span>
+            <span class="label-low">Тишина (0x)</span>
+            <span class="label-high">Усиление (5x)</span>
           </div>
           <p class="setting-hint">
-            Более высокая чувствительность улавливает тихие звуки, но может захватывать фоновый шум.
-            Рекомендуется: 80-100% для нормальной речи, 50-70% если много фонового шума, 100-200% для очень тихого микрофона
+            Регулирует громкость микрофона. 100% = без изменений (как записывает микрофон),
+            выше 100% = усиление для тихих микрофонов, ниже 100% = приглушение.
+            Рекомендуется: 100% для нормального микрофона, 150-200% для очень тихого.
+          </p>
+        </div>
+
+        <!-- Автоматические действия -->
+        <div class="setting-group">
+          <label class="setting-label">Автоматические действия</label>
+
+          <div class="checkbox">
+            <input type="checkbox" v-model="autoCopyToClipboard" id="auto-copy">
+            <label for="auto-copy">Автоматически копировать в буфер обмена</label>
+          </div>
+
+          <div class="checkbox">
+            <input type="checkbox" v-model="autoPasteText" id="auto-paste">
+            <label for="auto-paste">Автоматически вставлять текст</label>
+          </div>
+
+          <!-- Предупреждение о разрешении Accessibility для macOS -->
+          <div v-if="autoPasteText && !hasAccessibilityPermission && isMacOS" class="permission-warning">
+            <div class="warning-content">
+              <span class="warning-icon">⚠️</span>
+              <div class="warning-text">
+                <strong>Требуется разрешение Accessibility</strong>
+                <p>Для автоматической вставки текста необходимо разрешение в настройках macOS.</p>
+              </div>
+            </div>
+            <button class="button-warning" @click="openAccessibilitySettings">
+              Открыть настройки доступности
+            </button>
+          </div>
+
+          <p class="setting-hint">
+            <strong>Копирование:</strong> Сохраняет финальный текст в буфер обмена после остановки записи.<br>
+            <strong>Автовставка:</strong> По мере распознавания текста автоматически вставляет его в последнее активное окно.
+            {{ isMacOS ? 'Требует разрешения Accessibility на macOS.' : '' }}
+          </p>
+        </div>
+
+        <!-- Выбор устройства записи -->
+        <div class="setting-group">
+          <label class="setting-label">Устройство записи</label>
+          <select v-model="selectedAudioDevice" class="input-field">
+            <option value="">Системное устройство по умолчанию</option>
+            <option v-for="device in availableAudioDevices" :key="device" :value="device">
+              {{ device }}
+            </option>
+          </select>
+          <p class="setting-hint">
+            Выберите микрофон для записи. Если выбрано "По умолчанию", будет использоваться системное устройство ввода.
           </p>
         </div>
 
@@ -954,5 +1055,66 @@ onUnmounted(() => {
 .toggle-visibility-button:hover {
   background: rgba(255, 255, 255, 0.1);
   border-color: var(--color-accent);
+}
+
+/* Permission Warning */
+.permission-warning {
+  margin-top: var(--spacing-md);
+  padding: var(--spacing-md);
+  background: rgba(255, 152, 0, 0.15);
+  border: 1px solid rgba(255, 152, 0, 0.3);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.warning-content {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+}
+
+.warning-icon {
+  font-size: 24px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.warning-text {
+  flex: 1;
+}
+
+.warning-text strong {
+  font-size: 14px;
+  color: var(--color-text);
+  display: block;
+  margin-bottom: 4px;
+}
+
+.warning-text p {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  margin: 0;
+  line-height: 1.4;
+}
+
+.button-warning {
+  padding: var(--spacing-sm) var(--spacing-sm);
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  background: #ff9800;
+  color: white;
+  transition: all 0.2s ease;
+  align-self: flex-start;
+}
+
+.button-warning:hover {
+  background: #f57c00;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(255, 152, 0, 0.3);
 }
 </style>

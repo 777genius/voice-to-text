@@ -167,45 +167,56 @@ impl TranscriptionService {
                     on_audio_level(normalized_level);
                 }
 
-                // Фильтруем по чувствительности микрофона
-                // sensitivity: 0-200
-                //   0% = низкая чувствительность = только громкие звуки (высокий порог)
-                // 100% = высокая чувствительность = все звуки (порог 0)
-                // 101-200% = максимальная чувствительность (порог 0)
+                // Применяем линейное усиление (gain) на основе чувствительности микрофона
+                // sensitivity: 0-200%
+                //   0%   = gain 0.0x (полная тишина)
+                //   100% = gain 1.0x (без изменений, как записывает микрофон)
+                //   200% = gain 5.0x (максимальное усиление для тихих микрофонов)
                 let sensitivity = *sensitivity_arc.read().await;
 
-                // Вычисляем минимальный порог амплитуды
-                // Низкая чувствительность (0%) = порог 32767 (почти невозможно)
-                // Высокая чувствительность (100%+) = порог 0 (всё проходит)
-                // Пример: sensitivity=95% -> threshold=1638 (тихая речь проходит)
-                let threshold = if sensitivity >= 100 {
-                    0 // При 100%+ пропускаем весь аудио сигнал
+                // Простая линейная формула усиления
+                let gain = if sensitivity <= 100 {
+                    // 0-100% → 0.0x-1.0x (приглушение/нормальный уровень)
+                    sensitivity as f32 / 100.0
                 } else {
-                    ((100 - sensitivity) as f32 / 100.0 * 32767.0) as i16
+                    // 100-200% → 1.0x-5.0x (усиление для тихих микрофонов)
+                    1.0 + (sensitivity - 100) as f32 / 100.0 * 4.0
                 };
 
                 if chunk_count == 1 {
-                    log::debug!("Microphone sensitivity: {}%, threshold: {}", sensitivity, threshold);
+                    log::debug!("Microphone sensitivity: {}%, gain: {:.2}x", sensitivity, gain);
                 }
 
-                // Логируем каждый 20-й чанк для отладки уровня сигнала
+                // Применяем gain к каждому сэмплу с защитой от clipping
+                let amplified_data: Vec<i16> = chunk.data.iter()
+                    .map(|&sample| {
+                        let amplified = (sample as f32 * gain).clamp(-32767.0, 32767.0);
+                        amplified as i16
+                    })
+                    .collect();
+
+                // Создаем новый чанк с усиленным аудио
+                let amplified_chunk = crate::domain::AudioChunk {
+                    data: amplified_data,
+                    sample_rate: chunk.sample_rate,
+                    channels: chunk.channels,
+                    timestamp: chunk.timestamp,
+                };
+
+                // Логируем каждый 20-й чанк для отладки
                 if chunk_count % 20 == 0 {
-                    log::debug!("Audio level check: chunk #{}, max_amp={}, threshold={}, passed={}",
-                        chunk_count, max_amplitude, threshold, max_amplitude >= threshold);
-                }
-
-                if max_amplitude < threshold {
-                    // Звук слишком тихий для текущей чувствительности - пропускаем
-                    continue;
+                    let amplified_max = amplified_chunk.data.iter().map(|&s| s.abs()).max().unwrap_or(0);
+                    log::debug!("Audio processing: chunk #{}, original_max={}, amplified_max={}, gain={:.2}x",
+                        chunk_count, max_amplitude, amplified_max, gain);
                 }
 
                 if let Some(provider) = stt_provider.write().await.as_mut() {
                     if chunk_count == 1 || chunk_count % 50 == 0 {
                         log::debug!("Processing audio chunk #{}, {} samples, max_amp={}",
-                            chunk_count, chunk.data.len(), max_amplitude);
+                            chunk_count, amplified_chunk.data.len(), max_amplitude);
                     }
 
-                    if let Err(e) = provider.send_audio(&chunk).await {
+                    if let Err(e) = provider.send_audio(&amplified_chunk).await {
                         let error_msg = e.to_string();
 
                         // Определяем тип ошибки и критичность
@@ -384,6 +395,25 @@ impl TranscriptionService {
             .initialize(config)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to initialize audio: {}", e))
+    }
+
+    /// Replace audio capture device (only when not recording)
+    /// Полезно для смены микрофона без перезапуска приложения
+    pub async fn replace_audio_capture(&self, new_capture: Box<dyn AudioCapture>) -> Result<()> {
+        let status = self.status.read().await;
+
+        // Нельзя менять устройство во время записи
+        if *status != RecordingStatus::Idle {
+            anyhow::bail!("Cannot replace audio capture while recording (current status: {:?})", *status);
+        }
+
+        drop(status); // освобождаем read lock
+
+        log::info!("Replacing audio capture device");
+        *self.audio_capture.write().await = new_capture;
+        log::info!("Audio capture device replaced successfully");
+
+        Ok(())
     }
 }
 

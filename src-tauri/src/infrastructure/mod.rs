@@ -8,6 +8,7 @@ pub mod config_store;
 pub mod updater;
 pub mod models;
 pub mod embedded_keys; // API ключи встроенные в build
+pub mod auto_paste; // Автоматическая вставка текста
 
 pub use factory::*;
 pub use config_store::ConfigStore;

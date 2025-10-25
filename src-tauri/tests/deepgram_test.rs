@@ -37,7 +37,7 @@ async fn test_deepgram_initialization() {
 
     // Инициализация с корректным API key
     let mut config_with_key = SttConfig::default();
-    config_with_key.api_key = Some(get_api_key());
+    config_with_key.deepgram_api_key = Some(get_api_key());
     config_with_key.language = "ru".to_string();
 
     let result = provider.initialize(&config_with_key).await;
@@ -50,25 +50,25 @@ async fn test_deepgram_configuration() {
     let mut provider = DeepgramProvider::new();
 
     // Русский язык
-    let config_ru = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key(&get_api_key())
+    let mut config_ru = SttConfig::new(SttProviderType::Deepgram)
         .with_language("ru");
+    config_ru.deepgram_api_key = Some(get_api_key());
 
     let result = provider.initialize(&config_ru).await;
     assert!(result.is_ok());
 
     // Английский язык
-    let config_en = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key(&get_api_key())
+    let mut config_en = SttConfig::new(SttProviderType::Deepgram)
         .with_language("en");
+    config_en.deepgram_api_key = Some(get_api_key());
 
     let result = provider.initialize(&config_en).await;
     assert!(result.is_ok());
 
     // Кастомная модель
-    let config_custom = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key(&get_api_key())
+    let mut config_custom = SttConfig::new(SttProviderType::Deepgram)
         .with_model("nova-2");
+    config_custom.deepgram_api_key = Some(get_api_key());
 
     let result = provider.initialize(&config_custom).await;
     assert!(result.is_ok());
@@ -79,8 +79,8 @@ async fn test_deepgram_configuration() {
 async fn test_deepgram_state_machine() {
     let mut provider = DeepgramProvider::new();
 
-    let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key(&get_api_key());
+    let mut config = SttConfig::new(SttProviderType::Deepgram);
+    config.deepgram_api_key = Some(get_api_key());
 
     provider.initialize(&config).await.unwrap();
 
@@ -251,7 +251,6 @@ async fn test_deepgram_full_lifecycle() {
     let mut provider = DeepgramProvider::new();
 
     let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key(&get_api_key())
         .with_language("en"); // Используем en для теста
 
     provider.initialize(&config).await.unwrap();
@@ -313,7 +312,6 @@ async fn test_deepgram_websocket_connection() {
     let mut provider = DeepgramProvider::new();
 
     let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key(&get_api_key())
         .with_language("en");
 
     provider.initialize(&config).await.unwrap();
@@ -370,7 +368,6 @@ async fn test_deepgram_real_voice_transcription() {
     let mut provider = DeepgramProvider::new();
 
     let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key(&get_api_key())
         .with_language("ru");
 
     provider.initialize(&config).await.unwrap();
@@ -427,7 +424,6 @@ async fn test_deepgram_keepalive() {
     let mut provider = DeepgramProvider::new();
 
     let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key(&get_api_key())
         .with_language("ru");
 
     provider.initialize(&config).await.unwrap();
@@ -472,7 +468,6 @@ async fn test_e2e_full_pipeline_with_deepgram() {
 
     // Настраиваем Deepgram
     let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key(&get_api_key())
         .with_language("ru");
 
     service.update_config(config).await.unwrap();
@@ -521,7 +516,6 @@ async fn test_e2e_multiple_sessions() {
     let mut provider = DeepgramProvider::new();
 
     let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key(&get_api_key())
         .with_language("ru");
 
     provider.initialize(&config).await.unwrap();
@@ -566,7 +560,6 @@ async fn test_e2e_long_session() {
     let mut provider = DeepgramProvider::new();
 
     let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key(&get_api_key())
         .with_language("ru");
 
     provider.initialize(&config).await.unwrap();
@@ -632,8 +625,7 @@ async fn test_e2e_language_switching() {
         println!("\n🌍 Тестируем язык: {}", lang);
 
         let config = SttConfig::new(SttProviderType::Deepgram)
-            .with_api_key(&get_api_key())
-            .with_language(lang);
+                .with_language(lang);
 
         provider.initialize(&config).await.unwrap();
 
@@ -669,7 +661,6 @@ async fn test_e2e_abort_during_session() {
     let mut provider = DeepgramProvider::new();
 
     let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key(&get_api_key())
         .with_language("ru");
 
     provider.initialize(&config).await.unwrap();
@@ -838,7 +829,6 @@ async fn test_real_mp3_transcription_deepgram() {
     let mut provider = DeepgramProvider::new();
 
     let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key(&get_api_key())
         .with_language("en"); // Английский для теста
 
     provider.initialize(&config).await.unwrap();
@@ -946,7 +936,6 @@ async fn test_real_mp3_long_transcription_deepgram() {
     let mut provider = DeepgramProvider::new();
 
     let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key(&get_api_key())
         .with_language("en"); // Английский для теста
 
     provider.initialize(&config).await.unwrap();
@@ -1044,7 +1033,6 @@ async fn test_real_mp3_transcription_quality() {
     let mut provider = DeepgramProvider::new();
 
     let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key(&get_api_key())
         .with_language("en");
 
     provider.initialize(&config).await.unwrap();
@@ -1140,8 +1128,7 @@ async fn test_real_mp3_different_chunk_sizes() {
         let mut provider = DeepgramProvider::new();
 
         let config = SttConfig::new(SttProviderType::Deepgram)
-            .with_api_key(&get_api_key())
-            .with_language("en");
+                .with_language("en");
 
         provider.initialize(&config).await.unwrap();
 

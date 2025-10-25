@@ -48,10 +48,6 @@ pub struct SttConfig {
     /// Если None, используется встроенный ключ из embedded_keys
     pub assemblyai_api_key: Option<String>,
 
-    /// API key for cloud providers (deprecated, используйте deepgram_api_key или assemblyai_api_key)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
-
     /// Model name/ID for local providers
     pub model: Option<String>,
 
@@ -71,7 +67,6 @@ impl Default for SttConfig {
             filter_profanity: false,
             deepgram_api_key: None,
             assemblyai_api_key: None,
-            api_key: None,
             model: None,
             keep_connection_alive: false, // Безопасно по умолчанию для всех провайдеров
         }
@@ -88,11 +83,6 @@ impl SttConfig {
 
     pub fn with_language(mut self, language: impl Into<String>) -> Self {
         self.language = language.into();
-        self
-    }
-
-    pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
-        self.api_key = Some(api_key.into());
         self
     }
 
@@ -114,18 +104,25 @@ pub struct AppConfig {
     /// Auto-copy transcription to clipboard
     pub auto_copy_to_clipboard: bool,
 
+    /// Auto-paste transcription text incrementally (copies displayText to clipboard during recognition)
+    pub auto_paste_text: bool,
+
     /// Auto-close window after transcription
     pub auto_close_window: bool,
 
     /// VAD silence timeout in milliseconds
     pub vad_silence_timeout_ms: u64,
 
-    /// Microphone sensitivity (0-200, default 95)
-    /// 0-100: Controls noise gate threshold
-    /// 100-200: Maximum sensitivity (threshold = 0, passes all audio)
-    /// Higher = more sensitive (picks up quieter sounds)
-    /// Lower = less sensitive (only loud sounds)
+    /// Microphone sensitivity / gain (0-200, default 95)
+    /// Controls audio amplification level:
+    /// - 0%:   gain 0.0x (complete silence)
+    /// - 100%: gain 1.0x (no change, as recorded by microphone)
+    /// - 200%: gain 5.0x (maximum amplification for quiet microphones)
+    /// Formula: gain = sensitivity/100 for 0-100%, gain = 1.0 + (sensitivity-100)/100*4.0 for 100-200%
     pub microphone_sensitivity: u8,
+
+    /// Selected audio input device name (None = use system default)
+    pub selected_audio_device: Option<String>,
 
     /// Keep history of transcriptions
     pub keep_history: bool,
@@ -140,9 +137,11 @@ impl Default for AppConfig {
             stt: SttConfig::default(),
             recording_hotkey: "CmdOrCtrl+Shift+X".to_string(), // Кроссплатформенная комбинация
             auto_copy_to_clipboard: true,
+            auto_paste_text: false, // По умолчанию выключено (может раздражать)
             auto_close_window: true,
             vad_silence_timeout_ms: 3000, // 3 секунды тишины перед авто-остановкой
             microphone_sensitivity: 95, // Очень высокая чувствительность по умолчанию (порог ~1638)
+            selected_audio_device: None, // По умолчанию используем системное устройство
             keep_history: true,
             max_history_items: 20,
         }
@@ -168,7 +167,6 @@ mod tests {
         assert!(!config.filter_profanity);
         assert!(config.deepgram_api_key.is_none());
         assert!(config.assemblyai_api_key.is_none());
-        assert!(config.api_key.is_none());
         assert!(config.model.is_none());
         assert!(!config.keep_connection_alive);
     }
@@ -188,13 +186,6 @@ mod tests {
     }
 
     #[test]
-    fn test_stt_config_with_api_key() {
-        let config = SttConfig::new(SttProviderType::Deepgram)
-            .with_api_key("test_key_123");
-        assert_eq!(config.api_key, Some("test_key_123".to_string()));
-    }
-
-    #[test]
     fn test_stt_config_with_model() {
         let config = SttConfig::new(SttProviderType::WhisperLocal)
             .with_model("base");
@@ -205,12 +196,10 @@ mod tests {
     fn test_stt_config_builder_chain() {
         let config = SttConfig::new(SttProviderType::Deepgram)
             .with_language("en")
-            .with_api_key("my_key")
             .with_model("nova-2");
 
         assert_eq!(config.provider, SttProviderType::Deepgram);
         assert_eq!(config.language, "en");
-        assert_eq!(config.api_key, Some("my_key".to_string()));
         assert_eq!(config.model, Some("nova-2".to_string()));
     }
 
@@ -235,10 +224,10 @@ mod tests {
     #[test]
     fn test_stt_config_clone() {
         let config1 = SttConfig::new(SttProviderType::Deepgram)
-            .with_api_key("key123");
+            .with_language("en");
         let config2 = config1.clone();
         assert_eq!(config1.provider, config2.provider);
-        assert_eq!(config1.api_key, config2.api_key);
+        assert_eq!(config1.language, config2.language);
     }
 
     #[test]

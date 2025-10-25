@@ -741,21 +741,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_initialize_without_api_key() {
+    async fn test_initialize_uses_embedded_key() {
+        // Тест проверяет что при отсутствии пользовательского ключа
+        // используется встроенный ключ из embedded_keys
         let mut provider = DeepgramProvider::new();
         let config = SttConfig::default();
 
         let result = provider.initialize(&config).await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), SttError::Configuration(_)));
+        assert!(result.is_ok(), "Should succeed with embedded key");
+        assert!(provider.api_key.is_some(), "API key should be set from embedded key");
     }
 
     #[tokio::test]
     async fn test_initialize_with_api_key() {
         let mut provider = DeepgramProvider::new();
 
-        let config = SttConfig::new(SttProviderType::Deepgram)
-            .with_api_key("test-key-123");
+        let mut config = SttConfig::new(SttProviderType::Deepgram);
+        config.deepgram_api_key = Some("test-key-123".to_string());
 
         let result = provider.initialize(&config).await;
         assert!(result.is_ok());

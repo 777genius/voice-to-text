@@ -27,10 +27,10 @@ async fn test_save_and_load_stt_config() {
     let test_dir = get_test_config_dir();
 
     // Создаем тестовую конфигурацию
-    let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key("test-api-key-123")
+    let mut config = SttConfig::new(SttProviderType::Deepgram)
         .with_language("ru")
         .with_model("nova-3");
+    config.deepgram_api_key = Some("test-api-key-123".to_string());
 
     // Сохраняем
     let save_result = ConfigStore::save_config(&config).await;
@@ -42,7 +42,7 @@ async fn test_save_and_load_stt_config() {
 
     let loaded_config = loaded.unwrap();
     assert_eq!(loaded_config.provider, config.provider);
-    assert_eq!(loaded_config.api_key, config.api_key);
+    assert_eq!(loaded_config.deepgram_api_key, config.deepgram_api_key);
     assert_eq!(loaded_config.language, config.language);
     assert_eq!(loaded_config.model, config.model);
 
@@ -69,8 +69,8 @@ async fn test_load_config_when_not_exists() {
 #[serial]
 async fn test_delete_stt_config() {
     // Создаем и сохраняем конфиг
-    let config = SttConfig::new(SttProviderType::AssemblyAI)
-        .with_api_key("delete-test-key");
+    let mut config = SttConfig::new(SttProviderType::AssemblyAI);
+    config.assemblyai_api_key = Some("delete-test-key".to_string());
 
     ConfigStore::save_config(&config).await.unwrap();
 
@@ -155,11 +155,11 @@ async fn test_save_multiple_configs_sequentially() {
     let _ = ConfigStore::delete_config().await;
 
     // Тест на последовательное сохранение разных конфигов
-    let config1 = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key("key-1");
+    let mut config1 = SttConfig::new(SttProviderType::Deepgram);
+    config1.deepgram_api_key = Some("key-1".to_string());
 
-    let config2 = SttConfig::new(SttProviderType::AssemblyAI)
-        .with_api_key("key-2");
+    let mut config2 = SttConfig::new(SttProviderType::AssemblyAI);
+    config2.assemblyai_api_key = Some("key-2".to_string());
 
     // Сохраняем первый
     ConfigStore::save_config(&config1).await.unwrap();
@@ -170,7 +170,7 @@ async fn test_save_multiple_configs_sequentially() {
     ConfigStore::save_config(&config2).await.unwrap();
     let loaded2 = ConfigStore::load_config().await.unwrap();
     assert_eq!(loaded2.provider, SttProviderType::AssemblyAI);
-    assert_eq!(loaded2.api_key, Some("key-2".to_string()));
+    assert_eq!(loaded2.assemblyai_api_key, Some("key-2".to_string()));
 
     // Очистка
     ConfigStore::delete_config().await.unwrap();
@@ -184,10 +184,10 @@ async fn test_config_persistence_across_operations() {
     let _ = ConfigStore::delete_app_config().await;
 
     // Проверяем что конфиг сохраняется между операциями
-    let original = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key("persistent-key")
+    let mut original = SttConfig::new(SttProviderType::Deepgram)
         .with_language("en")
         .with_model("nova-2");
+    original.deepgram_api_key = Some("persistent-key".to_string());
 
     ConfigStore::save_config(&original).await.unwrap();
 
@@ -196,8 +196,8 @@ async fn test_config_persistence_across_operations() {
     let loaded2 = ConfigStore::load_config().await.unwrap();
     let loaded3 = ConfigStore::load_config().await.unwrap();
 
-    assert_eq!(loaded1.api_key, loaded2.api_key);
-    assert_eq!(loaded2.api_key, loaded3.api_key);
+    assert_eq!(loaded1.deepgram_api_key, loaded2.deepgram_api_key);
+    assert_eq!(loaded2.deepgram_api_key, loaded3.deepgram_api_key);
     assert_eq!(loaded1.language, "en");
     assert_eq!(loaded2.model, Some("nova-2".to_string()));
 
@@ -214,13 +214,15 @@ async fn test_config_with_empty_optional_fields() {
 
     // Тест с минимальной конфигурацией (без опциональных полей)
     let mut config = SttConfig::default();
-    config.api_key = None;
+    config.deepgram_api_key = None;
+    config.assemblyai_api_key = None;
     config.model = None;
 
     ConfigStore::save_config(&config).await.unwrap();
     let loaded = ConfigStore::load_config().await.unwrap();
 
-    assert_eq!(loaded.api_key, None);
+    assert_eq!(loaded.deepgram_api_key, None);
+    assert_eq!(loaded.assemblyai_api_key, None);
     assert_eq!(loaded.model, None);
 
     ConfigStore::delete_config().await.unwrap();
@@ -234,8 +236,8 @@ async fn test_concurrent_config_operations() {
     let _ = ConfigStore::delete_app_config().await;
 
     // Тест параллельных операций чтения
-    let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key("concurrent-test");
+    let mut config = SttConfig::new(SttProviderType::Deepgram);
+    config.deepgram_api_key = Some("concurrent-test".to_string());
 
     ConfigStore::save_config(&config).await.unwrap();
 

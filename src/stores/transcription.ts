@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
@@ -24,6 +24,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const finalText = ref<string>(''); // полный финальный результат (для копирования)
   const error = ref<string | null>(null);
   const lastFinalizedText = ref<string>(''); // последний финализированный текст (для дедупликации)
+
+  // Config flags
+  const autoCopyEnabled = ref<boolean>(true);
+  const autoPasteEnabled = ref<boolean>(false);
 
   // Отслеживание utterances по start времени
   const currentUtteranceStart = ref<number>(-1); // start время текущей utterance (-1 = нет активной)
@@ -183,11 +187,21 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     // Это предотвращает дублирование событий при повторной инициализации
     cleanup();
 
+    // Загружаем настройки auto-copy/paste из конфига
+    try {
+      const appConfig = await invoke<any>('get_app_config');
+      autoCopyEnabled.value = appConfig.auto_copy_to_clipboard ?? true;
+      autoPasteEnabled.value = appConfig.auto_paste_text ?? false;
+      console.log('Config loaded: autoCopy=', autoCopyEnabled.value, 'autoPaste=', autoPasteEnabled.value);
+    } catch (err) {
+      console.error('Failed to load auto-paste config:', err);
+    }
+
     try {
       // Listen to partial transcription events
       unlistenPartial = await listen<PartialTranscriptionPayload>(
         EVENT_TRANSCRIPTION_PARTIAL,
-        (event) => {
+        async (event) => {
           // Детальное логирование для отладки
           console.log('📝 PARTIAL EVENT:', {
             text: event.payload.text,
@@ -334,18 +348,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             console.log('📋 [BEFORE ADD] finalText:', oldFinalText);
             console.log('📋 [BEFORE ADD] currentUtteranceText:', currentUtteranceText);
 
-            // Добавляем к финальному тексту
-            finalText.value = finalText.value
-              ? `${finalText.value} ${currentUtteranceText}`
-              : currentUtteranceText;
-
-            console.log('📋 [AFTER ADD] finalText:', finalText.value);
-            console.log('📋 Successfully added utterance to finalText');
-
-            console.log('🧹 [CLEANUP] Clearing all temporary data after speech_final');
+            console.log('🧹 [CLEANUP] Clearing all temporary data BEFORE updating finalText');
             console.log('🧹 [CLEANUP] Before: accumulated=', accumulatedText.value, 'partial=', partialText.value);
 
-            // Очищаем промежуточные данные после финализации сегмента
+            // Очищаем промежуточные данные ПЕРЕД обновлением finalText
+            // чтобы избежать дублирования в UI
             partialText.value = '';
             accumulatedText.value = '';
             lastFinalizedText.value = '';
@@ -367,12 +374,46 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               accumulatedAnimationTimer = null;
             }
 
-            // Auto-copy to clipboard с накопленным текстом
-            try {
-              await writeText(finalText.value);
-              console.log('📋 Copied to clipboard:', finalText.value);
-            } catch (err) {
-              console.error('Failed to copy to clipboard:', err);
+            // Добавляем к финальному тексту
+            finalText.value = finalText.value
+              ? `${finalText.value} ${currentUtteranceText}`
+              : currentUtteranceText;
+
+            console.log('📋 [AFTER ADD] finalText:', finalText.value);
+            console.log('📋 Successfully added utterance to finalText');
+
+            // Auto-paste финальной фразы (вся utterance целиком)
+            if (autoPasteEnabled.value && currentUtteranceText.trim()) {
+              try {
+                // Добавляем пробел перед фразой если это не первая фраза
+                const needsSpace = oldFinalText.length > 0;
+                const textToInsert = needsSpace ? ` ${currentUtteranceText}` : currentUtteranceText;
+                console.log('📝 Auto-pasting final utterance:', textToInsert);
+                await invoke('auto_paste_text', { text: textToInsert });
+                console.log('✅ Auto-pasted successfully');
+              } catch (err) {
+                console.error('❌ Failed to auto-paste:', err);
+
+                // Fallback: копируем в clipboard
+                try {
+                  await writeText(currentUtteranceText);
+                  console.log('📋 Fallback: copied to clipboard');
+                } catch (copyErr) {
+                  console.error('❌ Failed to copy to clipboard:', copyErr);
+                }
+              }
+            }
+
+            // Auto-copy to clipboard с накопленным текстом (если включено)
+            if (autoCopyEnabled.value) {
+              try {
+                await writeText(finalText.value);
+                console.log('📋 Auto-copied to clipboard:', finalText.value);
+              } catch (err) {
+                console.error('Failed to copy to clipboard:', err);
+              }
+            } else {
+              console.log('📋 Auto-copy disabled, skipping clipboard');
             }
           } else {
             console.warn('⚠️ [SPEECH_FINAL] event.payload.text is empty, skipping');

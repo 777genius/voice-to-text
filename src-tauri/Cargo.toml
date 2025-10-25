@@ -72,9 +72,14 @@ dotenv = "0.15"  # Load .env file
 whisper-rs = { version = "0.10", optional = true }
 num_cpus = { version = "1.16", optional = true }
 
+# Auto-paste functionality (keyboard simulation)
+enigo = "0.2"
+
 # Platform-specific dependencies
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri = { version = "2.8.5", features = ["tray-icon", "macos-private-api"] }
+cocoa = "0.25"  # macOS API для работы с окнами и Accessibility
+objc = "0.2"  # Objective-C runtime bindings
 
 [dev-dependencies]
 tokio-test = "0.4"  # Utilities for testing async code

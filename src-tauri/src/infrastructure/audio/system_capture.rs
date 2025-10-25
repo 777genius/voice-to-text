@@ -39,14 +39,13 @@ pub struct SystemAudioCapture {
 impl SystemAudioCapture {
     /// Create new system audio capture with default input device
     pub fn new() -> AudioResult<Self> {
+        Self::with_device(None)
+    }
+
+    /// Create new system audio capture with specific input device
+    /// If device_name is None, uses default input device
+    pub fn with_device(device_name: Option<String>) -> AudioResult<Self> {
         let host = cpal::default_host();
-
-        let device = host
-            .default_input_device()
-            .ok_or_else(|| AudioError::DeviceNotFound("No input device available".to_string()))?;
-
-        let device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
-        log::info!("Using audio input device: {}", device_name);
 
         // Логируем все доступные устройства для отладки
         let all_devices: Vec<String> = host
@@ -59,6 +58,28 @@ impl SystemAudioCapture {
             })
             .unwrap_or_default();
         log::debug!("Available input devices: {:?}", all_devices);
+
+        // Выбираем устройство: либо указанное, либо дефолтное
+        let device = if let Some(ref name) = device_name {
+            log::info!("Looking for audio input device: {}", name);
+
+            host
+                .input_devices()
+                .map_err(|e| AudioError::DeviceNotFound(format!("Failed to enumerate devices: {}", e)))?
+                .find(|d| {
+                    d.name().ok().as_ref() == Some(name)
+                })
+                .ok_or_else(|| AudioError::DeviceNotFound(format!("Device '{}' not found. Available devices: {:?}", name, all_devices)))?
+        } else {
+            log::info!("Using default audio input device");
+
+            host
+                .default_input_device()
+                .ok_or_else(|| AudioError::DeviceNotFound("No input device available".to_string()))?
+        };
+
+        let selected_device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
+        log::info!("Using audio input device: {}", selected_device_name);
 
         // Check supported configs and choose best one
         let supported_configs = device

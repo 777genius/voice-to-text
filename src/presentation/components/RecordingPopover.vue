@@ -148,8 +148,16 @@ const openSettings = () => {
   showSettings.value = true;
 };
 
-const closeSettings = () => {
+const closeSettings = async () => {
   showSettings.value = false;
+
+  // Перезагружаем хоткей после закрытия настроек (мог измениться)
+  try {
+    const appConfig = await invoke<any>('get_app_config');
+    recordingHotkey.value = appConfig.recording_hotkey ?? 'Ctrl+X';
+  } catch (err) {
+    console.log('Failed to reload recording hotkey after settings close');
+  }
 };
 
 const minimizeWindow = async () => {

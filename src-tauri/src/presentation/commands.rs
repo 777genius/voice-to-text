@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, State, Window};
+use tauri::{AppHandle, Emitter, Manager, State, Window};
 
 use crate::domain::{RecordingStatus, AudioCapture};
 use crate::infrastructure::ConfigStore;
@@ -177,12 +177,25 @@ pub async fn get_recording_status(state: State<'_, AppState>) -> Result<Recordin
 
 /// Toggle window visibility
 #[tauri::command]
-pub async fn toggle_window(window: Window) -> Result<(), String> {
+pub async fn toggle_window(
+    state: State<'_, AppState>,
+    window: Window,
+) -> Result<(), String> {
     log::info!("Command: toggle_window");
 
     if window.is_visible().map_err(|e| e.to_string())? {
         window.hide().map_err(|e| e.to_string())?;
     } else {
+        // Перед показом окна сохраняем bundle ID текущего активного приложения
+        // (чтобы потом вставлять текст в правильное окно)
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(bundle_id) = crate::infrastructure::auto_paste::get_active_app_bundle_id() {
+                *state.last_focused_app_bundle_id.write().await = Some(bundle_id.clone());
+                log::info!("Saved last focused app bundle ID: {}", bundle_id);
+            }
+        }
+
         window.show().map_err(|e| e.to_string())?;
     }
 
@@ -205,11 +218,20 @@ pub async fn toggle_recording_with_window(
         RecordingStatus::Idle => {
             // Показываем окно если оно скрыто (не забираем фокус)
             if !window.is_visible().map_err(|e| e.to_string())? {
+                // Перед показом окна сохраняем bundle ID текущего активного приложения
+                #[cfg(target_os = "macos")]
+                {
+                    if let Some(bundle_id) = crate::infrastructure::auto_paste::get_active_app_bundle_id() {
+                        *state.last_focused_app_bundle_id.write().await = Some(bundle_id.clone());
+                        log::info!("Saved last focused app bundle ID: {}", bundle_id);
+                    }
+                }
+
                 window.show().map_err(|e| e.to_string())?;
             }
 
             // Запускаем запись
-            start_recording(state, app_handle).await?;
+            start_recording(state.clone(), app_handle).await?;
             log::info!("Recording started via hotkey");
         }
         RecordingStatus::Starting => {
@@ -370,16 +392,19 @@ pub async fn get_app_config(state: State<'_, AppState>) -> Result<AppConfig, Str
     Ok(config)
 }
 
-/// Update application configuration (e.g., microphone sensitivity, recording hotkey)
+/// Update application configuration (e.g., microphone sensitivity, recording hotkey, auto-copy/paste)
 #[tauri::command]
 pub async fn update_app_config(
     state: State<'_, AppState>,
     app_handle: AppHandle,
     microphone_sensitivity: Option<u8>,
     recording_hotkey: Option<String>,
+    auto_copy_to_clipboard: Option<bool>,
+    auto_paste_text: Option<bool>,
+    selected_audio_device: Option<String>,
 ) -> Result<(), String> {
-    log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}",
-        microphone_sensitivity, recording_hotkey);
+    log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}, auto_copy: {:?}, auto_paste: {:?}, device: {:?}",
+        microphone_sensitivity, recording_hotkey, auto_copy_to_clipboard, auto_paste_text, selected_audio_device);
 
     let mut config = state.config.write().await;
     let mut hotkey_changed = false;
@@ -407,8 +432,37 @@ pub async fn update_app_config(
         }
     }
 
-    log::info!("Saving app config to disk: sensitivity={}, hotkey={}, provider={:?}, language={}",
-        config.microphone_sensitivity, config.recording_hotkey, config.stt.provider, config.stt.language);
+    if let Some(auto_copy) = auto_copy_to_clipboard {
+        log::info!("Updating auto_copy_to_clipboard: {} -> {}", config.auto_copy_to_clipboard, auto_copy);
+        config.auto_copy_to_clipboard = auto_copy;
+    }
+
+    if let Some(auto_paste) = auto_paste_text {
+        log::info!("Updating auto_paste_text: {} -> {}", config.auto_paste_text, auto_paste);
+        config.auto_paste_text = auto_paste;
+    }
+
+    let mut device_changed = false;
+    if let Some(device) = selected_audio_device {
+        let device_opt = if device.is_empty() { None } else { Some(device.clone()) };
+
+        // Проверяем изменилось ли устройство
+        if config.selected_audio_device != device_opt {
+            log::info!("Updating selected_audio_device: {:?} -> {:?}", config.selected_audio_device, device_opt);
+            config.selected_audio_device = device_opt;
+            device_changed = true;
+        }
+    }
+
+    log::info!("Saving app config to disk: sensitivity={}, hotkey={}, provider={:?}, language={}, device={:?}",
+        config.microphone_sensitivity, config.recording_hotkey, config.stt.provider, config.stt.language, config.selected_audio_device);
+
+    // Запоминаем selected_audio_device для применения после сохранения
+    let device_to_apply = if device_changed {
+        Some(config.selected_audio_device.clone())
+    } else {
+        None
+    };
 
     // Сохраняем конфигурацию на диск
     ConfigStore::save_app_config(&config)
@@ -422,7 +476,23 @@ pub async fn update_app_config(
         log::info!("Re-registering recording hotkey");
 
         // Перерегистрируем горячую клавишу
-        register_recording_hotkey(state.clone(), app_handle).await?;
+        register_recording_hotkey(state.clone(), app_handle.clone()).await?;
+    } else {
+        drop(config); // освобождаем lock если не было hotkey_changed
+    }
+
+    // Если устройство изменилось - пересоздаем audio capture
+    if let Some(device_opt) = device_to_apply {
+        log::info!("Applying changed audio device: {:?}", device_opt);
+
+        state.recreate_audio_capture_with_device(device_opt.clone(), app_handle.clone())
+            .await
+            .map_err(|e| {
+                log::error!("Failed to apply new audio device: {}", e);
+                format!("Настройки сохранены, но не удалось применить новое устройство записи: {}", e)
+            })?;
+
+        log::info!("Audio device changed and applied successfully");
     }
 
     log::info!("App configuration updated and saved successfully");
@@ -442,8 +512,9 @@ pub async fn start_microphone_test(
     state: State<'_, AppState>,
     app_handle: AppHandle,
     sensitivity: Option<u8>,
+    device_name: Option<String>,
 ) -> Result<(), String> {
-    log::info!("Command: start_microphone_test");
+    log::info!("Command: start_microphone_test - device: {:?}", device_name);
 
     let mut test_state = state.microphone_test.write().await;
 
@@ -451,9 +522,10 @@ pub async fn start_microphone_test(
         return Err("Microphone test already running".to_string());
     }
 
-    // Создаем новый audio capture для теста
+    // Создаем новый audio capture для теста с выбранным устройством
+    let device_to_use = device_name.filter(|s| !s.is_empty()); // None если пустая строка
     let mut capture = Box::new(
-        SystemAudioCapture::new()
+        SystemAudioCapture::with_device(device_to_use.clone())
             .map_err(|e| format!("Failed to create audio capture: {}", e))?,
     );
 
@@ -488,22 +560,23 @@ pub async fn start_microphone_test(
     let app_handle_clone = app_handle.clone();
 
     tokio::spawn(async move {
-        // Вычисляем порог на основе чувствительности (та же логика что в TranscriptionService)
-        let threshold = if sensitivity >= 100 {
-            0
+        // Вычисляем коэффициент усиления (та же логика что в TranscriptionService)
+        let gain = if sensitivity <= 100 {
+            // 0-100% → 0.0x-1.0x (приглушение/нормальный уровень)
+            sensitivity as f32 / 100.0
         } else {
-            ((100 - sensitivity) as f32 / 100.0 * 32767.0) as i16
+            // 100-200% → 1.0x-5.0x (усиление для тихих микрофонов)
+            1.0 + (sensitivity - 100) as f32 / 100.0 * 4.0
         };
 
-        log::info!("Microphone test threshold: {} (sensitivity: {}%)", threshold, sensitivity);
+        log::info!("Microphone test: sensitivity={}%, gain={:.2}x", sensitivity, gain);
 
         while let Some(chunk) = rx.recv().await {
-            // Вычисляем уровень громкости
-            // Используем перцептивную нормализацию (корень квадратный) как в VU-метрах
+            // Вычисляем уровень громкости ДО усиления
             let max_amplitude = chunk.data.iter().map(|&s| s.abs()).max().unwrap_or(0);
             let normalized_level = (max_amplitude as f32 / 32767.0).sqrt().min(1.0);
 
-            // Отправляем событие в UI (показываем реальный уровень независимо от порога)
+            // Отправляем событие в UI (показываем уровень ДО усиления для честной индикации)
             let _ = app_handle_clone.emit(
                 EVENT_MICROPHONE_TEST_LEVEL,
                 MicrophoneTestLevelPayload {
@@ -511,16 +584,21 @@ pub async fn start_microphone_test(
                 },
             );
 
-            // Применяем фильтрацию по чувствительности
-            // Сохраняем в буфер только звук выше порога (как при реальной записи)
-            if max_amplitude >= threshold {
-                let mut buffer = buffer_for_task.lock().await;
-                buffer.extend_from_slice(&chunk.data);
-                // Ограничиваем размер буфера (максимум 5 секунд = 80000 samples @ 16kHz)
-                let buffer_len = buffer.len();
-                if buffer_len > 80000 {
-                    buffer.drain(0..buffer_len - 80000);
-                }
+            // Применяем gain к каждому сэмплу с защитой от clipping
+            let amplified_data: Vec<i16> = chunk.data.iter()
+                .map(|&sample| {
+                    let amplified = (sample as f32 * gain).clamp(-32767.0, 32767.0);
+                    amplified as i16
+                })
+                .collect();
+
+            // Сохраняем усиленный звук в буфер (для честного воспроизведения)
+            let mut buffer = buffer_for_task.lock().await;
+            buffer.extend_from_slice(&amplified_data);
+            // Ограничиваем размер буфера (максимум 5 секунд = 80000 samples @ 16kHz)
+            let buffer_len = buffer.len();
+            if buffer_len > 80000 {
+                buffer.drain(0..buffer_len - 80000);
             }
         }
     });
@@ -742,6 +820,28 @@ pub async fn delete_whisper_model(model_name: String) -> Result<String, String> 
     Ok(format!("Model '{}' deleted successfully", model_name))
 }
 
+/// Get available audio input devices
+#[tauri::command]
+pub async fn get_audio_devices() -> Result<Vec<String>, String> {
+    log::info!("Command: get_audio_devices");
+
+    use cpal::traits::{HostTrait, DeviceTrait};
+
+    let host = cpal::default_host();
+
+    let devices: Vec<String> = host
+        .input_devices()
+        .map_err(|e| format!("Failed to enumerate input devices: {}", e))?
+        .filter_map(|device| {
+            device.name().ok()
+        })
+        .collect();
+
+    log::info!("Found {} audio input devices", devices.len());
+
+    Ok(devices)
+}
+
 fn format_size_human(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -756,4 +856,90 @@ fn format_size_human(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+//
+// Auto-Paste Commands
+//
+
+/// Проверяет есть ли разрешение Accessibility на macOS
+/// На других платформах всегда возвращает true
+#[tauri::command]
+pub async fn check_accessibility_permission() -> Result<bool, String> {
+    log::debug!("Command: check_accessibility_permission");
+    Ok(crate::infrastructure::auto_paste::check_accessibility_permission())
+}
+
+/// Открывает системные настройки macOS в разделе Privacy & Security > Accessibility
+/// На других платформах ничего не делает
+#[tauri::command]
+pub async fn request_accessibility_permission() -> Result<(), String> {
+    log::info!("Command: request_accessibility_permission");
+    crate::infrastructure::auto_paste::open_accessibility_settings()
+        .map_err(|e| e.to_string())
+}
+
+/// Автоматически вставляет текст в последнее активное окно
+/// Требует разрешения Accessibility на macOS
+#[tauri::command]
+pub async fn auto_paste_text(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    text: String,
+) -> Result<(), String> {
+    log::info!("Command: auto_paste_text - text length: {}", text.len());
+
+    // Проверяем разрешение Accessibility на macOS
+    #[cfg(target_os = "macos")]
+    {
+        if !crate::infrastructure::auto_paste::check_accessibility_permission() {
+            return Err("Accessibility permission not granted. Please enable it in System Settings > Privacy & Security > Accessibility".to_string());
+        }
+    }
+
+    // Получаем bundle ID последнего активного окна
+    let last_bundle_id = state.last_focused_app_bundle_id.read().await.clone();
+
+    // Не скрываем окно Voice to Text - оставляем его видимым поверх всех
+    // (оно уже настроено с alwaysOnTop: true в tauri.conf.json)
+
+    // Если есть сохраненное окно - пытаемся активировать его
+    if let Some(bundle_id) = last_bundle_id {
+        log::info!("Attempting to activate last focused app: {}", bundle_id);
+
+        match crate::infrastructure::auto_paste::activate_app_by_bundle_id(&bundle_id) {
+            Ok(_) => {
+                log::info!("✅ Successfully activated app: {}", bundle_id);
+                // Даем время окну активироваться
+                tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+            }
+            Err(e) => {
+                log::warn!("⚠️ Failed to activate app '{}': {}", bundle_id, e);
+                log::info!("💡 Will paste to currently active window instead");
+                // Не критично - просто вставим в текущее активное окно
+                // Даем небольшую паузу для переключения фокуса вручную если нужно
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            }
+        }
+    } else {
+        log::info!("ℹ️ No saved window - pasting to currently active window");
+    }
+
+    // Вставляем текст в blocking thread (enigo работает с синхронными нативными API)
+    let text_clone = text.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::infrastructure::auto_paste::paste_text(&text_clone)
+    })
+    .await
+    .map_err(|e| format!("Failed to join blocking task: {}", e))?
+    .map_err(|e| format!("Failed to paste text: {}", e))?;
+
+    // Возвращаем окно Voice to Text поверх всех окон (но без фокуса)
+    if let Some(window) = app_handle.get_webview_window("main") {
+        let _ = window.set_always_on_top(true);
+        log::debug!("Voice to Text window kept on top");
+    }
+
+    log::info!("Text auto-pasted successfully");
+    Ok(())
 }

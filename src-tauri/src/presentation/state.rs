@@ -54,6 +54,13 @@ pub struct AppState {
     /// Receiver для VAD silence timeout событий
     /// Используется в setup для установки обработчика
     pub vad_timeout_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<()>>>,
+
+    /// VAD timeout handler task (для перезапуска при смене устройства)
+    vad_handler_task: Arc<RwLock<Option<tauri::async_runtime::JoinHandle<()>>>>,
+
+    /// Bundle ID последнего активного приложения (перед показом Voice to Text окна)
+    /// Используется для автоматической вставки текста в правильное окно
+    pub last_focused_app_bundle_id: Arc<RwLock<Option<String>>>,
 }
 
 impl AppState {
@@ -79,6 +86,8 @@ impl AppState {
                     final_transcription: Arc::new(RwLock::new(None)),
                     microphone_test: Arc::new(RwLock::new(MicrophoneTestState::default())),
                     vad_timeout_rx: Arc::new(tokio::sync::Mutex::new(vad_rx)),
+                    vad_handler_task: Arc::new(RwLock::new(None)),
+                    last_focused_app_bundle_id: Arc::new(RwLock::new(None)),
                 };
             }
         };
@@ -104,6 +113,8 @@ impl AppState {
                     final_transcription: Arc::new(RwLock::new(None)),
                     microphone_test: Arc::new(RwLock::new(MicrophoneTestState::default())),
                     vad_timeout_rx: Arc::new(tokio::sync::Mutex::new(vad_rx)),
+                    vad_handler_task: Arc::new(RwLock::new(None)),
+                    last_focused_app_bundle_id: Arc::new(RwLock::new(None)),
                 };
             }
         };
@@ -136,6 +147,8 @@ impl AppState {
             final_transcription: Arc::new(RwLock::new(None)),
             microphone_test: Arc::new(RwLock::new(MicrophoneTestState::default())),
             vad_timeout_rx: Arc::new(tokio::sync::Mutex::new(vad_rx)),
+            vad_handler_task: Arc::new(RwLock::new(None)),
+            last_focused_app_bundle_id: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -145,7 +158,7 @@ impl AppState {
         let service = self.transcription_service.clone();
         let rx = self.vad_timeout_rx.clone();
 
-        tauri::async_runtime::spawn(async move {
+        let handle = tauri::async_runtime::spawn(async move {
             let mut rx_guard = rx.lock().await;
 
             while let Some(_) = rx_guard.recv().await {
@@ -185,7 +198,76 @@ impl AppState {
             log::warn!("VAD timeout handler exited");
         });
 
+        // Сохраняем handle для возможности перезапуска
+        let task_arc = self.vad_handler_task.clone();
+        tauri::async_runtime::spawn(async move {
+            *task_arc.write().await = Some(handle);
+        });
+
         log::info!("VAD auto-stop handler started");
+    }
+
+    /// Перезапускает VAD timeout handler (используется при смене устройства)
+    pub async fn restart_vad_timeout_handler(&self, app_handle: tauri::AppHandle) {
+        log::info!("Restarting VAD timeout handler");
+
+        // Отменяем старый handler если он запущен
+        if let Some(old_handle) = self.vad_handler_task.write().await.take() {
+            log::debug!("Aborting old VAD handler");
+            old_handle.abort();
+            let _ = old_handle.await; // Ждем завершения
+        }
+
+        // Запускаем новый handler
+        self.start_vad_timeout_handler(app_handle);
+
+        log::info!("VAD timeout handler restarted successfully");
+    }
+
+    /// Пересоздает audio capture с новым устройством (применяет selected_audio_device)
+    /// Можно вызывать при старте приложения и при смене устройства в настройках
+    pub async fn recreate_audio_capture_with_device(
+        &self,
+        device_name: Option<String>,
+        app_handle: tauri::AppHandle,
+    ) -> Result<(), String> {
+        log::info!("Recreating audio capture with device: {:?}", device_name);
+
+        // Создаем новый SystemAudioCapture с выбранным устройством
+        let system_audio = SystemAudioCapture::with_device(device_name.clone())
+            .map_err(|e| format!("Failed to create audio capture with device {:?}: {}", device_name, e))?;
+
+        // Получаем текущий VAD timeout из конфига
+        let vad_timeout_ms = self.config.read().await.vad_silence_timeout_ms;
+
+        // Создаем VAD processor
+        let vad = VadProcessor::new(Some(vad_timeout_ms), None)
+            .map_err(|e| format!("Failed to create VAD processor: {}", e))?;
+
+        // Wrap system audio with VAD
+        let mut vad_wrapper = VadCaptureWrapper::new(Box::new(system_audio), vad);
+
+        // Копируем callback из текущего vad_timeout_rx (создаем новый channel)
+        let (vad_tx, vad_rx) = tokio::sync::mpsc::unbounded_channel();
+        vad_wrapper.set_silence_timeout_callback(Arc::new(move || {
+            log::info!("VAD silence timeout triggered - sending notification");
+            let _ = vad_tx.send(());
+        }));
+
+        // Заменяем vad_timeout_rx на новый
+        *self.vad_timeout_rx.lock().await = vad_rx;
+
+        // Заменяем audio capture в TranscriptionService
+        self.transcription_service
+            .replace_audio_capture(Box::new(vad_wrapper))
+            .await
+            .map_err(|e| format!("Failed to replace audio capture: {}", e))?;
+
+        // Перезапускаем VAD timeout handler чтобы он слушал новый channel
+        self.restart_vad_timeout_handler(app_handle).await;
+
+        log::info!("Audio capture recreated successfully with device: {:?}", device_name);
+        Ok(())
     }
 }
 

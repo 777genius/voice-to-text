@@ -26,17 +26,17 @@ async fn test_assemblyai_initialization() {
     assert_eq!(provider.name(), "AssemblyAI Universal-Streaming (v3)");
     assert!(provider.is_online());
 
-    // Инициализация без API key должна вернуть ошибку
+    // Инициализация без пользовательского ключа должна использовать встроенный ключ
     let config = SttConfig::default();
     let result = provider.initialize(&config).await;
-    assert!(result.is_err(), "Should fail without API key");
+    assert!(result.is_ok(), "Should succeed with embedded API key");
 
-    // Инициализация с API key должна пройти успешно
+    // Инициализация с пользовательским API key также должна пройти успешно
     let mut config_with_key = SttConfig::default();
-    config_with_key.api_key = Some(get_api_key());
+    config_with_key.assemblyai_api_key = Some(get_api_key());
 
     let result = provider.initialize(&config_with_key).await;
-    assert!(result.is_ok(), "Should succeed with API key: {:?}", result);
+    assert!(result.is_ok(), "Should succeed with user API key: {:?}", result);
 }
 
 /// Тест конфигурации с разными языками
@@ -46,7 +46,7 @@ async fn test_assemblyai_language_configuration() {
 
     // Тест с английским (дефолт)
     let mut config_en = SttConfig::default();
-    config_en.api_key = Some(get_api_key());
+    config_en.assemblyai_api_key = Some(get_api_key());
     config_en.language = "en".to_string();
 
     let result = provider.initialize(&config_en).await;
@@ -54,7 +54,7 @@ async fn test_assemblyai_language_configuration() {
 
     // Тест с русским
     let mut config_ru = SttConfig::default();
-    config_ru.api_key = Some(get_api_key());
+    config_ru.assemblyai_api_key = Some(get_api_key());
     config_ru.language = "ru".to_string();
 
     let result = provider.initialize(&config_ru).await;
@@ -116,7 +116,7 @@ async fn test_assemblyai_state_machine() {
 
     // Инициализация
     let mut config = SttConfig::default();
-    config.api_key = Some(get_api_key());
+    config.deepgram_api_key = Some(get_api_key());
     provider.initialize(&config).await.unwrap();
 
     // Попытка отправить audio до start_stream должна вернуть ошибку
@@ -183,7 +183,7 @@ async fn test_assemblyai_graceful_shutdown() {
     let mut provider = AssemblyAIProvider::new();
 
     let mut config = SttConfig::default();
-    config.api_key = Some(get_api_key());
+    config.deepgram_api_key = Some(get_api_key());
     provider.initialize(&config).await.unwrap();
 
     // Проверяем что abort безопасен
@@ -202,7 +202,7 @@ async fn test_assemblyai_factory_creation() {
 
     let mut config = SttConfig::default();
     config.provider = SttProviderType::AssemblyAI;
-    config.api_key = Some(get_api_key());
+    config.deepgram_api_key = Some(get_api_key());
 
     let result = factory.create(&config);
     assert!(result.is_ok(), "Factory should create AssemblyAI provider");

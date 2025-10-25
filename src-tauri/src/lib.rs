@@ -54,6 +54,10 @@ pub fn run() {
             commands::check_whisper_model,
             commands::download_whisper_model,
             commands::delete_whisper_model,
+            commands::get_audio_devices,
+            commands::check_accessibility_permission,
+            commands::request_accessibility_permission,
+            commands::auto_paste_text,
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]
@@ -116,8 +120,19 @@ pub fn run() {
                             .set_microphone_sensitivity(saved_app_config.microphone_sensitivity)
                             .await;
 
-                        log::info!("Loaded saved app configuration (sensitivity: {}%)",
-                            saved_app_config.microphone_sensitivity);
+                        // Применяем выбранное устройство записи (если указано)
+                        if let Err(e) = state.recreate_audio_capture_with_device(
+                            saved_app_config.selected_audio_device.clone(),
+                            app_handle.clone()
+                        ).await {
+                            log::error!("Failed to apply selected audio device: {}", e);
+                            log::warn!("Using default audio device instead");
+                        } else if saved_app_config.selected_audio_device.is_some() {
+                            log::info!("Applied selected audio device: {:?}", saved_app_config.selected_audio_device);
+                        }
+
+                        log::info!("Loaded saved app configuration (sensitivity: {}%, device: {:?})",
+                            saved_app_config.microphone_sensitivity, saved_app_config.selected_audio_device);
                     }
                 }
             });

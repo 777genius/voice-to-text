@@ -71,7 +71,6 @@ export interface SttConfig {
   filter_profanity: boolean;
   deepgram_api_key?: string;
   assemblyai_api_key?: string;
-  api_key?: string; // deprecated
   model?: string;
 }
 
