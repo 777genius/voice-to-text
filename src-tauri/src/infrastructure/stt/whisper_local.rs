@@ -275,6 +275,7 @@ mod whisper_impl {
             _on_partial: TranscriptionCallback,
             _on_final: TranscriptionCallback,
             _on_error: crate::domain::ErrorCallback,
+            _on_connection_quality: crate::domain::ConnectionQualityCallback,
         ) -> SttResult<()> {
             Err(SttError::Configuration(
                 "Whisper Local provider is not available".to_string(),

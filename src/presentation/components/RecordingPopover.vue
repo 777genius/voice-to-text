@@ -125,13 +125,6 @@ const handleHotkeyToggle = async () => {
   isHotkeyProcessing = true;
 
   try {
-    // Воспроизводим звук СРАЗУ при начале записи (до вызова команды)
-    if (store.isIdle) {
-      console.log('Playing show sound immediately on hotkey press');
-      playShowSound();
-    }
-
-    // Вызываем команду которая показывает окно и переключает запись
     await invoke('toggle_recording_with_window');
   } catch (err) {
     console.error('Failed to toggle recording via hotkey:', err);
@@ -186,6 +179,18 @@ const minimizeWindow = async () => {
           <div class="status-indicator" :class="{ active: store.isRecording }"></div>
         </div>
       </div>
+
+      <!-- Connection Warning Banner -->
+      <transition name="banner-fade">
+        <div v-if="store.hasConnectionIssue && store.isRecording" class="connection-warning">
+          <div class="warning-icon">⚠️</div>
+          <div class="warning-text">
+            {{ store.connectionQuality === 'Recovering'
+              ? 'Восстановление связи...'
+              : 'Плохая связь. Запись продолжается...' }}
+          </div>
+        </div>
+      </transition>
 
       <!-- Transcription Display -->
       <div class="transcription-area">
@@ -552,5 +557,46 @@ const minimizeWindow = async () => {
   word-wrap: break-word;
   overflow-wrap: break-word;
   text-align: center;
+}
+
+/* Connection Warning Banner */
+.connection-warning {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-sm);
+  background: rgba(255, 193, 7, 0.15);
+  border: 1px solid rgba(255, 193, 7, 0.3);
+  border-radius: var(--radius-sm);
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.connection-warning .warning-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.connection-warning .warning-text {
+  font-size: 12px;
+  color: #ffc107;
+  line-height: 1.4;
+  flex: 1;
+}
+
+/* Banner Fade Animation */
+.banner-fade-enter-active,
+.banner-fade-leave-active {
+  transition: all 0.3s ease;
+}
+
+.banner-fade-enter-from {
+  opacity: 0;
+  transform: translateY(-10px);
+}
+
+.banner-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-5px);
 }
 </style>

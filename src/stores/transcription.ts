@@ -2,18 +2,20 @@ import { defineStore } from 'pinia';
 import { ref, computed, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 import { playShowSound } from '../utils/sound';
 import {
   RecordingStatus,
+  ConnectionQuality,
   PartialTranscriptionPayload,
   FinalTranscriptionPayload,
   RecordingStatusPayload,
   TranscriptionErrorPayload,
+  ConnectionQualityPayload,
   EVENT_TRANSCRIPTION_PARTIAL,
   EVENT_TRANSCRIPTION_FINAL,
   EVENT_RECORDING_STATUS,
   EVENT_TRANSCRIPTION_ERROR,
+  EVENT_CONNECTION_QUALITY,
 } from '../types';
 
 export const useTranscriptionStore = defineStore('transcription', () => {
@@ -24,10 +26,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const finalText = ref<string>(''); // полный финальный результат (для копирования)
   const error = ref<string | null>(null);
   const lastFinalizedText = ref<string>(''); // последний финализированный текст (для дедупликации)
+  const connectionQuality = ref<ConnectionQuality>(ConnectionQuality.Good);
 
   // Config flags
   const autoCopyEnabled = ref<boolean>(true);
   const autoPasteEnabled = ref<boolean>(false);
+
+  // Флаг для защиты от дублирования auto-paste
+  // Хранит значение finalText на момент последней успешной вставки
+  const lastPastedFinalText = ref<string>('');
 
   // Отслеживание utterances по start времени
   const currentUtteranceStart = ref<number>(-1); // start время текущей utterance (-1 = нет активной)
@@ -46,6 +53,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   let unlistenFinal: UnlistenFn | null = null;
   let unlistenStatus: UnlistenFn | null = null;
   let unlistenError: UnlistenFn | null = null;
+  let unlistenConnectionQuality: UnlistenFn | null = null;
 
   // Computed
   const isStarting = computed(() => status.value === RecordingStatus.Starting);
@@ -53,6 +61,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const isIdle = computed(() => status.value === RecordingStatus.Idle);
   const isProcessing = computed(() => status.value === RecordingStatus.Processing);
   const hasError = computed(() => status.value === RecordingStatus.Error);
+  const hasConnectionIssue = computed(() =>
+    connectionQuality.value !== ConnectionQuality.Good
+  );
 
   const displayText = computed(() => {
     // Показываем: финальный текст + анимированный накопленный + анимированный промежуточный
@@ -331,16 +342,31 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           });
 
           // Deepgram отправляет финальный сегмент когда вся речь завершена (speech_final=true)
-          // Нужно собрать полный текст utterance: accumulated + последний сегмент
-          if (event.payload.text || accumulatedText.value) {
-            // Собираем полный текст текущей utterance
-            const currentUtteranceText = accumulatedText.value && event.payload.text
-              ? `${accumulatedText.value} ${event.payload.text}`.trim()
-              : (accumulatedText.value || event.payload.text);
+          //
+          // БАГ-ФИКС (2025-10-30): Deepgram может разбивать речь на несколько utterances с разными start временами.
+          // Если между SEGMENT FINAL и следующим Partial приходит другой FINAL - currentUtteranceStart
+          // сбрасывается в -1, что ломает логику обнаружения смены utterance. Из-за этого accumulated текст
+          // не сохраняется в finalText и теряется.
+          //
+          // Пример из логов:
+          // 1. FINAL #1 (start=0.00s): "Да, должна происходить индексация." → currentUtteranceStart = -1
+          // 2. SEGMENT FINAL (start=3.41s): "Когда в админке её запускаешь" → accumulated += текст
+          // 3. Partial (start=6.73s): новый start, но currentUtteranceStart=-1 → код думает "та же utterance"
+          // 4. FINAL #2 (start=6.73s): "для конкретного диалога?" → берет ТОЛЬКО это, accumulated теряется
+          //
+          // РЕШЕНИЕ: ВСЕГДА добавляем accumulated к FINAL тексту (если есть).
+          // Дублирования не будет, т.к. accumulated очищается только при сохранении в finalText.
+          if (event.payload.text || accumulatedText.value || partialText.value) {
+            const currentUtteranceText = [accumulatedText.value, event.payload.text || partialText.value]
+              .filter(Boolean)
+              .join(' ')
+              .trim();
 
             console.log('🔗 [SPEECH_FINAL] Combining utterance:', {
               accumulated: accumulatedText.value,
-              last_segment: event.payload.text,
+              partial: partialText.value,
+              final_payload: event.payload.text,
+              used_source: event.payload.text ? 'FINAL payload' : 'accumulated+partial',
               combined: currentUtteranceText
             });
 
@@ -384,30 +410,38 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
             // Auto-paste финальной фразы (вся utterance целиком)
             if (autoPasteEnabled.value && currentUtteranceText.trim()) {
-              try {
-                // Добавляем пробел перед фразой если это не первая фраза
-                const needsSpace = oldFinalText.length > 0;
-                const textToInsert = needsSpace ? ` ${currentUtteranceText}` : currentUtteranceText;
-                console.log('📝 Auto-pasting final utterance:', textToInsert);
-                await invoke('auto_paste_text', { text: textToInsert });
-                console.log('✅ Auto-pasted successfully');
-              } catch (err) {
-                console.error('❌ Failed to auto-paste:', err);
-
-                // Fallback: копируем в clipboard
+              // Защита от дубликатов: проверяем что мы еще не вставляли эту версию finalText
+              if (finalText.value !== lastPastedFinalText.value) {
                 try {
-                  await writeText(currentUtteranceText);
-                  console.log('📋 Fallback: copied to clipboard');
-                } catch (copyErr) {
-                  console.error('❌ Failed to copy to clipboard:', copyErr);
+                  // Добавляем пробел перед фразой если это не первая фраза
+                  const needsSpace = oldFinalText.length > 0;
+                  const textToInsert = needsSpace ? ` ${currentUtteranceText}` : currentUtteranceText;
+                  console.log('📝 Auto-pasting final utterance:', textToInsert);
+                  await invoke('auto_paste_text', { text: textToInsert });
+                  console.log('✅ Auto-pasted successfully');
+
+                  // ВАЖНО: Обновляем флаг ПОСЛЕ успешной вставки
+                  lastPastedFinalText.value = finalText.value;
+                } catch (err) {
+                  console.error('❌ Failed to auto-paste:', err);
+
+                  // Fallback: копируем в clipboard
+                  try {
+                    await invoke('copy_to_clipboard_native', { text: currentUtteranceText });
+                    console.log('📋 Fallback: copied to clipboard');
+                  } catch (copyErr) {
+                    console.error('❌ Failed to copy to clipboard:', copyErr);
+                  }
                 }
+              } else {
+                console.log('⏭️ Skipping auto-paste: already pasted this version of finalText');
               }
             }
 
             // Auto-copy to clipboard с накопленным текстом (если включено)
             if (autoCopyEnabled.value) {
               try {
-                await writeText(finalText.value);
+                await invoke('copy_to_clipboard_native', { text: finalText.value });
                 console.log('📋 Auto-copied to clipboard:', finalText.value);
               } catch (err) {
                 console.error('Failed to copy to clipboard:', err);
@@ -425,7 +459,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       // Listen to recording status events
       unlistenStatus = await listen<RecordingStatusPayload>(
         EVENT_RECORDING_STATUS,
-        (event) => {
+        async (event) => {
           console.log('Recording status changed:', event.payload);
 
           // Звук теперь воспроизводится раньше - в handleHotkeyToggle
@@ -448,6 +482,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             currentUtteranceStart.value = -1;
             error.value = null;
 
+            // Сбрасываем флаг auto-paste
+            lastPastedFinalText.value = '';
+
             // Очищаем анимированный текст
             animatedPartialText.value = '';
             animatedAccumulatedText.value = '';
@@ -460,6 +497,69 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             if (accumulatedAnimationTimer) {
               clearInterval(accumulatedAnimationTimer);
               accumulatedAnimationTimer = null;
+            }
+          }
+
+          // Если статус стал Idle - обрабатываем текущий текст при ЛЮБОЙ остановке
+          // (через hotkey ИЛИ через VAD timeout когда пользователь закончил говорить)
+          //
+          // Из логов [2025-11-03]: VAD timeout - это нормальный способ остановки после молчания >3 сек.
+          // Пользователь закончил говорить → текст должен скопироваться и вставиться автоматически.
+          // Проверка `stopped_via_hotkey` убрана, чтобы auto-paste работал в обоих случаях.
+          if (event.payload.status === RecordingStatus.Idle) {
+            console.log('🔄 Запись остановлена - обрабатываем текущий текст');
+
+            // Собираем весь видимый текст (final + accumulated + partial)
+            const currentText = [finalText.value, accumulatedText.value, partialText.value]
+              .filter(Boolean)
+              .join(' ')
+              .trim();
+
+            if (currentText) {
+              console.log('📝 Текущий текст для обработки:', currentText);
+
+              // Auto-copy: копируем ВЕСЬ текст в clipboard
+              if (autoCopyEnabled.value) {
+                try {
+                  await invoke('copy_to_clipboard_native', { text: currentText });
+                  console.log('📋 Весь текст скопирован в clipboard');
+                } catch (err) {
+                  console.error('❌ Ошибка копирования:', err);
+                }
+              }
+
+              // Auto-paste: вставляем только НОВУЮ часть
+              if (autoPasteEnabled.value) {
+                // Определяем что нужно вставить (только новое)
+                let textToInsert = currentText;
+
+                if (lastPastedFinalText.value) {
+                  // Если уже что-то вставляли, вставляем только новую часть
+                  if (currentText.startsWith(lastPastedFinalText.value)) {
+                    textToInsert = currentText.slice(lastPastedFinalText.value.length).trim();
+
+                    // Добавляем пробел если нужно
+                    if (textToInsert && lastPastedFinalText.value) {
+                      textToInsert = ' ' + textToInsert;
+                    }
+                  }
+                }
+
+                if (textToInsert.trim()) {
+                  try {
+                    console.log('📝 Auto-paste: вставляем новую часть:', textToInsert);
+                    await invoke('auto_paste_text', { text: textToInsert });
+                    console.log('✅ Новая часть вставлена через auto-paste');
+
+                    // Обновляем lastPastedFinalText
+                    lastPastedFinalText.value = currentText;
+                  } catch (err) {
+                    console.error('❌ Ошибка auto-paste:', err);
+                  }
+                } else {
+                  console.log('⏭️ Нечего вставлять - весь текст уже был вставлен');
+                }
+              }
             }
           }
 
@@ -507,6 +607,21 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         }
       );
 
+      // Listen to connection quality events
+      unlistenConnectionQuality = await listen<ConnectionQualityPayload>(
+        EVENT_CONNECTION_QUALITY,
+        (event) => {
+          console.log('Connection quality changed:', event.payload.quality, event.payload.reason);
+          connectionQuality.value = event.payload.quality;
+
+          // Сбрасываем connection quality обратно в Good когда запись останавливается
+          // (чтобы избежать показа старого статуса при следующей записи)
+          if (status.value === RecordingStatus.Idle) {
+            connectionQuality.value = ConnectionQuality.Good;
+          }
+        }
+      );
+
       console.log('Event listeners initialized successfully');
     } catch (err) {
       console.error('Failed to initialize event listeners:', err);
@@ -524,6 +639,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       lastFinalizedText.value = '';
       currentUtteranceStart.value = -1;
       status.value = RecordingStatus.Recording;
+
+      // Сбрасываем флаг auto-paste
+      lastPastedFinalText.value = '';
 
       // Очищаем анимированный текст
       animatedPartialText.value = '';
@@ -587,6 +705,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       unlistenError();
       unlistenError = null;
     }
+    if (unlistenConnectionQuality) {
+      unlistenConnectionQuality();
+      unlistenConnectionQuality = null;
+    }
 
     // Очищаем таймеры анимации
     if (partialAnimationTimer) {
@@ -599,6 +721,19 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
+  // Перезагрузка настроек auto-copy/paste из конфига
+  // Вызывается после сохранения настроек в Settings
+  async function reloadConfig() {
+    try {
+      const appConfig = await invoke<any>('get_app_config');
+      autoCopyEnabled.value = appConfig.auto_copy_to_clipboard ?? true;
+      autoPasteEnabled.value = appConfig.auto_paste_text ?? false;
+      console.log('Config reloaded: autoCopy=', autoCopyEnabled.value, 'autoPaste=', autoPasteEnabled.value);
+    } catch (err) {
+      console.error('Failed to reload config:', err);
+    }
+  }
+
   return {
     // State
     status,
@@ -606,6 +741,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     accumulatedText,
     finalText,
     error,
+    connectionQuality,
 
     // Computed
     isStarting,
@@ -613,6 +749,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     isIdle,
     isProcessing,
     hasError,
+    hasConnectionIssue,
     displayText,
 
     // Actions
@@ -621,5 +758,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     stopRecording,
     toggleRecording,
     cleanup,
+    reloadConfig,
   };
 });

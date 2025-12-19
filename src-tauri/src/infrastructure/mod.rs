@@ -9,6 +9,8 @@ pub mod updater;
 pub mod models;
 pub mod embedded_keys; // API ключи встроенные в build
 pub mod auto_paste; // Автоматическая вставка текста
+pub mod clipboard; // Кроссплатформенная работа с clipboard
 
 pub use factory::*;
 pub use config_store::ConfigStore;
+pub use clipboard::copy_to_clipboard;

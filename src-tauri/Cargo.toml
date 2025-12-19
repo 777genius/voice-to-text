@@ -1,6 +1,6 @@
 [package]
 name = "voice-to-text"
-version = "0.4.0"
+version = "0.4.1"
 description = "Privacy-focused voice-to-text application with offline support"
 authors = ["Voice to Text Contributors"]
 license = "MIT"

@@ -4,10 +4,14 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { SttProviderType, type SttConfig } from '../../types';
 import ModelManager from './ModelManager.vue';
+import { useTranscriptionStore } from '../../stores/transcription';
 
 const emit = defineEmits<{
   close: []
 }>();
+
+// Store
+const transcriptionStore = useTranscriptionStore();
 
 // Состояние
 const currentProvider = ref<SttProviderType>(SttProviderType.Deepgram);
@@ -156,6 +160,9 @@ const saveConfig = async () => {
       selectedAudioDevice: selectedAudioDevice.value,
     });
     console.log('App config saved successfully');
+
+    // Перезагружаем конфиг в transcription store чтобы auto-copy/paste настройки применились
+    await transcriptionStore.reloadConfig();
 
     // Закрываем сразу после успешного сохранения
     emit('close');

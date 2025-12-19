@@ -1,11 +1,11 @@
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager, State, Window};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Position, State, WebviewWindow, Window};
 
 use crate::domain::{RecordingStatus, AudioCapture};
 use crate::infrastructure::ConfigStore;
 use crate::presentation::{
     events::*, AppState, AudioLevelPayload, FinalTranscriptionPayload, PartialTranscriptionPayload,
-    RecordingStatusPayload, MicrophoneTestLevelPayload, TranscriptionErrorPayload,
+    RecordingStatusPayload, MicrophoneTestLevelPayload, TranscriptionErrorPayload, ConnectionQualityPayload,
 };
 
 /// Start recording voice
@@ -111,6 +111,32 @@ pub async fn start_recording(
         });
     });
 
+    let app_handle_quality = app_handle.clone();
+
+    // Callback for connection quality updates
+    let on_connection_quality = Arc::new(move |quality: String, reason: Option<String>| {
+        let app_handle = app_handle_quality.clone();
+
+        tokio::spawn(async move {
+            log::info!("Connection quality changed: {} (reason: {:?})", quality, reason);
+
+            // Emit connection quality event to frontend
+            let payload = ConnectionQualityPayload {
+                quality: match quality.as_str() {
+                    "Good" => crate::presentation::events::ConnectionQuality::Good,
+                    "Poor" => crate::presentation::events::ConnectionQuality::Poor,
+                    "Recovering" => crate::presentation::events::ConnectionQuality::Recovering,
+                    _ => crate::presentation::events::ConnectionQuality::Good,
+                },
+                reason,
+            };
+
+            if let Err(e) = app_handle.emit(EVENT_CONNECTION_QUALITY, payload) {
+                log::error!("Failed to emit connection quality event: {}", e);
+            }
+        });
+    });
+
     // Emit Starting status immediately
     log::debug!("Emitting status: Starting (stopped_via_hotkey: false)");
     let _ = app_handle.emit(
@@ -124,7 +150,7 @@ pub async fn start_recording(
     // Start recording (async - WebSocket connect, audio capture start)
     state
         .transcription_service
-        .start_recording(on_partial, on_final, on_audio_level, on_error)
+        .start_recording(on_partial, on_final, on_audio_level, on_error, on_connection_quality)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -175,6 +201,92 @@ pub async fn get_recording_status(state: State<'_, AppState>) -> Result<Recordin
     Ok(state.transcription_service.get_status().await)
 }
 
+/// Показывает окно на активном мониторе (где находится курсор мыши) - для Window
+pub fn show_window_on_active_monitor(window: &Window) -> Result<(), String> {
+    show_window_on_active_monitor_impl(
+        || window.current_monitor(),
+        || window.primary_monitor(),
+        || window.outer_size(),
+        |pos| window.set_position(pos),
+        || window.show(),
+    )
+}
+
+/// Показывает окно на активном мониторе (где находится курсор мыши) - для WebviewWindow
+pub fn show_webview_window_on_active_monitor<R: tauri::Runtime>(window: &WebviewWindow<R>) -> Result<(), String> {
+    show_window_on_active_monitor_impl(
+        || window.current_monitor(),
+        || window.primary_monitor(),
+        || window.outer_size(),
+        |pos| window.set_position(pos),
+        || window.show(),
+    )
+}
+
+/// Общая реализация для позиционирования окна
+fn show_window_on_active_monitor_impl<F1, F2, F3, F4, F5>(
+    get_current_monitor: F1,
+    get_primary_monitor: F2,
+    get_outer_size: F3,
+    set_position: F4,
+    show: F5,
+) -> Result<(), String>
+where
+    F1: FnOnce() -> tauri::Result<Option<tauri::Monitor>>,
+    F2: FnOnce() -> tauri::Result<Option<tauri::Monitor>>,
+    F3: FnOnce() -> tauri::Result<tauri::PhysicalSize<u32>>,
+    F4: FnOnce(Position) -> tauri::Result<()>,
+    F5: FnOnce() -> tauri::Result<()>,
+{
+    log::info!("🖥️  Определяем активный монитор для позиционирования окна...");
+
+    // Определяем текущий монитор (где курсор мыши)
+    let current_monitor = get_current_monitor()
+        .map_err(|e| format!("Failed to get current monitor: {}", e))?
+        .or_else(|| {
+            log::warn!("current_monitor() вернул None, использую primary монитор");
+            // Фоллбэк на primary монитор если current_monitor не сработал
+            get_primary_monitor().ok().flatten()
+        })
+        .ok_or("No monitor found")?;
+
+    // Получаем размеры и позицию монитора
+    let monitor_size = current_monitor.size();
+    let monitor_position = current_monitor.position();
+    let monitor_name = current_monitor.name().map(|s| s.as_str()).unwrap_or("Unknown");
+
+    log::info!("📺 Найден монитор: '{}', позиция: ({}, {}), размер: {}x{}",
+        monitor_name,
+        monitor_position.x,
+        monitor_position.y,
+        monitor_size.width,
+        monitor_size.height
+    );
+
+    // Получаем размеры окна
+    let window_size = get_outer_size()
+        .map_err(|e| format!("Failed to get window size: {}", e))?;
+
+    log::debug!("🪟 Размер окна: {}x{}", window_size.width, window_size.height);
+
+    // Вычисляем центральную позицию на мониторе
+    let x = monitor_position.x + (monitor_size.width as i32 - window_size.width as i32) / 2;
+    let y = monitor_position.y + (monitor_size.height as i32 - window_size.height as i32) / 2;
+
+    log::info!("📍 Устанавливаю позицию окна: ({}, {})", x, y);
+
+    // Устанавливаем позицию окна
+    set_position(Position::Physical(PhysicalPosition { x, y }))
+        .map_err(|e| format!("Failed to set window position: {}", e))?;
+
+    // Показываем окно
+    show().map_err(|e| e.to_string())?;
+
+    log::info!("✅ Окно успешно позиционировано и показано на активном мониторе");
+
+    Ok(())
+}
+
 /// Toggle window visibility
 #[tauri::command]
 pub async fn toggle_window(
@@ -196,7 +308,7 @@ pub async fn toggle_window(
             }
         }
 
-        window.show().map_err(|e| e.to_string())?;
+        show_window_on_active_monitor(&window)?;
     }
 
     Ok(())
@@ -227,7 +339,7 @@ pub async fn toggle_recording_with_window(
                     }
                 }
 
-                window.show().map_err(|e| e.to_string())?;
+                show_window_on_active_monitor(&window)?;
             }
 
             // Запускаем запись
@@ -941,5 +1053,23 @@ pub async fn auto_paste_text(
     }
 
     log::info!("Text auto-pasted successfully");
+    Ok(())
+}
+
+/// Копирует текст в системный clipboard используя arboard (кроссплатформенно)
+/// Работает БЕЗ активации приложения - решает проблему с nonactivating_panel на macOS
+#[tauri::command]
+pub async fn copy_to_clipboard_native(text: String) -> Result<(), String> {
+    log::debug!("Command: copy_to_clipboard_native - text length: {}", text.len());
+
+    // Используем blocking task (arboard работает с синхронными системными API, как enigo)
+    tokio::task::spawn_blocking(move || {
+        crate::infrastructure::copy_to_clipboard(&text)
+    })
+    .await
+    .map_err(|e| format!("Failed to join blocking task: {}", e))?
+    .map_err(|e| format!("Failed to copy to clipboard: {}", e))?;
+
+    log::info!("Text copied to clipboard successfully");
     Ok(())
 }

@@ -1,7 +1,7 @@
 {
     "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
     "productName": "Voice to Text",
-    "version": "0.3.0",
+    "version": "0.4.1",
     "identifier": "com.voicetotext.app",
     "build": {
         "frontendDist": "../dist",
@@ -28,7 +28,8 @@
             "center": true,
             "skipTaskbar": true,
             "visible": false,
-            "focus": false
+            "focus": false,
+            "visibleOnAllWorkspaces": true
         }],
         "security": {
             "csp": null

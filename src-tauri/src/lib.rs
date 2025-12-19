@@ -9,6 +9,20 @@ use presentation::state::AppState;
 use tauri::Manager;
 use infrastructure::ConfigStore;
 
+// Определяем базовый NSPanel класс для macOS (появление поверх fullscreen приложений)
+#[cfg(target_os = "macos")]
+use tauri_nspanel::tauri_panel;
+
+#[cfg(target_os = "macos")]
+tauri_panel! {
+    panel!(FloatingPanel {
+        config: {
+            can_become_key_window: false,
+            can_become_main_window: false
+        }
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Загружаем переменные окружения из .env файла (если есть) для dev режима
@@ -19,11 +33,19 @@ pub fn run() {
         Err(e) => println!("ℹ️  No .env file loaded: {}", e),
     }
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_dialog::init());
+
+    // Добавляем NSPanel плагин на macOS для появления поверх fullscreen приложений
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.plugin(tauri_nspanel::init());
+    }
+
+    builder
         .plugin(
             tauri_plugin_log::Builder::default()
                 .level(if cfg!(debug_assertions) {
@@ -58,12 +80,19 @@ pub fn run() {
             commands::check_accessibility_permission,
             commands::request_accessibility_permission,
             commands::auto_paste_text,
+            commands::copy_to_clipboard_native,
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]
             {
                 log::info!("Voice to Text application started in debug mode");
             }
+
+            // ЗАПАСНОЙ ВАРИАНТ: Если NSPanel с StyleMask не работает поверх fullscreen,
+            // раскомментируйте строку ниже. Окно гарантированно появится поверх ВСЕГО,
+            // но иконка исчезнет из Dock (app станет фоновым сервисом).
+            // #[cfg(target_os = "macos")]
+            // app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             // Создаем system tray иконку
             if let Err(e) = presentation::tray::create_tray(app.handle()) {
@@ -73,6 +102,48 @@ pub fn run() {
             // Окно скрыто при старте независимо от режима
             // Открывается по горячей клавише (не забирает фокус)
             if let Some(window) = app.get_webview_window("main") {
+                // На macOS конвертируем окно в NSPanel для появления поверх fullscreen приложений
+                #[cfg(target_os = "macos")]
+                {
+                    use tauri_nspanel::{WebviewWindowExt as _, CollectionBehavior, PanelLevel, StyleMask};
+
+                    let app_handle = app.handle().clone();
+                    let window_clone = window.clone();
+
+                    // Конвертация в NSPanel должна происходить на главном потоке
+                    if let Err(e) = app_handle.run_on_main_thread(move || {
+                        match window_clone.to_panel::<FloatingPanel>() {
+                            Ok(panel) => {
+                                log::info!("✅ Окно успешно конвертировано в NSPanel (macOS)");
+
+                                // КРИТИЧНО: Устанавливаем nonactivatingPanel style mask
+                                // Без этого NSPanel НЕ МОЖЕТ появляться поверх fullscreen (требование macOS)
+                                panel.set_style_mask(StyleMask::empty().nonactivating_panel().into());
+                                log::info!("🎭 Установлен style mask: nonactivating_panel");
+
+                                // Устанавливаем максимальный window level для появления поверх fullscreen
+                                panel.set_level(PanelLevel::ScreenSaver.value());
+                                log::info!("🔝 Установлен window level = ScreenSaver (1000)");
+
+                                // Настраиваем collection behavior для работы с fullscreen приложениями
+                                panel.set_collection_behavior(
+                                    CollectionBehavior::new()
+                                        .full_screen_auxiliary()  // Работает с fullscreen приложениями
+                                        .can_join_all_spaces()    // Видно на всех Spaces
+                                        .into(),
+                                );
+                                log::info!("🎯 Установлен collection behavior: fullscreen_auxiliary + can_join_all_spaces");
+                                log::info!("✅ NSPanel ПОЛНОСТЬЮ настроен - будет появляться поверх fullscreen приложений!");
+                            },
+                            Err(e) => {
+                                log::warn!("⚠️  Не удалось конвертировать окно в NSPanel: {} (используем обычное окно)", e);
+                            }
+                        }
+                    }) {
+                        log::error!("Failed to run NSPanel conversion on main thread: {}", e);
+                    }
+                }
+
                 let _ = window.hide();
 
                 // Настраиваем обработчик закрытия окна

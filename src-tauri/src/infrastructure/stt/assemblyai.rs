@@ -90,6 +90,7 @@ impl SttProvider for AssemblyAIProvider {
         on_partial: TranscriptionCallback,
         on_final: TranscriptionCallback,
         _on_error: crate::domain::ErrorCallback,
+        _on_connection_quality: crate::domain::ConnectionQualityCallback,
     ) -> SttResult<()> {
         log::info!("AssemblyAI Provider: Starting stream (v3 endpoint)");
 

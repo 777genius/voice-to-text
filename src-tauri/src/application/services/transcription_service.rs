@@ -2,7 +2,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::domain::{
-    AudioCapture, AudioConfig, AudioLevelCallback, ErrorCallback, RecordingStatus, SttConfig, SttProvider,
+    AudioCapture, AudioConfig, AudioLevelCallback, ConnectionQualityCallback, ErrorCallback, RecordingStatus, SttConfig, SttError, SttProvider,
     SttProviderFactory, TranscriptionCallback,
 };
 
@@ -50,6 +50,7 @@ impl TranscriptionService {
         on_final: TranscriptionCallback,
         on_audio_level: AudioLevelCallback,
         on_error: ErrorCallback,
+        on_connection_quality: ConnectionQualityCallback,
     ) -> Result<()> {
         let mut status = self.status.write().await;
 
@@ -70,7 +71,7 @@ impl TranscriptionService {
 
         // Проверяем можно ли переиспользовать существующее соединение
         let config = self.config.read().await.clone();
-        let can_reuse_connection = {
+        let mut can_reuse_connection = {
             let provider_opt = self.stt_provider.read().await;
             if let Some(provider) = provider_opt.as_ref() {
                 provider.supports_keep_alive()
@@ -82,21 +83,36 @@ impl TranscriptionService {
         };
 
         if can_reuse_connection {
-            // Переиспользуем существующее соединение (мгновенный старт!)
-            log::info!("Reusing existing keep-alive connection (instant start)");
+            log::info!("Attempting to reuse existing keep-alive connection");
 
-            let mut provider_opt = self.stt_provider.write().await;
-            if let Some(provider) = provider_opt.as_mut() {
-                provider
-                    .resume_stream(on_partial.clone(), on_final.clone(), on_error.clone())
-                    .await
-                    .map_err(|e| {
-                        let status_arc = self.status.clone();
-                        tokio::spawn(async move { *status_arc.write().await = RecordingStatus::Idle; });
-                        anyhow::anyhow!("Failed to resume STT stream: {}", e)
-                    })?;
+            let resume_result = {
+                let mut provider_opt = self.stt_provider.write().await;
+                if let Some(provider) = provider_opt.as_mut() {
+                    provider.resume_stream(
+                        on_partial.clone(),
+                        on_final.clone(),
+                        on_error.clone(),
+                        on_connection_quality.clone()
+                    ).await
+                } else {
+                    Err(SttError::Processing("Provider not available".to_string()))
+                }
+            };
+
+            match resume_result {
+                Ok(_) => {
+                    log::info!("Successfully resumed keep-alive connection (instant start)");
+                }
+                Err(e) => {
+                    log::warn!("Failed to resume connection: {} - creating new connection as fallback", e);
+
+                    *self.stt_provider.write().await = None;
+                    can_reuse_connection = false;
+                }
             }
-        } else {
+        }
+
+        if !can_reuse_connection {
             // Создаем новое соединение (обычный старт с задержкой)
             log::info!("Creating new STT connection");
 
@@ -120,7 +136,7 @@ impl TranscriptionService {
                 })?;
 
             provider
-                .start_stream(on_partial.clone(), on_final.clone(), on_error.clone())
+                .start_stream(on_partial.clone(), on_final.clone(), on_error.clone(), on_connection_quality.clone())
                 .await
                 .map_err(|e| {
                     let status_arc = self.status.clone();

@@ -10,6 +10,7 @@ pub const EVENT_AUDIO_LEVEL: &str = "audio:level";
 pub const EVENT_MICROPHONE_TEST_LEVEL: &str = "microphone_test:level";
 
 pub const EVENT_TRANSCRIPTION_ERROR: &str = "transcription:error";
+pub const EVENT_CONNECTION_QUALITY: &str = "connection:quality";
 
 /// Payload for partial transcription event
 #[derive(Debug, Clone, Serialize)]
@@ -80,4 +81,24 @@ pub struct MicrophoneTestLevelPayload {
 pub struct TranscriptionErrorPayload {
     pub error: String,
     pub error_type: String, // "connection", "configuration", "processing", "timeout", "authentication"
+}
+
+/// Connection quality states
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum ConnectionQuality {
+    /// Connection is working normally
+    Good,
+    /// Connection has issues (slow, errors)
+    Poor,
+    /// Connection is recovering from issues
+    Recovering,
+}
+
+/// Payload for connection quality event
+#[derive(Debug, Clone, Serialize)]
+pub struct ConnectionQualityPayload {
+    pub quality: ConnectionQuality,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>, // дополнительная информация о причине
 }

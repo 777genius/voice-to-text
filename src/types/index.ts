@@ -46,11 +46,23 @@ export interface TranscriptionErrorPayload {
   error_type: 'connection' | 'configuration' | 'processing' | 'timeout' | 'authentication';
 }
 
+export enum ConnectionQuality {
+  Good = 'Good',
+  Poor = 'Poor',
+  Recovering = 'Recovering',
+}
+
+export interface ConnectionQualityPayload {
+  quality: ConnectionQuality;
+  reason?: string;
+}
+
 // Event names (must match Rust backend)
 export const EVENT_TRANSCRIPTION_PARTIAL = 'transcription:partial';
 export const EVENT_TRANSCRIPTION_FINAL = 'transcription:final';
 export const EVENT_RECORDING_STATUS = 'recording:status';
 export const EVENT_TRANSCRIPTION_ERROR = 'transcription:error';
+export const EVENT_CONNECTION_QUALITY = 'connection:quality';
 export const EVENT_ERROR = 'app:error';
 
 // STT Configuration types

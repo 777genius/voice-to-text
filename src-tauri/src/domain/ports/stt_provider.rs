@@ -37,6 +37,11 @@ pub type AudioLevelCallback = Arc<dyn Fn(f32) + Send + Sync>;
 /// Callback type for receiving errors (error message, error type)
 pub type ErrorCallback = Arc<dyn Fn(String, String) + Send + Sync>;
 
+/// Callback type for receiving connection quality updates
+/// Параметры: (quality: String, reason: Option<String>)
+/// quality может быть: "Good", "Poor", "Recovering"
+pub type ConnectionQualityCallback = Arc<dyn Fn(String, Option<String>) + Send + Sync>;
+
 /// Trait defining the contract for speech-to-text providers
 ///
 /// This abstraction allows switching between different STT implementations
@@ -55,11 +60,13 @@ pub trait SttProvider: Send + Sync {
     /// * `on_partial` - Callback for partial transcription results
     /// * `on_final` - Callback for final transcription results
     /// * `on_error` - Callback for connection/processing errors
+    /// * `on_connection_quality` - Callback for connection quality updates
     async fn start_stream(
         &mut self,
         on_partial: TranscriptionCallback,
         on_final: TranscriptionCallback,
         on_error: ErrorCallback,
+        on_connection_quality: ConnectionQualityCallback,
     ) -> SttResult<()>;
 
     /// Send audio chunk for transcription
@@ -89,6 +96,7 @@ pub trait SttProvider: Send + Sync {
         _on_partial: TranscriptionCallback,
         _on_final: TranscriptionCallback,
         _on_error: ErrorCallback,
+        _on_connection_quality: ConnectionQualityCallback,
     ) -> SttResult<()> {
         Err(SttError::Unsupported(
             "resume_stream not supported by this provider".to_string(),
