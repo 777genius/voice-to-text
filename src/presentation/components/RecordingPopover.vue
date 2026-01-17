@@ -292,8 +292,7 @@ const minimizeWindow = async () => {
 
 <style scoped>
 .popover-container {
-  display: block;
-  position: absolute;
+  display: block;  
   inset: 0;
   width: 100%;
   height: 100%;
@@ -323,7 +322,11 @@ const minimizeWindow = async () => {
 }
 
 :global(.theme-light) .popover {
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
+  box-shadow: none;
+}
+
+:global(.theme-light) .popover-container {
+  background: transparent;
 }
 
 :global(.os-macos) .popover {
@@ -685,7 +688,7 @@ const minimizeWindow = async () => {
   right: 0;
   top: -1px;
   height: 3px;
-  background: rgba(0, 0, 0, 0.45);
+  background: transparent;
 }
 
 .hint {

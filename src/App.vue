@@ -10,7 +10,7 @@ import RecordingPopover from './presentation/components/RecordingPopover.vue';
 
 <style scoped>
 .app {
-  width: 100vw;
+  width: 100%;
   height: 100vh;
   display: block;
   margin: 0;
