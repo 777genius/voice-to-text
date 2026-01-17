@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from 'vue';
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
+import { useI18n } from 'vue-i18n';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { SttProviderType, type SttConfig } from '../../types';
@@ -25,6 +26,47 @@ const isSaving = ref(false);
 const saveMessage = ref('');
 const errorMessage = ref('');
 const isDragging = ref(false);
+const theme = ref<'dark' | 'light'>((localStorage.getItem('uiTheme') as 'dark' | 'light') ?? 'dark');
+
+const { t, locale } = useI18n();
+
+  const languageOptions = computed(() => [
+    { value: 'en', label: t('languages.en') },
+    { value: 'ru', label: t('languages.ru') },
+    { value: 'uk', label: t('languages.uk') },
+    { value: 'es', label: t('languages.es') },
+    { value: 'fr', label: t('languages.fr') },
+    { value: 'de', label: t('languages.de') },
+  ]);
+const isLanguageOpen = ref(false);
+const languageDropdownRef = ref<HTMLElement | null>(null);
+const selectedLanguageLabel = computed(() => {
+  const option = languageOptions.value.find((item) => item.value === currentLanguage.value);
+  return option ? option.label : currentLanguage.value;
+});
+
+const providerOptions = computed(() => [
+  { value: SttProviderType.WhisperLocal, label: t('settings.provider.optionWhisper') },
+  { value: SttProviderType.AssemblyAI, label: t('settings.provider.optionAssembly') },
+  { value: SttProviderType.Deepgram, label: t('settings.provider.optionDeepgram') },
+]);
+const isProviderOpen = ref(false);
+const providerDropdownRef = ref<HTMLElement | null>(null);
+const selectedProviderLabel = computed(() => {
+  const option = providerOptions.value.find((item) => item.value === currentProvider.value);
+  return option ? option.label : String(currentProvider.value);
+});
+
+const isDeviceOpen = ref(false);
+const deviceDropdownRef = ref<HTMLElement | null>(null);
+const deviceOptions = computed(() => [
+  { value: '', label: t('settings.device.default') },
+  ...availableAudioDevices.value.map((name) => ({ value: name, label: name })),
+]);
+const selectedDeviceLabel = computed(() => {
+  const option = deviceOptions.value.find((item) => item.value === selectedAudioDevice.value);
+  return option ? option.label : t('settings.device.default');
+});
 
 // Accessibility permission (для macOS)
 const hasAccessibilityPermission = ref(true);
@@ -40,13 +82,13 @@ const showAssemblyAIKey = ref(false);
 const isWhisperProvider = computed(() => currentProvider.value === SttProviderType.WhisperLocal);
 
 // Доступные модели Whisper
-const whisperModels = [
-  { value: 'tiny', label: 'Tiny - самая быстрая' },
-  { value: 'base', label: 'Base - баланс скорости и качества' },
-  { value: 'small', label: 'Small - рекомендуется' },
-  { value: 'medium', label: 'Medium - высокое качество' },
-  { value: 'large', label: 'Large - максимальное качество' },
-];
+const whisperModels = computed(() => [
+  { value: 'tiny', label: t('settings.whisper.models.tiny') },
+  { value: 'base', label: t('settings.whisper.models.base') },
+  { value: 'small', label: t('settings.whisper.models.small') },
+  { value: 'medium', label: t('settings.whisper.models.medium') },
+  { value: 'large', label: t('settings.whisper.models.large') },
+]);
 
 // Состояние теста микрофона
 const isTesting = ref(false);
@@ -58,12 +100,60 @@ let testLevelUnlisten: UnlistenFn | null = null;
 const availableAudioDevices = ref<string[]>([]);
 const selectedAudioDevice = ref<string>(''); // Пустая строка = default устройство
 
+const toggleLanguageDropdown = () => {
+  isLanguageOpen.value = !isLanguageOpen.value;
+};
+
+const toggleProviderDropdown = () => {
+  isProviderOpen.value = !isProviderOpen.value;
+};
+
+const selectLanguage = (value: string) => {
+  currentLanguage.value = value;
+  isLanguageOpen.value = false;
+};
+
+const selectProvider = (value: SttProviderType) => {
+  currentProvider.value = value;
+  isProviderOpen.value = false;
+};
+
+const toggleDeviceDropdown = () => {
+  isDeviceOpen.value = !isDeviceOpen.value;
+};
+
+const selectDevice = (value: string) => {
+  selectedAudioDevice.value = value;
+  isDeviceOpen.value = false;
+};
+
+const handleDocumentClick = (event: MouseEvent) => {
+  const target = event.target as Node | null;
+  const container = languageDropdownRef.value;
+  if (!target) return;
+  if (container && !container.contains(target)) {
+    isLanguageOpen.value = false;
+  }
+
+  const providerContainer = providerDropdownRef.value;
+  if (providerContainer && !providerContainer.contains(target)) {
+    isProviderOpen.value = false;
+  }
+
+  const deviceContainer = deviceDropdownRef.value;
+  if (deviceContainer && !deviceContainer.contains(target)) {
+    isDeviceOpen.value = false;
+  }
+};
+
 // Загрузка текущей конфигурации
 onMounted(async () => {
   try {
     const config = await invoke<SttConfig>('get_stt_config');
     currentProvider.value = config.provider as SttProviderType;
     currentLanguage.value = config.language;
+    locale.value = config.language;
+    localStorage.setItem('uiLocale', config.language);
 
     // Загружаем пользовательские API ключи если они есть
     deepgramApiKey.value = config.deepgram_api_key || '';
@@ -113,6 +203,26 @@ onMounted(async () => {
   updateAvailableUnlisten = await listen<string>('update:available', (event) => {
     updateAvailable.value = event.payload;
   });
+
+  document.addEventListener('mousedown', handleDocumentClick);
+
+  if (theme.value === 'light') {
+    document.documentElement.classList.add('theme-light');
+  }
+});
+
+watch(currentLanguage, (value) => {
+  locale.value = value;
+  localStorage.setItem('uiLocale', value);
+});
+
+watch(theme, (value) => {
+  if (value === 'light') {
+    document.documentElement.classList.add('theme-light');
+  } else {
+    document.documentElement.classList.remove('theme-light');
+  }
+  localStorage.setItem('uiTheme', value);
 });
 
 // Сохранение конфигурации
@@ -129,7 +239,7 @@ const saveConfig = async () => {
       });
 
       if (!isDownloaded) {
-        errorMessage.value = `Модель ${whisperModel.value} не скачана. Пожалуйста, скачайте модель перед сохранением.`;
+        errorMessage.value = t('settings.whisper.modelNotDownloaded', { model: whisperModel.value });
         isSaving.value = false;
         return;
       }
@@ -256,7 +366,7 @@ const checkForUpdates = async () => {
     if (version) {
       updateAvailable.value = version;
     } else {
-      updateError.value = 'Вы используете последнюю версию';
+      updateError.value = t('settings.updates.latest');
     }
   } catch (err) {
     console.error('Failed to check for updates:', err);
@@ -303,6 +413,7 @@ onUnmounted(() => {
   if (updateAvailableUnlisten) {
     updateAvailableUnlisten();
   }
+  document.removeEventListener('mousedown', handleDocumentClick);
 });
 </script>
 
@@ -310,51 +421,85 @@ onUnmounted(() => {
   <div class="settings-overlay" @click.self="emit('close')">
     <div class="settings-panel">
       <div class="settings-header">
-        <h2>Settings</h2>
+        <h2>{{ t('settings.title') }}</h2>
         <button class="close-button" @click="emit('close')">×</button>
       </div>
 
       <div class="settings-content">
         <!-- Provider Selection -->
         <div class="setting-group">
-          <label class="setting-label">Speech-to-Text Provider</label>
-          <select v-model="currentProvider" class="setting-select">
-            <option :value="SttProviderType.WhisperLocal">Whisper Local (оффлайн, требует cmake)</option>
-            <option :value="SttProviderType.AssemblyAI">AssemblyAI (онлайн)</option>
-            <option :value="SttProviderType.Deepgram">Deepgram (онлайн, Nova-2/3)</option>
-          </select>
+          <label class="setting-label">{{ t('settings.provider.label') }}</label>
+          <div ref="providerDropdownRef" class="provider-dropdown">
+            <button
+              class="provider-trigger"
+              type="button"
+              @click="toggleProviderDropdown"
+            >
+              <span>{{ selectedProviderLabel }}</span>
+              <span class="provider-chevron">▾</span>
+            </button>
+            <div v-if="isProviderOpen" class="provider-menu">
+              <button
+                v-for="option in providerOptions"
+                :key="option.value"
+                type="button"
+                class="provider-option"
+                :class="{ active: currentProvider === option.value }"
+                @click="selectProvider(option.value)"
+              >
+                {{ option.label }}
+              </button>
+            </div>
+          </div>
           <p class="setting-hint">
-            <strong>Whisper Local:</strong> работает полностью оффлайн, высокое качество. Требует установки cmake и загрузки модели.<br>
-            <strong>AssemblyAI и Deepgram:</strong> облачные сервисы с высоким качеством.
-            Deepgram автоматически выбирает модель: Nova-3 для английского, Nova-2 для русского.
+            <strong>{{ t('settings.provider.hintWhisperTitle') }}</strong>
+            {{ t('settings.provider.hintWhisperBody') }}<br>
+            <strong>{{ t('settings.provider.hintCloudTitle') }}</strong>
+            {{ t('settings.provider.hintCloudBody') }}
+            {{ t('settings.provider.hintDeepgramNote') }}
           </p>
         </div>
 
         <!-- Language Selection -->
         <div class="setting-group">
-          <label class="setting-label">Language</label>
-          <select v-model="currentLanguage" class="setting-select">
-            <option value="en">English</option>
-            <option value="ru">Русский</option>
-            <option value="es">Español</option>
-            <option value="fr">Français</option>
-            <option value="de">Deutsch</option>
-          </select>
+          <label class="setting-label">{{ t('settings.language.label') }}</label>
+          <div ref="languageDropdownRef" class="language-dropdown">
+            <button
+              class="language-trigger"
+              type="button"
+              @click="toggleLanguageDropdown"
+            >
+              <span>{{ selectedLanguageLabel }}</span>
+              <span class="language-chevron">▾</span>
+            </button>
+            <div v-if="isLanguageOpen" class="language-menu">
+              <button
+                v-for="option in languageOptions"
+                :key="option.value"
+                type="button"
+                class="language-option"
+                :class="{ active: currentLanguage === option.value }"
+                @click="selectLanguage(option.value)"
+              >
+                {{ option.label }}
+              </button>
+            </div>
+          </div>
         </div>
 
         <!-- API Keys (опционально для облачных провайдеров) -->
         <div v-if="currentProvider === SttProviderType.Deepgram || currentProvider === SttProviderType.AssemblyAI" class="setting-group">
-          <label class="setting-label">API Keys (опционально)</label>
+          <label class="setting-label">{{ t('settings.apiKeys.label') }}</label>
 
           <!-- Deepgram API Key -->
           <div v-if="currentProvider === SttProviderType.Deepgram" class="api-key-field">
-            <label class="setting-sublabel">Deepgram API Key</label>
+            <label class="setting-sublabel">{{ t('settings.apiKeys.deepgramLabel') }}</label>
             <div class="input-with-button">
               <input
                 :type="showDeepgramKey ? 'text' : 'password'"
                 v-model="deepgramApiKey"
                 class="setting-input"
-                placeholder="Оставьте пустым для использования встроенного ключа"
+                :placeholder="t('settings.apiKeys.placeholder')"
               />
               <button
                 class="toggle-visibility-button"
@@ -368,13 +513,13 @@ onUnmounted(() => {
 
           <!-- AssemblyAI API Key -->
           <div v-if="currentProvider === SttProviderType.AssemblyAI" class="api-key-field">
-            <label class="setting-sublabel">AssemblyAI API Key</label>
+            <label class="setting-sublabel">{{ t('settings.apiKeys.assemblyLabel') }}</label>
             <div class="input-with-button">
               <input
                 :type="showAssemblyAIKey ? 'text' : 'password'"
                 v-model="assemblyaiApiKey"
                 class="setting-input"
-                placeholder="Оставьте пустым для использования встроенного ключа"
+                :placeholder="t('settings.apiKeys.placeholder')"
               />
               <button
                 class="toggle-visibility-button"
@@ -387,14 +532,14 @@ onUnmounted(() => {
           </div>
 
           <p class="setting-hint">
-            Можете указать свой API ключ или оставить пустым для использования встроенного ключа.
-            Свой ключ нужен если хотите использовать собственные квоты и лимиты.
+            {{ t('settings.apiKeys.hintLine1') }}
+            {{ t('settings.apiKeys.hintLine2') }}
           </p>
         </div>
 
         <!-- Whisper Model Selection (только для WhisperLocal) -->
         <div v-if="isWhisperProvider" class="setting-group">
-          <label class="setting-label">Модель Whisper</label>
+          <label class="setting-label">{{ t('settings.whisper.label') }}</label>
           <select v-model="whisperModel" class="setting-select">
             <option
               v-for="model in whisperModels"
@@ -405,8 +550,8 @@ onUnmounted(() => {
             </option>
           </select>
           <p class="setting-hint">
-            Выберите модель для транскрибации. Модель должна быть скачана перед использованием.
-            Для загрузки моделей используйте менеджер ниже.
+            {{ t('settings.whisper.hintLine1') }}
+            {{ t('settings.whisper.hintLine2') }}
           </p>
         </div>
 
@@ -415,26 +560,49 @@ onUnmounted(() => {
           <ModelManager />
         </div>
 
+        <!-- Тема -->
+        <div class="setting-group">
+          <label class="setting-label">{{ t('settings.theme.label') }}</label>
+          <div class="theme-toggle">
+            <button
+              type="button"
+              class="theme-button"
+              :class="{ active: theme === 'dark' }"
+              @click="theme = 'dark'"
+            >
+              {{ t('settings.theme.dark') }}
+            </button>
+            <button
+              type="button"
+              class="theme-button"
+              :class="{ active: theme === 'light' }"
+              @click="theme = 'light'"
+            >
+              {{ t('settings.theme.light') }}
+            </button>
+          </div>
+        </div>
+
         <!-- Горячая клавиша для записи -->
         <div class="setting-group">
-          <label class="setting-label">Горячая клавиша для записи</label>
+          <label class="setting-label">{{ t('settings.hotkey.label') }}</label>
           <input
             type="text"
             v-model="recordingHotkey"
             class="setting-input"
-            placeholder="Например: Cmd+Shift+X, Alt+R"
+            :placeholder="t('settings.hotkey.placeholder')"
           />
           <p class="setting-hint">
-            Используйте комбинации вида: Cmd+Shift+X, Alt+R, CmdOrCtrl+Shift+R.
-            Поддерживаемые модификаторы: Ctrl, Alt, Shift, Cmd (Mac), CmdOrCtrl (кроссплатформенный Cmd/Ctrl).
-            ⚠️ Избегайте Ctrl+X на macOS - эта комбинация занята системой.
+            {{ t('settings.hotkey.hintLine1') }}
+            {{ t('settings.hotkey.hintLine2') }}
+            {{ t('settings.hotkey.hintLine3') }}
           </p>
         </div>
 
         <!-- Чувствительность микрофона -->
         <div class="setting-group">
           <label class="setting-label">
-            Чувствительность микрофона: {{ microphoneSensitivity }}%
+            {{ t('settings.micSensitivity.label', { value: microphoneSensitivity }) }}
           </label>
           <input
             type="range"
@@ -445,28 +613,28 @@ onUnmounted(() => {
             class="sensitivity-slider no-drag"
           />
           <div class="sensitivity-labels">
-            <span class="label-low">Тишина (0x)</span>
-            <span class="label-high">Усиление (5x)</span>
+            <span class="label-low">{{ t('settings.micSensitivity.low') }}</span>
+            <span class="label-high">{{ t('settings.micSensitivity.high') }}</span>
           </div>
           <p class="setting-hint">
-            Регулирует громкость микрофона. 100% = без изменений (как записывает микрофон),
-            выше 100% = усиление для тихих микрофонов, ниже 100% = приглушение.
-            Рекомендуется: 100% для нормального микрофона, 150-200% для очень тихого.
+            {{ t('settings.micSensitivity.hintLine1') }}
+            {{ t('settings.micSensitivity.hintLine2') }}
+            {{ t('settings.micSensitivity.hintLine3') }}
           </p>
         </div>
 
         <!-- Автоматические действия -->
         <div class="setting-group">
-          <label class="setting-label">Автоматические действия</label>
+          <label class="setting-label">{{ t('settings.autoActions.label') }}</label>
 
           <div class="checkbox">
             <input type="checkbox" v-model="autoCopyToClipboard" id="auto-copy">
-            <label for="auto-copy">Автоматически копировать в буфер обмена</label>
+            <label for="auto-copy">{{ t('settings.autoActions.copy') }}</label>
           </div>
 
           <div class="checkbox">
             <input type="checkbox" v-model="autoPasteText" id="auto-paste">
-            <label for="auto-paste">Автоматически вставлять текст</label>
+            <label for="auto-paste">{{ t('settings.autoActions.paste') }}</label>
           </div>
 
           <!-- Предупреждение о разрешении Accessibility для macOS -->
@@ -474,42 +642,60 @@ onUnmounted(() => {
             <div class="warning-content">
               <span class="warning-icon">⚠️</span>
               <div class="warning-text">
-                <strong>Требуется разрешение Accessibility</strong>
-                <p>Для автоматической вставки текста необходимо разрешение в настройках macOS.</p>
+                <strong>{{ t('settings.autoActions.accessibilityTitle') }}</strong>
+                <p>{{ t('settings.autoActions.accessibilityBody') }}</p>
               </div>
             </div>
             <button class="button-warning" @click="openAccessibilitySettings">
-              Открыть настройки доступности
+              {{ t('settings.autoActions.accessibilityButton') }}
             </button>
           </div>
 
           <p class="setting-hint">
-            <strong>Копирование:</strong> Сохраняет финальный текст в буфер обмена после остановки записи.<br>
-            <strong>Автовставка:</strong> По мере распознавания текста автоматически вставляет его в последнее активное окно.
-            {{ isMacOS ? 'Требует разрешения Accessibility на macOS.' : '' }}
+            <strong>{{ t('settings.autoActions.hintCopyTitle') }}</strong>
+            {{ t('settings.autoActions.hintCopyBody') }}<br>
+            <strong>{{ t('settings.autoActions.hintPasteTitle') }}</strong>
+            {{ t('settings.autoActions.hintPasteBody') }}
+            {{ isMacOS ? t('settings.autoActions.hintMacPermission') : '' }}
           </p>
         </div>
 
         <!-- Выбор устройства записи -->
         <div class="setting-group">
-          <label class="setting-label">Устройство записи</label>
-          <select v-model="selectedAudioDevice" class="input-field">
-            <option value="">Системное устройство по умолчанию</option>
-            <option v-for="device in availableAudioDevices" :key="device" :value="device">
-              {{ device }}
-            </option>
-          </select>
+          <label class="setting-label">{{ t('settings.device.label') }}</label>
+          <div ref="deviceDropdownRef" class="device-dropdown">
+            <button
+              class="device-trigger"
+              type="button"
+              @click="toggleDeviceDropdown"
+            >
+              <span>{{ selectedDeviceLabel }}</span>
+              <span class="device-chevron">▾</span>
+            </button>
+            <div v-if="isDeviceOpen" class="device-menu">
+              <button
+                v-for="option in deviceOptions"
+                :key="option.value"
+                type="button"
+                class="device-option"
+                :class="{ active: selectedAudioDevice === option.value }"
+                @click="selectDevice(option.value)"
+              >
+                {{ option.label }}
+              </button>
+            </div>
+          </div>
           <p class="setting-hint">
-            Выберите микрофон для записи. Если выбрано "По умолчанию", будет использоваться системное устройство ввода.
+            {{ t('settings.device.hint') }}
           </p>
         </div>
 
         <!-- Тест микрофона -->
         <div class="setting-group">
-          <label class="setting-label">Проверка микрофона</label>
+          <label class="setting-label">{{ t('settings.micTest.label') }}</label>
           <p class="setting-hint">
-            Нажмите кнопку ниже чтобы проверить работает ли микрофон.
-            После остановки записи вы услышите что было записано.
+            {{ t('settings.micTest.hintLine1') }}
+            {{ t('settings.micTest.hintLine2') }}
           </p>
 
           <div class="microphone-test">
@@ -518,19 +704,19 @@ onUnmounted(() => {
               class="button-test"
               @click="startMicrophoneTest"
             >
-              Начать проверку
+              {{ t('settings.micTest.start') }}
             </button>
             <button
               v-else
               class="button-test-stop"
               @click="stopMicrophoneTest"
             >
-              Остановить и воспроизвести
+              {{ t('settings.micTest.stop') }}
             </button>
 
             <!-- Визуализация уровня громкости -->
             <div v-if="isTesting" class="audio-level-container">
-              <div class="audio-level-label">Уровень громкости:</div>
+              <div class="audio-level-label">{{ t('settings.micTest.audioLevel') }}</div>
               <div class="audio-level-bar">
                 <div
                   class="audio-level-fill"
@@ -545,10 +731,10 @@ onUnmounted(() => {
 
         <!-- Обновления приложения -->
         <div class="setting-group">
-          <label class="setting-label">Обновления приложения</label>
+          <label class="setting-label">{{ t('settings.updates.label') }}</label>
           <p class="setting-hint">
-            Приложение автоматически проверяет обновления каждые 6 часов в фоновом режиме.
-            Вы также можете проверить обновления вручную.
+            {{ t('settings.updates.hintLine1') }}
+            {{ t('settings.updates.hintLine2') }}
           </p>
 
           <div class="update-controls">
@@ -557,7 +743,7 @@ onUnmounted(() => {
               :disabled="isCheckingUpdates"
               @click="checkForUpdates"
             >
-              {{ isCheckingUpdates ? 'Проверка...' : 'Проверить обновления' }}
+              {{ isCheckingUpdates ? t('settings.updates.checking') : t('settings.updates.check') }}
             </button>
 
             <!-- Индикатор доступного обновления -->
@@ -565,12 +751,12 @@ onUnmounted(() => {
               <div class="update-info">
                 <span class="update-icon">🎉</span>
                 <div>
-                  <div class="update-title">Доступна новая версия {{ updateAvailable }}</div>
-                  <div class="update-subtitle">Нажмите кнопку ниже чтобы установить</div>
+                  <div class="update-title">{{ t('settings.updates.availableTitle', { version: updateAvailable }) }}</div>
+                  <div class="update-subtitle">{{ t('settings.updates.availableSubtitle') }}</div>
                 </div>
               </div>
               <button class="button-install" @click="installUpdate">
-                Установить и перезапустить
+                {{ t('settings.updates.install') }}
               </button>
             </div>
 
@@ -587,13 +773,13 @@ onUnmounted(() => {
       </div>
 
       <div class="settings-footer">
-        <button class="button-secondary" @click="emit('close')">Cancel</button>
+        <button class="button-secondary" @click="emit('close')">{{ t('settings.cancel') }}</button>
         <button
           class="button-primary"
           :disabled="isSaving"
           @click="saveConfig"
         >
-          {{ isSaving ? 'Saving...' : 'Save' }}
+          {{ isSaving ? t('settings.saving') : t('settings.save') }}
         </button>
       </div>
     </div>
@@ -607,25 +793,24 @@ onUnmounted(() => {
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.6);
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: stretch;
+  justify-content: stretch;
   z-index: 1000;
-  backdrop-filter: blur(4px);
+  -webkit-app-region: no-drag;
 }
 
 .settings-panel {
   background: var(--color-surface);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-lg);
-  width: 400px;
-  max-width: 90%;
-  height: 1000px;
-  max-height: 95vh;
+  border-radius: 0;
+  box-shadow: none;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  -webkit-app-region: no-drag;
 }
 
 .settings-header {
@@ -666,8 +851,38 @@ onUnmounted(() => {
 
 .settings-content {
   padding: var(--spacing-sm);
-  overflow-y: auto;
+  overflow-y: scroll;
+  overflow-x: hidden;
   flex: 1;
+  min-height: 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-text-secondary) transparent;
+}
+
+:global(.theme-light) .audio-level-bar {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: rgba(0, 0, 0, 0.12);
+}
+
+:global(.theme-light) .audio-level-fill {
+  box-shadow: 0 0 8px rgba(37, 99, 235, 0.35);
+}
+
+.settings-content::-webkit-scrollbar {
+  width: 8px !important;
+}
+
+.settings-content::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.settings-content::-webkit-scrollbar-thumb {
+  background: var(--color-text-secondary);
+  border-radius: var(--radius-sm);
+}
+
+.settings-content::-webkit-scrollbar-thumb:hover {
+  background: var(--color-accent);
 }
 
 .setting-group {
@@ -686,8 +901,8 @@ onUnmounted(() => {
 .setting-input {
   width: 100%;
   padding: var(--spacing-sm);
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--field-bg);
+  border: 1px solid var(--field-border);
   border-radius: var(--radius-md);
   color: var(--color-text);
   font-size: 14px;
@@ -697,8 +912,239 @@ onUnmounted(() => {
 .setting-select:focus,
 .setting-input:focus {
   outline: none;
-  border-color: var(--color-accent);
+  border-color: var(--field-border-focus);
+  background: var(--field-bg-focus);
+}
+
+.setting-select option,
+.setting-select optgroup {
+  background: #1f1f1f;
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.language-dropdown {
+  position: relative;
+  width: 100%;
+}
+
+.language-trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--spacing-sm);
+  background: var(--field-bg);
+  border: 1px solid var(--field-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.language-trigger:hover {
+  background: var(--field-bg-focus);
+}
+
+.language-trigger:focus-visible {
+  outline: none;
+  border-color: var(--field-border-focus);
+  background: var(--field-bg-focus);
+}
+
+.language-chevron {
+  opacity: 0.7;
+  font-size: 12px;
+}
+
+.language-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  background: var(--dropdown-bg);
+  border: 1px solid var(--dropdown-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  max-height: 240px;
+  overflow-y: auto;
+  z-index: 10;
+}
+
+.language-option {
+  width: 100%;
+  text-align: left;
+  padding: var(--spacing-sm);
+  background: transparent;
+  border: none;
+  color: var(--color-text);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.language-option:hover,
+.language-option.active {
   background: rgba(255, 255, 255, 0.08);
+}
+
+.provider-dropdown {
+  position: relative;
+  width: 100%;
+}
+
+.provider-trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--spacing-sm);
+  background: var(--field-bg);
+  border: 1px solid var(--field-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.provider-trigger:hover {
+  background: var(--field-bg-focus);
+}
+
+.provider-trigger:focus-visible {
+  outline: none;
+  border-color: var(--field-border-focus);
+  background: var(--field-bg-focus);
+}
+
+.provider-chevron {
+  opacity: 0.7;
+  font-size: 12px;
+}
+
+.provider-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  background: var(--dropdown-bg);
+  border: 1px solid var(--dropdown-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  max-height: 240px;
+  overflow-y: auto;
+  z-index: 10;
+}
+
+.provider-option {
+  width: 100%;
+  text-align: left;
+  padding: var(--spacing-sm);
+  background: transparent;
+  border: none;
+  color: var(--color-text);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.provider-option:hover,
+.provider-option.active {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.device-dropdown {
+  position: relative;
+  width: 100%;
+}
+
+.device-trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--spacing-sm);
+  background: var(--field-bg);
+  border: 1px solid var(--field-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.device-trigger:hover {
+  background: var(--field-bg-focus);
+}
+
+.device-trigger:focus-visible {
+  outline: none;
+  border-color: var(--field-border-focus);
+  background: var(--field-bg-focus);
+}
+
+.device-chevron {
+  opacity: 0.7;
+  font-size: 12px;
+}
+
+.device-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  background: var(--dropdown-bg);
+  border: 1px solid var(--dropdown-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  max-height: 240px;
+  overflow-y: auto;
+  z-index: 10;
+}
+
+.device-option {
+  width: 100%;
+  text-align: left;
+  padding: var(--spacing-sm);
+  background: transparent;
+  border: none;
+  color: var(--color-text);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.device-option:hover,
+.device-option.active {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.theme-toggle {
+  display: flex;
+  gap: var(--spacing-sm);
+}
+
+.theme-button {
+  flex: 1;
+  padding: var(--spacing-sm);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--field-border);
+  background: var(--field-bg);
+  color: var(--color-text);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.theme-button:hover {
+  background: var(--field-bg-focus);
+}
+
+.theme-button.active {
+  border-color: var(--field-border-focus);
+  background: var(--field-bg-focus);
+  color: var(--color-text);
 }
 
 .setting-hint {
@@ -800,10 +1246,39 @@ onUnmounted(() => {
   width: 100%;
   height: 6px;
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--field-bg);
   outline: none;
   -webkit-appearance: none;
   appearance: none;
+}
+
+:global(.theme-light) .sensitivity-slider {
+  background: var(--field-bg);
+  border: 1px solid var(--field-border);
+}
+
+.sensitivity-slider::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--field-bg);
+  border: 1px solid var(--field-border);
+}
+
+:global(.theme-light) .sensitivity-slider::-webkit-slider-runnable-track {
+  background: rgba(0, 0, 0, 0.12);
+  border-color: rgba(0, 0, 0, 0.2);
+}
+
+.sensitivity-slider::-moz-range-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--field-bg);
+  border: 1px solid var(--field-border);
+}
+
+:global(.theme-light) .sensitivity-slider::-moz-range-track {
+  background: rgba(0, 0, 0, 0.12);
+  border-color: rgba(0, 0, 0, 0.2);
 }
 
 .sensitivity-slider::-webkit-slider-thumb {
@@ -814,6 +1289,7 @@ onUnmounted(() => {
   border-radius: 50%;
   background: var(--color-accent);
   cursor: pointer;
+  margin-top: -7px;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
   transition: all 0.2s ease;
 }

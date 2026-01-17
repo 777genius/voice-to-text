@@ -11,6 +11,12 @@
     --color-success: #4caf50;
     --color-error: #f44336;
     --color-warning: #ff9800;
+    --field-bg: rgba(255, 255, 255, 0.05);
+    --field-bg-focus: rgba(255, 255, 255, 0.08);
+    --field-border: rgba(255, 255, 255, 0.1);
+    --field-border-focus: rgba(74, 158, 255, 0.7);
+    --dropdown-bg: #1f1f1f;
+    --dropdown-border: rgba(255, 255, 255, 0.12);
     /* Glass window */
     --glass-bg: rgba(26, 26, 26, 0.9);
     --glass-border: rgba(255, 255, 255, 0.08);
@@ -32,6 +38,30 @@
     --shadow-lg: 0 8px 16px rgba(0, 0, 0, 0.2);
 }
 
+.theme-light {
+    --color-bg: #f2f3f5;
+    --color-surface: #ffffff;
+    --color-surface-hover: #f0f1f3;
+    --color-text: #111111;
+    --color-text-secondary: #5a5a5a;
+    --color-accent: #2563eb;
+    --color-accent-hover: #1d4ed8;
+    --color-success: #16a34a;
+    --color-error: #dc2626;
+    --color-warning: #f59e0b;
+    --glass-bg: rgba(255, 255, 255, 0.92);
+    --glass-border: rgba(0, 0, 0, 0.08);
+    --field-bg: rgba(0, 0, 0, 0.04);
+    --field-bg-focus: rgba(0, 0, 0, 0.06);
+    --field-border: rgba(0, 0, 0, 0.12);
+    --field-border-focus: rgba(37, 99, 235, 0.6);
+    --dropdown-bg: #ffffff;
+    --dropdown-border: rgba(0, 0, 0, 0.12);
+    --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.08);
+    --shadow-md: 0 6px 12px rgba(0, 0, 0, 0.12);
+    --shadow-lg: 0 12px 24px rgba(0, 0, 0, 0.16);
+}
+
 * {
     margin: 0;
     padding: 0;
@@ -45,6 +75,11 @@ body {
     color: var(--color-text);
     font-size: 14px;
     line-height: 1.5;
+}
+
+.os-macos body {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
 }
 
 #app {
@@ -67,21 +102,15 @@ body {
 
 
 /* Scrollbar styling */
-
 ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
+    width: 0;
+    height: 0;
 }
 
 ::-webkit-scrollbar-track {
-    background: var(--color-surface);
+    background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-    background: var(--color-text-secondary);
-    border-radius: var(--radius-sm);
-}
-
-::-webkit-scrollbar-thumb:hover {
-    background: var(--color-accent);
+    background: transparent;
 }

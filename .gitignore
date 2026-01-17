@@ -33,6 +33,7 @@ src-tauri/WixTools
 .env.*.local
 .env.test
 .env.production
+env
 
 # Secrets and credentials
 **/secrets*.txt

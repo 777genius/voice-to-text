@@ -135,7 +135,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             stt: SttConfig::default(),
-            recording_hotkey: "CmdOrCtrl+Shift+X".to_string(), // Кроссплатформенная комбинация
+            recording_hotkey: "Ctrl+Shift+X".to_string(), // Кроссплатформенная комбинация
             auto_copy_to_clipboard: true,
             auto_paste_text: false, // По умолчанию выключено (может раздражать)
             auto_close_window: true,
