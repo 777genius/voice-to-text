@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue';
+import { useI18n } from 'vue-i18n';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { WhisperModelInfo, WhisperModelDownloadProgress } from '../../types';
@@ -17,6 +18,8 @@ const errorMessage = ref('');
 // Состояние загрузки конкретной модели
 const downloadingModel = ref<string | null>(null);
 const downloadProgress = ref(0);
+
+const { t } = useI18n();
 
 let unlistenProgress: UnlistenFn | null = null;
 let unlistenStarted: UnlistenFn | null = null;
@@ -54,7 +57,7 @@ const downloadModel = async (modelName: string) => {
 // Удаление модели
 const deleteModel = async (modelName: string) => {
   // Подтверждение перед удалением
-  const confirmed = confirm(`Вы уверены что хотите удалить модель ${modelName}?`);
+  const confirmed = confirm(t('modelManager.deleteConfirm', { model: modelName }));
   if (!confirmed) return;
 
   try {
@@ -71,22 +74,22 @@ const deleteModel = async (modelName: string) => {
 
 // Проверяем скачана ли модель (из описания, которое обогащается на backend)
 const isModelDownloaded = (model: WhisperModelInfo): boolean => {
-  return model.description.includes('Скачана');
+  return model.description.includes('Скачана') || model.description.includes('Downloaded');
 };
 
 // Форматируем скорость (относительно base)
 const formatSpeed = (speedFactor: number): string => {
   if (speedFactor >= 1.0) {
-    return `${speedFactor.toFixed(1)}x быстрее`;
+    return t('modelManager.speedFaster', { value: speedFactor.toFixed(1) });
   } else {
-    return `${(1 / speedFactor).toFixed(1)}x медленнее`;
+    return t('modelManager.speedSlower', { value: (1 / speedFactor).toFixed(1) });
   }
 };
 
 // Форматируем качество
 const formatQuality = (qualityFactor: number): string => {
   const percent = Math.round(qualityFactor * 100);
-  return `${percent}%`;
+  return t('modelManager.qualityValue', { value: percent });
 };
 
 onMounted(async () => {
@@ -128,10 +131,11 @@ onUnmounted(() => {
 <template>
   <div class="model-manager">
     <div class="manager-header">
-      <h3>Управление моделями Whisper</h3>
+      <h3>{{ t('modelManager.title') }}</h3>
       <p class="manager-hint">
-        Скачайте модель для использования оффлайн транскрибации.
-        Рекомендуется модель <strong>small</strong> для баланса скорости и качества.
+        {{ t('modelManager.hintLine1') }}
+        <strong>{{ t('modelManager.hintModel') }}</strong>
+        {{ t('modelManager.hintLine2') }}
       </p>
     </div>
 
@@ -139,7 +143,7 @@ onUnmounted(() => {
     <div v-if="errorMessage" class="error-message">{{ errorMessage }}</div>
 
     <!-- Индикатор загрузки списка -->
-    <div v-if="isLoading" class="loading-message">Загрузка списка моделей...</div>
+    <div v-if="isLoading" class="loading-message">{{ t('modelManager.loading') }}</div>
 
     <!-- Список моделей -->
     <div v-else class="models-list">
@@ -152,22 +156,22 @@ onUnmounted(() => {
         <div class="model-info">
           <div class="model-header">
             <h4 class="model-name">{{ model.name }}</h4>
-            <span v-if="isModelDownloaded(model)" class="badge-downloaded">✓ Скачана</span>
+            <span v-if="isModelDownloaded(model)" class="badge-downloaded">✓ {{ t('modelManager.downloaded') }}</span>
           </div>
 
           <p class="model-description">{{ model.description }}</p>
 
           <div class="model-specs">
             <div class="spec-item">
-              <span class="spec-label">Размер:</span>
+              <span class="spec-label">{{ t('modelManager.sizeLabel') }}</span>
               <span class="spec-value">{{ model.size_human }}</span>
             </div>
             <div class="spec-item">
-              <span class="spec-label">Скорость:</span>
+              <span class="spec-label">{{ t('modelManager.speedLabel') }}</span>
               <span class="spec-value">{{ formatSpeed(model.speed_factor) }}</span>
             </div>
             <div class="spec-item">
-              <span class="spec-label">Качество:</span>
+              <span class="spec-label">{{ t('modelManager.qualityLabel') }}</span>
               <span class="spec-value">{{ formatQuality(model.quality_factor) }}</span>
             </div>
           </div>
@@ -195,7 +199,7 @@ onUnmounted(() => {
             @click="downloadModel(model.name)"
             :disabled="downloadingModel !== null"
           >
-            Скачать
+            {{ t('modelManager.download') }}
           </button>
           <button
             v-else
@@ -203,7 +207,7 @@ onUnmounted(() => {
             @click="deleteModel(model.name)"
             :disabled="downloadingModel !== null"
           >
-            Удалить
+            {{ t('modelManager.delete') }}
           </button>
         </div>
       </div>

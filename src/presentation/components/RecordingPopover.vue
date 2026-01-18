@@ -1,15 +1,33 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue';
+import { useI18n } from 'vue-i18n';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useTranscriptionStore } from '../../stores/transcription';
 import Settings from './Settings.vue';
-import type { FinalTranscriptionPayload } from '../../types';
-import { EVENT_TRANSCRIPTION_FINAL } from '../../types';
 import { playShowSound, playDoneSound } from '../../utils/sound';
+import { isTauriAvailable } from '../../utils/tauri';
+
+// Простая поддержка перетаскивания мышью по шапке
+async function onDragMouseDown(e: MouseEvent) {
+  if (e.button !== 0) return;
+  if (!isTauriAvailable()) return;
+  let el = e.target as HTMLElement | null;
+  while (el && el !== (e.currentTarget as HTMLElement)) {
+    if (el.classList && el.classList.contains('no-drag')) return;
+    el = el.parentElement;
+  }
+  try {
+    const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+    await getCurrentWebviewWindow().startDragging();
+  } catch (err) {
+    console.error('Failed to start dragging:', err);
+  }
+}
 
 const store = useTranscriptionStore();
+const { t } = useI18n();
 const showSettings = ref(false);
 const audioLevel = ref(0);
 const recordingHotkey = ref('Cmd+Shift+X');
@@ -43,6 +61,11 @@ watch(() => store.displayText, () => {
 });
 
 onMounted(async () => {
+  if (!isTauriAvailable()) {
+    store.error = t('main.tauriUnavailable');
+    return;
+  }
+
   await store.initialize();
 
   // Очищаем текст при показе окна (когда получает фокус)
@@ -178,14 +201,15 @@ const minimizeWindow = async () => {
 <template>
   <div class="popover-container">
     <div class="popover">
+      <div class="popover-content">
       <!-- Header -->
-      <div class="header" data-tauri-drag-region>
-        <div class="title">Voice to Text</div>
+      <div class="header" data-tauri-drag-region @mousedown="onDragMouseDown">
+        <div class="title">{{ t('app.title') }}</div>
         <div class="header-right">
-          <button class="minimize-button no-drag" @click="minimizeWindow" title="Minimize">
+          <button class="minimize-button no-drag" @click="minimizeWindow" :title="t('main.minimize')">
             −
           </button>
-          <button class="settings-button no-drag" @click="openSettings" title="Settings">
+          <button class="settings-button no-drag" @click="openSettings" :title="t('main.settings')">
             ⚙️
           </button>
           <div class="status-indicator" :class="{ active: store.isRecording }"></div>
@@ -198,8 +222,8 @@ const minimizeWindow = async () => {
           <div class="warning-icon">⚠️</div>
           <div class="warning-text">
             {{ store.connectionQuality === 'Recovering'
-              ? 'Восстановление связи...'
-              : 'Плохая связь. Запись продолжается...' }}
+              ? t('main.connectionRecovering')
+              : t('main.connectionPoor') }}
           </div>
         </div>
       </transition>
@@ -213,12 +237,12 @@ const minimizeWindow = async () => {
 
         <!-- Starting indicator -->
         <div v-if="store.isStarting" class="starting-message">
-          Подключение...
+          {{ t('main.connecting') }}
         </div>
 
         <!-- Audio Level Visualizer -->
         <div v-if="store.isRecording" class="audio-level-container">
-          <div class="audio-level-label">Уровень громкости</div>
+          <div class="audio-level-label">{{ t('main.audioLevel') }}</div>
           <div class="audio-level-bar">
             <div
               class="audio-level-fill"
@@ -234,7 +258,7 @@ const minimizeWindow = async () => {
         <div v-if="store.error || store.hasError" class="error-container">
           <div class="error-icon">⚠️</div>
           <div class="error-message">
-            {{ store.error || 'Произошла ошибка. Попробуйте снова.' }}
+            {{ store.error || t('main.errorGeneric') }}
           </div>
         </div>
       </div>
@@ -247,16 +271,17 @@ const minimizeWindow = async () => {
           :disabled="store.isProcessing || store.isStarting"
           @click="handleToggle"
         >
-          <span v-if="store.isIdle">Start Recording</span>
-          <span v-else-if="store.isStarting">Starting...</span>
-          <span v-else-if="store.isRecording">Stop Recording</span>
-          <span v-else-if="store.isProcessing">Processing...</span>
+          <span v-if="store.isIdle">{{ t('main.startRecording') }}</span>
+          <span v-else-if="store.isStarting">{{ t('main.starting') }}</span>
+          <span v-else-if="store.isRecording">{{ t('main.stopRecording') }}</span>
+          <span v-else-if="store.isProcessing">{{ t('main.processing') }}</span>
         </button>
       </div>
 
       <!-- Footer hint -->
       <div class="footer">
-        <span class="hint">{{ recordingHotkey }} для старта/остановки записи</span>
+        <span class="hint">{{ t('main.hotkeyHint', { hotkey: recordingHotkey }) }}</span>
+      </div>
       </div>
     </div>
 
@@ -267,24 +292,28 @@ const minimizeWindow = async () => {
 
 <style scoped>
 .popover-container {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: block;  
+  inset: 0;
   width: 100%;
-  max-width: 400px;
   height: 100%;
-  padding: var(--spacing-sm);
   box-sizing: border-box;
   overflow: hidden;
+  background: transparent;
+  border-radius: inherit;
+}
+
+:global(.os-windows) .popover-container {
+  left: -2px;
+  width: calc(100% + 2px);
 }
 
 .popover {
-  background: transparent;
-  border-radius: 0;
-  box-shadow: none;
-  padding: var(--spacing-sm);
+  background: var(--glass-bg);
+  border: none;
+  border-radius: inherit;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
   width: 100%;
-  max-width: 400px;
+  height: 100%;
   display: flex;
   flex-direction: column;
   gap: var(--spacing-sm);
@@ -292,25 +321,62 @@ const minimizeWindow = async () => {
   overflow: hidden;
 }
 
+:global(.theme-light) .popover {
+  box-shadow: none;
+}
+
+:global(.theme-light) .popover-container {
+  background: transparent;
+}
+
+:global(.os-macos) .popover {
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+}
+
+:global(.os-windows) .popover {
+  box-shadow: none;
+}
+
+.popover-content {
+  padding: var(--spacing-sm);
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+}
+
 .header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 0;
+  padding: var(--spacing-sm);
   width: 100%;
   box-sizing: border-box;
+  min-width: 0;
+  background: transparent;  
+}
+
+:global(.theme-light) .header {
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
 }
 
 .title {
+  flex: 1;
   font-size: 16px;
   font-weight: 600;
   color: var(--color-text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .header-right {
   display: flex;
   align-items: center;
   gap: var(--spacing-sm);
+  flex-shrink: 0;
 }
 
 .minimize-button,
@@ -330,7 +396,7 @@ const minimizeWindow = async () => {
   font-size: 22px;
   line-height: 1;
   font-weight: 400;
-  color: white;
+  color: var(--color-text);
 }
 
 .minimize-button:hover,
@@ -339,12 +405,51 @@ const minimizeWindow = async () => {
   background: rgba(255, 255, 255, 0.1);
 }
 
+:global(.theme-light) .minimize-button:hover,
+:global(.theme-light) .settings-button:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+:global(.theme-light) .minimize-button {
+  color: #1f2937;
+}
+
 .status-indicator {
   width: 12px;
   height: 12px;
   border-radius: 50%;
   background: var(--color-text-secondary);
   transition: all 0.3s ease;
+}
+
+:global(.os-windows) .popover {
+  padding: var(--spacing-xs);
+}
+
+:global(.os-windows) .header {
+  padding: 0 var(--spacing-xs);
+}
+
+:global(.os-windows) .header-right {
+  gap: var(--spacing-xs);
+}
+
+:global(.os-windows) .minimize-button,
+:global(.os-windows) .settings-button {
+  padding: 2px 4px;
+}
+
+:global(.os-windows) .minimize-button {
+  font-size: 20px;
+}
+
+:global(.os-windows) .settings-button {
+  font-size: 16px;
+}
+
+:global(.os-windows) .status-indicator {
+  width: 10px;
+  height: 10px;
 }
 
 .status-indicator.active {
@@ -357,22 +462,28 @@ const minimizeWindow = async () => {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: var(--spacing-sm);
   position: relative;
   width: 100%;
   box-sizing: border-box;
   overflow: hidden;
+  flex: 1;
 }
 
 .recording-indicator {
   position: relative;
-  width: 24px;
-  height: 24px;
+  margin-top: 10px;
+  width: 16px;
+  height: 16px;
+}
+
+:global(.os-windows) .recording-indicator {
+  margin-top: 0;
 }
 
 .pulse-ring {
-  position: absolute;
+  position: absolute;  
   width: 100%;
   height: 100%;
   border: 2px solid var(--color-accent);
@@ -436,9 +547,9 @@ const minimizeWindow = async () => {
 
 .audio-level-bar {
   width: 100%;
-  height: 20px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  height: 15px;
+  background: var(--field-bg);
+  border: 1px solid var(--field-border);
   border-radius: var(--radius-sm);
   overflow: hidden;
   position: relative;
@@ -457,7 +568,7 @@ const minimizeWindow = async () => {
   color: var(--color-text);
   text-align: left;
   line-height: 1.5;
-  max-height: 120px;
+  max-height: none;
   overflow-y: auto;
   padding: var(--spacing-sm);
   width: 100%;
@@ -511,6 +622,7 @@ const minimizeWindow = async () => {
   justify-content: center;
   width: 100%;
   box-sizing: border-box;
+  margin-top: auto;
 }
 
 .record-button {
@@ -561,6 +673,22 @@ const minimizeWindow = async () => {
   border-top: 1px solid rgba(255, 255, 255, 0.1);
   width: 100%;
   box-sizing: border-box;
+  margin-top: var(--spacing-xs);
+}
+
+:global(.theme-light) .footer {
+  position: relative;
+  border-top: none;
+}
+
+:global(.theme-light) .footer::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -1px;
+  height: 3px;
+  background: transparent;
 }
 
 .hint {

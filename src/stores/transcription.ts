@@ -3,6 +3,8 @@ import { ref, computed, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { playShowSound } from '../utils/sound';
+import { isTauriAvailable } from '../utils/tauri';
+import { i18n } from '../i18n';
 import {
   RecordingStatus,
   ConnectionQuality,
@@ -66,6 +68,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   );
 
   const displayText = computed(() => {
+    const t = i18n.global.t;
     // Показываем: финальный текст + анимированный накопленный + анимированный промежуточный
     const final = finalText.value;
     const accumulated = animatedAccumulatedText.value;
@@ -83,16 +86,16 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
     // Показываем placeholder только когда в режиме Idle
     if (status.value === RecordingStatus.Idle) {
-      return 'Press the button or use hotkey to start recording...';
+      return t('main.idlePrompt');
     }
 
     // Во время Starting/Recording показываем пустую строку или "Listening..."
     if (status.value === RecordingStatus.Starting) {
-      return 'Подключение...';
+      return t('main.connecting');
     }
 
     if (status.value === RecordingStatus.Recording) {
-      return 'Говорите...';
+      return t('main.listening');
     }
 
     return '';
@@ -193,6 +196,14 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   // Actions
   async function initialize() {
     console.log('Initializing transcription store');
+
+    if (!isTauriAvailable()) {
+      const message = i18n.global.t('main.tauriUnavailable');
+      console.warn(message);
+      error.value = message;
+      status.value = RecordingStatus.Error;
+      return;
+    }
 
     // Отписываемся от старых listeners перед регистрацией новых
     // Это предотвращает дублирование событий при повторной инициализации
@@ -587,19 +598,19 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           let errorMessage = '';
           switch (event.payload.error_type) {
             case 'timeout':
-              errorMessage = 'Превышен таймаут ожидания. Проверьте подключение к интернету.';
+              errorMessage = i18n.global.t('errors.timeout');
               break;
             case 'connection':
-              errorMessage = 'Проблема с подключением. Проверьте интернет и попробуйте снова.';
+              errorMessage = i18n.global.t('errors.connection');
               break;
             case 'authentication':
-              errorMessage = 'Ошибка авторизации. Проверьте API ключ в настройках.';
+              errorMessage = i18n.global.t('errors.authentication');
               break;
             case 'processing':
-              errorMessage = 'Ошибка обработки аудио. Попробуйте перезапустить запись.';
+              errorMessage = i18n.global.t('errors.processing');
               break;
             default:
-              errorMessage = `Ошибка: ${event.payload.error}`;
+              errorMessage = i18n.global.t('errors.generic', { error: event.payload.error });
           }
 
           error.value = errorMessage;
@@ -680,6 +691,17 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
+  function clearText() {
+    error.value = null;
+    partialText.value = '';
+    accumulatedText.value = '';
+    finalText.value = '';
+    lastFinalizedText.value = '';
+    currentUtteranceStart.value = -1;
+    animatedPartialText.value = '';
+    animatedAccumulatedText.value = '';
+  }
+
   async function toggleRecording() {
     if (isRecording.value) {
       await stopRecording();
@@ -756,6 +778,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     initialize,
     startRecording,
     stopRecording,
+    clearText,
     toggleRecording,
     cleanup,
     reloadConfig,
