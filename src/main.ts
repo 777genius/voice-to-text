@@ -17,6 +17,11 @@ if (isMacOS) {
   document.documentElement.classList.add('os-macos');
 }
 
+const storedFontSize = Number(localStorage.getItem('uiFontSize') || 14);
+if (!Number.isNaN(storedFontSize)) {
+  document.documentElement.style.setProperty('--transcription-font-size', `${storedFontSize}px`);
+}
+
 app.use(pinia);
 app.use(i18n);
 app.mount('#app');

@@ -25,8 +25,8 @@ const autoPasteText = ref(false);
 const isSaving = ref(false);
 const saveMessage = ref('');
 const errorMessage = ref('');
-const isDragging = ref(false);
 const theme = ref<'dark' | 'light'>((localStorage.getItem('uiTheme') as 'dark' | 'light') ?? 'dark');
+const transcriptionFontSize = ref<number>(Number(localStorage.getItem('uiFontSize') || 14));
 
 const { t, locale } = useI18n();
 
@@ -209,6 +209,7 @@ onMounted(async () => {
   if (theme.value === 'light') {
     document.documentElement.classList.add('theme-light');
   }
+  document.documentElement.style.setProperty('--transcription-font-size', `${transcriptionFontSize.value}px`);
 });
 
 watch(currentLanguage, (value) => {
@@ -223,6 +224,11 @@ watch(theme, (value) => {
     document.documentElement.classList.remove('theme-light');
   }
   localStorage.setItem('uiTheme', value);
+});
+
+watch(transcriptionFontSize, (value) => {
+  document.documentElement.style.setProperty('--transcription-font-size', `${value}px`);
+  localStorage.setItem('uiFontSize', String(value));
 });
 
 // Сохранение конфигурации
@@ -580,6 +586,25 @@ onUnmounted(() => {
             >
               {{ t('settings.theme.light') }}
             </button>
+          </div>
+        </div>
+
+        <!-- Размер шрифта -->
+        <div class="setting-group">
+          <label class="setting-label">
+            {{ t('settings.textSize.label', { value: transcriptionFontSize }) }}
+          </label>
+          <input
+            type="range"
+            min="12"
+            max="20"
+            step="1"
+            v-model.number="transcriptionFontSize"
+            class="sensitivity-slider no-drag"
+          />
+          <div class="sensitivity-labels">
+            <span class="label-low">{{ t('settings.textSize.small') }}</span>
+            <span class="label-high">{{ t('settings.textSize.large') }}</span>
           </div>
         </div>
 

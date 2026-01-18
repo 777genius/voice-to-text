@@ -16,7 +16,7 @@
   "dependencies": {
     "vue": "^3.4.0",
     "pinia": "^2.1.0",
-    "vue-i18n": "^9.10.0"
+    "vue-i18n": "^11.2.8"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",

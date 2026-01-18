@@ -564,7 +564,7 @@ const minimizeWindow = async () => {
 }
 
 .transcription-text {
-  font-size: 14px;
+  font-size: var(--transcription-font-size, 14px);
   color: var(--color-text);
   text-align: left;
   line-height: 1.5;
