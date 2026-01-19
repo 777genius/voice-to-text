@@ -2,6 +2,7 @@ import vuetify from "vite-plugin-vuetify";
 import { generateI18nRoutes, supportedLocales } from "./data/i18n";
 
 export default defineNuxtConfig({
+  compatibilityDate: "2026-01-19",
   ssr: true,
   modules: [
     "@pinia/nuxt",
@@ -35,6 +36,9 @@ export default defineNuxtConfig({
     strategy: "prefix_except_default",
     lazy: true,
     langDir: "locales",
+    bundle: {
+      optimizeTranslationDirective: false
+    },
     detectBrowserLanguage: {
       useCookie: true,
       cookieKey: "i18n_redirected",

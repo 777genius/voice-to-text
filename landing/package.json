@@ -13,24 +13,24 @@
     "format:fix": "prettier . --write"
   },
   "dependencies": {
-    "@nuxtjs/i18n": "^9.0.0",
-    "@pinia/nuxt": "^0.5.1",
-    "@vueuse/nuxt": "^10.10.0",
-    "nuxt": "^3.11.2",
+    "@nuxtjs/i18n": "^9.5.6",
+    "@pinia/nuxt": "^0.11.3",
+    "@vueuse/nuxt": "^10.11.1",
+    "nuxt": "^3.20.2",
     "nuxt-icon": "^0.6.10",
-    "pinia": "^2.1.7",
-    "swiper": "^11.1.9",
-    "vue": "^3.4.0",
+    "pinia": "^3.0.4",
+    "swiper": "^11.2.10",
+    "vue": "^3.5.27",
     "vue-i18n": "^11.2.8",
     "vue-router": "^4.6.4",
-    "vuetify": "^3.5.0"
+    "vuetify": "^3.11.6"
   },
   "devDependencies": {
     "@mdi/font": "^7.4.47",
-    "@nuxt/eslint": "^0.4.0",
-    "eslint": "^8.57.0",
-    "prettier": "^3.2.5",
-    "sass": "^1.77.0",
-    "vite-plugin-vuetify": "^2.0.3"
+    "@nuxt/eslint": "^1.12.1",
+    "eslint": "^9.39.2",
+    "prettier": "^3.8.0",
+    "sass": "^1.97.2",
+    "vite-plugin-vuetify": "^2.1.3"
   }
 }
