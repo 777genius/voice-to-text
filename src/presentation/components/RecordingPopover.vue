@@ -96,7 +96,15 @@ onMounted(async () => {
     console.log('[Hotkey] Received recording:start-requested');
     console.log('[Hotkey] store.status =', store.status);
     console.log('[Hotkey] store.isIdle =', store.isIdle);
-    if (store.isIdle) {
+    // Важно: доверяем Rust-стороне (она эмитит это событие только когда считает что запись можно стартовать).
+    // В dev/HMR бывает рассинхрон: Rust уже вернулся в Idle, а frontend остался в Error → раньше hotkey "залипал".
+    // Разрешаем старт и из Error, но не вмешиваемся если уже идёт старт/запись/обработка.
+    if (store.isStarting || store.isProcessing || store.isRecording) {
+      console.log('[Hotkey] Skipped - already busy');
+      return;
+    }
+
+    if (store.isIdle || store.hasError) {
       console.log('[Hotkey] Starting recording...');
       await store.startRecording();
       console.log('[Hotkey] startRecording completed');
@@ -236,10 +244,10 @@ const minimizeWindow = async () => {
             @click="openProfile"
             :title="t('profile.title')"
           >
-            👤
+            <span class="mdi mdi-account-circle-outline"></span>
           </button>
           <button class="settings-button no-drag" @click="openSettings" :title="t('main.settings')">
-            ⚙️
+            <span class="mdi mdi-cog-outline"></span>
           </button>
         </div>
       </div>

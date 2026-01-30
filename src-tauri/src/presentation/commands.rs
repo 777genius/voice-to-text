@@ -905,6 +905,7 @@ pub async fn register_recording_hotkey(
     app_handle: AppHandle,
 ) -> Result<(), String> {
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
+    use std::sync::atomic::Ordering;
 
     let hotkey = state.config.read().await.recording_hotkey.clone();
     log::info!("Command: register_recording_hotkey - hotkey: {}", hotkey);
@@ -933,6 +934,18 @@ pub async fn register_recording_hotkey(
 
             if let (Some(state), Some(window)) = (state_opt, window_opt) {
                 let app_for_call = app_clone.clone();
+
+                // Дебаунс: защищаемся от key repeat / двойных срабатываний.
+                // Иначе окно может "мигать" (показ/скрытие несколько раз подряд).
+                let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+                let last_ms = state.inner().last_recording_hotkey_ms.load(Ordering::Relaxed);
+                let delta = now_ms.saturating_sub(last_ms);
+                if delta < 450 {
+                    log::debug!("Hotkey ignored (debounced): {}ms since last trigger", delta);
+                    return;
+                }
+                state.inner().last_recording_hotkey_ms.store(now_ms, Ordering::Relaxed);
+
                 if let Err(e) = crate::presentation::commands::toggle_recording_with_window_internal(
                     state.inner(),
                     window,

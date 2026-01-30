@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use tokio::sync::RwLock;
 
 use crate::application::TranscriptionService;
@@ -68,6 +69,10 @@ pub struct AppState {
     /// Флаг авторизации пользователя (синхронизируется из frontend)
     /// Используется для определения какое окно показывать при нажатии hotkey
     pub is_authenticated: Arc<RwLock<bool>>,
+
+    /// Дебаунс для глобального hotkey записи.
+    /// Нужен из‑за key repeat / случайных двойных срабатываний, которые выглядят как "мигание" окна.
+    pub last_recording_hotkey_ms: AtomicU64,
 }
 
 impl AppState {
@@ -97,6 +102,7 @@ impl AppState {
                     vad_handler_task: Arc::new(RwLock::new(None)),
                     last_focused_app_bundle_id: Arc::new(RwLock::new(None)),
                     is_authenticated: Arc::new(RwLock::new(false)),
+                    last_recording_hotkey_ms: AtomicU64::new(0),
                 };
             }
         };
@@ -126,6 +132,7 @@ impl AppState {
                     vad_handler_task: Arc::new(RwLock::new(None)),
                     last_focused_app_bundle_id: Arc::new(RwLock::new(None)),
                     is_authenticated: Arc::new(RwLock::new(false)),
+                    last_recording_hotkey_ms: AtomicU64::new(0),
                 };
             }
         };
@@ -162,6 +169,7 @@ impl AppState {
             vad_handler_task: Arc::new(RwLock::new(None)),
             last_focused_app_bundle_id: Arc::new(RwLock::new(None)),
             is_authenticated: Arc::new(RwLock::new(false)),
+            last_recording_hotkey_ms: AtomicU64::new(0),
         }
     }
 
