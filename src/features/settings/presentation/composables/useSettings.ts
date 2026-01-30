@@ -92,9 +92,16 @@ export function useSettings() {
         store.setWhisperModel(sttConfig.model);
       }
 
-      // Синхронизируем локаль UI
-      locale.value = sttConfig.language;
-      localStorage.setItem('uiLocale', sttConfig.language);
+      // Синхронизируем локаль UI: localStorage имеет приоритет
+      // (пользователь мог выбрать язык на экране входа до загрузки конфига)
+      const storedLocale = localStorage.getItem('uiLocale');
+      if (storedLocale) {
+        locale.value = storedLocale;
+        store.setLanguage(storedLocale);
+      } else {
+        locale.value = sttConfig.language;
+        localStorage.setItem('uiLocale', sttConfig.language);
+      }
 
       // Загружаем App конфиг
       try {

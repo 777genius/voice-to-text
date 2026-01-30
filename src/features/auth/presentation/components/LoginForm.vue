@@ -25,6 +25,10 @@ const confirmPassword = ref('');
 const showPassword = ref(false);
 const formValid = ref(false);
 
+// Раздельные флаги загрузки для email и Google кнопок
+const isEmailLoading = ref(false);
+const isGoogleLoading = ref(false);
+
 const emailRules = computed(() => [
   (v: string) => !!v || t('auth.rules.emailRequired'),
   (v: string) => /.+@.+\..+/.test(v) || t('auth.rules.emailInvalid'),
@@ -45,15 +49,25 @@ const isRegister = computed(() => props.mode === 'register');
 async function submit() {
   if (!formValid.value) return;
 
-  if (isRegister.value) {
-    await auth.register(email.value, password.value);
-  } else {
-    await auth.login(email.value, password.value);
+  isEmailLoading.value = true;
+  try {
+    if (isRegister.value) {
+      await auth.register(email.value, password.value);
+    } else {
+      await auth.login(email.value, password.value);
+    }
+  } finally {
+    isEmailLoading.value = false;
   }
 }
 
 async function loginWithGoogle() {
-  await oauth.startGoogleOAuth();
+  isGoogleLoading.value = true;
+  try {
+    await oauth.startGoogleOAuth();
+  } finally {
+    isGoogleLoading.value = false;
+  }
 }
 </script>
 
@@ -76,7 +90,7 @@ async function loginWithGoogle() {
       type="email"
       prepend-inner-icon="mdi-email-outline"
       :rules="emailRules"
-      :disabled="auth.isLoading.value"
+      :disabled="isEmailLoading || isGoogleLoading"
       autocomplete="email"
       autofocus
       class="mb-2"
@@ -89,7 +103,7 @@ async function loginWithGoogle() {
       prepend-inner-icon="mdi-lock-outline"
       :append-inner-icon="showPassword ? 'mdi-eye-off' : 'mdi-eye'"
       :rules="passwordRules"
-      :disabled="auth.isLoading.value"
+      :disabled="isEmailLoading || isGoogleLoading"
       autocomplete="current-password"
       class="mb-2"
       @click:append-inner="showPassword = !showPassword"
@@ -102,7 +116,7 @@ async function loginWithGoogle() {
       :type="showPassword ? 'text' : 'password'"
       prepend-inner-icon="mdi-lock-check-outline"
       :rules="confirmPasswordRules"
-      :disabled="auth.isLoading.value"
+      :disabled="isEmailLoading || isGoogleLoading"
       autocomplete="new-password"
       class="mb-2"
     />
@@ -123,8 +137,8 @@ async function loginWithGoogle() {
       color="primary"
       size="large"
       block
-      :loading="auth.isLoading.value"
-      :disabled="!formValid"
+      :loading="isEmailLoading"
+      :disabled="!formValid || isGoogleLoading"
       class="mb-4"
     >
       {{ isRegister ? t('auth.register') : t('auth.login') }}
@@ -140,8 +154,8 @@ async function loginWithGoogle() {
       variant="outlined"
       size="large"
       block
-      :loading="auth.isLoading.value"
-      :disabled="auth.isLoading.value"
+      :loading="isGoogleLoading"
+      :disabled="isEmailLoading"
       class="mb-4"
       @click="loginWithGoogle"
     >

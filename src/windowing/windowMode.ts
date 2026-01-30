@@ -35,7 +35,11 @@ export function getWindowMode(input: WindowModeInput): WindowModeOutput {
         : { render: 'auth', desiredWindow: null };
 
     case 'settings':
-      return { render: 'settings', desiredWindow: null };
+      // Окно настроек — только для авторизованных пользователей.
+      // Если пользователь не залогинен, окно должно быть скрыто, а UI — переехать в auth.
+      return input.isAuthenticated
+        ? { render: 'settings', desiredWindow: null }
+        : { render: 'none', desiredWindow: 'auth' };
 
     default:
       // В браузере/тестах: оставляем старое поведение как fallback.

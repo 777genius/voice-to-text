@@ -1249,6 +1249,13 @@ pub async fn show_auth_window(app_handle: AppHandle) -> Result<(), String> {
         }
     }
 
+    // Скрываем settings окно (если было открыто)
+    if let Some(settings) = app_handle.get_webview_window("settings") {
+        if let Err(e) = settings.hide() {
+            log::warn!("Failed to hide settings window: {}", e);
+        }
+    }
+
     // Показываем auth окно
     if let Some(auth) = app_handle.get_webview_window("auth") {
         // Центрируем и показываем на активном мониторе, чтобы окно точно было видно
@@ -1291,8 +1298,19 @@ pub async fn show_recording_window(app_handle: AppHandle) -> Result<(), String> 
 
 /// Показывает settings окно и скрывает recording (main)
 #[tauri::command]
-pub async fn show_settings_window(app_handle: AppHandle) -> Result<(), String> {
+pub async fn show_settings_window(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
     log::info!("Command: show_settings_window");
+
+    // Настройки доступны только авторизованному пользователю.
+    // Если не авторизован — открываем auth окно, а settings держим скрытым.
+    if !*state.is_authenticated.read().await {
+        log::info!("show_settings_window: user is not authenticated -> redirect to auth window");
+        show_auth_window(app_handle).await?;
+        return Err("Not authenticated".to_string());
+    }
 
     // Скрываем recording окно (main)
     if let Some(main) = app_handle.get_webview_window("main") {

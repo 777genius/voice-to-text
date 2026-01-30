@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, computed, watch, ref } from 'vue';
+import { onMounted, onUnmounted, computed, watch, ref, nextTick } from 'vue';
 import { useTheme } from 'vuetify';
 import { useAuth, useAuthState } from './features/auth';
 import AuthScreen from './features/auth/presentation/components/AuthScreen.vue';
@@ -24,8 +24,25 @@ let unlistenUiLocaleChange: UnlistenFn | null = null;
 // Флаг завершения инициализации (чтобы не мелькал AuthScreen)
 const isInitialized = ref(false);
 
-// Флаг: изменение пришло от другого окна (не отправлять событие в ответ)
-let isExternalAuthChange = false;
+// Защита от "пинг-понга" между окнами:
+// при синхронизации auth из другого окна мы обновляем store у себя, но не шлём set_authenticated обратно.
+let externalAuthSyncDepth = 0;
+
+function isExternalAuthSync(): boolean {
+  return externalAuthSyncDepth > 0;
+}
+
+async function runExternalAuthSync(task: () => Promise<void>): Promise<void> {
+  externalAuthSyncDepth += 1;
+  try {
+    await task();
+    // Важно: даём Vue отработать реактивные обновления,
+    // чтобы watcher не успел отправить set_authenticated обратно.
+    await nextTick();
+  } finally {
+    externalAuthSyncDepth = Math.max(0, externalAuthSyncDepth - 1);
+  }
+}
 
 const windowLabel = ref<AppWindowLabel>('unknown');
 
@@ -53,7 +70,11 @@ watch(
       if (render === 'none') {
         await getCurrentWindow().hide();
       } else {
-        await getCurrentWindow().show();
+        // Settings окно контролируется командами backend (show_settings_window/show_recording_window),
+        // поэтому НЕ показываем его автоматически на старте.
+        if (windowLabel.value !== 'settings') {
+          await getCurrentWindow().show();
+        }
       }
     } catch {}
   }
@@ -95,14 +116,16 @@ watch(() => theme.global.name.value, (newTheme) => {
 // При смене состояния авторизации - синхронизируем с backend и переключаем окна
 watch(() => authState.isAuthenticated.value, async (isAuth) => {
   if (!isInitialized.value) return;
+  // Во время загрузки auth мы не должны "перекидывать" пользователя между окнами.
+  // Это особенно критично при синхронизации между окнами и во время refresh токенов.
+  if (authState.isLoading.value) return;
 
   try {
-    if (!isExternalAuthChange) {
+    if (!isExternalAuthSync()) {
       const token = isAuth ? authState.accessToken.value : null;
       console.log('[Auth] set_authenticated called, isAuth:', isAuth, 'token present:', !!token);
       await invoke('set_authenticated', { authenticated: isAuth, token });
     }
-    isExternalAuthChange = false;
 
     // Переключение делаем по правилам окна, чтобы main не показывал auth UI и наоборот.
     // Важно: сначала прячем текущее окно (иногда hide из backend может не отработать вовремя).
@@ -112,6 +135,12 @@ watch(() => authState.isAuthenticated.value, async (isAuth) => {
       } catch {}
       await invoke('show_recording_window');
     } else if (windowLabel.value === 'main' && !isAuth) {
+      try {
+        await getCurrentWindow().hide();
+      } catch {}
+      await invoke('show_auth_window');
+    } else if (windowLabel.value === 'settings' && !isAuth) {
+      // Если юзер разлогинился в настройках — закрываем настройки и показываем auth.
       try {
         await getCurrentWindow().hide();
       } catch {}
@@ -173,8 +202,7 @@ onMounted(async () => {
 
     const scope = event.payload?.scope ?? null;
     if (scope === 'auth') {
-      isExternalAuthChange = true;
-      await auth.initialize();
+      await runExternalAuthSync(() => auth.initialize({ silent: true }));
       return;
     }
 
@@ -208,6 +236,20 @@ onUnmounted(() => {
   }
   cleanupUpdateListener();
 });
+
+// HMR в dev иногда не размонтирует компонент "чисто".
+// На всякий случай отписываемся от tauri listeners при замене модуля,
+// чтобы не словить дублирование и повторные sync/переключения окон.
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    try {
+      if (unlistenConfigChanged) unlistenConfigChanged();
+      if (unlistenUiThemeChange) unlistenUiThemeChange();
+      if (unlistenUiLocaleChange) unlistenUiLocaleChange();
+    } catch {}
+    cleanupUpdateListener();
+  });
+}
 </script>
 
 <template>

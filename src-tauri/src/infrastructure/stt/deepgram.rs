@@ -18,11 +18,8 @@ use crate::infrastructure::embedded_keys;
 /// Deepgram cloud STT provider
 ///
 /// Endpoint: wss://api.deepgram.com/v1/listen
-/// Pricing: ~$0.0077/min for Nova-3, ~$0.0043/min for Nova-2
-/// Models:
-/// - Nova-3: английский, испанский, французский, немецкий, португальский, итальянский, голландский
-/// - Nova-2: русский и другие языки
-/// Модель выбирается автоматически в зависимости от языка
+/// Pricing: ~$0.0077/min for Nova-3
+/// Model: Nova-3 (47+ языков, включая русский, английский, и др.)
 ///
 /// Protocol:
 /// 1. Connect with Authorization: Token API_KEY header
@@ -149,18 +146,10 @@ impl SttProvider for DeepgramProvider {
             .and_then(|c| Some(c.language.clone()))
             .unwrap_or_else(|| "en".to_string());
 
-        // Определяем модель из конфига
-        // Nova-3 поддерживает только английский и несколько основных языков
-        // Nova-2 поддерживает больше языков включая русский
+        // Nova-3 поддерживает 47+ языков, включая русский
         let model = self.config.as_ref()
             .and_then(|c| c.model.clone())
-            .unwrap_or_else(|| {
-                // Автоматически выбираем модель в зависимости от языка
-                match language.as_str() {
-                    "en" | "es" | "fr" | "de" | "pt" | "it" | "nl" => "nova-3",
-                    _ => "nova-2", // для остальных языков используем nova-2
-                }.to_string()
-            });
+            .unwrap_or_else(|| "nova-3".to_string());
 
         log::info!("Using Deepgram model '{}' for language '{}'", model, language);
 
@@ -797,7 +786,7 @@ impl SttProvider for DeepgramProvider {
     }
 
     fn name(&self) -> &str {
-        "Deepgram (Nova-2/Nova-3)"
+        "Deepgram (Nova-3)"
     }
 
     fn supports_keep_alive(&self) -> bool {
@@ -950,7 +939,7 @@ impl DeepgramProvider {
                 "{}?encoding=linear16&sample_rate=16000&channels=1&language={}&model={}",
                 DEEPGRAM_WS_URL,
                 config.language,
-                config.model.as_deref().unwrap_or("nova-2")
+                config.model.as_deref().unwrap_or("nova-3")
             );
 
             let request = match Request::builder()

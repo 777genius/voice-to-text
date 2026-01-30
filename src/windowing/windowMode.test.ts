@@ -52,15 +52,17 @@ describe('getWindowMode', () => {
     ).toEqual({ render: 'none', desiredWindow: 'main' });
   });
 
-  it('settings window: always render settings', () => {
+  it('settings window: unauthenticated -> render none, request auth window', () => {
     expect(
       getWindowMode({
         windowLabel: 'settings',
         isInitialized: true,
         isAuthenticated: false,
       })
-    ).toEqual({ render: 'settings', desiredWindow: null });
+    ).toEqual({ render: 'none', desiredWindow: 'auth' });
+  });
 
+  it('settings window: authenticated -> render settings', () => {
     expect(
       getWindowMode({
         windowLabel: 'settings',

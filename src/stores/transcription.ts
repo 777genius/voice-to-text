@@ -27,6 +27,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const accumulatedText = ref<string>(''); // накопленные финализированные сегменты
   const finalText = ref<string>(''); // полный финальный результат (для копирования)
   const error = ref<string | null>(null);
+  const errorType = ref<TranscriptionErrorPayload['error_type'] | null>(null);
   const lastFinalizedText = ref<string>(''); // последний финализированный текст (для дедупликации)
   const connectionQuality = ref<ConnectionQuality>(ConnectionQuality.Good);
 
@@ -202,6 +203,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       const message = i18n.global.t('main.tauriUnavailable');
       console.warn(message);
       error.value = message;
+      errorType.value = null;
       status.value = RecordingStatus.Error;
       return;
     }
@@ -493,6 +495,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             lastFinalizedText.value = '';
             currentUtteranceStart.value = -1;
             error.value = null;
+            errorType.value = null;
 
             // Сбрасываем флаг auto-paste
             lastPastedFinalText.value = '';
@@ -615,6 +618,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
 
           error.value = errorMessage;
+          errorType.value = event.payload.error_type;
           status.value = RecordingStatus.Error;
         }
       );
@@ -655,6 +659,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     try {
       // Очищаем весь предыдущий текст перед новой записью
       error.value = null;
+      errorType.value = null;
       partialText.value = '';
       accumulatedText.value = '';
       finalText.value = '';
@@ -685,7 +690,53 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       console.log('Recording started:', result);
     } catch (err) {
       console.error('Failed to start recording:', err);
-      error.value = String(err);
+      const raw = String(err ?? '');
+      const lower = raw.toLowerCase();
+
+      // Ошибка старта записи приходит как строка из Rust/Tauri.
+      // Здесь важно НЕ показывать пользователю технические детали (401, "Failed to...", и т.п.)
+      // и вместо этого дать понятный сценарий действий.
+      let detectedType: TranscriptionErrorPayload['error_type'] | null = null;
+      if (
+        lower.includes('authentication error') ||
+        lower.includes('401') ||
+        lower.includes('unauthorized') ||
+        lower.includes('token') && lower.includes('auth')
+      ) {
+        detectedType = 'authentication';
+      } else if (lower.includes('timeout') || lower.includes('timed out')) {
+        detectedType = 'timeout';
+      } else if (lower.includes('connection error') || lower.includes('websocket')) {
+        detectedType = 'connection';
+      } else if (lower.includes('configuration error')) {
+        detectedType = 'configuration';
+      } else if (lower.includes('processing error')) {
+        detectedType = 'processing';
+      }
+
+      let errorMessage = '';
+      switch (detectedType) {
+        case 'timeout':
+          errorMessage = i18n.global.t('errors.timeout');
+          break;
+        case 'connection':
+          errorMessage = i18n.global.t('errors.connection');
+          break;
+        case 'authentication':
+          errorMessage = i18n.global.t('errors.authentication');
+          break;
+        case 'processing':
+          errorMessage = i18n.global.t('errors.processing');
+          break;
+        case 'configuration':
+          errorMessage = i18n.global.t('errors.generic', { error: raw });
+          break;
+        default:
+          errorMessage = i18n.global.t('errors.generic', { error: raw });
+      }
+
+      errorType.value = detectedType;
+      error.value = errorMessage;
       status.value = RecordingStatus.Error;
     }
   }
@@ -704,6 +755,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   function clearText() {
     error.value = null;
+    errorType.value = null;
     partialText.value = '';
     accumulatedText.value = '';
     finalText.value = '';
@@ -778,6 +830,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     accumulatedText,
     finalText,
     error,
+    errorType,
     connectionQuality,
 
     // Computed

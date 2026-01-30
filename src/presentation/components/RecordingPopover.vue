@@ -4,8 +4,10 @@ import { useI18n } from 'vue-i18n';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { LogicalSize } from '@tauri-apps/api/dpi';
 import { useTranscriptionStore } from '../../stores/transcription';
 import { useAppConfigStore } from '../../stores/appConfig';
+import { useAuth } from '../../features/auth';
 import { useAuthStore } from '../../features/auth/store/authStore';
 import { SettingsPanel } from '../../features/settings';
 import ProfilePopover from './ProfilePopover.vue';
@@ -35,6 +37,7 @@ async function onDragMouseDown(e: MouseEvent) {
 const store = useTranscriptionStore();
 const appConfigStore = useAppConfigStore();
 const authStore = useAuthStore();
+const auth = useAuth();
 const { t } = useI18n();
 const showSettings = ref(false);
 const showProfile = ref(false);
@@ -53,7 +56,38 @@ let unlistenStartRequested: UnlistenFn | null = null;
 // Ref для элемента транскрипции (для автоскролла)
 const transcriptionTextRef = ref<HTMLElement | null>(null);
 
-// Автоскролл вниз при обновлении текста (если скролл уже внизу)
+// Динамическая высота окна при росте текста
+const BASE_WINDOW_HEIGHT = 330;
+const TEXT_THRESHOLD_PX = 128; // ~5 строк (line-height 1.5 × font-size 17px)
+const MAX_WINDOW_HEIGHT = 700;
+const NON_TEXT_HEIGHT = 200; // header + controls + footer + отступы
+
+function adjustWindowHeight() {
+  const el = transcriptionTextRef.value;
+  if (!el || !isTauriAvailable()) return;
+
+  const textHeight = el.scrollHeight;
+  if (textHeight <= TEXT_THRESHOLD_PX) {
+    setWindowHeight(BASE_WINDOW_HEIGHT);
+    return;
+  }
+
+  const needed = Math.min(NON_TEXT_HEIGHT + textHeight + 16, MAX_WINDOW_HEIGHT);
+  setWindowHeight(needed);
+}
+
+async function setWindowHeight(height: number) {
+  try {
+    const win = getCurrentWebviewWindow();
+    const currentSize = await win.innerSize();
+    const targetHeight = Math.round(height * (window.devicePixelRatio || 1));
+    // Не дёргаем resize если разница меньше 5px
+    if (Math.abs(currentSize.height - targetHeight) < 5) return;
+    await win.setSize(new LogicalSize(460, height));
+  } catch {}
+}
+
+// Автоскролл + подгонка высоты окна при обновлении текста
 watch(() => store.displayText, () => {
   nextTick(() => {
     const el = transcriptionTextRef.value;
@@ -66,6 +100,8 @@ watch(() => store.displayText, () => {
     if (isNearBottom) {
       el.scrollTop = el.scrollHeight;
     }
+
+    adjustWindowHeight();
   });
 });
 
@@ -83,6 +119,8 @@ onMounted(async () => {
   unlistenWindowFocus = await window.onFocusChanged(({ payload: focused }) => {
     if (focused) {
       store.clearText();
+      // Сбрасываем высоту окна к базовой при очистке текста
+      setWindowHeight(BASE_WINDOW_HEIGHT);
     }
   });
 
@@ -223,6 +261,17 @@ const minimizeWindow = async () => {
     console.error('Failed to minimize window:', err);
   }
 };
+
+const handleSignInAgain = async () => {
+  try {
+    await auth.logout();
+  } catch (err) {
+    console.warn('Failed to logout, fallback to auth window:', err);
+    try {
+      await invoke('show_auth_window');
+    } catch {}
+  }
+};
 </script>
 
 <template>
@@ -277,8 +326,19 @@ const minimizeWindow = async () => {
 
         <div v-if="store.error || store.hasError" class="error-container">
           <div class="error-icon">⚠️</div>
-          <div class="error-message">
-            {{ store.error || t('main.errorGeneric') }}
+          <div class="error-content">
+            <div class="error-message">
+              {{ store.error || t('main.errorGeneric') }}
+            </div>
+
+            <div v-if="store.errorType === 'authentication'" class="error-actions">
+              <button class="error-action-button no-drag" @click="handleSignInAgain">
+                {{ t('errors.actions.signInAgain') }}
+              </button>
+              <button class="error-action-button secondary no-drag" @click="openSettings">
+                {{ t('errors.actions.openSettings') }}
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -291,10 +351,9 @@ const minimizeWindow = async () => {
           :disabled="store.isProcessing || store.isStarting"
           @click="handleToggle"
         >
-          <span v-if="store.isIdle">{{ t('main.startRecording') }}</span>
-          <span v-else-if="store.isStarting">{{ t('main.starting') }}</span>
-          <span v-else-if="store.isRecording">{{ t('main.stopRecording') }}</span>
-          <span v-else-if="store.isProcessing">{{ t('main.processing') }}</span>
+          <span v-if="store.isRecording" class="mdi mdi-stop"></span>
+          <span v-else-if="store.isProcessing" class="mdi mdi-cached record-icon-spin"></span>
+          <span v-else class="mdi mdi-microphone"></span>
         </button>
       </div>
 
@@ -544,7 +603,7 @@ const minimizeWindow = async () => {
 
 .error-container {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--spacing-xs);
   padding: var(--spacing-sm);
   background: rgba(244, 67, 54, 0.15);
@@ -562,7 +621,43 @@ const minimizeWindow = async () => {
   font-size: 14px;
   color: var(--color-error);
   line-height: 1.4;
+}
+
+.error-content {
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.error-actions {
+  display: flex;
+  gap: var(--spacing-xs);
+  flex-wrap: wrap;
+}
+
+.error-action-button {
+  border: 1px solid rgba(244, 67, 54, 0.45);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--color-text);
+  font-size: 13px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.error-action-button:hover {
+  background: rgba(255, 255, 255, 0.12);
+  transform: translateY(-1px);
+}
+
+.error-action-button:active {
+  transform: translateY(0);
+}
+
+.error-action-button.secondary {
+  border-color: rgba(255, 255, 255, 0.16);
 }
 
 @keyframes shake {
@@ -583,29 +678,27 @@ const minimizeWindow = async () => {
   width: 100%;
   box-sizing: border-box;
   margin-top: auto;
+  padding-bottom: 7px;
 }
 
 .record-button {
-  padding: var(--spacing-sm) var(--spacing-lg);
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
   background: var(--color-accent);
-  color: var(--color-text);
+  color: #fff;
   border: none;
-  border-radius: var(--radius-md);
-  font-size: 17px;
-  font-weight: 500;
+  font-size: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
   transition: all 0.2s ease;
-  min-width: 140px;
 }
 
-.record-button:hover {
-  background: var(--color-accent-hover);
-  transform: translateY(-1px);
+.record-button:hover:not(:disabled) {
+  transform: scale(1.08);
   box-shadow: var(--shadow-md);
-}
-
-.record-button:active {
-  transform: translateY(0);
 }
 
 .record-button:disabled {
@@ -616,6 +709,7 @@ const minimizeWindow = async () => {
 .record-button.starting {
   background: var(--color-warning);
   opacity: 0.8;
+  animation: pulse 1.5s infinite;
 }
 
 .record-button.recording {
@@ -624,6 +718,20 @@ const minimizeWindow = async () => {
 
 .record-button.processing {
   background: var(--color-warning);
+}
+
+@keyframes pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.06); }
+}
+
+.record-icon-spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 .footer {

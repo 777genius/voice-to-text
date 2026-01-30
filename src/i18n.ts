@@ -28,12 +28,12 @@ const messages = {
         label: 'Speech-to-Text Provider',
         optionWhisper: 'Whisper Local (offline, requires cmake)',
         optionAssembly: 'AssemblyAI (online)',
-        optionDeepgram: 'Deepgram (online, Nova-2/3)',
+        optionDeepgram: 'Deepgram (online, Nova-3)',
         hintWhisperTitle: 'Whisper Local:',
         hintWhisperBody: 'works fully offline, high quality. Requires cmake and downloading a model.',
         hintCloudTitle: 'AssemblyAI and Deepgram:',
         hintCloudBody: 'cloud services with high quality.',
-        hintDeepgramNote: 'Deepgram automatically chooses the model: Nova-3 for English, Nova-2 for Russian.',
+        hintDeepgramNote: 'Uses Deepgram Nova-3 model with support for 47+ languages.',
       },
       language: {
         label: 'Language',
@@ -152,9 +152,13 @@ const messages = {
     errors: {
       timeout: 'Request timed out. Check your internet connection.',
       connection: 'Connection problem. Check your internet and try again.',
-      authentication: 'Authentication error. Check the API key in settings.',
+      authentication: 'Authentication error. Sign in again or check the keys in Settings.',
       processing: 'Audio processing error. Try restarting the recording.',
       generic: 'Error: {error}',
+      actions: {
+        signInAgain: 'Sign in again',
+        openSettings: 'Open settings',
+      },
     },
     auth: {
       login: 'Login',
@@ -214,8 +218,23 @@ const messages = {
     profile: {
       title: 'Profile',
       email: 'Email',
+      plan: 'Plan',
+      usage: 'Usage',
+      usageDetail: '{used} / {total} min used',
       logout: 'Sign out',
       loggingOut: 'Signing out...',
+      plans: {
+        free: 'Free',
+        starter: 'Starter',
+        pro: 'Pro',
+        business: 'Business',
+      },
+      statuses: {
+        active: 'Active',
+        cancelled: 'Cancelled',
+        disabled: 'Paused',
+        past_due: 'Past due',
+      },
     },
   },
   ru: {
@@ -245,12 +264,12 @@ const messages = {
         label: 'Провайдер распознавания речи',
         optionWhisper: 'Whisper Local (оффлайн, требует cmake)',
         optionAssembly: 'AssemblyAI (онлайн)',
-        optionDeepgram: 'Deepgram (онлайн, Nova-2/3)',
+        optionDeepgram: 'Deepgram (онлайн, Nova-3)',
         hintWhisperTitle: 'Whisper Local:',
         hintWhisperBody: 'работает полностью оффлайн, высокое качество. Требует установки cmake и загрузки модели.',
         hintCloudTitle: 'AssemblyAI и Deepgram:',
         hintCloudBody: 'облачные сервисы с высоким качеством.',
-        hintDeepgramNote: 'Deepgram автоматически выбирает модель: Nova-3 для английского, Nova-2 для русского.',
+        hintDeepgramNote: 'Используется модель Deepgram Nova-3 с поддержкой 47+ языков.',
       },
       language: {
         label: 'Язык',
@@ -369,9 +388,13 @@ const messages = {
     errors: {
       timeout: 'Превышен таймаут ожидания. Проверьте подключение к интернету.',
       connection: 'Проблема с подключением. Проверьте интернет и попробуйте снова.',
-      authentication: 'Ошибка авторизации. Проверьте API ключ в настройках.',
+      authentication: 'Ошибка авторизации. Войдите заново или проверьте ключи в настройках.',
       processing: 'Ошибка обработки аудио. Попробуйте перезапустить запись.',
       generic: 'Ошибка: {error}',
+      actions: {
+        signInAgain: 'Войти заново',
+        openSettings: 'Открыть настройки',
+      },
     },
     auth: {
       login: 'Войти',
@@ -431,8 +454,23 @@ const messages = {
     profile: {
       title: 'Профиль',
       email: 'Email',
+      plan: 'План',
+      usage: 'Использование',
+      usageDetail: '{used} / {total} мин. использовано',
       logout: 'Выйти',
       loggingOut: 'Выход...',
+      plans: {
+        free: 'Бесплатный',
+        starter: 'Starter',
+        pro: 'Pro',
+        business: 'Business',
+      },
+      statuses: {
+        active: 'Активна',
+        cancelled: 'Отменена',
+        disabled: 'Приостановлена',
+        past_due: 'Просрочена',
+      },
     },
   },
   es: {
@@ -462,12 +500,12 @@ const messages = {
         label: 'Proveedor de voz a texto',
         optionWhisper: 'Whisper Local (offline, requiere cmake)',
         optionAssembly: 'AssemblyAI (online)',
-        optionDeepgram: 'Deepgram (online, Nova-2/3)',
+        optionDeepgram: 'Deepgram (online, Nova-3)',
         hintWhisperTitle: 'Whisper Local:',
         hintWhisperBody: 'funciona totalmente sin conexión, alta calidad. Requiere cmake y descargar un modelo.',
         hintCloudTitle: 'AssemblyAI y Deepgram:',
         hintCloudBody: 'servicios en la nube con alta calidad.',
-        hintDeepgramNote: 'Deepgram elige automáticamente el modelo: Nova-3 para inglés, Nova-2 para ruso.',
+        hintDeepgramNote: 'Utiliza el modelo Deepgram Nova-3 con soporte para más de 47 idiomas.',
       },
       language: {
         label: 'Idioma',
@@ -586,9 +624,13 @@ const messages = {
     errors: {
       timeout: 'Se agotó el tiempo de espera. Compruebe su conexión.',
       connection: 'Problema de conexión. Compruebe su internet e inténtelo de nuevo.',
-      authentication: 'Error de autenticación. Compruebe la clave API en ajustes.',
+      authentication: 'Error de autenticación. Inicie sesión de nuevo o compruebe las claves en ajustes.',
       processing: 'Error de procesamiento de audio. Reinicie la grabación.',
       generic: 'Error: {error}',
+      actions: {
+        signInAgain: 'Iniciar sesión de nuevo',
+        openSettings: 'Abrir ajustes',
+      },
     },
     auth: {
       login: 'Iniciar sesión',
@@ -648,8 +690,23 @@ const messages = {
     profile: {
       title: 'Perfil',
       email: 'Email',
+      plan: 'Plan',
+      usage: 'Uso',
+      usageDetail: '{used} / {total} min usados',
       logout: 'Cerrar sesión',
       loggingOut: 'Cerrando sesión...',
+      plans: {
+        free: 'Gratuito',
+        starter: 'Starter',
+        pro: 'Pro',
+        business: 'Business',
+      },
+      statuses: {
+        active: 'Activa',
+        cancelled: 'Cancelada',
+        disabled: 'Pausada',
+        past_due: 'Vencida',
+      },
     },
   },
   fr: {
@@ -684,7 +741,7 @@ const messages = {
         hintWhisperBody: 'fonctionne entièrement hors ligne, haute qualité. Nécessite cmake et un modèle téléchargé.',
         hintCloudTitle: 'AssemblyAI et Deepgram:',
         hintCloudBody: 'services cloud de haute qualité.',
-        hintDeepgramNote: 'Deepgram choisit automatiquement le modèle : Nova-3 pour l’anglais, Nova-2 pour le russe.',
+        hintDeepgramNote: 'Utilise le modèle Deepgram Nova-3 avec prise en charge de plus de 47 langues.',
       },
       language: {
         label: 'Langue',
@@ -803,9 +860,13 @@ const messages = {
     errors: {
       timeout: 'Délai dépassé. Vérifiez votre connexion internet.',
       connection: 'Problème de connexion. Vérifiez internet et réessayez.',
-      authentication: "Erreur d'authentification. Vérifiez la clé API.",
+      authentication: "Erreur d'authentification. Reconnectez-vous ou vérifiez les clés dans les paramètres.",
       processing: "Erreur de traitement audio. Redémarrez l'enregistrement.",
       generic: 'Erreur : {error}',
+      actions: {
+        signInAgain: 'Se reconnecter',
+        openSettings: 'Ouvrir les paramètres',
+      },
     },
     auth: {
       login: 'Connexion',
@@ -865,8 +926,23 @@ const messages = {
     profile: {
       title: 'Profil',
       email: 'Email',
+      plan: 'Forfait',
+      usage: 'Utilisation',
+      usageDetail: '{used} / {total} min utilisées',
       logout: 'Déconnexion',
       loggingOut: 'Déconnexion...',
+      plans: {
+        free: 'Gratuit',
+        starter: 'Starter',
+        pro: 'Pro',
+        business: 'Business',
+      },
+      statuses: {
+        active: 'Active',
+        cancelled: 'Annulée',
+        disabled: 'Suspendue',
+        past_due: 'En retard',
+      },
     },
   },
   de: {
@@ -896,12 +972,12 @@ const messages = {
         label: 'Speech-to-Text-Anbieter',
         optionWhisper: 'Whisper Local (offline, benötigt cmake)',
         optionAssembly: 'AssemblyAI (online)',
-        optionDeepgram: 'Deepgram (online, Nova-2/3)',
+        optionDeepgram: 'Deepgram (online, Nova-3)',
         hintWhisperTitle: 'Whisper Local:',
         hintWhisperBody: 'arbeitet komplett offline, hohe Qualität. Benötigt cmake und ein Modell.',
         hintCloudTitle: 'AssemblyAI und Deepgram:',
         hintCloudBody: 'Cloud-Dienste mit hoher Qualität.',
-        hintDeepgramNote: 'Deepgram wählt automatisch: Nova-3 für Englisch, Nova-2 für Russisch.',
+        hintDeepgramNote: 'Verwendet das Deepgram Nova-3-Modell mit Unterstützung für über 47 Sprachen.',
       },
       language: {
         label: 'Sprache',
@@ -1020,9 +1096,13 @@ const messages = {
     errors: {
       timeout: 'Zeitüberschreitung. Prüfen Sie Ihre Internetverbindung.',
       connection: 'Verbindungsproblem. Prüfen Sie Internet und versuchen Sie erneut.',
-      authentication: 'Authentifizierungsfehler. Prüfen Sie den API‑Schlüssel.',
+      authentication: 'Authentifizierungsfehler. Bitte erneut anmelden oder die Schlüssel in den Einstellungen prüfen.',
       processing: 'Audioverarbeitungsfehler. Aufnahme neu starten.',
       generic: 'Fehler: {error}',
+      actions: {
+        signInAgain: 'Erneut anmelden',
+        openSettings: 'Einstellungen öffnen',
+      },
     },
     auth: {
       login: 'Anmelden',
@@ -1082,8 +1162,23 @@ const messages = {
     profile: {
       title: 'Profil',
       email: 'E-Mail',
+      plan: 'Tarif',
+      usage: 'Nutzung',
+      usageDetail: '{used} / {total} Min. verbraucht',
       logout: 'Abmelden',
       loggingOut: 'Abmelden...',
+      plans: {
+        free: 'Kostenlos',
+        starter: 'Starter',
+        pro: 'Pro',
+        business: 'Business',
+      },
+      statuses: {
+        active: 'Aktiv',
+        cancelled: 'Gekündigt',
+        disabled: 'Pausiert',
+        past_due: 'Überfällig',
+      },
     },
   },
   uk: {
@@ -1113,12 +1208,12 @@ const messages = {
         label: 'Провайдер розпізнавання мовлення',
         optionWhisper: 'Whisper Local (офлайн, потребує cmake)',
         optionAssembly: 'AssemblyAI (онлайн)',
-        optionDeepgram: 'Deepgram (онлайн, Nova-2/3)',
+        optionDeepgram: 'Deepgram (онлайн, Nova-3)',
         hintWhisperTitle: 'Whisper Local:',
         hintWhisperBody: 'працює повністю офлайн, висока якість. Потребує cmake та завантаження моделі.',
         hintCloudTitle: 'AssemblyAI та Deepgram:',
         hintCloudBody: 'хмарні сервіси з високою якістю.',
-        hintDeepgramNote: 'Deepgram автоматично обирає модель: Nova-3 для англійської, Nova-2 для російської.',
+        hintDeepgramNote: 'Використовується модель Deepgram Nova-3 з підтримкою 47+ мов.',
       },
       language: {
         label: 'Мова',
@@ -1237,9 +1332,13 @@ const messages = {
     errors: {
       timeout: 'Перевищено час очікування. Перевірте інтернет-зʼєднання.',
       connection: 'Проблема зʼєднання. Перевірте інтернет і спробуйте знову.',
-      authentication: 'Помилка автентифікації. Перевірте API ключ у налаштуваннях.',
+      authentication: 'Помилка автентифікації. Увійдіть знову або перевірте ключі в налаштуваннях.',
       processing: 'Помилка обробки аудіо. Спробуйте перезапустити запис.',
       generic: 'Помилка: {error}',
+      actions: {
+        signInAgain: 'Увійти знову',
+        openSettings: 'Відкрити налаштування',
+      },
     },
     auth: {
       login: 'Увійти',
@@ -1299,8 +1398,23 @@ const messages = {
     profile: {
       title: 'Профіль',
       email: 'Email',
+      plan: 'План',
+      usage: 'Використання',
+      usageDetail: '{used} / {total} хв. використано',
       logout: 'Вийти',
       loggingOut: 'Вихід...',
+      plans: {
+        free: 'Безкоштовний',
+        starter: 'Starter',
+        pro: 'Pro',
+        business: 'Business',
+      },
+      statuses: {
+        active: 'Активна',
+        cancelled: 'Скасована',
+        disabled: 'Призупинена',
+        past_due: 'Прострочена',
+      },
     },
   },
 };

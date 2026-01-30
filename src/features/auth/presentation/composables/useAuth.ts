@@ -14,6 +14,14 @@ export function useAuth() {
   const container = getAuthContainer();
   const state = useAuthState();
 
+  type InitializeOptions = {
+    /**
+     * Не переводит store в статус loading.
+     * Удобно для синхронизации между окнами, чтобы UI не "прыгал" на auth экран.
+     */
+    silent?: boolean;
+  };
+
   function handleError(e: unknown): void {
     if (e instanceof AuthError) {
       switch (e.code) {
@@ -70,8 +78,10 @@ export function useAuth() {
     store.setStatusError();
   }
 
-  async function initialize(): Promise<void> {
-    store.setLoading();
+  async function initialize(options: InitializeOptions = {}): Promise<void> {
+    if (!options.silent) {
+      store.setLoading();
+    }
 
     try {
       const result = await container.initializeAuthUseCase.execute();
