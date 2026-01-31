@@ -123,15 +123,13 @@ mod tests {
         let _ = ConfigStore::delete_config().await;
 
         let mut config = SttConfig::default();
-        config.provider = SttProviderType::Deepgram;
-        config.deepgram_api_key = Some("test-key".to_string());
+        config.provider = SttProviderType::Backend;
         config.language = "ru".to_string();
 
         ConfigStore::save_config(&config).await.unwrap();
         let loaded = ConfigStore::load_config().await.unwrap();
 
         assert_eq!(loaded.provider, config.provider);
-        assert_eq!(loaded.deepgram_api_key, config.deepgram_api_key);
         assert_eq!(loaded.language, config.language);
 
         ConfigStore::delete_config().await.unwrap();

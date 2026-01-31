@@ -13,23 +13,13 @@ const { currentTheme, setTheme } = useSettingsTheme();
 
 <template>
   <SettingGroup :title="t('settings.theme.label')">
-    <v-btn-toggle
-      :model-value="currentTheme"
-      mandatory
-      divided
-      density="comfortable"
+    <v-switch
+      :model-value="currentTheme === 'light'"
       color="primary"
-      class="w-100"
-      @update:model-value="setTheme($event)"
-    >
-      <v-btn value="dark" class="flex-grow-1">
-        <v-icon start>mdi-weather-night</v-icon>
-        {{ t('settings.theme.dark') }}
-      </v-btn>
-      <v-btn value="light" class="flex-grow-1">
-        <v-icon start>mdi-white-balance-sunny</v-icon>
-        {{ t('settings.theme.light') }}
-      </v-btn>
-    </v-btn-toggle>
+      hide-details
+      inset
+      :label="t('settings.theme.light')"
+      @update:model-value="setTheme($event ? 'light' : 'dark')"
+    />
   </SettingGroup>
 </template>

@@ -51,6 +51,30 @@ async function handleInstall() {
           {{ t('settings.updates.availableSubtitle') }}
         </p>
 
+        <div v-if="store.isInstalling" class="mt-3">
+          <v-progress-linear
+            v-if="store.downloadProgress !== null"
+            :model-value="store.downloadProgress"
+            height="6"
+            rounded
+            color="success"
+          />
+          <v-progress-linear
+            v-else
+            indeterminate
+            height="6"
+            rounded
+            color="success"
+          />
+
+          <div
+            v-if="store.downloadProgress !== null"
+            class="text-caption text-medium-emphasis mt-1 text-center"
+          >
+            {{ store.downloadProgress }}%
+          </div>
+        </div>
+
         <v-alert
           v-if="store.error"
           type="error"
@@ -76,7 +100,7 @@ async function handleInstall() {
           :loading="store.isInstalling"
           @click="handleInstall"
         >
-          {{ store.isInstalling ? t('settings.updates.installing') : t('settings.updates.install') }}
+          {{ store.isInstalling ? t('settings.updates.installing') : t('settings.updates.update') }}
         </v-btn>
       </v-card-actions>
     </v-card>

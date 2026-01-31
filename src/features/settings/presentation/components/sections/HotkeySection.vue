@@ -3,22 +3,177 @@
  * Секция настройки горячей клавиши
  */
 
+import { computed, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import SettingGroup from '../shared/SettingGroup.vue';
 import { useSettings } from '../../composables/useSettings';
 
 const { t } = useI18n();
 const { recordingHotkey } = useSettings();
+
+const isCapturing = ref(false);
+let windowKeydownListener: ((event: KeyboardEvent) => void) | null = null;
+
+const hotkeyPlaceholder = computed(() =>
+  isCapturing.value
+    ? t('settings.hotkey.capturePlaceholder')
+    : t('settings.hotkey.placeholder')
+);
+
+watch(isCapturing, (enabled) => {
+  if (enabled) setupWindowListener();
+  else cleanupWindowListener();
+});
+
+onUnmounted(() => {
+  cleanupWindowListener();
+});
+
+function formatHotkeyFromKeyboardEvent(event: KeyboardEvent): string | null {
+  // Не считаем одиночные модификаторы “клавишей” — ждём реальную кнопку.
+  if (event.key === 'Shift' || event.key === 'Control' || event.key === 'Alt' || event.key === 'Meta') {
+    return null;
+  }
+
+  const parts: string[] = [];
+
+  const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+
+  // По умолчанию пишем в “тауришном” формате. На macOS отдельно поддерживаем чистый Ctrl,
+  // чтобы сочетание сохранялось так же, как пользователь его нажал.
+  if (event.metaKey) {
+    parts.push('CmdOrCtrl');
+  } else if (event.ctrlKey) {
+    parts.push(isMac ? 'Ctrl' : 'CmdOrCtrl');
+  }
+  if (event.altKey) parts.push('Alt');
+  if (event.shiftKey) parts.push('Shift');
+
+  const code = event.code ?? '';
+  let key: string | null = null;
+
+  if (code.startsWith('Key')) {
+    key = code.replace('Key', '').toUpperCase();
+  } else if (code.startsWith('Digit')) {
+    key = code.replace('Digit', '');
+  } else if (code.startsWith('Numpad')) {
+    const num = code.replace('Numpad', '');
+    key = /^\d$/.test(num) ? num : `Numpad${num}`;
+  } else {
+    const codeKeyMap: Record<string, string> = {
+      Backquote: 'Backquote',
+      Minus: 'Minus',
+      Equal: 'Equal',
+      BracketLeft: 'BracketLeft',
+      BracketRight: 'BracketRight',
+      Backslash: 'Backslash',
+      IntlBackslash: 'IntlBackslash',
+      Semicolon: 'Semicolon',
+      Quote: 'Quote',
+      Comma: 'Comma',
+      Period: 'Period',
+      Slash: 'Slash',
+    };
+
+    if (codeKeyMap[code]) {
+      key = codeKeyMap[code];
+    }
+
+    switch (code) {
+      case 'Space':
+        key = 'Space';
+        break;
+      case 'Enter':
+        key = 'Enter';
+        break;
+      case 'Tab':
+        key = 'Tab';
+        break;
+      case 'Backspace':
+        key = 'Backspace';
+        break;
+      case 'Escape':
+        key = 'Escape';
+        break;
+      case 'ArrowUp':
+        key = 'Up';
+        break;
+      case 'ArrowDown':
+        key = 'Down';
+        break;
+      case 'ArrowLeft':
+        key = 'Left';
+        break;
+      case 'ArrowRight':
+        key = 'Right';
+        break;
+      default: {
+        // F-клавиши и прочие “понятные” варианты берём из event.key, иначе игнорируем.
+        const k = (event.key ?? '').toUpperCase();
+        if (/^F\d{1,2}$/.test(k)) key = k;
+        break;
+      }
+    }
+  }
+
+  if (!key) return null;
+
+  // Если пользователь нажал только “кнопку” без модификаторов — тоже позволяем (формат валидный).
+  return parts.length > 0 ? [...parts, key].join('+') : key;
+}
+
+function handleKeydown(event: KeyboardEvent) {
+  if (!isCapturing.value) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+
+  if (event.key === 'Escape') {
+    isCapturing.value = false;
+    return;
+  }
+
+  const formatted = formatHotkeyFromKeyboardEvent(event);
+  if (!formatted) return;
+
+  recordingHotkey.value = formatted;
+  isCapturing.value = false;
+}
+
+function setupWindowListener() {
+  if (windowKeydownListener) return;
+  windowKeydownListener = (event: KeyboardEvent) => handleKeydown(event);
+  window.addEventListener('keydown', windowKeydownListener, { capture: true });
+}
+
+function cleanupWindowListener() {
+  if (!windowKeydownListener) return;
+  window.removeEventListener('keydown', windowKeydownListener, { capture: true } as any);
+  windowKeydownListener = null;
+}
+
+function startCapture() {
+  isCapturing.value = true;
+}
+
+function stopCapture() {
+  isCapturing.value = false;
+}
 </script>
 
 <template>
   <SettingGroup :title="t('settings.hotkey.label')">
     <v-text-field
       v-model="recordingHotkey"
-      :placeholder="t('settings.hotkey.placeholder')"
+      :placeholder="hotkeyPlaceholder"
       density="comfortable"
       hide-details
       prepend-inner-icon="mdi-keyboard"
+      readonly
+      :append-inner-icon="isCapturing ? 'mdi-record-circle-outline' : undefined"
+      @focus="startCapture"
+      @click="startCapture"
+      @blur="stopCapture"
     />
 
     <template #hint>

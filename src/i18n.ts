@@ -37,6 +37,7 @@ const messages = {
       },
       language: {
         label: 'Language',
+        searchPlaceholder: 'Search language...',
       },
       apiKeys: {
         label: 'API Keys (optional)',
@@ -61,8 +62,9 @@ const messages = {
       },
       hotkey: {
         label: 'Recording hotkey',
-        placeholder: 'For example: Cmd+Shift+X, Alt+R',
-        hintLine1: 'Use combinations like: Cmd+Shift+X, Alt+R, CmdOrCtrl+Shift+R.',
+        placeholder: 'Click and press a key combination',
+        capturePlaceholder: 'Press keys...',
+        hintLine1: 'Click the field and press a key combo — the format will be set automatically.',
         hintLine2: 'Supported modifiers: Ctrl, Alt, Shift, Cmd (Mac), CmdOrCtrl (cross‑platform Cmd/Ctrl).',
         hintLine3: '⚠️ Avoid Ctrl+X on macOS - this combo is reserved by the system.',
       },
@@ -103,14 +105,16 @@ const messages = {
       updates: {
         label: 'App updates',
         hintLine1: 'The app checks for updates every 6 hours in the background.',
-        hintLine2: 'You can also check for updates manually.',
+        hintLine2: 'A check is also performed when you open settings.',
         check: 'Check for updates',
         checking: 'Checking...',
         availableTitle: 'New version available {version}',
         availableSubtitle: 'Press the button below to install',
-        install: 'Install and restart',
+        update: 'Update',
         latest: 'You are using the latest version',
+        currentVersion: 'Current version: v{version}',
         indicator: 'Update',
+        badgeAvailable: 'Update available',
         later: 'Later',
         installing: 'Installing...',
         dialogTitle: 'Update available',
@@ -158,6 +162,7 @@ const messages = {
       actions: {
         signInAgain: 'Sign in again',
         openSettings: 'Open settings',
+        reconnect: 'Reconnect',
       },
     },
     auth: {
@@ -273,6 +278,7 @@ const messages = {
       },
       language: {
         label: 'Язык',
+        searchPlaceholder: 'Поиск языка...',
       },
       apiKeys: {
         label: 'API ключи (опционально)',
@@ -297,8 +303,9 @@ const messages = {
       },
       hotkey: {
         label: 'Горячая клавиша для записи',
-        placeholder: 'Например: Cmd+Shift+X, Alt+R',
-        hintLine1: 'Используйте комбинации вида: Cmd+Shift+X, Alt+R, CmdOrCtrl+Shift+R.',
+        placeholder: 'Кликните и нажмите сочетание клавиш',
+        capturePlaceholder: 'Нажмите клавиши...',
+        hintLine1: 'Кликните по полю и нажмите сочетание — формат выставится автоматически.',
         hintLine2: 'Поддерживаемые модификаторы: Ctrl, Alt, Shift, Cmd (Mac), CmdOrCtrl (кроссплатформенный Cmd/Ctrl).',
         hintLine3: '⚠️ Избегайте Ctrl+X на macOS - эта комбинация занята системой.',
       },
@@ -339,14 +346,16 @@ const messages = {
       updates: {
         label: 'Обновления приложения',
         hintLine1: 'Приложение автоматически проверяет обновления каждые 6 часов в фоновом режиме.',
-        hintLine2: 'Вы также можете проверить обновления вручную.',
+        hintLine2: 'Проверка также выполняется при открытии настроек.',
         check: 'Проверить обновления',
         checking: 'Проверка...',
         availableTitle: 'Доступна новая версия {version}',
         availableSubtitle: 'Нажмите кнопку ниже чтобы установить',
-        install: 'Установить и перезапустить',
+        update: 'Обновить',
         latest: 'Вы используете последнюю версию',
+        currentVersion: 'Текущая версия: v{version}',
         indicator: 'Обновление',
+        badgeAvailable: 'Есть обновление',
         later: 'Позже',
         installing: 'Установка...',
         dialogTitle: 'Доступно обновление',
@@ -394,6 +403,7 @@ const messages = {
       actions: {
         signInAgain: 'Войти заново',
         openSettings: 'Открыть настройки',
+        reconnect: 'Переподключиться',
       },
     },
     auth: {
@@ -509,6 +519,7 @@ const messages = {
       },
       language: {
         label: 'Idioma',
+        searchPlaceholder: 'Buscar idioma...',
       },
       apiKeys: {
         label: 'Claves API (opcional)',
@@ -533,8 +544,9 @@ const messages = {
       },
       hotkey: {
         label: 'Atajo de grabación',
-        placeholder: 'Por ejemplo: Cmd+Shift+X, Alt+R',
-        hintLine1: 'Use combinaciones como: Cmd+Shift+X, Alt+R, CmdOrCtrl+Shift+R.',
+        placeholder: 'Haz clic y pulsa una combinación',
+        capturePlaceholder: 'Pulsa teclas...',
+        hintLine1: 'Haz clic en el campo y pulsa una combinación — el formato se aplicará automáticamente.',
         hintLine2: 'Modificadores compatibles: Ctrl, Alt, Shift, Cmd (Mac), CmdOrCtrl (Cmd/Ctrl).',
         hintLine3: '⚠️ Evite Ctrl+X en macOS - está reservado por el sistema.',
       },
@@ -575,14 +587,16 @@ const messages = {
       updates: {
         label: 'Actualizaciones de la app',
         hintLine1: 'La app busca actualizaciones cada 6 horas en segundo plano.',
-        hintLine2: 'También puede comprobarlas manualmente.',
+        hintLine2: 'También se realiza una comprobación al abrir ajustes.',
         check: 'Buscar actualizaciones',
         checking: 'Comprobando...',
         availableTitle: 'Nueva versión disponible {version}',
         availableSubtitle: 'Pulse el botón de abajo para instalar',
-        install: 'Instalar y reiniciar',
+        update: 'Actualizar',
         latest: 'Está usando la última versión',
+        currentVersion: 'Versión actual: v{version}',
         indicator: 'Actualización',
+        badgeAvailable: 'Hay actualización',
         later: 'Más tarde',
         installing: 'Instalando...',
         dialogTitle: 'Actualización disponible',
@@ -630,6 +644,7 @@ const messages = {
       actions: {
         signInAgain: 'Iniciar sesión de nuevo',
         openSettings: 'Abrir ajustes',
+        reconnect: 'Reconectar',
       },
     },
     auth: {
@@ -745,6 +760,7 @@ const messages = {
       },
       language: {
         label: 'Langue',
+        searchPlaceholder: 'Rechercher une langue...',
       },
       apiKeys: {
         label: 'Clés API (optionnel)',
@@ -769,8 +785,9 @@ const messages = {
       },
       hotkey: {
         label: 'Raccourci d’enregistrement',
-        placeholder: 'Par ex. : Cmd+Shift+X, Alt+R',
-        hintLine1: 'Utilisez des combinaisons comme : Cmd+Shift+X, Alt+R, CmdOrCtrl+Shift+R.',
+        placeholder: 'Cliquez et appuyez sur une combinaison',
+        capturePlaceholder: 'Appuyez sur les touches...',
+        hintLine1: 'Cliquez dans le champ et appuyez sur une combinaison — le format sera défini automatiquement.',
         hintLine2: 'Modificateurs pris en charge : Ctrl, Alt, Shift, Cmd (Mac), CmdOrCtrl.',
         hintLine3: '⚠️ Évitez Ctrl+X sur macOS - combinaison réservée par le système.',
       },
@@ -811,14 +828,16 @@ const messages = {
       updates: {
         label: 'Mises à jour',
         hintLine1: "L'application vérifie les mises à jour toutes les 6 heures en arrière-plan.",
-        hintLine2: 'Vous pouvez aussi vérifier manuellement.',
+        hintLine2: 'Une vérification est aussi lancée à l’ouverture des réglages.',
         check: 'Vérifier les mises à jour',
         checking: 'Vérification...',
         availableTitle: 'Nouvelle version disponible {version}',
         availableSubtitle: 'Cliquez ci‑dessous pour installer',
-        install: 'Installer et redémarrer',
+        update: 'Mettre à jour',
         latest: 'Vous utilisez la dernière version',
+        currentVersion: 'Version actuelle : v{version}',
         indicator: 'Mise à jour',
+        badgeAvailable: 'Mise à jour dispo',
         later: 'Plus tard',
         installing: 'Installation...',
         dialogTitle: 'Mise à jour disponible',
@@ -866,6 +885,7 @@ const messages = {
       actions: {
         signInAgain: 'Se reconnecter',
         openSettings: 'Ouvrir les paramètres',
+        reconnect: 'Reconnexion',
       },
     },
     auth: {
@@ -981,6 +1001,7 @@ const messages = {
       },
       language: {
         label: 'Sprache',
+        searchPlaceholder: 'Sprache suchen...',
       },
       apiKeys: {
         label: 'API-Schlüssel (optional)',
@@ -1005,8 +1026,9 @@ const messages = {
       },
       hotkey: {
         label: 'Aufnahme-Hotkey',
-        placeholder: 'Zum Beispiel: Cmd+Shift+X, Alt+R',
-        hintLine1: 'Kombinationen wie: Cmd+Shift+X, Alt+R, CmdOrCtrl+Shift+R.',
+        placeholder: 'Klicken und Tastenkombination drücken',
+        capturePlaceholder: 'Tasten drücken...',
+        hintLine1: 'Klicken Sie in das Feld und drücken Sie die Kombination — das Format wird automatisch gesetzt.',
         hintLine2: 'Unterstützte Modifikatoren: Ctrl, Alt, Shift, Cmd (Mac), CmdOrCtrl.',
         hintLine3: '⚠️ Vermeiden Sie Ctrl+X auf macOS - Systemkürzel.',
       },
@@ -1047,14 +1069,16 @@ const messages = {
       updates: {
         label: 'App-Updates',
         hintLine1: 'Die App prüft alle 6 Stunden im Hintergrund auf Updates.',
-        hintLine2: 'Sie können auch manuell prüfen.',
+        hintLine2: 'Beim Öffnen der Einstellungen wird ebenfalls geprüft.',
         check: 'Updates prüfen',
         checking: 'Prüfen...',
         availableTitle: 'Neue Version verfügbar {version}',
         availableSubtitle: 'Unten klicken zum Installieren',
-        install: 'Installieren und neu starten',
+        update: 'Aktualisieren',
         latest: 'Sie verwenden die neueste Version',
+        currentVersion: 'Aktuelle Version: v{version}',
         indicator: 'Update',
+        badgeAvailable: 'Update verfügbar',
         later: 'Später',
         installing: 'Installieren...',
         dialogTitle: 'Update verfügbar',
@@ -1102,6 +1126,7 @@ const messages = {
       actions: {
         signInAgain: 'Erneut anmelden',
         openSettings: 'Einstellungen öffnen',
+        reconnect: 'Erneut verbinden',
       },
     },
     auth: {
@@ -1217,6 +1242,7 @@ const messages = {
       },
       language: {
         label: 'Мова',
+        searchPlaceholder: 'Пошук мови...',
       },
       apiKeys: {
         label: 'API ключі (опційно)',
@@ -1241,8 +1267,9 @@ const messages = {
       },
       hotkey: {
         label: 'Гаряча клавіша для запису',
-        placeholder: 'Наприклад: Cmd+Shift+X, Alt+R',
-        hintLine1: 'Використовуйте комбінації: Cmd+Shift+X, Alt+R, CmdOrCtrl+Shift+R.',
+        placeholder: 'Клікніть і натисніть комбінацію клавіш',
+        capturePlaceholder: 'Натисніть клавіші...',
+        hintLine1: 'Клікніть по полю й натисніть комбінацію — формат виставиться автоматично.',
         hintLine2: 'Підтримувані модифікатори: Ctrl, Alt, Shift, Cmd (Mac), CmdOrCtrl (кросплатформний Cmd/Ctrl).',
         hintLine3: '⚠️ Уникайте Ctrl+X на macOS - ця комбінація зайнята системою.',
       },
@@ -1283,14 +1310,16 @@ const messages = {
       updates: {
         label: 'Оновлення застосунку',
         hintLine1: 'Застосунок перевіряє оновлення кожні 6 годин у фоновому режимі.',
-        hintLine2: 'Ви також можете перевірити оновлення вручну.',
+        hintLine2: 'Перевірка також виконується при відкритті налаштувань.',
         check: 'Перевірити оновлення',
         checking: 'Перевірка...',
         availableTitle: 'Доступна нова версія {version}',
         availableSubtitle: 'Натисніть кнопку нижче, щоб встановити',
-        install: 'Встановити та перезапустити',
+        update: 'Оновити',
         latest: 'Ви використовуєте останню версію',
+        currentVersion: 'Поточна версія: v{version}',
         indicator: 'Оновлення',
+        badgeAvailable: 'Є оновлення',
         later: 'Пізніше',
         installing: 'Встановлення...',
         dialogTitle: 'Доступне оновлення',
@@ -1338,6 +1367,7 @@ const messages = {
       actions: {
         signInAgain: 'Увійти знову',
         openSettings: 'Відкрити налаштування',
+        reconnect: 'Перепідключитись',
       },
     },
     auth: {

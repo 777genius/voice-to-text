@@ -28,7 +28,7 @@ defineProps<{
 
 <style scoped>
 .setting-group {
-  margin-bottom: 16px;
+  margin-bottom: var(--spacing-xl);
 }
 
 .setting-group__label {

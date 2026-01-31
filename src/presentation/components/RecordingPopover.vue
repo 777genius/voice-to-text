@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { listen, type UnlistenFn, emit } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { LogicalSize } from '@tauri-apps/api/dpi';
 import { useTranscriptionStore } from '../../stores/transcription';
 import { useAppConfigStore } from '../../stores/appConfig';
-import { useAuth } from '../../features/auth';
 import { useAuthStore } from '../../features/auth/store/authStore';
+import { useUpdateStore } from '../../stores/update';
 import { SettingsPanel } from '../../features/settings';
 import ProfilePopover from './ProfilePopover.vue';
 import UpdateIndicator from './UpdateIndicator.vue';
@@ -16,6 +16,7 @@ import UpdateDialog from './UpdateDialog.vue';
 import AudioVisualizer from './AudioVisualizer.vue';
 import { playShowSound, playDoneSound } from '../../utils/sound';
 import { isTauriAvailable } from '../../utils/tauri';
+import { EVENT_SETTINGS_FOCUS_UPDATES } from '@/types';
 
 // Простая поддержка перетаскивания мышью по шапке
 async function onDragMouseDown(e: MouseEvent) {
@@ -37,7 +38,7 @@ async function onDragMouseDown(e: MouseEvent) {
 const store = useTranscriptionStore();
 const appConfigStore = useAppConfigStore();
 const authStore = useAuthStore();
-const auth = useAuth();
+const updateStore = useUpdateStore();
 const { t } = useI18n();
 const showSettings = ref(false);
 const showProfile = ref(false);
@@ -239,6 +240,29 @@ const openSettings = () => {
   showSettings.value = true;
 };
 
+const openUpdatesInSettings = async () => {
+  // Fallback: если settings окно ещё не успело повесить listener — оно заберёт фокус из localStorage.
+  try {
+    localStorage.setItem('settings:pending-focus', JSON.stringify({ target: 'updates', ts: Date.now() }));
+  } catch {}
+
+  if (isTauriAvailable()) {
+    try {
+      await invoke('show_settings_window');
+    } catch {}
+
+    // Если окно уже поднято — отработает сразу (без повторной проверки обновлений).
+    try {
+      void emit(EVENT_SETTINGS_FOCUS_UPDATES, { ts: Date.now() });
+    } catch {}
+
+    return;
+  }
+
+  // Web fallback: откроем модалку, секция сама подхватит pending-focus.
+  showSettings.value = true;
+};
+
 const openProfile = () => {
   showProfile.value = true;
 };
@@ -261,17 +285,6 @@ const minimizeWindow = async () => {
     console.error('Failed to minimize window:', err);
   }
 };
-
-const handleSignInAgain = async () => {
-  try {
-    await auth.logout();
-  } catch (err) {
-    console.warn('Failed to logout, fallback to auth window:', err);
-    try {
-      await invoke('show_auth_window');
-    } catch {}
-  }
-};
 </script>
 
 <template>
@@ -281,7 +294,19 @@ const handleSignInAgain = async () => {
       <div class="popover-content">
       <!-- Header -->
       <div class="header" data-tauri-drag-region @mousedown="onDragMouseDown">
-        <div class="title">{{ t('app.title') }}</div>
+        <div class="title-row">
+          <div class="title">{{ t('app.title') }}</div>
+          <v-chip
+            v-if="updateStore.availableVersion"
+            class="update-badge no-drag"
+            color="success"
+            size="x-small"
+            variant="flat"
+            @click="openUpdatesInSettings"
+          >
+            {{ t('settings.updates.badgeAvailable') }}
+          </v-chip>
+        </div>
         <div class="header-right">
           <UpdateIndicator @click="showUpdateDialog = true" />
           <button class="minimize-button no-drag" @click="minimizeWindow" :title="t('main.minimize')">
@@ -315,31 +340,26 @@ const handleSignInAgain = async () => {
 
       <!-- Transcription Display -->
       <div class="transcription-area">
-        <!-- Starting indicator -->
-        <div v-if="store.isStarting" class="starting-message">
-          {{ t('main.connecting') }}
-        </div>
-
-        <p ref="transcriptionTextRef" class="transcription-text" :class="{ recording: store.isRecording }">
+        <p ref="transcriptionTextRef" class="transcription-text" :class="{ recording: store.isRecording, starting: store.isStarting }">
           {{ store.displayText }}
         </p>
 
         <div v-if="store.error || store.hasError" class="error-container">
-          <div class="error-icon">⚠️</div>
-          <div class="error-content">
+          <div class="error-row">
+            <div class="error-icon">⚠️</div>
             <div class="error-message">
               {{ store.error || t('main.errorGeneric') }}
             </div>
-
-            <div v-if="store.errorType === 'authentication'" class="error-actions">
-              <button class="error-action-button no-drag" @click="handleSignInAgain">
-                {{ t('errors.actions.signInAgain') }}
-              </button>
-              <button class="error-action-button secondary no-drag" @click="openSettings">
-                {{ t('errors.actions.openSettings') }}
-              </button>
-            </div>
           </div>
+
+          <button
+            v-if="store.canReconnect"
+            class="error-action-button no-drag"
+            :disabled="store.isStarting || store.isProcessing || store.isConnecting"
+            @click="store.reconnect()"
+          >
+            {{ t('errors.actions.reconnect') }}
+          </button>
         </div>
       </div>
 
@@ -601,15 +621,29 @@ const handleSignInAgain = async () => {
   color: var(--color-accent);
 }
 
+.transcription-text.starting {
+  color: var(--color-accent);
+  font-style: italic;
+  opacity: 0.8;
+  animation: fade-pulse 1.5s ease-in-out infinite;
+}
+
 .error-container {
   display: flex;
-  align-items: flex-start;
+  flex-direction: column;
+  align-items: stretch;
   gap: var(--spacing-xs);
   padding: var(--spacing-sm);
   background: rgba(244, 67, 54, 0.15);
   border: 1px solid rgba(244, 67, 54, 0.3);
   border-radius: var(--radius-sm);
   animation: shake 0.5s ease-in-out;
+}
+
+.error-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
 }
 
 .error-icon {
@@ -621,43 +655,28 @@ const handleSignInAgain = async () => {
   font-size: 14px;
   color: var(--color-error);
   line-height: 1.4;
-}
-
-.error-content {
   flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-xs);
-}
-
-.error-actions {
-  display: flex;
-  gap: var(--spacing-xs);
-  flex-wrap: wrap;
 }
 
 .error-action-button {
-  border: 1px solid rgba(244, 67, 54, 0.45);
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--color-text);
-  font-size: 13px;
+  align-self: flex-start;
   padding: 6px 10px;
   border-radius: var(--radius-sm);
+  border: 1px solid rgba(244, 67, 54, 0.35);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--color-text);
+  font-size: 13px;
   cursor: pointer;
-  transition: background 0.15s ease, transform 0.15s ease;
+  transition: all 0.15s ease;
 }
 
-.error-action-button:hover {
-  background: rgba(255, 255, 255, 0.12);
-  transform: translateY(-1px);
+.error-action-button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
 }
 
-.error-action-button:active {
-  transform: translateY(0);
-}
-
-.error-action-button.secondary {
-  border-color: rgba(255, 255, 255, 0.16);
+.error-action-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 @keyframes shake {
@@ -806,5 +825,19 @@ const handleSignInAgain = async () => {
 .banner-fade-leave-to {
   opacity: 0;
   transform: translateY(-5px);
+}
+
+/* Бейдж "Есть обновление" рядом с заголовком */
+.title-row {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.update-badge {
+  flex-shrink: 0;
+  font-weight: 600;
 }
 </style>

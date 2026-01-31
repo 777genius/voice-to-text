@@ -1,10 +1,23 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { getVersion } from '@tauri-apps/api/app';
 import { useUpdateStore } from '../stores/update';
 import { useI18n } from 'vue-i18n';
+import { isTauriAvailable } from '@/utils/tauri';
+import {
+  EVENT_UPDATE_AVAILABLE,
+  EVENT_UPDATE_DOWNLOAD_PROGRESS,
+  EVENT_UPDATE_DOWNLOAD_STARTED,
+  EVENT_UPDATE_INSTALLING,
+  type AppUpdateDownloadProgress,
+  type AppUpdateInfo,
+} from '@/types';
 
 // Singleton для listener - должен быть один на всё приложение
 let unlistenUpdateAvailable: UnlistenFn | null = null;
+let unlistenUpdateDownloadStarted: UnlistenFn | null = null;
+let unlistenUpdateDownloadProgress: UnlistenFn | null = null;
+let unlistenUpdateInstalling: UnlistenFn | null = null;
 
 // Composable для работы с обновлениями приложения
 // Единый источник логики обновлений для всех компонентов (DRY)
@@ -12,20 +25,41 @@ export function useUpdater() {
   const store = useUpdateStore();
   const { t } = useI18n();
 
+  async function loadCurrentVersion(): Promise<string | null> {
+    if (!isTauriAvailable()) {
+      store.setCurrentVersion(null);
+      return null;
+    }
+
+    try {
+      const version = await getVersion();
+      store.setCurrentVersion(version);
+      return version;
+    } catch (err) {
+      console.error('Failed to get current app version:', err);
+      store.setCurrentVersion(null);
+      return null;
+    }
+  }
+
   // Проверка обновлений вручную
   async function checkForUpdates(): Promise<string | null> {
     store.isChecking = true;
     store.error = null;
+    store.setLatest(false);
 
     try {
-      const version = await invoke<string | null>('check_for_updates');
+      if (!isTauriAvailable()) {
+        return null;
+      }
 
-      if (version) {
-        store.setAvailableUpdate(version);
-        return version;
+      const update = await invoke<AppUpdateInfo | null>('check_for_updates');
+
+      if (update) {
+        store.setAvailableUpdate(update.version, update.body);
+        return update.version;
       } else {
-        // Нет доступных обновлений
-        store.error = t('settings.updates.latest');
+        store.setLatest(true);
         return null;
       }
     } catch (err) {
@@ -41,6 +75,7 @@ export function useUpdater() {
   async function installUpdate(): Promise<void> {
     store.isInstalling = true;
     store.error = null;
+    store.resetDownloadProgress();
 
     try {
       await invoke('install_update');
@@ -49,6 +84,7 @@ export function useUpdater() {
     } catch (err) {
       console.error('Failed to install update:', err);
       store.error = String(err);
+      store.resetDownloadProgress();
       store.isInstalling = false;
     }
   }
@@ -67,9 +103,41 @@ export function useUpdater() {
     }
 
     try {
-      unlistenUpdateAvailable = await listen<string>('update:available', (event) => {
+      unlistenUpdateAvailable = await listen<AppUpdateInfo>(EVENT_UPDATE_AVAILABLE, (event) => {
         console.log('Update available event received:', event.payload);
-        store.setAvailableUpdate(event.payload);
+        store.setAvailableUpdate(event.payload.version, event.payload.body);
+      });
+
+      unlistenUpdateDownloadStarted = await listen<{ version: string }>(
+        EVENT_UPDATE_DOWNLOAD_STARTED,
+        (event) => {
+          // На старте скачивания прогресс может быть неизвестен, но нам важно показать UI,
+          // что процесс пошёл (даже если пока без процентов).
+          store.setDownloadProgress({ progress: null, downloaded: null, total: null });
+          // На всякий случай обновляем версию, если прилетела.
+          if (event.payload?.version) {
+            store.setAvailableUpdate(event.payload.version, store.releaseNotes ?? undefined);
+          }
+        }
+      );
+
+      unlistenUpdateDownloadProgress = await listen<AppUpdateDownloadProgress>(
+        EVENT_UPDATE_DOWNLOAD_PROGRESS,
+        (event) => {
+          store.setDownloadProgress({
+            progress: event.payload.progress,
+            downloaded: event.payload.downloaded,
+            total: event.payload.total,
+          });
+        }
+      );
+
+      unlistenUpdateInstalling = await listen<{ version: string }>(EVENT_UPDATE_INSTALLING, () => {
+        // Скачивание закончено — дальше будет установка.
+        // Оставляем последний процент, но если его не было — сбрасываем в indeterminate.
+        if (store.downloadProgress === null) {
+          store.setDownloadProgress({ progress: null });
+        }
       });
     } catch (err) {
       console.error('Failed to setup update listener:', err);
@@ -82,6 +150,18 @@ export function useUpdater() {
       unlistenUpdateAvailable();
       unlistenUpdateAvailable = null;
     }
+    if (unlistenUpdateDownloadStarted) {
+      unlistenUpdateDownloadStarted();
+      unlistenUpdateDownloadStarted = null;
+    }
+    if (unlistenUpdateDownloadProgress) {
+      unlistenUpdateDownloadProgress();
+      unlistenUpdateDownloadProgress = null;
+    }
+    if (unlistenUpdateInstalling) {
+      unlistenUpdateInstalling();
+      unlistenUpdateInstalling = null;
+    }
   }
 
   return {
@@ -89,6 +169,7 @@ export function useUpdater() {
     store,
 
     // Actions
+    loadCurrentVersion,
     checkForUpdates,
     installUpdate,
     dismissUpdate,

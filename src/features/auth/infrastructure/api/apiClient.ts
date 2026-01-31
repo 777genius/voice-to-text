@@ -53,6 +53,7 @@ async function refreshToken(): Promise<void> {
       throw new AuthError(AuthErrorCode.SessionExpired, 'No refresh token');
     }
 
+    const usedRefreshToken = session.refreshToken;
     const deviceId = tokenRepo.getDeviceId();
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -71,16 +72,51 @@ async function refreshToken(): Promise<void> {
           device_id: deviceId,
         }),
       });
+    } catch (e) {
+      // Важно: при проблемах сети/таймауте НЕ разлогиниваем пользователя.
+      if (e instanceof DOMException && e.name === 'AbortError') {
+        throw new AuthError(AuthErrorCode.NetworkError, 'Время ожидания истекло');
+      }
+      throw new AuthError(AuthErrorCode.NetworkError, 'Ошибка сети');
     } finally {
       clearTimeout(timeoutId);
     }
 
     if (!response.ok) {
-      // Refresh не удался - сессия истекла
-      await tokenRepo.clear();
-      trySyncAuthStoreSession(null);
-      await syncAuthWithTauriBackend({ authenticated: false, token: null });
-      throw new AuthError(AuthErrorCode.SessionExpired, 'Session expired');
+      // Refresh может не удаться по разным причинам.
+      // Разлогиниваем ТОЛЬКО когда сервер явно говорит "refresh токен невалиден" (401).
+      // В остальных случаях (5xx/429 и т.д.) сохраняем токены и даём пользователю шанс повторить позже.
+      const body = await response.json().catch(() => ({}));
+      const errorData = body as { error?: { code?: string; message?: string; details?: any } };
+      const message = errorData?.error?.message || 'Неизвестная ошибка';
+
+      if (response.status === 401) {
+        // Частый кейс в desktop multi-window:
+        // другое окно успело сделать refresh (rotation), а мы ещё шлём старый refresh_token.
+        // В этом случае НЕ очищаем storage, а просто подхватываем актуальную сессию.
+        const currentSession = await tokenRepo.get();
+        if (currentSession?.refreshToken && currentSession.refreshToken !== usedRefreshToken) {
+          trySyncAuthStoreSession(currentSession);
+          await syncAuthWithTauriBackend({
+            authenticated: true,
+            token: currentSession.accessToken,
+          });
+          return;
+        }
+
+        await tokenRepo.clear();
+        trySyncAuthStoreSession(null);
+        await syncAuthWithTauriBackend({ authenticated: false, token: null });
+        throw new AuthError(AuthErrorCode.SessionExpired, message);
+      }
+
+      if (response.status === 429) {
+        const retryAfterSeconds = Number(errorData?.error?.details?.retry_after_seconds);
+        const retryAfterMs = Number.isFinite(retryAfterSeconds) ? retryAfterSeconds * 1000 : undefined;
+        throw new AuthError(AuthErrorCode.RateLimitExceeded, message, retryAfterMs);
+      }
+
+      throw new AuthError(AuthErrorCode.NetworkError, message);
     }
 
     const json = await response.json();

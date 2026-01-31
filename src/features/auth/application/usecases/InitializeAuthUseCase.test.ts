@@ -110,16 +110,16 @@ describe('InitializeAuthUseCase', () => {
     expect(mockTokenRepository.clear).toHaveBeenCalled();
   });
 
-  it('возвращает sessionExpired и очищает storage если refresh не удался', async () => {
+  it('не разлогинивает пользователя если refresh не удался (например, временная ошибка сети)', async () => {
     vi.mocked(mockTokenRepository.get).mockResolvedValue(expiredAccessSession);
     vi.mocked(mockAuthRepository.refreshTokens).mockRejectedValue(new Error('Refresh failed'));
 
     const result = await initializeAuthUseCase.execute();
 
-    expect(result.isAuthenticated).toBe(false);
-    expect(result.session).toBeNull();
-    expect(result.sessionExpired).toBe(true);
-    expect(mockTokenRepository.clear).toHaveBeenCalled();
+    expect(result.isAuthenticated).toBe(true);
+    expect(result.session).toEqual(expiredAccessSession);
+    expect(result.sessionExpired).toBe(false);
+    expect(mockTokenRepository.clear).not.toHaveBeenCalled();
   });
 
   it('не пытается обновить и очищает storage если нет refresh токена', async () => {

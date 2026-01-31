@@ -109,7 +109,11 @@ impl TranscriptionService {
                 Err(e) => {
                     log::warn!("Failed to resume connection: {} - creating new connection as fallback", e);
 
-                    *self.stt_provider.write().await = None;
+                    // Важно: перед тем как выкинуть провайдер, аккуратно закрываем его.
+                    // Иначе есть риск оставить "висящий" WebSocket/таски в фоне.
+                    if let Some(mut provider) = self.stt_provider.write().await.take() {
+                        let _ = provider.abort().await;
+                    }
                     can_reuse_connection = false;
                 }
             }
@@ -367,24 +371,29 @@ impl TranscriptionService {
                     .map_err(|e| anyhow::anyhow!("Failed to pause STT stream: {}", e))?;
             }
 
-            // Запускаем таймер на 30 минут для автоматического закрытия соединения
+            // Запускаем таймер на TTL (keep_alive_ttl_secs) для автоматического закрытия соединения.
+            //
+            // Важно: keep-alive удерживает WS соединение открытым. Если держать слишком долго,
+            // можно упереться в лимиты провайдера на параллельные соединения (например Deepgram).
+            // Поэтому TTL должен быть коротким и конфигурируемым.
             let stt_provider = self.stt_provider.clone();
             let status_arc = self.status.clone();
+            let ttl_secs = config.keep_alive_ttl_secs.max(10); // защитный минимум
             let inactivity_timer = tokio::spawn(async move {
-                log::info!("Inactivity timer started (30 minutes)");
-                tokio::time::sleep(tokio::time::Duration::from_secs(30 * 60)).await;
+                log::info!("Inactivity timer started ({} seconds)", ttl_secs);
+                tokio::time::sleep(tokio::time::Duration::from_secs(ttl_secs)).await;
 
                 // Проверяем что статус все еще Idle (не началась новая запись)
                 let current_status = *status_arc.read().await;
                 if current_status == RecordingStatus::Idle {
-                    log::info!("Inactivity timeout reached (30 min) - closing persistent connection for memory cleanup");
+                    log::info!("Inactivity timeout reached ({}s) - closing persistent connection", ttl_secs);
 
                     if let Some(provider) = stt_provider.write().await.as_mut() {
                         let _ = provider.stop_stream().await;
                     }
                     *stt_provider.write().await = None;
 
-                    log::info!("Persistent connection closed, memory freed");
+                    log::info!("Persistent connection closed");
                 } else {
                     log::debug!("Inactivity timer cancelled - recording restarted before timeout");
                 }

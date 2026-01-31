@@ -12,7 +12,8 @@ import type { AppTheme, SaveStatus, SettingsState } from '../domain/types';
 
 export const useSettingsStore = defineStore('settings', () => {
   // Состояние настроек
-  const provider = ref<SttProviderType>(SttProviderType.Deepgram);
+  // По умолчанию используем только наш Backend. Выбор провайдера в UI скрыт.
+  const provider = ref<SttProviderType>(SttProviderType.Backend);
   const language = ref('ru');
   const deepgramApiKey = ref('');
   const assemblyaiApiKey = ref('');
@@ -69,7 +70,8 @@ export const useSettingsStore = defineStore('settings', () => {
 
   // Действия
   function setProvider(value: SttProviderType) {
-    provider.value = value;
+    // Выбор провайдера выключен: всегда используем Backend.
+    provider.value = SttProviderType.Backend;
   }
 
   function setLanguage(value: string) {

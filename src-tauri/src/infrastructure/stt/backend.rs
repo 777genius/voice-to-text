@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use tokio::time::Duration;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tokio::net::TcpStream;
 
@@ -72,11 +73,13 @@ pub type UsageUpdateCallback = Arc<dyn Fn(f32, f32) + Send + Sync>;
 pub struct BackendProvider {
     config: Option<SttConfig>,
     is_streaming: bool,
+    is_paused: bool,
     auth_token: Option<String>,
     backend_url: String,
     session_id: Option<String>,
     ws_write: Option<Arc<Mutex<futures_util::stream::SplitSink<WsStream, Message>>>>,
     receiver_task: Option<JoinHandle<()>>,
+    keepalive_task: Option<JoinHandle<()>>,
 
     /// Флаг закрытия соединения (атомарный для thread-safety)
     /// Используется для предотвращения race condition при закрытии WebSocket
@@ -105,11 +108,13 @@ impl BackendProvider {
         Self {
             config: None,
             is_streaming: false,
+            is_paused: false,
             auth_token: None,
             backend_url: get_default_backend_url(),
             session_id: None,
             ws_write: None,
             receiver_task: None,
+            keepalive_task: None,
             is_closed: Arc::new(AtomicBool::new(true)), // Изначально закрыто
             on_partial_callback: None,
             on_final_callback: None,
@@ -454,7 +459,32 @@ impl SttProvider for BackendProvider {
         });
 
         self.receiver_task = Some(receiver_task);
+
+        // KeepAlive task (best-effort): поддерживает соединение живым, когда пользователь
+        // быстро старт/стопит запись или просто прячет окно на пару секунд.
+        //
+        // Важно: само наличие открытого WS-соединения может держать ресурсы провайдера (Deepgram) на сервере.
+        // Поэтому держим TTL коротким и всегда закрываем соединение по таймеру в TranscriptionService.
+        let ws_write_for_keepalive = ws_write.clone();
+        let is_closed_for_keepalive = self.is_closed.clone();
+        let keepalive_task = tokio::spawn(async move {
+            log::debug!("Backend keepalive task started");
+            loop {
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                if is_closed_for_keepalive.load(Ordering::SeqCst) {
+                    break;
+                }
+                let mut guard = ws_write_for_keepalive.lock().await;
+                if guard.send(Message::Ping(Vec::new())).await.is_err() {
+                    break;
+                }
+            }
+            log::debug!("Backend keepalive task ended");
+        });
+        self.keepalive_task = Some(keepalive_task);
+
         self.is_streaming = true;
+        self.is_paused = false;
         self.sent_chunks_count = 0;
         self.sent_bytes_total = 0;
 
@@ -587,8 +617,15 @@ impl SttProvider for BackendProvider {
             let _ = task.await;
         }
 
+        // Останавливаем keepalive task
+        if let Some(task) = self.keepalive_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+
         self.ws_write = None;
         self.is_streaming = false;
+        self.is_paused = false;
         self.session_id = None;
         self.next_send_at = None;
         self.batch_started_at = None;
@@ -608,6 +645,10 @@ impl SttProvider for BackendProvider {
         // ПЕРВЫМ ДЕЛОМ ставим флаг закрытия
         self.is_closed.store(true, Ordering::SeqCst);
 
+        if let Some(task) = self.keepalive_task.take() {
+            task.abort();
+        }
+
         // Принудительно закрываем без отправки Close
         if let Some(ref ws_write) = self.ws_write {
             let _ = ws_write.lock().await.close().await;
@@ -619,8 +660,56 @@ impl SttProvider for BackendProvider {
 
         self.ws_write = None;
         self.is_streaming = false;
+        self.is_paused = false;
         self.session_id = None;
 
+        Ok(())
+    }
+
+    async fn pause_stream(&mut self) -> SttResult<()> {
+        if !self.is_streaming {
+            return Err(SttError::Processing("Stream not active".to_string()));
+        }
+        if self.is_paused {
+            return Ok(());
+        }
+
+        // Флашим хвост батча, чтобы не потерять последние миллисекунды аудио перед паузой.
+        if !self.audio_batch.is_empty() && !self.is_closed.load(Ordering::SeqCst) {
+            if let Some(ref ws_write) = self.ws_write {
+                let bytes = std::mem::take(&mut self.audio_batch);
+                self.audio_batch_frames = 0;
+                self.next_send_at = None;
+                self.batch_started_at = None;
+                let _ = ws_write.lock().await.send(Message::Binary(bytes)).await;
+            }
+        }
+
+        self.is_paused = true;
+        Ok(())
+    }
+
+    async fn resume_stream(
+        &mut self,
+        on_partial: TranscriptionCallback,
+        on_final: TranscriptionCallback,
+        on_error: ErrorCallback,
+        on_connection_quality: ConnectionQualityCallback,
+    ) -> SttResult<()> {
+        if !self.is_streaming {
+            return Err(SttError::Processing("Stream not active".to_string()));
+        }
+        if self.is_closed.load(Ordering::SeqCst) {
+            return Err(SttError::Connection("Connection closed".to_string()));
+        }
+
+        // На практике callbacks не обязаны меняться, но обновим их на всякий случай.
+        self.on_partial_callback = Some(on_partial);
+        self.on_final_callback = Some(on_final);
+        self.on_error_callback = Some(on_error);
+        self.on_connection_quality_callback = Some(on_connection_quality);
+
+        self.is_paused = false;
         Ok(())
     }
 
@@ -633,12 +722,27 @@ impl SttProvider for BackendProvider {
     }
 
     fn supports_keep_alive(&self) -> bool {
-        // Пока не поддерживаем keep-alive для backend провайдера
-        false
+        true
     }
 
     fn is_connection_alive(&self) -> bool {
-        self.is_streaming && self.ws_write.is_some()
+        if !(self.is_streaming && self.is_paused && self.ws_write.is_some()) {
+            return false;
+        }
+        if self.is_closed.load(Ordering::SeqCst) {
+            return false;
+        }
+        if let Some(task) = &self.receiver_task {
+            if task.is_finished() {
+                return false;
+            }
+        }
+        if let Some(task) = &self.keepalive_task {
+            if task.is_finished() {
+                return false;
+            }
+        }
+        true
     }
 
     fn is_online(&self) -> bool {

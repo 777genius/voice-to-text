@@ -10,25 +10,18 @@ const STORE_PATH = 'auth.json';
 // Флаг для определения Tauri окружения
 const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
-// Lazy load Tauri store
-let storePromise: Promise<any> | null = null;
-
 async function getStore() {
   if (!isTauri) return null;
 
-  if (!storePromise) {
-    storePromise = (async () => {
-      try {
-        const { Store } = await import('@tauri-apps/plugin-store');
-        return await Store.load(STORE_PATH);
-      } catch (e) {
-        console.warn('Tauri Store not available, using localStorage fallback:', e);
-        return null;
-      }
-    })();
+  // Важно: НЕ кешируем Store instance.
+  // В Tauri multi-window другой webview может поменять файл стора, а кешированный instance этого не увидит.
+  try {
+    const { Store } = await import('@tauri-apps/plugin-store');
+    return await Store.load(STORE_PATH);
+  } catch (e) {
+    console.warn('Tauri Store not available, using localStorage fallback:', e);
+    return null;
   }
-
-  return storePromise;
 }
 
 /**
@@ -112,7 +105,47 @@ export class TokenRepository implements ITokenRepository {
   }
 
   getDeviceId(): string {
-    // Device ID храним в localStorage (не секретные данные)
+    // В идеале device_id должен быть одинаковым во всех окнах приложения.
+    // Для Tauri храним в plugin-store, иначе — в localStorage.
+    //
+    // Это не секретные данные, но они участвуют в привязке refresh токена на сервере.
+    // Если device_id "прыгает", refresh начнёт стабильно падать.
+    if (isTauri) {
+      // В этой ветке избегаем async API на горячем пути: будем использовать localStorage как fallback,
+      // но попытаемся синхронизировать в store, когда можем.
+      let deviceId = localStorage.getItem(DEVICE_ID_KEY);
+      if (!deviceId) {
+        deviceId = `desktop-${crypto.randomUUID()}`;
+        localStorage.setItem(DEVICE_ID_KEY, deviceId);
+        void (async () => {
+          const store = await getStore();
+          if (!store) return;
+          const existing = (await store.get(DEVICE_ID_KEY)) as string | null;
+          if (existing) {
+            localStorage.setItem(DEVICE_ID_KEY, existing);
+            return;
+          }
+          await store.set(DEVICE_ID_KEY, deviceId);
+          await store.save();
+        })();
+      } else {
+        void (async () => {
+          const store = await getStore();
+          if (!store) return;
+          const existing = (await store.get(DEVICE_ID_KEY)) as string | null;
+          if (existing) {
+            if (existing !== deviceId) {
+              localStorage.setItem(DEVICE_ID_KEY, existing);
+            }
+            return;
+          }
+          await store.set(DEVICE_ID_KEY, deviceId);
+          await store.save();
+        })();
+      }
+      return deviceId;
+    }
+
     let deviceId = localStorage.getItem(DEVICE_ID_KEY);
     if (!deviceId) {
       deviceId = `desktop-${crypto.randomUUID()}`;
@@ -135,5 +168,4 @@ export function getTokenRepository(): TokenRepository {
 // Для тестов
 export function resetTokenRepository(): void {
   tokenRepositoryInstance = null;
-  storePromise = null;
 }

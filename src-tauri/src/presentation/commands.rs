@@ -335,6 +335,15 @@ pub async fn toggle_recording_with_window(
 ) -> Result<(), String> {
     log::info!("Command: toggle_recording_with_window");
 
+    // Если пользователь не авторизован — не показываем recording окно.
+    // Иначе получается странное поведение: окно может получить фокус, но UI в нём "none" (скрыт правилами windowMode).
+    let is_authenticated = *state.is_authenticated.read().await;
+    if !is_authenticated {
+        log::info!("toggle_recording_with_window: user not authenticated -> redirect to auth window");
+        show_auth_window(app_handle).await?;
+        return Ok(());
+    }
+
     // Переключаем состояние записи
     let current_status = state.transcription_service.get_status().await;
 
@@ -501,16 +510,10 @@ pub async fn update_stt_config(
 ) -> Result<(), String> {
     log::info!("Command: update_stt_config - provider: {}, language: {}, model: {:?}", provider, language, model);
 
-    // Парсим provider type
-    let provider_type = match provider.to_lowercase().as_str() {
-        "assemblyai" | "assembly-ai" => SttProviderType::AssemblyAI,
-        "deepgram" => SttProviderType::Deepgram,
-        "whisper" | "whisper-local" => SttProviderType::WhisperLocal,
-        "google" | "google-cloud" => SttProviderType::GoogleCloud,
-        "azure" => SttProviderType::Azure,
-        "backend" => SttProviderType::Backend,
-        _ => return Err(format!("Unknown STT provider: {}", provider)),
-    };
+    // Выбор провайдера отключён — всегда используем Backend.
+    // Параметр provider оставлен, чтобы не ломать совместимость API.
+    let _ = provider;
+    let provider_type = SttProviderType::Backend;
 
     // Загружаем существующую конфигурацию из файла (если есть)
     let mut config = ConfigStore::load_config().await.unwrap_or_default();
@@ -519,40 +522,26 @@ pub async fn update_stt_config(
     config.provider = provider_type;
     config.language = language;
 
-    // Обновляем модель если передана
-    if let Some(model_name) = model {
-        config.model = Some(model_name);
-    }
+    // Whisper/model больше не используем в backend-only архитектуре.
+    let _ = model;
+    config.model = None;
 
-    // Автоматически устанавливаем keep_connection_alive в зависимости от провайдера
-    // Deepgram: безопасно (биллит по длительности аудио, не по времени соединения)
-    // AssemblyAI: опасно (биллит по времени соединения)
-    config.keep_connection_alive = matches!(provider_type, SttProviderType::Deepgram);
+    // В backend-only режиме keep-alive полезен: это снижает latency при повторном старте записи,
+    // потому что мы переиспользуем WebSocket соединение с нашим сервером.
+    //
+    // Важно: keep-alive удерживает живые соединения в фоне. Если TTL сделать слишком большим,
+    // можно упереться в лимиты параллельных соединений (и на нашей стороне, и на стороне провайдера, например Deepgram).
+    // Поэтому по умолчанию держим включенным, но TTL оставляем коротким (см. stt_config.keep_alive_ttl_secs).
+    config.keep_connection_alive = true;
 
     log::debug!("Setting keep_connection_alive={} for provider {:?}",
         config.keep_connection_alive, provider_type);
 
-    // Обновляем пользовательские API ключи если они переданы
-    // Пустая строка означает "очистить" (использовать встроенный ключ)
-    if let Some(key) = deepgram_api_key {
-        if key.trim().is_empty() {
-            config.deepgram_api_key = None; // Очистить (будет использован встроенный)
-            log::debug!("Deepgram API key cleared (will use embedded key)");
-        } else {
-            config.deepgram_api_key = Some(key);
-            log::debug!("Deepgram API key updated");
-        }
-    }
-
-    if let Some(key) = assemblyai_api_key {
-        if key.trim().is_empty() {
-            config.assemblyai_api_key = None; // Очистить (будет использован встроенный)
-            log::debug!("AssemblyAI API key cleared (will use embedded key)");
-        } else {
-            config.assemblyai_api_key = Some(key);
-            log::debug!("AssemblyAI API key updated");
-        }
-    }
+    // API ключи больше не используем в настройках (backend-only).
+    let _ = deepgram_api_key;
+    let _ = assemblyai_api_key;
+    config.deepgram_api_key = None;
+    config.assemblyai_api_key = None;
 
     // Обновляем конфигурацию в сервисе
     state
@@ -967,7 +956,9 @@ pub async fn register_recording_hotkey(
 
 /// Check for application updates
 #[tauri::command]
-pub async fn check_for_updates(app_handle: AppHandle) -> Result<Option<String>, String> {
+pub async fn check_for_updates(
+    app_handle: AppHandle,
+) -> Result<Option<crate::infrastructure::updater::UpdateInfo>, String> {
     log::info!("Command: check_for_updates");
     crate::infrastructure::updater::check_for_update(app_handle).await
 }

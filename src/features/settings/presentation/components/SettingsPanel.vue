@@ -11,13 +11,9 @@ import { useSettings } from '../composables/useSettings';
 import { useSettingsTheme } from '../composables/useSettingsTheme';
 
 // Секции
-import ProviderSection from './sections/ProviderSection.vue';
 import LanguageSection from './sections/LanguageSection.vue';
-import ApiKeysSection from './sections/ApiKeysSection.vue';
-import WhisperSection from './sections/WhisperSection.vue';
 import ThemeSection from './sections/ThemeSection.vue';
 import HotkeySection from './sections/HotkeySection.vue';
-import SensitivitySection from './sections/SensitivitySection.vue';
 import AutoActionsSection from './sections/AutoActionsSection.vue';
 import AudioDeviceSection from './sections/AudioDeviceSection.vue';
 import MicTestSection from './sections/MicTestSection.vue';
@@ -82,26 +78,14 @@ async function handleSave() {
         </div>
 
         <template v-else>
-          <!-- Провайдер STT -->
-          <ProviderSection />
-
-          <!-- Язык -->
-          <LanguageSection />
-
-          <!-- API ключи (только для облачных провайдеров) -->
-          <ApiKeysSection />
-
-          <!-- Whisper (только для Whisper) -->
-          <WhisperSection />
-
-          <!-- Тема -->
-          <ThemeSection />
+          <!-- Язык + тема в две колонки -->
+          <div class="settings-two-cols">
+            <LanguageSection />
+            <ThemeSection />
+          </div>
 
           <!-- Горячая клавиша -->
           <HotkeySection />
-
-          <!-- Чувствительность микрофона -->
-          <SensitivitySection />
 
           <!-- Автоматические действия -->
           <AutoActionsSection />
@@ -199,5 +183,17 @@ async function handleSave() {
 
 .settings-content::-webkit-scrollbar-thumb:hover {
   background: rgba(var(--v-theme-on-surface), 0.3);
+}
+
+.settings-two-cols {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--spacing-xl);
+}
+
+@media (min-width: 600px) {
+  .settings-two-cols {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 </style>

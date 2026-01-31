@@ -37,7 +37,6 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::default().build());
@@ -230,6 +229,28 @@ pub fn run() {
                     // Приоритет: пользовательские ключи (deepgram_api_key/assemblyai_api_key) → встроенные ключи
 
                     if let Some(state) = app_handle.try_state::<AppState>() {
+                        // Backend-only режим: по умолчанию держим соединение живым между сессиями записи.
+                        // TTL короткий (см. stt_config.keep_alive_ttl_secs), чтобы не держать "висящие" коннекты в фоне
+                        // и не упереться в лимиты параллельных соединений провайдера (например Deepgram).
+                        let mut config_migrated = false;
+                        if saved_config.provider == crate::domain::SttProviderType::Backend
+                            && !saved_config.keep_connection_alive
+                        {
+                            saved_config.keep_connection_alive = true;
+                            config_migrated = true;
+                            log::info!(
+                                "Enabled keep_connection_alive for backend provider by default (ttl={}s)",
+                                saved_config.keep_alive_ttl_secs
+                            );
+                        }
+
+                        // Best-effort: сохраняем миграцию обратно на диск, чтобы настройка была стабильной.
+                        if config_migrated {
+                            if let Err(e) = ConfigStore::save_config(&saved_config).await {
+                                log::warn!("Failed to persist migrated STT config: {}", e);
+                            }
+                        }
+
                         // Сохраняем токен если он уже был установлен (race condition с Vue set_authenticated)
                         let current_config = state.transcription_service.get_config().await;
                         if current_config.backend_auth_token.is_some() && saved_config.backend_auth_token.is_none() {

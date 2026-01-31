@@ -19,6 +19,8 @@ export class RefreshTokensUseCase {
       return null;
     }
 
+    let usedRefreshToken: string | null = null;
+
     try {
       let refreshedSession: Session | null = null;
 
@@ -29,6 +31,7 @@ export class RefreshTokensUseCase {
         }
 
         const deviceId = this.tokenRepository.getDeviceId();
+        usedRefreshToken = currentSession.refreshToken;
         refreshedSession = await this.authRepository.refreshTokens(
           currentSession.refreshToken,
           deviceId
@@ -39,6 +42,14 @@ export class RefreshTokensUseCase {
       return refreshedSession ?? (await this.tokenRepository.get());
     } catch (error) {
       if (error instanceof AuthError && error.code === AuthErrorCode.SessionExpired) {
+        // В desktop multi-window другой webview может успеть обновить токены,
+        // а этот refresh прилетит со "старым" refresh_token и получит 401.
+        // В таком случае НЕ очищаем токены — просто используем актуальную сессию из хранилища.
+        const current = await this.tokenRepository.get();
+        const tokenToCompare = usedRefreshToken ?? sessionBefore.refreshToken;
+        if (current?.refreshToken && tokenToCompare && current.refreshToken !== tokenToCompare) {
+          return current;
+        }
         await this.tokenRepository.clear();
       }
       return null;

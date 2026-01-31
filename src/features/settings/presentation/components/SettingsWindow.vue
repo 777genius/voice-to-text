@@ -9,13 +9,9 @@ import { useSettings } from '../composables/useSettings';
 import { useSettingsTheme } from '../composables/useSettingsTheme';
 
 // Секции
-import ProviderSection from './sections/ProviderSection.vue';
 import LanguageSection from './sections/LanguageSection.vue';
-import ApiKeysSection from './sections/ApiKeysSection.vue';
-import WhisperSection from './sections/WhisperSection.vue';
 import ThemeSection from './sections/ThemeSection.vue';
 import HotkeySection from './sections/HotkeySection.vue';
-import SensitivitySection from './sections/SensitivitySection.vue';
 import AutoActionsSection from './sections/AutoActionsSection.vue';
 import AudioDeviceSection from './sections/AudioDeviceSection.vue';
 import MicTestSection from './sections/MicTestSection.vue';
@@ -87,13 +83,11 @@ async function handleSave(): Promise<void> {
       </div>
 
       <template v-else>
-        <ProviderSection />
-        <LanguageSection />
-        <ApiKeysSection />
-        <WhisperSection />
-        <ThemeSection />
+        <div class="settings-two-cols">
+          <LanguageSection />
+          <ThemeSection />
+        </div>
         <HotkeySection />
-        <SensitivitySection />
         <AutoActionsSection />
         <AudioDeviceSection />
         <MicTestSection />
@@ -178,6 +172,18 @@ async function handleSave(): Promise<void> {
   display: flex;
   justify-content: center;
   padding: var(--spacing-xl);
+}
+
+.settings-two-cols {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--spacing-xl);
+}
+
+@media (min-width: 600px) {
+  .settings-two-cols {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 </style>
 

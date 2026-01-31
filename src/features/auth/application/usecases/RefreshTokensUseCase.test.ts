@@ -96,6 +96,33 @@ describe('RefreshTokensUseCase', () => {
     expect(mockTokenRepository.clear).toHaveBeenCalled();
   });
 
+  it('не очищает токены при SessionExpired если другая вкладка/окно уже обновило refresh токен', async () => {
+    const rotatedSession: Session = {
+      accessToken: 'rotated-access-token',
+      refreshToken: 'rotated-refresh-token',
+      accessExpiresAt: new Date(now + 3600000),
+      refreshExpiresAt: new Date(now + 86400000),
+    };
+
+    // execute() вызывает get() минимум 3 раза:
+    // 1) sessionBefore
+    // 2) currentSession внутри single-flight
+    // 3) current в catch при SessionExpired
+    vi.mocked(mockTokenRepository.get)
+      .mockResolvedValueOnce(currentSession)
+      .mockResolvedValueOnce(currentSession)
+      .mockResolvedValueOnce(rotatedSession);
+
+    vi.mocked(mockAuthRepository.refreshTokens).mockRejectedValue(
+      new AuthError(AuthErrorCode.SessionExpired, 'Session expired')
+    );
+
+    const result = await refreshTokensUseCase.execute();
+
+    expect(result).toEqual(rotatedSession);
+    expect(mockTokenRepository.clear).not.toHaveBeenCalled();
+  });
+
   it('возвращает null при других ошибках без очистки токенов', async () => {
     vi.mocked(mockTokenRepository.get).mockResolvedValue(currentSession);
     vi.mocked(mockAuthRepository.refreshTokens).mockRejectedValue(

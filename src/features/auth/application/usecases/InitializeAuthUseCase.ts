@@ -54,6 +54,17 @@ export class InitializeAuthUseCase {
           sessionExpired: false,
         };
       }
+
+      // Refresh мог не удаться по временным причинам (сеть/5xx).
+      // Важно: не очищаем storage и не считаем сессию "истёкшей", если токены всё ещё на месте.
+      const stillStoredSession = await this.tokenRepository.get();
+      if (stillStoredSession) {
+        return {
+          isAuthenticated: true,
+          session: stillStoredSession,
+          sessionExpired: false,
+        };
+      }
     }
 
     // Сессия истекла и обновить не удалось - очищаем storage

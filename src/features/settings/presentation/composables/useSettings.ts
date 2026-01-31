@@ -83,14 +83,12 @@ export function useSettings() {
     try {
       // Загружаем STT конфиг
       const sttConfig = await tauriSettingsService.getSttConfig();
-      store.setProvider(sttConfig.provider as SttProviderType);
+      // Выбор провайдера выключен: всегда работаем через Backend
+      store.setProvider(SttProviderType.Backend);
       store.setLanguage(sttConfig.language);
-      store.setDeepgramApiKey(sttConfig.deepgram_api_key || '');
-      store.setAssemblyaiApiKey(sttConfig.assemblyai_api_key || '');
-
-      if (sttConfig.model) {
-        store.setWhisperModel(sttConfig.model);
-      }
+      // API ключи и whisper-модель больше не используются в настройках (backend-only).
+      store.setDeepgramApiKey('');
+      store.setAssemblyaiApiKey('');
 
       // Синхронизируем локаль UI: localStorage имеет приоритет
       // (пользователь мог выбрать язык на экране входа до загрузки конфига)
@@ -149,31 +147,14 @@ export function useSettings() {
     store.clearError();
 
     try {
-      // Для Whisper проверяем что модель скачана
-      if (store.provider === SttProviderType.WhisperLocal) {
-        const isDownloaded = await tauriSettingsService.checkWhisperModel(
-          store.whisperModel
-        );
-
-        if (!isDownloaded) {
-          store.setError(
-            t('settings.whisper.modelNotDownloaded', { model: store.whisperModel })
-          );
-          store.setSaveStatus('error');
-          return false;
-        }
-      }
-
       // Сохраняем STT конфиг
       const sttConfigData: SttConfigData = {
-        provider: store.provider,
+        // Выбор провайдера выключен: всегда Backend
+        provider: SttProviderType.Backend,
         language: store.language,
-        deepgramApiKey: store.deepgramApiKey || null,
-        assemblyaiApiKey: store.assemblyaiApiKey || null,
-        model:
-          store.provider === SttProviderType.WhisperLocal
-            ? store.whisperModel
-            : null,
+        deepgramApiKey: null,
+        assemblyaiApiKey: null,
+        model: null,
       };
 
       await tauriSettingsService.updateSttConfig(sttConfigData);

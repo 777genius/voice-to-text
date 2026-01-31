@@ -64,6 +64,17 @@ pub struct SttConfig {
     /// Deepgram: safe (bills by audio duration, not connection time)
     /// AssemblyAI: dangerous (bills by connection time)
     pub keep_connection_alive: bool,
+
+    /// Сколько держать соединение живым после остановки записи (если keep_connection_alive=true).
+    ///
+    /// Важно: keep-alive удерживает streaming соединение на стороне провайдера (Deepgram) и занимает слот
+    /// по лимиту параллельных соединений. Поэтому TTL должен быть коротким (по умолчанию 2 минуты).
+    #[serde(default = "default_keep_alive_ttl_secs")]
+    pub keep_alive_ttl_secs: u64,
+}
+
+fn default_keep_alive_ttl_secs() -> u64 {
+    120
 }
 
 impl Default for SttConfig {
@@ -80,6 +91,7 @@ impl Default for SttConfig {
             backend_auth_token: None,
             backend_url: None,
             keep_connection_alive: false, // Безопасно по умолчанию для всех провайдеров
+            keep_alive_ttl_secs: default_keep_alive_ttl_secs(),
         }
     }
 }
@@ -182,6 +194,7 @@ mod tests {
         assert!(config.backend_auth_token.is_none());
         assert!(config.backend_url.is_none());
         assert!(!config.keep_connection_alive);
+        assert_eq!(config.keep_alive_ttl_secs, 120);
     }
 
     #[test]
