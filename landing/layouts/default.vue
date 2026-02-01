@@ -1,7 +1,7 @@
 <template>
-  <v-app>
+  <v-app class="app-layout">
     <AppHeader />
-    <v-main>
+    <v-main class="app-layout__main">
       <SupportedLanguages />
       <div>
         <slot />
@@ -10,3 +10,9 @@
     <AppFooter />
   </v-app>
 </template>
+
+<style scoped>
+.app-layout__main {
+  flex: 1;
+}
+</style>

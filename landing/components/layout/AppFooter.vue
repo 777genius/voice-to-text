@@ -4,45 +4,70 @@ const year = new Date().getFullYear();
 </script>
 
 <template>
-  <v-footer class="app-footer" app>
-    <v-container class="d-flex align-center justify-space-between">
-      <span>{{ t("footer.copyright", { year }) }}</span>
-      <div class="d-flex align-center ga-3">
-        <span class="footer-tagline">{{ t("footer.tagline") }}</span>
-        <span class="footer-separator">·</span>
-        <NuxtLink class="footer-link" to="/terms">{{ t("footer.links.terms") }}</NuxtLink>
-        <span class="footer-separator">·</span>
-        <NuxtLink class="footer-link" to="/privacy-policy">{{ t("footer.links.privacyPolicy") }}</NuxtLink>
-        <span class="footer-separator">·</span>
-        <NuxtLink class="footer-link" to="/refund-policy">{{ t("footer.links.refundPolicy") }}</NuxtLink>
+  <footer class="app-footer">
+    <v-container class="app-footer__inner">
+      <span class="app-footer__copy">{{ t("footer.copyright", { year }) }}</span>
+      <div class="app-footer__links">
+        <NuxtLink class="app-footer__link" to="/terms">{{ t("footer.links.terms") }}</NuxtLink>
+        <span class="app-footer__sep">·</span>
+        <NuxtLink class="app-footer__link" to="/privacy-policy">{{ t("footer.links.privacyPolicy") }}</NuxtLink>
+        <span class="app-footer__sep">·</span>
+        <NuxtLink class="app-footer__link" to="/refund-policy">{{ t("footer.links.refundPolicy") }}</NuxtLink>
       </div>
     </v-container>
-  </v-footer>
+  </footer>
 </template>
 
 <style scoped>
 .app-footer {
   border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 20px 0;
 }
 
-.footer-link {
-  color: rgba(255, 255, 255, 0.78);
+.app-footer__inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.app-footer__copy {
+  font-size: 13px;
+  opacity: 0.5;
+}
+
+.app-footer__links {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.app-footer__link {
+  color: inherit;
   text-decoration: none;
   font-size: 13px;
+  opacity: 0.5;
+  transition: opacity 0.2s ease;
 }
 
-.footer-link:hover {
-  color: rgba(255, 255, 255, 0.95);
-  text-decoration: underline;
+.app-footer__link:hover {
+  opacity: 0.85;
 }
 
-.footer-separator {
-  color: rgba(255, 255, 255, 0.35);
+.app-footer__sep {
+  opacity: 0.25;
   user-select: none;
 }
 
-.footer-tagline {
-  color: rgba(255, 255, 255, 0.65);
-  font-size: 13px;
+/* Light theme */
+.v-theme--light .app-footer {
+  border-top-color: rgba(0, 0, 0, 0.08);
+}
+
+@media (max-width: 600px) {
+  .app-footer__inner {
+    flex-direction: column;
+    gap: 10px;
+    text-align: center;
+  }
 }
 </style>

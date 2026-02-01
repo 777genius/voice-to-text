@@ -80,7 +80,7 @@
     {
       "id": "openSource",
       "question": "Is the project open source?",
-      "answer": "Yes, the full source code is available on GitHub under the MIT license."
+      "answer": "Yes, the code is open source on <a href='https://github.com/777genius/VoicetextAI' target='_blank'>GitHub</a>."
     }
   ],
   "download": {

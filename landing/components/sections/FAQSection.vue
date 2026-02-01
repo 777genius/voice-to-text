@@ -58,9 +58,7 @@ const faqIcons = [
                 </div>
               </v-expansion-panel-title>
               <v-expansion-panel-text class="faq-section__panel-text">
-                <div class="faq-section__answer">
-                  {{ item.answer }}
-                </div>
+                <div class="faq-section__answer" v-html="item.answer" />
               </v-expansion-panel-text>
             </v-expansion-panel>
           </v-expansion-panels>
@@ -269,6 +267,16 @@ const faqIcons = [
   font-size: 0.95rem;
   line-height: 1.7;
   opacity: 0.65;
+}
+
+.faq-section__answer :deep(a) {
+  color: #f59e0b;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.faq-section__answer :deep(a:hover) {
+  text-decoration: underline;
 }
 
 /* ─── Decoration ─── */
