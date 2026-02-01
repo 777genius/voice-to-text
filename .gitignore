@@ -32,6 +32,7 @@ src-tauri/WixTools
 .env.local
 .env.*.local
 .env.test
+.env.prod
 .env.production
 env
 

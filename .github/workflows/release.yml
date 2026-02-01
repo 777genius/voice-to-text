@@ -86,6 +86,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VITE_API_URL: https://api.voicetext.site
+          VOICE_TO_TEXT_BACKEND_URL: wss://api.voicetext.site
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Voice to Text v__VERSION__'
