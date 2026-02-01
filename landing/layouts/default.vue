@@ -2,7 +2,7 @@
   <v-app>
     <AppHeader />
     <v-main>
-      <div class="page">
+      <div>
         <slot />
       </div>
     </v-main>

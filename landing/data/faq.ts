@@ -3,5 +3,5 @@ export const faqItems = [
   { id: "offline" },
   { id: "keys" },
   { id: "hotkey" },
-  { id: "privacy" }
+  { id: "openSource" }
 ] as const;

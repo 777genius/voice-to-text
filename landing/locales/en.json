@@ -4,8 +4,9 @@
     "providers": "Providers",
     "screenshots": "Screenshots",
     "download": "Download",
-    "privacy": "Privacy",
-    "faq": "FAQ"
+    "openSource": "Open Source",
+    "faq": "FAQ",
+    "pricing": "Pricing"
   },
   "hero": {
     "ctaPrimary": "Download for {platform}",
@@ -24,10 +25,32 @@
   "language": {
     "label": "Language"
   },
+  "features": {
+    "sectionTitle": "Everything you need for voice input",
+    "sectionSubtitle": "Powerful features designed to make voice-to-text seamless, private, and lightning fast."
+  },
+  "providers": {
+    "sectionTitle": "Powered by Deepgram Nova-3",
+    "sectionSubtitle": "Industry-leading speech-to-text engine with unmatched accuracy and real-time multilingual support.",
+    "learnMoreBtn": "Learn More"
+  },
+  "pricing": {
+    "sectionTitle": "Simple, transparent pricing",
+    "sectionSubtitle": "Start free. Upgrade when you need more power.",
+    "getStarted": "Get Started",
+    "popular": "Most Popular"
+  },
+  "faq": {
+    "sectionTitle": "Got questions? We've got answers",
+    "subtitle": "Answers to frequently asked questions"
+  },
   "common": {
     "learnMore": "Learn more"
   },
   "screenshots": {
+    "sectionTitle": "See it in action",
+    "sectionSubtitle": "Explore the sleek interface designed for productivity and comfort.",
+    "main": "Main screen",
     "dark": "Dark theme",
     "light": "Light theme",
     "settings": "Settings",
@@ -42,7 +65,7 @@
     "homeDescription": "Real-time voice-to-text app with offline support and global hotkeys.",
     "downloadTitle": "Download Voice to Text",
     "downloadDescription": "Get the latest builds for macOS, Windows, and Linux.",
-    "privacyTitle": "Privacy at Voice to Text",
-    "privacyDescription": "Learn how we keep your data private and local."
+    "openSourceTitle": "Open Source — Voice to Text",
+    "openSourceDescription": "Explore the open-source code behind Voice to Text on GitHub."
   }
 }

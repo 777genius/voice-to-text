@@ -4,12 +4,12 @@ type ThemeName = "light" | "dark";
 
 export const useThemeStore = defineStore("theme", {
   state: () => ({
-    current: "light" as ThemeName,
+    current: "dark" as ThemeName,
     userSelected: false
   }),
   actions: {
     getInitialTheme(): ThemeName {
-      if (!process.client) return "light";
+      if (!process.client) return "dark";
       const saved = localStorage.getItem("theme");
       if (saved === "dark" || saved === "light") {
         this.userSelected = true;
@@ -18,7 +18,7 @@ export const useThemeStore = defineStore("theme", {
       if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
         return "dark";
       }
-      return "light";
+      return "dark";
     },
     setTheme(theme: ThemeName, fromUser: boolean) {
       this.current = theme;

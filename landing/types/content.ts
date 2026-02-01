@@ -18,10 +18,10 @@ export interface FaqItem {
   answer: string;
 }
 
-export interface PrivacyContent {
+export interface OpenSourceContent {
   title: string;
   bullets: string[];
-  openSourceNote: string;
+  note: string;
 }
 
 export interface HeroContent {
@@ -34,13 +34,24 @@ export interface DownloadContent {
   note: string;
 }
 
+export interface PricingPlan {
+  id: string;
+  name: string;
+  price: string;
+  period: string;
+  description: string;
+  features: string[];
+  highlighted?: boolean;
+}
+
 export interface LandingContent {
   hero: HeroContent;
   features: FeatureItem[];
   providers: ProviderItem[];
-  privacy: PrivacyContent;
+  openSource: OpenSourceContent;
   faq: FaqItem[];
   download: DownloadContent;
+  pricing: PricingPlan[];
 }
 
 export type LocalizedContent = Record<LocaleCode, LandingContent>;

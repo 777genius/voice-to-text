@@ -4,8 +4,9 @@
     "providers": "Proveedores",
     "screenshots": "Capturas",
     "download": "Descargar",
-    "privacy": "Privacidad",
-    "faq": "FAQ"
+    "openSource": "Open Source",
+    "faq": "FAQ",
+    "pricing": "Precios"
   },
   "hero": {
     "ctaPrimary": "Descargar para {platform}",
@@ -24,10 +25,32 @@
   "language": {
     "label": "Idioma"
   },
+  "features": {
+    "sectionTitle": "Todo lo que necesitas para la entrada de voz",
+    "sectionSubtitle": "Funciones potentes diseñadas para una transcripción fluida, privada y ultrarrápida."
+  },
+  "providers": {
+    "sectionTitle": "Impulsado por Deepgram Nova-3",
+    "sectionSubtitle": "Motor líder de voz a texto con precisión inigualable y soporte multilingüe en tiempo real.",
+    "learnMoreBtn": "Más información"
+  },
+  "pricing": {
+    "sectionTitle": "Precios simples y transparentes",
+    "sectionSubtitle": "Empieza gratis. Mejora cuando necesites más.",
+    "getStarted": "Empezar",
+    "popular": "Más Popular"
+  },
+  "faq": {
+    "sectionTitle": "¿Tienes preguntas? Tenemos respuestas",
+    "subtitle": "Respuestas a preguntas frecuentes"
+  },
   "common": {
     "learnMore": "Más información"
   },
   "screenshots": {
+    "sectionTitle": "Míralo en acción",
+    "sectionSubtitle": "Explora la interfaz elegante diseñada para la productividad y la comodidad.",
+    "main": "Pantalla principal",
     "dark": "Tema oscuro",
     "light": "Tema claro",
     "settings": "Ajustes",
@@ -42,7 +65,7 @@
     "homeDescription": "App de voz a texto con modo sin conexión y atajos globales.",
     "downloadTitle": "Descargar Voice to Text",
     "downloadDescription": "Versiones para macOS, Windows y Linux.",
-    "privacyTitle": "Privacidad en Voice to Text",
-    "privacyDescription": "Cómo protegemos tus datos y los guardamos localmente."
+    "openSourceTitle": "Open Source — Voice to Text",
+    "openSourceDescription": "Explora el código abierto de Voice to Text en GitHub."
   }
 }

@@ -6,15 +6,29 @@ import { useLocaleStore } from "~/stores/locale";
 const { t, locale } = useI18n();
 const nuxtApp = useNuxtApp();
 const switchLocalePath = useSwitchLocalePath();
-const props = defineProps<{ fullWidth?: boolean; compact?: boolean }>();
+const props = defineProps<{ fullWidth?: boolean; compact?: boolean; iconOnly?: boolean }>();
 const localeStore = useLocaleStore();
+
+const flagIconMap: Record<string, string> = {
+  en: "circle-flags:us",
+  ru: "circle-flags:ru",
+  es: "circle-flags:es",
+  fr: "circle-flags:fr",
+  de: "circle-flags:de",
+  uk: "circle-flags:ua"
+};
 
 const items = computed(() =>
   supportedLocales.map((item) => ({
     title: item.name,
-    value: item.code as LocaleCode
+    value: item.code as LocaleCode,
+    flagIcon: flagIconMap[item.code] ?? "circle-flags:xx"
   }))
 );
+
+const currentFlagIcon = computed(() => {
+  return flagIconMap[locale.value as string] ?? "circle-flags:xx";
+});
 
 const onChange = async (value: string | LocaleCode) => {
   const nextLocale = value as LocaleCode;
@@ -32,7 +46,32 @@ const onChange = async (value: string | LocaleCode) => {
 </script>
 
 <template>
+  <!-- Icon-only mode: simple button with dropdown menu -->
+  <v-menu v-if="props.iconOnly" location="bottom">
+    <template #activator="{ props: menuProps }">
+      <v-btn variant="text" v-bind="menuProps" :aria-label="t('language.label')">
+        <Icon :name="currentFlagIcon" class="language-switcher__flag-icon" />
+      </v-btn>
+    </template>
+    <v-list density="compact">
+      <v-list-item
+        v-for="item in items"
+        :key="item.value"
+        @click="onChange(item.value)"
+      >
+        <template #title>
+          <span class="language-switcher__item">
+            <Icon :name="item.flagIcon" class="language-switcher__flag-icon" />
+            <span>{{ item.title }}</span>
+          </span>
+        </template>
+      </v-list-item>
+    </v-list>
+  </v-menu>
+
+  <!-- Standard select mode -->
   <v-select
+    v-else
     :label="props.compact ? undefined : t('language.label')"
     :placeholder="props.compact ? t('language.label') : undefined"
     :items="items"
@@ -48,10 +87,37 @@ const onChange = async (value: string | LocaleCode) => {
     }"
     :aria-label="t('language.label')"
     :single-line="props.compact"
-  />
+  >
+    <template #selection>
+      <Icon :name="currentFlagIcon" class="language-switcher__flag-icon" />
+    </template>
+    <template #item="{ item, props: itemProps }">
+      <v-list-item v-bind="itemProps">
+        <template #title>
+          <span class="language-switcher__item">
+            <Icon :name="item.raw.flagIcon" class="language-switcher__flag-icon" />
+            <span>{{ item.raw.title }}</span>
+          </span>
+        </template>
+      </v-list-item>
+    </template>
+  </v-select>
 </template>
 
 <style scoped>
+.language-switcher__flag-icon {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 50%;
+}
+
+.language-switcher__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .language-switcher--compact :deep(.v-field) {
   min-height: 36px;
 }
@@ -63,7 +129,7 @@ const onChange = async (value: string | LocaleCode) => {
 }
 
 .language-switcher--compact {
-  min-width: 90px;
+  min-width: 60px;
   position: relative;
   z-index: 2;
 }

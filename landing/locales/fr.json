@@ -4,8 +4,9 @@
     "providers": "Fournisseurs",
     "screenshots": "Captures",
     "download": "Télécharger",
-    "privacy": "Confidentialité",
-    "faq": "FAQ"
+    "openSource": "Open Source",
+    "faq": "FAQ",
+    "pricing": "Tarifs"
   },
   "hero": {
     "ctaPrimary": "Télécharger pour {platform}",
@@ -24,10 +25,32 @@
   "language": {
     "label": "Langue"
   },
+  "features": {
+    "sectionTitle": "Tout ce qu'il faut pour la saisie vocale",
+    "sectionSubtitle": "Des fonctionnalités puissantes pour une transcription fluide, privée et ultra-rapide."
+  },
+  "providers": {
+    "sectionTitle": "Propulsé par Deepgram Nova-3",
+    "sectionSubtitle": "Moteur de reconnaissance vocale leader avec une précision inégalée et un support multilingue en temps réel.",
+    "learnMoreBtn": "En savoir plus"
+  },
+  "pricing": {
+    "sectionTitle": "Des prix simples et transparents",
+    "sectionSubtitle": "Commencez gratuitement. Passez au niveau supérieur quand vous en avez besoin.",
+    "getStarted": "Commencer",
+    "popular": "Le plus populaire"
+  },
+  "faq": {
+    "sectionTitle": "Des questions ? Nous avons les réponses",
+    "subtitle": "Réponses aux questions fréquentes"
+  },
   "common": {
     "learnMore": "En savoir plus"
   },
   "screenshots": {
+    "sectionTitle": "Voyez-le en action",
+    "sectionSubtitle": "Découvrez l'interface élégante conçue pour la productivité et le confort.",
+    "main": "Écran principal",
     "dark": "Thème sombre",
     "light": "Thème clair",
     "settings": "Paramètres",
@@ -42,7 +65,7 @@
     "homeDescription": "Application de dictée avec mode hors ligne et raccourcis globaux.",
     "downloadTitle": "Télécharger Voice to Text",
     "downloadDescription": "Versions pour macOS, Windows et Linux.",
-    "privacyTitle": "Confidentialité Voice to Text",
-    "privacyDescription": "Comment nous protégeons vos données et les gardons localement."
+    "openSourceTitle": "Open Source — Voice to Text",
+    "openSourceDescription": "Explorez le code open source de Voice to Text sur GitHub."
   }
 }

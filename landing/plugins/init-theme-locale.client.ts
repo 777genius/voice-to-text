@@ -7,10 +7,8 @@ export default defineNuxtPlugin({
 
     // Run after hydration to avoid SSR/CSR mismatches.
     nuxtApp.hook("app:mounted", () => {
-      requestAnimationFrame(() => {
-        initTheme();
-        initLocale();
-      });
+      initTheme();
+      initLocale();
     });
   }
 });

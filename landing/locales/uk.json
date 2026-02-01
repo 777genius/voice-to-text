@@ -4,8 +4,9 @@
     "providers": "Провайдери",
     "screenshots": "Скріншоти",
     "download": "Завантажити",
-    "privacy": "Приватність",
-    "faq": "FAQ"
+    "openSource": "Open Source",
+    "faq": "FAQ",
+    "pricing": "Ціни"
   },
   "hero": {
     "ctaPrimary": "Завантажити для {platform}",
@@ -24,10 +25,32 @@
   "language": {
     "label": "Мова"
   },
+  "features": {
+    "sectionTitle": "Все, що потрібно для голосового введення",
+    "sectionSubtitle": "Потужні функції для швидкої, приватної та зручної транскрипції голосу в текст."
+  },
+  "providers": {
+    "sectionTitle": "На базі Deepgram Nova-3",
+    "sectionSubtitle": "Провідний рушій розпізнавання мовлення з неперевершеною точністю та мультимовною підтримкою в реальному часі.",
+    "learnMoreBtn": "Детальніше"
+  },
+  "pricing": {
+    "sectionTitle": "Прості та прозорі ціни",
+    "sectionSubtitle": "Починайте безкоштовно. Оновіться, коли потрібно більше.",
+    "getStarted": "Почати",
+    "popular": "Популярний"
+  },
+  "faq": {
+    "sectionTitle": "Маєте запитання? У нас є відповіді",
+    "subtitle": "Відповіді на поширені запитання"
+  },
   "common": {
     "learnMore": "Детальніше"
   },
   "screenshots": {
+    "sectionTitle": "Подивіться в дії",
+    "sectionSubtitle": "Ознайомтеся з елегантним інтерфейсом, створеним для продуктивності та зручності.",
+    "main": "Головний екран",
     "dark": "Темна тема",
     "light": "Світла тема",
     "settings": "Налаштування",
@@ -42,7 +65,7 @@
     "homeDescription": "Застосунок голос‑у‑текст із офлайн‑режимом і хоткеями.",
     "downloadTitle": "Завантажити Voice to Text",
     "downloadDescription": "Збірки для macOS, Windows та Linux.",
-    "privacyTitle": "Приватність Voice to Text",
-    "privacyDescription": "Як ми захищаємо дані та зберігаємо їх локально."
+    "openSourceTitle": "Open Source — Voice to Text",
+    "openSourceDescription": "Досліджуйте відкритий вихідний код Voice to Text на GitHub."
   }
 }

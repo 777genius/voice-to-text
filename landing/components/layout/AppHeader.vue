@@ -7,20 +7,16 @@ const menuOpen = ref(false);
 
 const navItems = computed(() => [
   { id: "features", label: t("nav.features") },
-  { id: "providers", label: t("nav.providers") },
-  { id: "screenshots", label: t("nav.screenshots") },
+  { id: "pricing", label: t("nav.pricing") },
   { id: "download", label: t("nav.download") },
-  { id: "privacy", label: t("nav.privacy") },
-  { id: "faq", label: t("nav.faq") }
 ]);
 </script>
 
 <template>
   <v-app-bar flat class="app-header">
-    <v-container class="d-flex align-center gap-4 header-container">
+    <v-container class="d-flex align-center gap-4 header-container ml-24">
       <AppLogo />
-      <v-spacer />
-      <div class="nav-links" v-show="!smAndDown">
+      <div class="nav-links ml-6" v-show="!smAndDown">
         <v-btn
           v-for="item in navItems"
           :key="item.id"
@@ -30,6 +26,7 @@ const navItems = computed(() => [
           {{ item.label }}
         </v-btn>
       </div>
+      <v-spacer />
       <div class="desktop-actions" v-show="!smAndDown">
         <LanguageSwitcher compact />
         <ThemeToggle />
@@ -55,7 +52,7 @@ const navItems = computed(() => [
             </v-list>
             <v-divider />
             <div class="mobile-menu__actions">
-              <LanguageSwitcher full-width />
+              <LanguageSwitcher icon-only />
               <ThemeToggle />
             </div>
           </v-card>
@@ -102,9 +99,10 @@ const navItems = computed(() => [
 
 .mobile-menu__actions {
   display: flex;
-  flex-direction: column;
-  gap: 16px;
-  align-items: stretch;
+  flex-direction: row;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
   padding-top: 16px;
 }
 </style>

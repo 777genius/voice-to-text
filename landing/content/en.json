@@ -10,9 +10,9 @@
       "description": "Live partial and final results while you speak."
     },
     {
-      "id": "privacy",
-      "title": "Privacy-first",
-      "description": "Keys stay local. No cloud storage of your text."
+      "id": "openSource",
+      "title": "Open source",
+      "description": "Full source code on GitHub. Transparent and community-driven."
     },
     {
       "id": "providers",
@@ -33,33 +33,73 @@
       "id": "autoCopy",
       "title": "Auto-copy",
       "description": "Final text is copied to your clipboard."
+    },
+    {
+      "id": "multilingual",
+      "title": "Multilingual",
+      "description": "Interface in 6 languages with multi-language speech recognition."
+    },
+    {
+      "id": "offline",
+      "title": "Offline mode",
+      "description": "Full transcription without internet using local Whisper models."
+    },
+    {
+      "id": "autoUpdate",
+      "title": "Auto-updates",
+      "description": "Seamless updates delivered automatically via GitHub Releases."
+    },
+    {
+      "id": "vad",
+      "title": "Voice detection",
+      "description": "Smart WebRTC VAD filters silence and background noise."
+    },
+    {
+      "id": "tray",
+      "title": "System tray",
+      "description": "Runs quietly in the background, always one click away."
+    },
+    {
+      "id": "autoPaste",
+      "title": "Auto-paste",
+      "description": "Transcription is pasted directly into any active text field."
     }
   ],
   "providers": [
     {
-      "id": "deepgram",
-      "name": "Deepgram",
-      "description": "Low latency, high accuracy (Nova-2/3)."
+      "id": "nova3-accuracy",
+      "name": "Superior Accuracy",
+      "description": "54.3% reduction in word error rate for streaming and 47.4% for batch processing compared to competitors."
     },
     {
-      "id": "assemblyai",
-      "name": "AssemblyAI",
-      "description": "Streaming v3 with strong quality."
+      "id": "nova3-multilingual",
+      "name": "Real-time Multilingual",
+      "description": "First voice AI model to offer real-time multilingual transcription across multiple languages."
     },
     {
-      "id": "whisper",
-      "name": "Whisper Local",
-      "description": "Offline mode with local models."
+      "id": "nova3-customization",
+      "name": "Self-serve Customization",
+      "description": "Instant vocabulary adaptation without model retraining — highly accurate and effective."
+    },
+    {
+      "id": "nova3-enterprise",
+      "name": "Enterprise Ready",
+      "description": "Extended capabilities for real-world enterprise use cases and challenging audio conditions."
+    },
+    {
+      "id": "nova3-preferred",
+      "name": "Preferred over Whisper",
+      "description": "Preferred on 7 out of 7 languages tested — up to 8-to-1 preference on certain languages."
     }
   ],
-  "privacy": {
-    "title": "Privacy by design",
+  "openSource": {
+    "title": "Fully open source",
     "bullets": [
-      "API keys are stored locally",
-      "Optional use of your own keys",
-      "No cloud storage of transcriptions"
+      "Source code available on GitHub — inspect, modify, and build freely",
+      "Community-driven development with open issues and contributions",
+      "Licensed under MIT — use in personal and commercial projects"
     ],
-    "openSourceNote": "Parts of the stack are open-source."
+    "note": "Transparency and trust through open code."
   },
   "faq": [
     {
@@ -83,13 +123,60 @@
       "answer": "Update it in Settings inside the app."
     },
     {
-      "id": "privacy",
-      "question": "Is my data safe?",
-      "answer": "We do not store your text in the cloud."
+      "id": "openSource",
+      "question": "Is the project open source?",
+      "answer": "Yes, the full source code is available on GitHub under the MIT license."
     }
   ],
   "download": {
     "title": "Download",
     "note": "Choose your platform and install in minutes."
-  }
+  },
+  "pricing": [
+    {
+      "id": "free",
+      "name": "Free",
+      "price": "$0",
+      "period": "forever",
+      "description": "Get started with offline transcription at no cost.",
+      "features": [
+        "Whisper Local (offline)",
+        "Unlimited transcription",
+        "Global hotkeys",
+        "Auto-copy to clipboard",
+        "Community support"
+      ]
+    },
+    {
+      "id": "pro",
+      "name": "Pro",
+      "price": "$9",
+      "period": "per month",
+      "description": "Unlock cloud providers for maximum accuracy and speed.",
+      "features": [
+        "Everything in Free",
+        "Deepgram Nova-3",
+        "AssemblyAI integration",
+        "Real-time streaming",
+        "Priority support",
+        "Early access to features"
+      ],
+      "highlighted": true
+    },
+    {
+      "id": "team",
+      "name": "Team",
+      "price": "$29",
+      "period": "per month",
+      "description": "For teams that need shared access and admin tools.",
+      "features": [
+        "Everything in Pro",
+        "Up to 10 seats",
+        "Team admin dashboard",
+        "Shared API keys",
+        "Usage analytics",
+        "Dedicated support"
+      ]
+    }
+  ]
 }
