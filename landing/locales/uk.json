@@ -87,5 +87,11 @@
     "termsDescription": "Умови та положення використання застосунку Voice to Text.",
     "openSourceTitle": "Open Source — Voice to Text",
     "openSourceDescription": "Досліджуйте відкритий вихідний код Voice to Text на GitHub."
+    "privacyTitle": "Приватність Voice to Text",
+    "privacyDescription": "Як ми захищаємо дані та зберігаємо їх локально.",
+    "privacyPolicyTitle": "Політика конфіденційності — Voice to Text",
+    "privacyPolicyDescription": "Як ми збираємо, використовуємо та захищаємо ваші дані.",
+    "termsTitle": "Умови використання — Voice to Text",
+    "termsDescription": "Умови та положення використання застосунку Voice to Text."
   }
 }

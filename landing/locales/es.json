@@ -87,5 +87,11 @@
     "termsDescription": "Términos y condiciones de uso de la aplicación Voice to Text.",
     "openSourceTitle": "Open Source — Voice to Text",
     "openSourceDescription": "Explora el código abierto de Voice to Text en GitHub."
+    "privacyTitle": "Privacidad en Voice to Text",
+    "privacyDescription": "Cómo protegemos tus datos y los guardamos localmente.",
+    "privacyPolicyTitle": "Política de privacidad — Voice to Text",
+    "privacyPolicyDescription": "Cómo recopilamos, usamos y protegemos tus datos.",
+    "termsTitle": "Términos de servicio — Voice to Text",
+    "termsDescription": "Términos y condiciones de uso de la aplicación Voice to Text."
   }
 }
