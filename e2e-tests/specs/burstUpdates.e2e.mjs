@@ -1,46 +1,20 @@
 import { expect } from 'expect-webdriverio';
-
-async function ensureE2E() {
-  await browser.execute(() => {
-    if (!window.__E2E__) throw new Error('__E2E__ is not installed');
-  });
-}
-
-async function invoke(command, args) {
-  return await browser.executeAsync((cmd, a, done) => {
-    window.__E2E__
-      .invoke(cmd, a)
-      .then((res) => done(res))
-      .catch((err) => done({ __error: String(err) }));
-  }, command, args);
-}
-
-async function waitFor(fn, { timeoutMs = 15_000, intervalMs = 200 } = {}) {
-  const start = Date.now();
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    const ok = await fn();
-    if (ok) return;
-    if (Date.now() - start > timeoutMs) throw new Error('timeout');
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
-}
+import {
+  ensureE2E,
+  findWindowHandleByLabel,
+  invoke,
+  openSettingsWindow,
+  waitFor,
+} from '../helpers/tauriE2e.mjs';
 
 describe('multi-window sync (burst updates)', () => {
   it('multiple rapid updates converge to the latest state in both windows', async () => {
     await ensureE2E();
+    const mainHandle = await findWindowHandleByLabel('main');
+    await browser.switchToWindow(mainHandle);
+    await openSettingsWindow();
 
-    // Открываем settings окно.
-    const settingsButton = await $('[data-testid="open-settings"]');
-    await settingsButton.waitForExist({ timeout: 15000 });
-    await settingsButton.click();
-
-    const handles = await browser.getWindowHandles();
-    expect(handles.length).toBeGreaterThanOrEqual(2);
-
-    const mainHandle = handles[0];
-    const settingsHandle = handles[1];
-
+    const settingsHandle = await findWindowHandleByLabel('settings');
     await browser.switchToWindow(settingsHandle);
     await ensureE2E();
 

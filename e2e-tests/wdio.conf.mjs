@@ -10,6 +10,15 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url));
 let tauriDriver;
 let exit = false;
 
+function resolveAppBinaryPath() {
+  const base = path.resolve(__dirname, '../src-tauri/target/debug');
+  // На Windows бинарь с .exe
+  if (process.platform === 'win32') {
+    return path.resolve(base, 'voice-to-text.exe');
+  }
+  return path.resolve(base, 'voice-to-text');
+}
+
 export const config = {
   hostname: '127.0.0.1',
   port: 4444,
@@ -21,7 +30,7 @@ export const config = {
     {
       maxInstances: 1,
       'tauri:options': {
-        application: path.resolve(__dirname, '../src-tauri/target/debug/voice-to-text'),
+        application: resolveAppBinaryPath(),
       },
     },
   ],
@@ -35,7 +44,7 @@ export const config = {
 
   onPrepare: () => {
     // Собираем debug бинарь без бандла, чтобы путь был стабильным.
-    spawnSync('pnpm', ['tauri', 'build', '--debug', '--no-bundle', '--ci'], {
+    const res = spawnSync('pnpm', ['tauri', 'build', '--debug', '--no-bundle', '--ci'], {
       cwd: path.resolve(__dirname, '..'),
       stdio: 'inherit',
       shell: true,
@@ -45,6 +54,9 @@ export const config = {
         VOICETEXT_E2E: '1',
       },
     });
+    if ((res.status ?? 1) !== 0) {
+      throw new Error(`[e2e] failed to build tauri app (exit=${res.status})`);
+    }
   },
 
   beforeSession: () => {

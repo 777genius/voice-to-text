@@ -76,6 +76,16 @@ export function installE2eHooks(pinia: Pinia): void {
   const appConfig = useAppConfigStore(pinia);
   const sttConfig = useSttConfigStore(pinia);
 
+  // В e2e режиме нам важно, чтобы store sync стартовал независимо от того,
+  // какой именно компонент успел смонтироваться.
+  // Иначе тест может “успеть” сделать update_* до подписки и получить флейк.
+  try {
+    void appConfig.startSync();
+  } catch {}
+  try {
+    void sttConfig.startSync();
+  } catch {}
+
   window.__E2E__ = {
     getWindowLabel: () => String(getCurrentWindow().label),
     invoke: (command, args) => invoke(command, args as any),

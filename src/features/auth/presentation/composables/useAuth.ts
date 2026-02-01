@@ -79,6 +79,14 @@ export function useAuth() {
   }
 
   async function initialize(options: InitializeOptions = {}): Promise<void> {
+    // E2E: в тестах синхронизации нас не интересует реальная авторизация,
+    // и мы заранее выставляем authenticated в e2e hooks.
+    // Если сейчас принудительно сделать initializeAuthUseCase, он может перезаписать
+    // статус на unauthenticated (пустой store на диске) и сломать e2e сценарии.
+    if (import.meta.env.VITE_E2E === '1' && store.status === 'authenticated') {
+      return;
+    }
+
     if (!options.silent) {
       store.setLoading();
     }

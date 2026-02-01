@@ -7,6 +7,7 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { LogicalSize } from '@tauri-apps/api/dpi';
 import { useTranscriptionStore } from '../../stores/transcription';
 import { useAppConfigStore } from '../../stores/appConfig';
+import { useSttConfigStore } from '../../stores/sttConfig';
 import { useAuthStore } from '../../features/auth/store/authStore';
 import { useUpdateStore } from '../../stores/update';
 import { SettingsPanel } from '../../features/settings';
@@ -37,6 +38,7 @@ async function onDragMouseDown(e: MouseEvent) {
 
 const store = useTranscriptionStore();
 const appConfigStore = useAppConfigStore();
+const sttConfigStore = useSttConfigStore();
 const authStore = useAuthStore();
 const updateStore = useUpdateStore();
 const { t } = useI18n();
@@ -114,6 +116,7 @@ onMounted(async () => {
 
   await store.initialize();
   await appConfigStore.startSync();
+  await sttConfigStore.startSync();
 
   // Очищаем текст при показе окна (когда получает фокус)
   const window = getCurrentWebviewWindow();
@@ -180,6 +183,7 @@ onMounted(async () => {
 onUnmounted(() => {
   store.cleanup();
   appConfigStore.stopSync();
+  sttConfigStore.stopSync();
   if (unlistenHotkey) {
     unlistenHotkey();
   }
