@@ -40,6 +40,8 @@ env
 **/credentials*.json
 **/*secret*
 **/*password*
+!**/usePassword*.ts
+!**/Password*Form.vue
 **/*token*.txt
 
 # BFG Repo-Cleaner reports
