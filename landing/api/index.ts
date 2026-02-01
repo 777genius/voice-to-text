@@ -7,7 +7,7 @@ import { HttpClient } from "./http-client";
  */
 export function useApiClient(): HttpClient {
   const config = useRuntimeConfig();
-  const baseUrl = (config.public.apiBaseUrl as string) || "http://localhost:3001";
+  const baseUrl = (config.public.apiBaseUrl as string) || "http://localhost:8080";
 
   return new HttpClient({ baseURL: baseUrl });
 }

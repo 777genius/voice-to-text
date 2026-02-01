@@ -2,6 +2,7 @@ services:
   - type: web
     name: voicetext-landing
     runtime: static
+    rootDir: landing
     buildCommand: pnpm install --no-frozen-lockfile && pnpm generate
     staticPublishPath: .output/public
     envVars:
