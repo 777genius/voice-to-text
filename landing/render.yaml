@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: voicetext-landing
+    runtime: static
+    buildCommand: pnpm install && pnpm generate
+    staticPublishPath: .output/public
+    envVars:
+      - key: NUXT_PUBLIC_SITE_URL
+        value: https://voicetext.site
+    autoDeploy: true
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

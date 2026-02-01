@@ -2,9 +2,11 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::domain::{
-    AudioCapture, AudioConfig, AudioLevelCallback, ConnectionQualityCallback, ErrorCallback, RecordingStatus, SttConfig, SttError, SttProvider,
+    AudioCapture, AudioConfig, AudioLevelCallback, AudioSpectrumCallback, ConnectionQualityCallback,
+    ErrorCallback, RecordingStatus, SttConfig, SttError, SttProvider,
     SttProviderFactory, TranscriptionCallback,
 };
+use crate::application::AudioSpectrumAnalyzer;
 
 type Result<T> = anyhow::Result<T>;
 
@@ -49,6 +51,7 @@ impl TranscriptionService {
         on_partial: TranscriptionCallback,
         on_final: TranscriptionCallback,
         on_audio_level: AudioLevelCallback,
+        on_audio_spectrum: AudioSpectrumCallback,
         on_error: ErrorCallback,
         on_connection_quality: ConnectionQualityCallback,
     ) -> Result<()> {
@@ -106,7 +109,11 @@ impl TranscriptionService {
                 Err(e) => {
                     log::warn!("Failed to resume connection: {} - creating new connection as fallback", e);
 
-                    *self.stt_provider.write().await = None;
+                    // Важно: перед тем как выкинуть провайдер, аккуратно закрываем его.
+                    // Иначе есть риск оставить "висящий" WebSocket/таски в фоне.
+                    if let Some(mut provider) = self.stt_provider.write().await.take() {
+                        let _ = provider.abort().await;
+                    }
                     can_reuse_connection = false;
                 }
             }
@@ -163,6 +170,10 @@ impl TranscriptionService {
 
         tokio::spawn(async move {
             let mut chunk_count = 0;
+            let mut consecutive_errors: u32 = 0;
+            const MAX_CONSECUTIVE_ERRORS: u32 = 10;
+            let mut spectrum = AudioSpectrumAnalyzer::new();
+
             while let Some(chunk) = rx.recv().await {
                 chunk_count += 1;
 
@@ -219,6 +230,12 @@ impl TranscriptionService {
                     timestamp: chunk.timestamp,
                 };
 
+                // Отправляем спектр (48 баров) в UI.
+                // Берем именно усиленный звук, чтобы визуализация соответствовала тому, что слышит STT.
+                if let Some(bars) = spectrum.push_samples(&amplified_chunk.data) {
+                    on_audio_spectrum(bars);
+                }
+
                 // Логируем каждый 20-й чанк для отладки
                 if chunk_count % 20 == 0 {
                     let amplified_max = amplified_chunk.data.iter().map(|&s| s.abs()).max().unwrap_or(0);
@@ -232,49 +249,62 @@ impl TranscriptionService {
                             chunk_count, amplified_chunk.data.len(), max_amplitude);
                     }
 
-                    if let Err(e) = provider.send_audio(&amplified_chunk).await {
-                        let error_msg = e.to_string();
+                    match provider.send_audio(&amplified_chunk).await {
+                        Ok(_) => {
+                            // Успешная отправка — сбрасываем счётчик ошибок
+                            consecutive_errors = 0;
+                        }
+                        Err(e) => {
+                            let error_msg = e.to_string();
 
-                        // Определяем тип ошибки и критичность
-                        let (error_type, is_critical) = if error_msg.contains("WebSocket connection closed")
-                            || error_msg.contains("connection")
-                        {
-                            // Временная ошибка сети - продолжаем обработку
-                            // Deepgram может восстановиться когда сеть вернется
-                            ("connection", false)
-                        } else if error_msg.contains("timeout") {
-                            // Timeout тоже временный - сеть может быть медленной
-                            ("timeout", false)
-                        } else if error_msg.contains("API key") || error_msg.contains("auth") || error_msg.contains("401") {
-                            // Критическая ошибка - неверные credentials
-                            ("authentication", true)
-                        } else if error_msg.contains("configuration") || error_msg.contains("invalid") {
-                            // Критическая ошибка - неверная конфигурация
-                            ("configuration", true)
-                        } else {
-                            // Неизвестная ошибка - считаем некритической
-                            ("processing", false)
-                        };
+                            // Определяем тип ошибки и критичность
+                            let (error_type, is_critical) = if error_msg.contains("WebSocket connection closed")
+                                || error_msg.contains("connection")
+                            {
+                                // Временная ошибка сети - продолжаем обработку
+                                // Deepgram может восстановиться когда сеть вернется
+                                ("connection", false)
+                            } else if error_msg.contains("timeout") {
+                                // Timeout тоже временный - сеть может быть медленной
+                                ("timeout", false)
+                            } else if error_msg.contains("API key") || error_msg.contains("auth") || error_msg.contains("401") {
+                                // Критическая ошибка - неверные credentials
+                                ("authentication", true)
+                            } else if error_msg.contains("configuration") || error_msg.contains("invalid") {
+                                // Критическая ошибка - неверная конфигурация
+                                ("configuration", true)
+                            } else {
+                                // Неизвестная ошибка - считаем некритической
+                                ("processing", false)
+                            };
 
-                        if is_critical {
-                            log::error!("STT critical error ({}): {}", error_type, error_msg);
+                            if is_critical {
+                                log::error!("STT critical error ({}): {}", error_type, error_msg);
 
-                            // Вызываем error callback для уведомления UI
-                            on_error_for_processor(error_msg.clone(), error_type.to_string());
+                                // Вызываем error callback для уведомления UI
+                                on_error_for_processor(error_msg.clone(), error_type.to_string());
 
-                            // Меняем статус на Error
-                            *status_arc.write().await = RecordingStatus::Error;
+                                // Меняем статус на Error
+                                *status_arc.write().await = RecordingStatus::Error;
 
-                            // Останавливаем обработку при критической ошибке
-                            break;
-                        } else {
-                            // Временная ошибка - логируем как warning и продолжаем
-                            log::warn!("STT temporary error ({}): {} - continuing processing",
-                                error_type, error_msg);
+                                // Останавливаем обработку при критической ошибке
+                                break;
+                            } else {
+                                consecutive_errors += 1;
 
-                            // Увеличиваем счетчик временных ошибок
-                            // Если их слишком много подряд - останавливаемся
-                            // (пока просто пропускаем чанк)
+                                // Логируем не слишком часто чтобы не спамить
+                                if consecutive_errors <= 3 {
+                                    log::warn!("STT temporary error ({}): {} - continuing ({}/{})",
+                                        error_type, error_msg, consecutive_errors, MAX_CONSECUTIVE_ERRORS);
+                                }
+
+                                // Если слишком много ошибок подряд — останавливаем обработку
+                                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                                    log::error!("Too many consecutive errors ({}), stopping audio processing",
+                                        consecutive_errors);
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
@@ -341,24 +371,29 @@ impl TranscriptionService {
                     .map_err(|e| anyhow::anyhow!("Failed to pause STT stream: {}", e))?;
             }
 
-            // Запускаем таймер на 30 минут для автоматического закрытия соединения
+            // Запускаем таймер на TTL (keep_alive_ttl_secs) для автоматического закрытия соединения.
+            //
+            // Важно: keep-alive удерживает WS соединение открытым. Если держать слишком долго,
+            // можно упереться в лимиты провайдера на параллельные соединения (например Deepgram).
+            // Поэтому TTL должен быть коротким и конфигурируемым.
             let stt_provider = self.stt_provider.clone();
             let status_arc = self.status.clone();
+            let ttl_secs = config.keep_alive_ttl_secs.max(10); // защитный минимум
             let inactivity_timer = tokio::spawn(async move {
-                log::info!("Inactivity timer started (30 minutes)");
-                tokio::time::sleep(tokio::time::Duration::from_secs(30 * 60)).await;
+                log::info!("Inactivity timer started ({} seconds)", ttl_secs);
+                tokio::time::sleep(tokio::time::Duration::from_secs(ttl_secs)).await;
 
                 // Проверяем что статус все еще Idle (не началась новая запись)
                 let current_status = *status_arc.read().await;
                 if current_status == RecordingStatus::Idle {
-                    log::info!("Inactivity timeout reached (30 min) - closing persistent connection for memory cleanup");
+                    log::info!("Inactivity timeout reached ({}s) - closing persistent connection", ttl_secs);
 
                     if let Some(provider) = stt_provider.write().await.as_mut() {
                         let _ = provider.stop_stream().await;
                     }
                     *stt_provider.write().await = None;
 
-                    log::info!("Persistent connection closed, memory freed");
+                    log::info!("Persistent connection closed");
                 } else {
                     log::debug!("Inactivity timer cancelled - recording restarted before timeout");
                 }

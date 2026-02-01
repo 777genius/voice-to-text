@@ -14,11 +14,13 @@ pub enum SttProviderType {
     GoogleCloud,
     /// Azure Speech Services
     Azure,
+    /// Backend API (через наш сервер с лицензией)
+    Backend,
 }
 
 impl Default for SttProviderType {
     fn default() -> Self {
-        Self::Deepgram
+        Self::Backend // Через наш API с лицензией и usage tracking
     }
 }
 
@@ -51,10 +53,28 @@ pub struct SttConfig {
     /// Model name/ID for local providers
     pub model: Option<String>,
 
+    /// Auth token для нашего Backend API (получается при активации лицензии)
+    /// Используется для подключения к api.voicetotext.app
+    pub backend_auth_token: Option<String>,
+
+    /// URL нашего Backend API (по умолчанию wss://api.voicetotext.app)
+    pub backend_url: Option<String>,
+
     /// Keep WebSocket connection alive between recording sessions (only for providers that support it)
     /// Deepgram: safe (bills by audio duration, not connection time)
     /// AssemblyAI: dangerous (bills by connection time)
     pub keep_connection_alive: bool,
+
+    /// Сколько держать соединение живым после остановки записи (если keep_connection_alive=true).
+    ///
+    /// Важно: keep-alive удерживает streaming соединение на стороне провайдера (Deepgram) и занимает слот
+    /// по лимиту параллельных соединений. Поэтому TTL должен быть коротким (по умолчанию 2 минуты).
+    #[serde(default = "default_keep_alive_ttl_secs")]
+    pub keep_alive_ttl_secs: u64,
+}
+
+fn default_keep_alive_ttl_secs() -> u64 {
+    120
 }
 
 impl Default for SttConfig {
@@ -68,7 +88,10 @@ impl Default for SttConfig {
             deepgram_api_key: None,
             assemblyai_api_key: None,
             model: None,
+            backend_auth_token: None,
+            backend_url: None,
             keep_connection_alive: false, // Безопасно по умолчанию для всех провайдеров
+            keep_alive_ttl_secs: default_keep_alive_ttl_secs(),
         }
     }
 }
@@ -135,7 +158,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             stt: SttConfig::default(),
-            recording_hotkey: "Ctrl+Shift+X".to_string(), // Кроссплатформенная комбинация
+            recording_hotkey: "CmdOrCtrl+Shift+X".to_string(), // Cmd на Mac, Ctrl на Win/Linux
             auto_copy_to_clipboard: true,
             auto_paste_text: false, // По умолчанию выключено (может раздражать)
             auto_close_window: true,
@@ -148,19 +171,35 @@ impl Default for AppConfig {
     }
 }
 
+/// Пользовательские UI-настройки (тема, локаль), синхронизируются между окнами через state-sync
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiPreferences {
+    pub theme: String,
+    pub locale: String,
+}
+
+impl Default for UiPreferences {
+    fn default() -> Self {
+        Self {
+            theme: "dark".to_string(),
+            locale: "ru".to_string(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_stt_provider_type_default() {
-        assert_eq!(SttProviderType::default(), SttProviderType::Deepgram);
+        assert_eq!(SttProviderType::default(), SttProviderType::Backend);
     }
 
     #[test]
     fn test_stt_config_default() {
         let config = SttConfig::default();
-        assert_eq!(config.provider, SttProviderType::Deepgram);
+        assert_eq!(config.provider, SttProviderType::Backend);
         assert_eq!(config.language, "ru");
         assert!(!config.auto_detect_language);
         assert!(config.enable_punctuation);
@@ -168,7 +207,10 @@ mod tests {
         assert!(config.deepgram_api_key.is_none());
         assert!(config.assemblyai_api_key.is_none());
         assert!(config.model.is_none());
+        assert!(config.backend_auth_token.is_none());
+        assert!(config.backend_url.is_none());
         assert!(!config.keep_connection_alive);
+        assert_eq!(config.keep_alive_ttl_secs, 120);
     }
 
     #[test]
@@ -198,7 +240,7 @@ mod tests {
             .with_language("en")
             .with_model("nova-2");
 
-        assert_eq!(config.provider, SttProviderType::Deepgram);
+        assert_eq!(config.provider, SttProviderType::Deepgram); // Явно создан с Deepgram
         assert_eq!(config.language, "en");
         assert_eq!(config.model, Some("nova-2".to_string()));
     }

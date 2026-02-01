@@ -7,6 +7,9 @@ use app_lib::domain::{
 };
 use app_lib::infrastructure::stt::{DeepgramProvider, AssemblyAIProvider};
 
+mod test_support;
+use test_support::{noop_connection_quality, SttConfigTestExt};
+
 /// Хелпер для получения API ключей
 fn get_deepgram_key() -> String {
     let _ = dotenv::dotenv();
@@ -42,7 +45,10 @@ async fn test_websocket_ping_pong_mechanism() {
         println!("⚠️  Error: {} ({})", msg, err_type);
     });
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     println!("🏓 Тест Ping/Pong механизма...");
     println!("   WebSocket должен автоматически отвечать на Ping от сервера");
@@ -91,7 +97,10 @@ async fn test_websocket_message_types() {
     let on_final = Arc::new(|_: Transcription| {});
     let on_error = Arc::new(|_: String, _: String| {});
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     println!("📨 Отправляем аудио и ждем различные типы сообщений...");
 
@@ -139,7 +148,10 @@ async fn test_websocket_graceful_vs_abrupt_close() {
     let on_f = Arc::new(|_: Transcription| {});
     let on_e = Arc::new(|_: String, _: String| {});
 
-    provider1.start_stream(on_p.clone(), on_f.clone(), on_e.clone()).await.unwrap();
+    provider1
+        .start_stream(on_p.clone(), on_f.clone(), on_e.clone(), noop_connection_quality())
+        .await
+        .unwrap();
 
     // Отправляем данные
     for _ in 0..5 {
@@ -160,7 +172,10 @@ async fn test_websocket_graceful_vs_abrupt_close() {
     println!("\n2️⃣  Тест abrupt close (abort)...");
     let mut provider2 = DeepgramProvider::new();
     provider2.initialize(&config).await.unwrap();
-    provider2.start_stream(on_p, on_f, on_e).await.unwrap();
+    provider2
+        .start_stream(on_p, on_f, on_e, noop_connection_quality())
+        .await
+        .unwrap();
 
     // Отправляем данные
     for _ in 0..5 {
@@ -211,7 +226,10 @@ async fn test_websocket_concurrent_sending() {
     let on_final = Arc::new(|_: Transcription| {});
     let on_error = Arc::new(|_: String, _: String| {});
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     println!("🔀 Тест конкурентной отправки данных...");
 
@@ -289,7 +307,10 @@ async fn test_multiple_providers_simultaneously() {
         let on_final = Arc::new(|_: Transcription| {});
         let on_error = Arc::new(|_: String, _: String| {});
 
-        provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+        provider
+            .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+            .await
+            .unwrap();
         println!("🟢 Deepgram: подключен");
 
         for _ in 0..20 {
@@ -319,7 +340,10 @@ async fn test_multiple_providers_simultaneously() {
         let on_final = Arc::new(|_: Transcription| {});
         let on_error = Arc::new(|_: String, _: String| {});
 
-        provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+        provider
+            .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+            .await
+            .unwrap();
         println!("🔵 AssemblyAI: подключен");
 
         for _ in 0..20 {
@@ -368,7 +392,10 @@ async fn test_websocket_rapid_start_stop() {
     for i in 1..=10 {
         println!("   Цикл {}/10", i);
 
-        provider.start_stream(on_p.clone(), on_f.clone(), on_e.clone()).await.unwrap();
+        provider
+            .start_stream(on_p.clone(), on_f.clone(), on_e.clone(), noop_connection_quality())
+            .await
+            .unwrap();
 
         // Отправляем минимум данных
         let chunk = AudioChunk::new(vec![100i16; 1600], 16000, 1);
@@ -406,7 +433,10 @@ async fn test_websocket_empty_data() {
     let on_final = Arc::new(|_: Transcription| {});
     let on_error = Arc::new(|_: String, _: String| {});
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     println!("🔇 Тест отправки тишины (нулевые данные)...");
 
@@ -444,7 +474,10 @@ async fn test_websocket_tiny_chunks() {
     let on_final = Arc::new(|_: Transcription| {});
     let on_error = Arc::new(|_: String, _: String| {});
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     println!("🔬 Тест очень маленьких чанков (10ms = 160 samples)...");
 
@@ -494,7 +527,10 @@ async fn test_websocket_huge_chunks() {
     let on_final = Arc::new(|_: Transcription| {});
     let on_error = Arc::new(|_: String, _: String| {});
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     println!("🐘 Тест очень больших чанков (1 секунда = 16000 samples)...");
 
@@ -534,7 +570,10 @@ async fn test_websocket_extreme_amplitude() {
     let on_final = Arc::new(|_: Transcription| {});
     let on_error = Arc::new(|_: String, _: String| {});
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     println!("📢 Тест экстремальных значений амплитуды...");
 
@@ -586,7 +625,10 @@ async fn test_websocket_frequency_changes() {
     let on_final = Arc::new(|_: Transcription| {});
     let on_error = Arc::new(|_: String, _: String| {});
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     println!("🎵 Тест резких изменений частоты...");
 
@@ -634,7 +676,10 @@ async fn test_websocket_send_latency_measurement() {
     let on_final = Arc::new(|_: Transcription| {});
     let on_error = Arc::new(|_: String, _: String| {});
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     println!("⏱️  Измерение латентности отправки данных...\n");
 
@@ -701,7 +746,10 @@ async fn test_websocket_memory_usage() {
     let on_final = Arc::new(|_: Transcription| {});
     let on_error = Arc::new(|_: String, _: String| {});
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     // Отправляем большое количество данных чтобы проверить утечки памяти
     println!("   Отправка большого объема данных (10 секунд аудио)...");
@@ -727,7 +775,10 @@ async fn test_websocket_memory_usage() {
     let on_final2 = Arc::new(|_: Transcription| {});
     let on_error2 = Arc::new(|_: String, _: String| {});
 
-    provider.start_stream(on_partial2, on_final2, on_error2).await.unwrap();
+    provider
+        .start_stream(on_partial2, on_final2, on_error2, noop_connection_quality())
+        .await
+        .unwrap();
 
     for _ in 0..10 {
         let chunk = AudioChunk::new(vec![100i16; 1600], 16000, 1);
@@ -766,7 +817,10 @@ async fn test_websocket_transcription_rate() {
 
     let on_error = Arc::new(|_: String, _: String| {});
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     println!("📈 Измерение скорости получения транскрипций...\n");
 
@@ -829,7 +883,10 @@ async fn test_websocket_throughput() {
     let on_final = Arc::new(|_: Transcription| {});
     let on_error = Arc::new(|_: String, _: String| {});
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     println!("🚀 Измерение пропускной способности...\n");
 

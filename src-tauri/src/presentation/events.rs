@@ -7,10 +7,24 @@ pub const EVENT_TRANSCRIPTION_PARTIAL: &str = "transcription:partial";
 pub const EVENT_TRANSCRIPTION_FINAL: &str = "transcription:final";
 pub const EVENT_RECORDING_STATUS: &str = "recording:status";
 pub const EVENT_AUDIO_LEVEL: &str = "audio:level";
+pub const EVENT_AUDIO_SPECTRUM: &str = "audio:spectrum";
 pub const EVENT_MICROPHONE_TEST_LEVEL: &str = "microphone_test:level";
 
 pub const EVENT_TRANSCRIPTION_ERROR: &str = "transcription:error";
 pub const EVENT_CONNECTION_QUALITY: &str = "connection:quality";
+
+// State-sync протокол: invalidation event для синхронизации между окнами
+pub const EVENT_STATE_SYNC_INVALIDATION: &str = "state-sync:invalidation";
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StateSyncInvalidationPayload {
+    pub topic: String,
+    pub revision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    pub timestamp_ms: i64,
+}
 
 /// Payload for partial transcription event
 #[derive(Debug, Clone, Serialize)]
@@ -67,6 +81,13 @@ pub struct RecordingStatusPayload {
 pub struct AudioLevelPayload {
     /// Normalized audio level (0.0 - 1.0)
     pub level: f32,
+}
+
+/// Payload for audio spectrum event
+#[derive(Debug, Clone, Serialize)]
+pub struct AudioSpectrumPayload {
+    /// Normalized bars (48 values, each 0.0 - 1.0)
+    pub bars: Vec<f32>,
 }
 
 /// Payload for microphone test level event

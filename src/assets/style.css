@@ -68,13 +68,17 @@
     box-sizing: border-box;
 }
 
-body {
+html, body {
     margin: 0;
-    /* окно прозрачное, фон задаём на корневом контейнере */
-    background: transparent;
+    background: transparent !important;
     color: var(--color-text);
     font-size: 14px;
     line-height: 1.5;
+}
+
+/* Vuetify v-app тоже должен быть прозрачным */
+.v-application {
+    background: transparent !important;
 }
 
 .os-macos body {

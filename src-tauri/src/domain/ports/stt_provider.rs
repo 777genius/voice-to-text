@@ -34,6 +34,9 @@ pub type TranscriptionCallback = Arc<dyn Fn(Transcription) + Send + Sync>;
 /// Callback type for receiving audio level updates (0.0 - 1.0)
 pub type AudioLevelCallback = Arc<dyn Fn(f32) + Send + Sync>;
 
+/// Callback type for receiving audio spectrum updates (48 bars, each 0.0 - 1.0)
+pub type AudioSpectrumCallback = Arc<dyn Fn([f32; 48]) + Send + Sync>;
+
 /// Callback type for receiving errors (error message, error type)
 pub type ErrorCallback = Arc<dyn Fn(String, String) + Send + Sync>;
 

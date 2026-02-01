@@ -165,12 +165,6 @@ impl SystemAudioCapture {
     }
 }
 
-impl Default for SystemAudioCapture {
-    fn default() -> Self {
-        Self::new().expect("Failed to create system audio capture")
-    }
-}
-
 // SAFETY: SystemAudioCapture содержит cpal::Stream который не Send/Sync на macOS.
 // Однако мы гарантируем безопасность тем что:
 // 1. Stream доступен только через RwLock/Mutex в async методах

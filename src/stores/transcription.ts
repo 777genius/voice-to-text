@@ -2,9 +2,13 @@ import { defineStore } from 'pinia';
 import { ref, computed, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { playShowSound } from '../utils/sound';
 import { isTauriAvailable } from '../utils/tauri';
 import { i18n } from '../i18n';
+import { useAuthStore } from '../features/auth/store/authStore';
+import { useAppConfigStore } from './appConfig';
+import { getTokenRepository } from '../features/auth/infrastructure/repositories/TokenRepository';
+import { getAuthContainer } from '../features/auth/infrastructure/di/authContainer';
+import { canRefreshSession, isAccessTokenExpired } from '../features/auth/domain/entities/Session';
 import {
   RecordingStatus,
   ConnectionQuality,
@@ -27,12 +31,27 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const accumulatedText = ref<string>(''); // накопленные финализированные сегменты
   const finalText = ref<string>(''); // полный финальный результат (для копирования)
   const error = ref<string | null>(null);
+  const errorType = ref<TranscriptionErrorPayload['error_type'] | null>(null);
   const lastFinalizedText = ref<string>(''); // последний финализированный текст (для дедупликации)
   const connectionQuality = ref<ConnectionQuality>(ConnectionQuality.Good);
 
-  // Config flags
-  const autoCopyEnabled = ref<boolean>(true);
-  const autoPasteEnabled = ref<boolean>(false);
+  // Retry логика подключения (когда запись ещё не стартанула и мы пытаемся подключиться к STT)
+  const isConnecting = ref<boolean>(false);
+  const connectAttempt = ref<number>(0);
+  const connectMaxAttempts = ref<number>(0);
+  const lastConnectFailure = ref<TranscriptionErrorPayload['error_type'] | null>(null);
+  const lastConnectFailureRaw = ref<string>('');
+
+  // STT auth ошибки чаще всего означают "access token протух" (TTL ~15 минут).
+  // Это НЕ должно выкидывать пользователя из аккаунта — сначала пробуем тихо обновить токен.
+  let suppressNextErrorStatus = false;
+  let isForcingLogout = false;
+  let isRefreshingAuthForStt = false;
+
+  // Config flags — берём из appConfig store (единый источник правды)
+  const appConfig = useAppConfigStore();
+  const autoCopyEnabled = computed(() => appConfig.autoCopyToClipboard);
+  const autoPasteEnabled = computed(() => appConfig.autoPasteText);
 
   // Флаг для защиты от дублирования auto-paste
   // Хранит значение finalText на момент последней успешной вставки
@@ -46,8 +65,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const animatedAccumulatedText = ref<string>('');
 
   // Таймеры для анимации
-  let partialAnimationTimer: NodeJS.Timeout | null = null;
-  let accumulatedAnimationTimer: NodeJS.Timeout | null = null;
+  let partialAnimationTimer: ReturnType<typeof setInterval> | null = null;
+  let accumulatedAnimationTimer: ReturnType<typeof setInterval> | null = null;
 
   // Listeners
   type UnlistenFn = () => void;
@@ -66,6 +85,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const hasConnectionIssue = computed(() =>
     connectionQuality.value !== ConnectionQuality.Good
   );
+
+  const canReconnect = computed(() => {
+    // Показываем кнопку только когда реально упали в Error и причина похожа на сеть/таймаут
+    if (status.value !== RecordingStatus.Error) return false;
+    return errorType.value === 'connection' || errorType.value === 'timeout';
+  });
 
   const displayText = computed(() => {
     const t = i18n.global.t;
@@ -201,6 +226,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       const message = i18n.global.t('main.tauriUnavailable');
       console.warn(message);
       error.value = message;
+      errorType.value = null;
       status.value = RecordingStatus.Error;
       return;
     }
@@ -208,16 +234,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     // Отписываемся от старых listeners перед регистрацией новых
     // Это предотвращает дублирование событий при повторной инициализации
     cleanup();
-
-    // Загружаем настройки auto-copy/paste из конфига
-    try {
-      const appConfig = await invoke<any>('get_app_config');
-      autoCopyEnabled.value = appConfig.auto_copy_to_clipboard ?? true;
-      autoPasteEnabled.value = appConfig.auto_paste_text ?? false;
-      console.log('Config loaded: autoCopy=', autoCopyEnabled.value, 'autoPaste=', autoPasteEnabled.value);
-    } catch (err) {
-      console.error('Failed to load auto-paste config:', err);
-    }
 
     try {
       // Listen to partial transcription events
@@ -492,6 +508,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             lastFinalizedText.value = '';
             currentUtteranceStart.value = -1;
             error.value = null;
+            errorType.value = null;
 
             // Сбрасываем флаг auto-paste
             lastPastedFinalText.value = '';
@@ -574,6 +591,32 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             }
           }
 
+          // Если прилетает Error после auth-ошибки, не показываем это пользователю.
+          // В commands.rs сначала эмитится transcription:error, потом recording:status=Error.
+          if (event.payload.status === RecordingStatus.Error && suppressNextErrorStatus) {
+            suppressNextErrorStatus = false;
+            status.value = RecordingStatus.Idle;
+            return;
+          }
+
+          // Если сейчас идёт подключение с ретраями — не переключаем UI в Error мгновенно.
+          // Решение о показе ошибки принимает retry-цикл, чтобы не мигала красная плашка.
+          if (event.payload.status === RecordingStatus.Error && isConnecting.value) {
+            console.warn('[ConnectRetry] Got RecordingStatus.Error during connect attempt - waiting for retry decision');
+            return;
+          }
+
+          // Фоновая ошибка после остановки записи (keep-alive/таймаут провайдера и т.п.)
+          // Пользователь уже закончил запись — не надо переводить UI в Error.
+          if (event.payload.status === RecordingStatus.Error && !isConnecting.value) {
+            const current = status.value;
+            if (current === RecordingStatus.Idle || current === RecordingStatus.Processing) {
+              console.warn('[STT] Ignoring background Error status while not recording:', event.payload);
+              status.value = RecordingStatus.Idle;
+              return;
+            }
+          }
+
           status.value = event.payload.status;
         }
       );
@@ -581,7 +624,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       // Listen to transcription error events
       unlistenError = await listen<TranscriptionErrorPayload>(
         EVENT_TRANSCRIPTION_ERROR,
-        (event) => {
+        async (event) => {
           console.error('Transcription error received:', event.payload);
 
           // Останавливаем все анимации
@@ -594,7 +637,54 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             accumulatedAnimationTimer = null;
           }
 
-          // Формируем понятное сообщение на русском
+          // Auth ошибка: чаще всего это 401 от нашего backend WS из-за протухшего access token.
+          // Сначала даём retry-циклу шанс обновить токен и переподключиться.
+          const detectedFromRaw = detectErrorTypeFromRaw(event.payload.error);
+          if (event.payload.error_type === 'authentication' || detectedFromRaw === 'authentication') {
+            errorType.value = 'authentication';
+            suppressNextErrorStatus = true;
+
+            lastConnectFailure.value = 'authentication';
+            lastConnectFailureRaw.value = event.payload.error;
+
+            // Если мы не в цикле подключения (например, ошибка пришла "фоном"),
+            // попробуем тихо обновить токен. Если не получилось — тогда уже разлогиниваем.
+            if (!isConnecting.value) {
+              const ok = await tryRefreshAuthForStt();
+              if (!ok) {
+                void forceLogoutFromSttAuthError();
+              } else {
+                status.value = RecordingStatus.Idle;
+              }
+            }
+            return;
+          }
+
+          // Фоновая ошибка после остановки записи (keep-alive, таймаут провайдера, и т.п.)
+          // Если пользователь сейчас не записывает и не подключается — игнорируем, чтобы не "залипать" в Error.
+          if (!isConnecting.value) {
+            const current = status.value;
+            if (current === RecordingStatus.Idle || current === RecordingStatus.Processing) {
+              console.warn('[STT] Ignoring background error while not recording:', event.payload);
+              return;
+            }
+          }
+
+          // Во время подключения подавляем показ ошибки и даём retry-циклу принять решение.
+          // Это убирает "Проблема с подключением" на первой же неудачной попытке.
+          if (isConnecting.value) {
+            // error_type может быть любым (backend иногда присылает PROVIDER_ERROR и т.п.)
+            // Нормализуем к нашим типам, иначе retry-цикл может не понять, что произошло.
+            lastConnectFailure.value =
+              asKnownErrorType(event.payload.error_type) ??
+              detectErrorTypeFromRaw(event.payload.error) ??
+              'connection';
+            lastConnectFailureRaw.value = event.payload.error;
+            console.warn('[ConnectRetry] Suppressed error during connect:', event.payload);
+            return;
+          }
+
+          // Остальные ошибки показываем пользователю
           let errorMessage = '';
           switch (event.payload.error_type) {
             case 'timeout':
@@ -602,9 +692,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               break;
             case 'connection':
               errorMessage = i18n.global.t('errors.connection');
-              break;
-            case 'authentication':
-              errorMessage = i18n.global.t('errors.authentication');
               break;
             case 'processing':
               errorMessage = i18n.global.t('errors.processing');
@@ -614,6 +701,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
 
           error.value = errorMessage;
+          errorType.value = event.payload.error_type;
           status.value = RecordingStatus.Error;
         }
       );
@@ -640,16 +728,191 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
-  async function startRecording() {
+  function detectErrorTypeFromRaw(raw: string): TranscriptionErrorPayload['error_type'] | null {
+    const lower = raw.toLowerCase();
+    if (
+      lower.includes('authentication error') ||
+      lower.includes('401') ||
+      lower.includes('unauthorized') ||
+      (lower.includes('token') && lower.includes('auth'))
+    ) {
+      return 'authentication';
+    }
+    if (lower.includes('timeout') || lower.includes('timed out')) return 'timeout';
+    if (lower.includes('connection error') || lower.includes('websocket')) return 'connection';
+    if (lower.includes('configuration error')) return 'configuration';
+    if (lower.includes('processing error')) return 'processing';
+    return null;
+  }
+
+  function asKnownErrorType(value: unknown): TranscriptionErrorPayload['error_type'] | null {
+    if (value === 'timeout') return 'timeout';
+    if (value === 'connection') return 'connection';
+    if (value === 'configuration') return 'configuration';
+    if (value === 'processing') return 'processing';
+    if (value === 'authentication') return 'authentication';
+    return null;
+  }
+
+  function mapErrorMessage(type: TranscriptionErrorPayload['error_type'] | null, raw: string): string {
+    switch (type) {
+      case 'timeout':
+        return i18n.global.t('errors.timeout');
+      case 'connection':
+        return i18n.global.t('errors.connection');
+      case 'processing':
+        return i18n.global.t('errors.processing');
+      case 'authentication':
+        // По идее мы сюда не попадаем (auth ошибка приводит к auto-logout),
+        // но оставляем адекватный текст на всякий случай.
+        return i18n.global.t('errors.authentication');
+      case 'configuration':
+        return i18n.global.t('errors.generic', { error: raw });
+      default:
+        return i18n.global.t('errors.generic', { error: raw });
+    }
+  }
+
+  function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function calcBackoffMs(attemptIndex: number): number {
+    // attemptIndex: 1..N
+    // Плавный backoff: 600ms, 1200ms, 2000ms, 3000ms...
+    const base = [600, 1200, 2000, 3000, 4000][attemptIndex - 1] ?? 5000;
+    const jitter = Math.floor(Math.random() * 250);
+    return base + jitter;
+  }
+
+  async function waitForConnectOutcome(timeoutMs: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let finished = false;
+      let stop: (() => void) | null = null;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+
+      const finishOk = () => {
+        if (finished) return;
+        finished = true;
+        if (timer) clearTimeout(timer);
+        if (stop) stop();
+        resolve();
+      };
+
+      const finishErr = (type: TranscriptionErrorPayload['error_type']) => {
+        if (finished) return;
+        finished = true;
+        if (timer) clearTimeout(timer);
+        if (stop) stop();
+        reject(type);
+      };
+
+      // Мгновенные проверки перед подпиской, чтобы избежать гонок с immediate-watch
+      if (status.value === RecordingStatus.Recording) {
+        finishOk();
+        return;
+      }
+      if (lastConnectFailure.value) {
+        finishErr(lastConnectFailure.value);
+        return;
+      }
+
+      stop = watch(
+        [status, lastConnectFailure],
+        ([nextStatus, failure]) => {
+          if (finished) return;
+          if (nextStatus === RecordingStatus.Recording) {
+            finishOk();
+            return;
+          }
+          if (failure) {
+            finishErr(failure);
+          }
+        }
+      );
+
+      timer = setTimeout(() => {
+        if (finished) return;
+        finishErr('timeout');
+      }, timeoutMs);
+    });
+  }
+
+  async function forceLogoutFromSttAuthError(): Promise<void> {
+    if (isForcingLogout) return;
+    isForcingLogout = true;
+
     try {
+      // 1) Чистим локальную сессию
+      try {
+        await getTokenRepository().clear();
+      } catch {}
+
+      // 2) Сбрасываем auth store (это переключит окно на auth через watcher в App.vue)
+      try {
+        const authStore = useAuthStore();
+        authStore.reset();
+      } catch {}
+
+      // 3) На всякий случай синхронизируем состояние с tauri backend
+      try {
+        await invoke('set_authenticated', { authenticated: false, token: null });
+      } catch {}
+
+      // 4) И гарантируем, что auth окно показано (fallback)
+      try {
+        await invoke('show_auth_window');
+      } catch {}
+    } finally {
+      // Важно: не оставляем UI в error состоянии.
+      status.value = RecordingStatus.Idle;
+      error.value = null;
+      errorType.value = null;
+      isForcingLogout = false;
+    }
+  }
+
+  async function tryRefreshAuthForStt(): Promise<boolean> {
+    if (isRefreshingAuthForStt) return false;
+    isRefreshingAuthForStt = true;
+    try {
+      const tokenRepo = getTokenRepository();
+      const session = await tokenRepo.get();
+      if (!session) return false;
+
+      // Если refresh невозможен — смысла пытаться нет.
+      if (!canRefreshSession(session)) return false;
+
+      const container = getAuthContainer();
+      const refreshed = await container.refreshTokensUseCase.execute();
+      if (!refreshed) return false;
+
+      // Обновляем UI состояние (isAuthenticated остаётся true, но токен меняется)
+      try {
+        const authStore = useAuthStore();
+        authStore.setAuthenticated(refreshed);
+      } catch {}
+
+      // И обязательно обновляем токен в tauri backend, иначе backend STT снова получит 401.
+      try {
+        await invoke('set_authenticated', { authenticated: true, token: refreshed.accessToken });
+      } catch {}
+
+      return true;
+    } finally {
+      isRefreshingAuthForStt = false;
+    }
+  }
+
+  function resetTextStateBeforeStart(): void {
       // Очищаем весь предыдущий текст перед новой записью
       error.value = null;
+    errorType.value = null;
       partialText.value = '';
       accumulatedText.value = '';
       finalText.value = '';
       lastFinalizedText.value = '';
       currentUtteranceStart.value = -1;
-      status.value = RecordingStatus.Recording;
 
       // Сбрасываем флаг auto-paste
       lastPastedFinalText.value = '';
@@ -666,17 +929,127 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       if (accumulatedAnimationTimer) {
         clearInterval(accumulatedAnimationTimer);
         accumulatedAnimationTimer = null;
-      }
-
-      console.log('Starting new recording - all text cleared');
-
-      const result = await invoke<string>('start_recording');
-      console.log('Recording started:', result);
-    } catch (err) {
-      console.error('Failed to start recording:', err);
-      error.value = String(err);
-      status.value = RecordingStatus.Error;
     }
+  }
+
+  async function startRecordingOnce(): Promise<void> {
+    resetTextStateBeforeStart();
+    status.value = RecordingStatus.Starting;
+
+    // На каждый запуск сбрасываем маркеры исхода подключения
+    lastConnectFailure.value = null;
+    lastConnectFailureRaw.value = '';
+
+    console.log('[ConnectRetry] Starting recording (single attempt)');
+    await invoke<string>('start_recording');
+  }
+
+  async function startRecordingWithRetry(maxAttempts = 3): Promise<void> {
+    // Не запускаем два подключения одновременно
+    if (isConnecting.value) {
+      console.log('[ConnectRetry] Skipped - connect already in progress');
+      return;
+    }
+
+    isConnecting.value = true;
+    connectAttempt.value = 0;
+    connectMaxAttempts.value = Math.max(1, maxAttempts);
+
+    try {
+      for (let attempt = 1; attempt <= connectMaxAttempts.value; attempt++) {
+        connectAttempt.value = attempt;
+        lastConnectFailure.value = null;
+        lastConnectFailureRaw.value = '';
+
+        try {
+          // Перед первой попыткой гарантируем, что access token свежий.
+          // Иначе backend WS легко вернёт 401 (access TTL ~15 минут), и UI начнёт "разлогинивать" пользователя.
+          if (attempt === 1) {
+            const tokenRepo = getTokenRepository();
+            const session = await tokenRepo.get();
+            if (session && isAccessTokenExpired(session)) {
+              await tryRefreshAuthForStt();
+            }
+          }
+
+          // Перед ретраем аккуратно пробуем остановить возможный "полузапущенный" поток.
+          // Если он не стартанул — просто игнорируем ошибку.
+          if (attempt > 1) {
+            try {
+              await invoke('stop_recording');
+            } catch {}
+          }
+
+          await startRecordingOnce();
+
+          // Ждём пока backend реально переведёт нас в Recording или пришлёт ошибку
+          await waitForConnectOutcome(12_000);
+
+          console.log('[ConnectRetry] Connected successfully');
+          return;
+    } catch (err) {
+          // ВАЖНО: err может быть либо "типом" (timeout/connection/...) из waitForConnectOutcome,
+          // либо сырой строкой ошибки из invoke('start_recording').
+          // Нельзя интерпретировать любую строку как error_type.
+          const failureType = asKnownErrorType(err);
+
+          // Если ошибка пришла не через events, пробуем классифицировать по raw строке
+          const raw = lastConnectFailureRaw.value || String(err ?? '');
+          const detected = failureType || detectErrorTypeFromRaw(raw) || 'connection';
+
+          // Auth ошибка: обычно это протухший access token.
+          // Пробуем один раз обновить сессию и продолжить retry-цикл.
+          if (detected === 'authentication') {
+            const ok = await tryRefreshAuthForStt();
+            if (ok) {
+              console.warn('[ConnectRetry] Auth refreshed, retrying connection');
+              continue;
+            }
+            errorType.value = 'authentication';
+            suppressNextErrorStatus = true;
+            await forceLogoutFromSttAuthError();
+            return;
+          }
+
+          const isRetriable = detected === 'connection' || detected === 'timeout';
+          const isLastAttempt = attempt >= connectMaxAttempts.value;
+
+          console.warn('[ConnectRetry] Connect attempt failed:', {
+            attempt,
+            detected,
+            isRetriable,
+            isLastAttempt,
+            raw,
+          });
+
+          if (!isRetriable || isLastAttempt) {
+            errorType.value = detected;
+            error.value = mapErrorMessage(detected, raw);
+      status.value = RecordingStatus.Error;
+            return;
+          }
+
+          // Короткая пауза перед следующей попыткой
+          const backoffMs = calcBackoffMs(attempt);
+          await sleep(backoffMs);
+        }
+      }
+    } finally {
+      isConnecting.value = false;
+      connectAttempt.value = 0;
+      connectMaxAttempts.value = 0;
+      lastConnectFailure.value = null;
+      lastConnectFailureRaw.value = '';
+    }
+  }
+
+  async function startRecording(): Promise<void> {
+    // Ретраим подключение "из коробки" — это ровно тот сценарий, который часто фейлится на первой попытке.
+    await startRecordingWithRetry(3);
+  }
+
+  async function reconnect(): Promise<void> {
+    await startRecordingWithRetry(3);
   }
 
   async function stopRecording() {
@@ -693,6 +1066,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   function clearText() {
     error.value = null;
+    errorType.value = null;
     partialText.value = '';
     accumulatedText.value = '';
     finalText.value = '';
@@ -743,19 +1117,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
-  // Перезагрузка настроек auto-copy/paste из конфига
-  // Вызывается после сохранения настроек в Settings
-  async function reloadConfig() {
-    try {
-      const appConfig = await invoke<any>('get_app_config');
-      autoCopyEnabled.value = appConfig.auto_copy_to_clipboard ?? true;
-      autoPasteEnabled.value = appConfig.auto_paste_text ?? false;
-      console.log('Config reloaded: autoCopy=', autoCopyEnabled.value, 'autoPaste=', autoPasteEnabled.value);
-    } catch (err) {
-      console.error('Failed to reload config:', err);
-    }
-  }
-
   return {
     // State
     status,
@@ -763,6 +1124,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     accumulatedText,
     finalText,
     error,
+    errorType,
     connectionQuality,
 
     // Computed
@@ -772,15 +1134,19 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     isProcessing,
     hasError,
     hasConnectionIssue,
+    canReconnect,
+    isConnecting,
+    connectAttempt,
+    connectMaxAttempts,
     displayText,
 
     // Actions
     initialize,
     startRecording,
+    reconnect,
     stopRecording,
     clearText,
     toggleRecording,
     cleanup,
-    reloadConfig,
   };
 });

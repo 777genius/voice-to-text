@@ -70,6 +70,7 @@ export enum SttProviderType {
   Mock = 'mock',
   AssemblyAI = 'assemblyai',
   Deepgram = 'deepgram',
+  Backend = 'backend',
   WhisperLocal = 'whisperlocal',
   GoogleCloud = 'googlecloud',
   Azure = 'azure',
@@ -108,3 +109,24 @@ export interface WhisperModelDownloadProgress {
 export const EVENT_WHISPER_DOWNLOAD_STARTED = 'whisper-model:download-started';
 export const EVENT_WHISPER_DOWNLOAD_PROGRESS = 'whisper-model:download-progress';
 export const EVENT_WHISPER_DOWNLOAD_COMPLETED = 'whisper-model:download-completed';
+
+// App update types/events
+export interface AppUpdateInfo {
+  version: string;
+  body: string;
+}
+
+export interface AppUpdateDownloadProgress {
+  version: string;
+  downloaded: number;
+  total: number | null;
+  progress: number | null;
+}
+
+export const EVENT_UPDATE_AVAILABLE = 'update:available';
+export const EVENT_UPDATE_DOWNLOAD_STARTED = 'update:download-started';
+export const EVENT_UPDATE_DOWNLOAD_PROGRESS = 'update:download-progress';
+export const EVENT_UPDATE_INSTALLING = 'update:installing';
+
+// Settings focus events (между окнами)
+export const EVENT_SETTINGS_FOCUS_UPDATES = 'settings:focus-updates';

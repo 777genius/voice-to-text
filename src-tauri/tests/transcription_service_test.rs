@@ -5,7 +5,7 @@ use tokio::time::sleep;
 
 use app_lib::application::services::TranscriptionService;
 use app_lib::domain::{
-    AudioCapture, AudioChunk, AudioConfig, AudioLevelCallback, ErrorCallback,
+    AudioCapture, AudioChunk, AudioConfig, AudioLevelCallback, ConnectionQualityCallback, ErrorCallback,
     RecordingStatus, SttConfig, SttError, SttProvider, SttProviderFactory, SttProviderType,
     Transcription, TranscriptionCallback,
 };
@@ -118,6 +118,7 @@ impl SttProvider for MockSttProvider {
         on_partial: TranscriptionCallback,
         on_final: TranscriptionCallback,
         on_error: ErrorCallback,
+        _on_connection_quality: ConnectionQualityCallback,
     ) -> Result<(), SttError> {
         if !*self.initialized.read().await {
             return Err(SttError::Configuration("Provider not initialized".to_string()));
@@ -164,6 +165,7 @@ impl SttProvider for MockSttProvider {
         on_partial: TranscriptionCallback,
         on_final: TranscriptionCallback,
         on_error: ErrorCallback,
+        _on_connection_quality: ConnectionQualityCallback,
     ) -> Result<(), SttError> {
         if !self.supports_keep_alive_flag {
             return Err(SttError::Configuration("Keep-alive not supported".to_string()));
@@ -300,14 +302,18 @@ async fn test_start_recording_prevents_double_start() {
     let on_partial = Arc::new(|_: Transcription| {});
     let on_final = Arc::new(|_: Transcription| {});
     let on_audio_level = Arc::new(|_: f32| {});
+    let on_audio_spectrum = Arc::new(|_: [f32; 48]| {});
     let on_error = Arc::new(|_: String, _: String| {});
+    let on_connection_quality = Arc::new(|_: String, _: Option<String>| {});
 
     // Первый старт должен пройти
     let result1 = service.start_recording(
         on_partial.clone(),
         on_final.clone(),
         on_audio_level.clone(),
+        on_audio_spectrum.clone(),
         on_error.clone(),
+        on_connection_quality.clone(),
     ).await;
     assert!(result1.is_ok(), "Первый старт должен пройти");
 
@@ -319,7 +325,9 @@ async fn test_start_recording_prevents_double_start() {
         on_partial,
         on_final,
         on_audio_level,
+        on_audio_spectrum,
         on_error,
+        on_connection_quality,
     ).await;
     assert!(result2.is_err(), "Повторный старт должен вернуть ошибку");
 
@@ -354,6 +362,7 @@ async fn test_full_recording_lifecycle() {
     let on_partial = Arc::new(|_: Transcription| {});
     let on_final = Arc::new(|_: Transcription| {});
     let on_audio_level = Arc::new(|_: f32| {});
+    let on_audio_spectrum = Arc::new(|_: [f32; 48]| {});
     let on_error = Arc::new(|_: String, _: String| {});
 
     // Проверяем статус Idle
@@ -364,7 +373,9 @@ async fn test_full_recording_lifecycle() {
         on_partial,
         on_final,
         on_audio_level,
+        on_audio_spectrum,
         on_error,
+        Arc::new(|_: String, _: Option<String>| {}),
     ).await.unwrap();
 
     // Даем время на переход
@@ -399,6 +410,7 @@ async fn test_keep_alive_mode() {
     let on_partial = Arc::new(|_: Transcription| {});
     let on_final = Arc::new(|_: Transcription| {});
     let on_audio_level = Arc::new(|_: f32| {});
+    let on_audio_spectrum = Arc::new(|_: [f32; 48]| {});
     let on_error = Arc::new(|_: String, _: String| {});
 
     // Старт
@@ -406,7 +418,9 @@ async fn test_keep_alive_mode() {
         on_partial.clone(),
         on_final.clone(),
         on_audio_level.clone(),
+        on_audio_spectrum.clone(),
         on_error.clone(),
+        Arc::new(|_: String, _: Option<String>| {}),
     ).await.unwrap();
 
     sleep(Duration::from_millis(100)).await;
@@ -424,7 +438,9 @@ async fn test_keep_alive_mode() {
         on_partial,
         on_final,
         on_audio_level,
+        on_audio_spectrum,
         on_error,
+        Arc::new(|_: String, _: Option<String>| {}),
     ).await;
     assert!(result2.is_ok(), "Быстрый рестарт с keep-alive должен работать");
 
@@ -447,13 +463,16 @@ async fn test_recording_status_transitions() {
     let on_partial = Arc::new(|_: Transcription| {});
     let on_final = Arc::new(|_: Transcription| {});
     let on_audio_level = Arc::new(|_: f32| {});
+    let on_audio_spectrum = Arc::new(|_: [f32; 48]| {});
     let on_error = Arc::new(|_: String, _: String| {});
 
     service.start_recording(
         on_partial,
         on_final,
         on_audio_level,
+        on_audio_spectrum,
         on_error,
+        Arc::new(|_: String, _: Option<String>| {}),
     ).await.unwrap();
 
     sleep(Duration::from_millis(100)).await;

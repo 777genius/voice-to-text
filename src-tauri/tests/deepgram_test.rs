@@ -7,6 +7,9 @@ use app_lib::domain::{
 };
 use app_lib::infrastructure::stt::DeepgramProvider;
 
+mod test_support;
+use test_support::{noop_connection_quality, SttConfigTestExt};
+
 /// Получаем API ключ из переменной окружения
 ///
 /// Установите переменную окружения DEEPGRAM_TEST_KEY перед запуском тестов:
@@ -14,14 +17,12 @@ use app_lib::infrastructure::stt::DeepgramProvider;
 /// export DEEPGRAM_TEST_KEY="your_api_key_here"
 /// cargo test
 /// ```
-fn get_api_key() -> String {
+fn get_api_key() -> Option<String> {
     // Пробуем загрузить .env файл (если есть)
     let _ = dotenv::dotenv();
 
     // Читаем из переменной окружения
-    std::env::var("DEEPGRAM_TEST_KEY")
-        .expect("DEEPGRAM_TEST_KEY environment variable must be set for tests. \
-                 Set it with: export DEEPGRAM_TEST_KEY='your_key_here'")
+    std::env::var("DEEPGRAM_TEST_KEY").ok()
 }
 
 // ============================================================================
@@ -37,18 +38,20 @@ async fn test_deepgram_initialization() {
     assert!(provider.is_online());
     assert!(provider.supports_streaming());
 
-    // Попытка инициализации без API key должна вернуть ошибку
+    // Инициализация без пользовательского ключа должна использовать встроенный ключ
     let config = SttConfig::default();
     let result = provider.initialize(&config).await;
-    assert!(result.is_err(), "Должна быть ошибка без API key");
+    assert!(result.is_ok(), "Инициализация должна пройти со встроенным ключом");
 
-    // Инициализация с корректным API key
-    let mut config_with_key = SttConfig::default();
-    config_with_key.deepgram_api_key = Some(get_api_key());
-    config_with_key.language = "ru".to_string();
+    // Пользовательский ключ (если задан) тоже должен приниматься
+    if let Some(api_key) = get_api_key() {
+        let mut config_with_key = SttConfig::default();
+        config_with_key.deepgram_api_key = Some(api_key);
+        config_with_key.language = "ru".to_string();
 
-    let result = provider.initialize(&config_with_key).await;
-    assert!(result.is_ok(), "Инициализация должна пройти успешно: {:?}", result);
+        let result = provider.initialize(&config_with_key).await;
+        assert!(result.is_ok(), "Инициализация с пользовательским ключом должна пройти успешно: {:?}", result);
+    }
 }
 
 /// Тестируем конфигурацию с разными языками и моделями
@@ -59,7 +62,6 @@ async fn test_deepgram_configuration() {
     // Русский язык
     let mut config_ru = SttConfig::new(SttProviderType::Deepgram)
         .with_language("ru");
-    config_ru.deepgram_api_key = Some(get_api_key());
 
     let result = provider.initialize(&config_ru).await;
     assert!(result.is_ok());
@@ -67,7 +69,6 @@ async fn test_deepgram_configuration() {
     // Английский язык
     let mut config_en = SttConfig::new(SttProviderType::Deepgram)
         .with_language("en");
-    config_en.deepgram_api_key = Some(get_api_key());
 
     let result = provider.initialize(&config_en).await;
     assert!(result.is_ok());
@@ -75,7 +76,6 @@ async fn test_deepgram_configuration() {
     // Кастомная модель
     let mut config_custom = SttConfig::new(SttProviderType::Deepgram)
         .with_model("nova-2");
-    config_custom.deepgram_api_key = Some(get_api_key());
 
     let result = provider.initialize(&config_custom).await;
     assert!(result.is_ok());
@@ -87,7 +87,9 @@ async fn test_deepgram_state_machine() {
     let mut provider = DeepgramProvider::new();
 
     let mut config = SttConfig::new(SttProviderType::Deepgram);
-    config.deepgram_api_key = Some(get_api_key());
+    if let Some(api_key) = get_api_key() {
+        config.deepgram_api_key = Some(api_key);
+    }
 
     provider.initialize(&config).await.unwrap();
 
@@ -162,8 +164,10 @@ async fn test_deepgram_audio_buffering() {
 async fn test_deepgram_graceful_shutdown() {
     let mut provider = DeepgramProvider::new();
 
-    let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key(&get_api_key());
+    let mut config = SttConfig::new(SttProviderType::Deepgram);
+    if let Some(api_key) = get_api_key() {
+        config.deepgram_api_key = Some(api_key);
+    }
 
     provider.initialize(&config).await.unwrap();
 
@@ -233,8 +237,10 @@ async fn test_deepgram_factory_creation() {
 
     let factory = DefaultSttProviderFactory::new();
 
-    let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key(&get_api_key());
+    let mut config = SttConfig::new(SttProviderType::Deepgram);
+    if let Some(api_key) = get_api_key() {
+        config.deepgram_api_key = Some(api_key);
+    }
 
     let result = factory.create(&config);
     assert!(result.is_ok(), "Factory должна создать Deepgram провайдер");
@@ -281,7 +287,9 @@ async fn test_deepgram_full_lifecycle() {
     });
 
     // Запускаем stream
-    let result = provider.start_stream(on_partial, on_final, on_error).await;
+    let result = provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await;
     assert!(result.is_ok(), "Не удалось запустить stream: {:?}", result);
 
     println!("🎙️  Stream запущен, отправляем аудио...");
@@ -336,7 +344,9 @@ async fn test_deepgram_websocket_connection() {
     });
 
     // Подключаемся
-    let result = provider.start_stream(on_partial, on_final, on_error).await;
+    let result = provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await;
     assert!(result.is_ok(), "WebSocket подключение не удалось: {:?}", result);
 
     println!("✅ WebSocket соединение установлено");
@@ -364,7 +374,9 @@ async fn test_deepgram_connection_error() {
     let on_error = Arc::new(|_msg: String, _err_type: String| {});
 
     // Попытка подключиться должна вернуть ошибку
-    let result = provider.start_stream(on_partial, on_final, on_error).await;
+    let result = provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await;
     assert!(result.is_err(), "Должна быть ошибка с неверным API key");
 }
 
@@ -395,7 +407,10 @@ async fn test_deepgram_real_voice_transcription() {
         eprintln!("❌ Error: {} (type: {})", msg, err_type);
     });
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     // Генерируем синтетический голос (многочастотный сигнал)
     let sample_rate = 16000;
@@ -441,7 +456,10 @@ async fn test_deepgram_keepalive() {
         eprintln!("❌ Error: {} (type: {})", msg, err_type);
     });
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     // Ждем больше 4 секунд без отправки аудио
     // KeepAlive должен сработать автоматически
@@ -499,9 +517,19 @@ async fn test_e2e_full_pipeline_with_deepgram() {
 
     // Запускаем запись
     let on_audio_level = Arc::new(|_level: f32| {});
+    let on_audio_spectrum = Arc::new(|_spectrum: [f32; 48]| {});
     let on_error = Arc::new(|_msg: String, _err_type: String| {});
 
-    let result = service.start_recording(on_partial, on_final, on_audio_level, on_error).await;
+    let result = service
+        .start_recording(
+            on_partial,
+            on_final,
+            on_audio_level,
+            on_audio_spectrum,
+            on_error,
+            noop_connection_quality(),
+        )
+        .await;
     assert!(result.is_ok(), "Не удалось запустить запись: {:?}", result);
 
     assert_eq!(service.get_status().await, RecordingStatus::Recording);
@@ -542,7 +570,10 @@ async fn test_e2e_multiple_sessions() {
             eprintln!("❌ Error: {} (type: {})", msg, err_type);
         });
 
-        provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+        provider
+            .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+            .await
+            .unwrap();
 
         // Отправляем немного аудио
         for _ in 0..5 {
@@ -587,7 +618,10 @@ async fn test_e2e_long_session() {
         eprintln!("❌ Error: {} (type: {})", msg, err_type);
     });
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     // Отправляем аудио в течение 30 секунд
     let duration_secs = 30;
@@ -645,7 +679,10 @@ async fn test_e2e_language_switching() {
             eprintln!("❌ Error: {} (type: {})", msg, err_type);
         });
 
-        provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+        provider
+            .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+            .await
+            .unwrap();
 
         // Отправляем тестовое аудио
         for _ in 0..5 {
@@ -684,7 +721,10 @@ async fn test_e2e_abort_during_session() {
         eprintln!("❌ Error: {} (type: {})", msg, err_type);
     });
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     // Отправляем немного аудио
     for _ in 0..3 {
@@ -860,7 +900,10 @@ async fn test_real_mp3_transcription_deepgram() {
     });
 
     println!("🔗 Подключаемся к Deepgram...");
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     println!("📤 Отправляем аудио чанками...");
 
@@ -967,7 +1010,10 @@ async fn test_real_mp3_long_transcription_deepgram() {
     });
 
     println!("🔗 Подключаемся к Deepgram...");
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     println!("📤 Отправляем аудио чанками...");
 
@@ -1060,7 +1106,10 @@ async fn test_real_mp3_transcription_quality() {
         eprintln!("❌ Error: {} (type: {})", msg, err_type);
     });
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     // Отправляем весь аудио файл
     for chunk_samples in samples.chunks(1600) {
@@ -1151,7 +1200,10 @@ async fn test_real_mp3_different_chunk_sizes() {
             eprintln!("❌ Error: {} (type: {})", msg, err_type);
         });
 
-        provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+        provider
+            .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+            .await
+            .unwrap();
 
         for chunk_samples in samples.chunks(chunk_size) {
             let chunk = AudioChunk::new(chunk_samples.to_vec(), 16000, 1);

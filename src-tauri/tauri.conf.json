@@ -1,7 +1,7 @@
 {
     "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
     "productName": "Voice to Text",
-    "version": "0.4.1",
+    "version": "0.5.0",
     "identifier": "com.voicetotext.app",
     "build": {
         "frontendDist": "../dist",
@@ -11,27 +11,61 @@
     },
     "app": {
         "withGlobalTauri": true,
-        "windows": [{
-            "label": "main",
-            "title": "Voice to Text",
-            "width": 460,
-            "height": 330,
-            "minWidth": 460,
-            "minHeight": 300,
-            "maxWidth": 460,
-            "maxHeight": 550,
-            "resizable": false,
-            "fullscreen": false,
-            "decorations": false,
-            "transparent": true,
-            "shadow": false,
-            "alwaysOnTop": true,
-            "center": true,
-            "skipTaskbar": true,
-            "visible": false,
-            "focus": false,
-            "visibleOnAllWorkspaces": true
-        }],
+        "windows": [
+            {
+                "label": "main",
+                "title": "Voice to Text",
+                "width": 460,
+                "height": 330,
+                "minWidth": 460,
+                "minHeight": 300,
+                "maxWidth": 460,
+                "maxHeight": 700,
+                "resizable": false,
+                "fullscreen": false,
+                "decorations": false,
+                "transparent": true,
+                "shadow": false,
+                "alwaysOnTop": true,
+                "center": true,
+                "skipTaskbar": true,
+                "visible": false,
+                "focus": false,
+                "visibleOnAllWorkspaces": true
+            },
+            {
+                "label": "auth",
+                "title": "Voice to Text",
+                "width": 460,
+                "height": 580,
+                "visible": false,
+                "decorations": false,
+                "transparent": true,
+                "shadow": false,
+                "alwaysOnTop": false,
+                "skipTaskbar": false,
+                "center": true,
+                "resizable": false,
+                "url": "index.html"
+            },
+            {
+                "label": "settings",
+                "title": "Voice to Text — Settings",
+                "width": 860,
+                "height": 760,
+                "minWidth": 720,
+                "minHeight": 640,
+                "visible": false,
+                "decorations": false,
+                "transparent": true,
+                "shadow": false,
+                "alwaysOnTop": false,
+                "skipTaskbar": false,
+                "center": true,
+                "resizable": true,
+                "url": "index.html"
+            }
+        ],
         "security": {
             "csp": null
         }
@@ -83,6 +117,11 @@
             ],
             "windows": {
                 "installMode": "passive"
+            }
+        },
+        "deep-link": {
+            "desktop": {
+                "schemes": ["voicetotext"]
             }
         }
     }

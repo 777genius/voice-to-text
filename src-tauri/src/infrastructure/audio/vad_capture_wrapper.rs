@@ -59,7 +59,9 @@ impl AudioCapture for VadCaptureWrapper {
 
     async fn start_capture(&mut self, on_chunk: AudioChunkCallback) -> AudioResult<()> {
         // Сбрасываем флаг при старте новой записи
-        *self.silence_timeout_triggered.lock().unwrap() = false;
+        if let Ok(mut flag) = self.silence_timeout_triggered.lock() {
+            *flag = false;
+        }
 
         let vad = self.vad.clone();
         let silence_callback = self.on_silence_timeout.clone();

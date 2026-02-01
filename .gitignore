@@ -38,8 +38,12 @@ env
 # Secrets and credentials
 **/secrets*.txt
 **/credentials*.json
-**/*secret*
-**/*password*
+**/*secret*.txt
+**/*secret*.env
+**/*secret*.json
+**/*password*.txt
+**/*password*.env
+**/*password*.json
 **/*token*.txt
 
 # BFG Repo-Cleaner reports
@@ -53,3 +57,5 @@ src-tauri/src/infrastructure/embedded_keys.rs
 src-tauri/target/
 src-tauri/tests/fixtures/*.bin
 src-tauri/examples/target/
+api/.env
+api/target/

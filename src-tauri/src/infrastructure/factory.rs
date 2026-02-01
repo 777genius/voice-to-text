@@ -1,5 +1,5 @@
 use crate::domain::{SttConfig, SttError, SttProvider, SttProviderFactory, SttProviderType, SttResult};
-use crate::infrastructure::stt::{AssemblyAIProvider, DeepgramProvider, WhisperLocalProvider};
+use crate::infrastructure::stt::{AssemblyAIProvider, BackendProvider, DeepgramProvider, WhisperLocalProvider};
 
 /// Factory for creating STT providers based on configuration
 ///
@@ -28,6 +28,8 @@ impl SttProviderFactory for DefaultSttProviderFactory {
             SttProviderType::AssemblyAI => Ok(Box::new(AssemblyAIProvider::new())),
 
             SttProviderType::Deepgram => Ok(Box::new(DeepgramProvider::new())),
+
+            SttProviderType::Backend => Ok(Box::new(BackendProvider::new())),
 
             SttProviderType::GoogleCloud => Err(SttError::Unsupported(
                 "Google Cloud STT provider not yet implemented".to_string(),
@@ -77,6 +79,14 @@ mod tests {
     fn test_create_deepgram() {
         let factory = DefaultSttProviderFactory::new();
         let config = SttConfig::new(SttProviderType::Deepgram);
+        let result = factory.create(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_backend() {
+        let factory = DefaultSttProviderFactory::new();
+        let config = SttConfig::new(SttProviderType::Backend);
         let result = factory.create(&config);
         assert!(result.is_ok());
     }

@@ -7,6 +7,9 @@ use app_lib::domain::{
 };
 use app_lib::infrastructure::stt::AssemblyAIProvider;
 
+mod test_support;
+use test_support::{noop_connection_quality, SttConfigTestExt};
+
 /// Получаем API ключ из переменной окружения или используем дефолтный
 fn get_api_key() -> String {
     // Пробуем загрузить .env файл (если есть)
@@ -353,7 +356,10 @@ async fn test_real_mp3_transcription_assemblyai() {
     });
 
     println!("🔗 Подключаемся к AssemblyAI...");
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     println!("📤 Отправляем аудио чанками...");
 
@@ -473,7 +479,10 @@ async fn test_real_mp3_long_transcription_assemblyai() {
     });
 
     println!("🔗 Подключаемся к AssemblyAI...");
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     println!("📤 Отправляем аудио чанками...");
 

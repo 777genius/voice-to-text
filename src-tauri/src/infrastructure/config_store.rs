@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use anyhow::Result;
 
-use crate::domain::{SttConfig, AppConfig};
+use crate::domain::{SttConfig, AppConfig, UiPreferences};
 
 /// Персистентное хранилище конфигурации STT
 pub struct ConfigStore;
@@ -98,6 +98,33 @@ impl ConfigStore {
         Ok(config)
     }
 
+    /// Получить путь к файлу UI-настроек
+    fn ui_preferences_path() -> Result<PathBuf> {
+        Ok(Self::config_dir()?.join("ui_preferences.json"))
+    }
+
+    /// Сохранить UI-настройки (тема, локаль)
+    pub async fn save_ui_preferences(prefs: &UiPreferences) -> Result<()> {
+        let path = Self::ui_preferences_path()?;
+        let json = serde_json::to_string_pretty(prefs)?;
+        tokio::fs::write(path, json).await?;
+        log::info!("UI preferences saved to disk");
+        Ok(())
+    }
+
+    /// Загрузить UI-настройки
+    pub async fn load_ui_preferences() -> Result<UiPreferences> {
+        let path = Self::ui_preferences_path()?;
+        if !path.exists() {
+            log::info!("No saved UI preferences found, using defaults");
+            return Ok(UiPreferences::default());
+        }
+        let json = tokio::fs::read_to_string(path).await?;
+        let prefs: UiPreferences = serde_json::from_str(&json)?;
+        log::info!("UI preferences loaded from disk");
+        Ok(prefs)
+    }
+
     /// Удалить сохраненную конфигурацию приложения
     pub async fn delete_app_config() -> Result<()> {
         let path = Self::app_config_path()?;
@@ -123,15 +150,13 @@ mod tests {
         let _ = ConfigStore::delete_config().await;
 
         let mut config = SttConfig::default();
-        config.provider = SttProviderType::Deepgram;
-        config.deepgram_api_key = Some("test-key".to_string());
+        config.provider = SttProviderType::Backend;
         config.language = "ru".to_string();
 
         ConfigStore::save_config(&config).await.unwrap();
         let loaded = ConfigStore::load_config().await.unwrap();
 
         assert_eq!(loaded.provider, config.provider);
-        assert_eq!(loaded.deepgram_api_key, config.deepgram_api_key);
         assert_eq!(loaded.language, config.language);
 
         ConfigStore::delete_config().await.unwrap();

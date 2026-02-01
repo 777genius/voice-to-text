@@ -67,5 +67,11 @@
     "downloadDescription": "Versions pour macOS, Windows et Linux.",
     "openSourceTitle": "Open Source — Voice to Text",
     "openSourceDescription": "Explorez le code open source de Voice to Text sur GitHub."
+    "privacyTitle": "Confidentialité Voice to Text",
+    "privacyDescription": "Comment nous protégeons vos données et les gardons localement.",
+    "privacyPolicyTitle": "Politique de confidentialité — Voice to Text",
+    "privacyPolicyDescription": "Comment nous collectons, utilisons et protégeons vos données.",
+    "termsTitle": "Conditions d'utilisation — Voice to Text",
+    "termsDescription": "Conditions générales d'utilisation de l'application Voice to Text."
   }
 }

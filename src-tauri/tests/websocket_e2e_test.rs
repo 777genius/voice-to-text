@@ -7,6 +7,9 @@ use app_lib::domain::{
 };
 use app_lib::infrastructure::stt::{DeepgramProvider, AssemblyAIProvider};
 
+mod test_support;
+use test_support::{noop_connection_quality, SttConfigTestExt};
+
 /// Хелпер для получения API ключей из окружения
 fn get_deepgram_key() -> String {
     let _ = dotenv::dotenv();
@@ -54,7 +57,9 @@ async fn test_e2e_deepgram_websocket_connection() {
     });
 
     // Подключаемся
-    let result = provider.start_stream(on_partial, on_final, on_error).await;
+    let result = provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await;
     assert!(result.is_ok(), "WebSocket подключение должно пройти успешно");
 
     println!("✅ WebSocket соединение установлено");
@@ -97,7 +102,9 @@ async fn test_e2e_assemblyai_websocket_connection() {
     });
 
     // Подключаемся
-    let result = provider.start_stream(on_partial, on_final, on_error).await;
+    let result = provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await;
     assert!(result.is_ok(), "WebSocket подключение должно пройти успешно");
 
     println!("✅ WebSocket соединение установлено");
@@ -133,7 +140,15 @@ async fn test_e2e_deepgram_reconnect() {
         eprintln!("❌ Error: {} ({})", msg, err_type);
     });
 
-    provider.start_stream(on_partial.clone(), on_final.clone(), on_error.clone()).await.unwrap();
+    provider
+        .start_stream(
+            on_partial.clone(),
+            on_final.clone(),
+            on_error.clone(),
+            noop_connection_quality(),
+        )
+        .await
+        .unwrap();
 
     // Отправляем данные
     let chunk = AudioChunk::new(vec![100i16; 1600], 16000, 1);
@@ -147,7 +162,10 @@ async fn test_e2e_deepgram_reconnect() {
 
     // Второе подключение (переподключение)
     println!("🔌 Переподключаемся...");
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     // Отправляем данные снова
     provider.send_audio(&chunk).await.unwrap();
@@ -182,7 +200,10 @@ async fn test_e2e_multiple_sequential_connections() {
             eprintln!("❌ Error: {} ({})", msg, err_type);
         });
 
-        provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+        provider
+            .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+            .await
+            .unwrap();
 
         // Отправляем немного данных
         for _ in 0..3 {
@@ -219,7 +240,10 @@ async fn test_e2e_abort_during_active_connection() {
         eprintln!("❌ Error: {} ({})", msg, err_type);
     });
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     // Отправляем данные
     for _ in 0..5 {
@@ -280,7 +304,10 @@ async fn test_e2e_deepgram_message_handling() {
         eprintln!("❌ Error: {} ({})", msg, err_type);
     });
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     // Отправляем достаточно аудио чтобы получить транскрипции
     for i in 0..20 {
@@ -347,7 +374,9 @@ async fn test_e2e_connection_error_invalid_key() {
     });
 
     // Попытка подключиться должна вернуть ошибку
-    let result = provider.start_stream(on_partial, on_final, on_error).await;
+    let result = provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await;
     assert!(result.is_err(), "Должна быть ошибка с неверным API ключом");
 
     if let Err(e) = result {
@@ -385,7 +414,7 @@ async fn test_e2e_connection_timeout_handling() {
     // Пытаемся подключиться с таймаутом
     let result = tokio::time::timeout(
         Duration::from_secs(10),
-        provider.start_stream(on_partial, on_final, on_error)
+        provider.start_stream(on_partial, on_final, on_error, noop_connection_quality())
     ).await;
 
     match result {
@@ -424,7 +453,10 @@ async fn test_e2e_server_initiated_close() {
         *close_clone.lock().unwrap() = true;
     });
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     // Отправляем данные
     for _ in 0..10 {
@@ -471,7 +503,10 @@ async fn test_e2e_slow_network_simulation() {
         eprintln!("❌ Error: {} ({})", msg, err_type);
     });
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     println!("🐌 Имитируем медленное соединение (задержки 300-500ms)...");
 
@@ -517,7 +552,10 @@ async fn test_e2e_batch_sending() {
         eprintln!("❌ Error: {} ({})", msg, err_type);
     });
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     println!("📦 Отправляем большие пачки данных...");
 
@@ -566,7 +604,10 @@ async fn test_e2e_high_frequency_sending() {
         eprintln!("❌ Error: {} ({})", msg, err_type);
     });
 
-    provider.start_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     println!("⚡ Стресс-тест: быстрая отправка данных (10ms интервалы)...");
 
@@ -623,7 +664,15 @@ async fn test_e2e_keepalive_mechanism() {
         eprintln!("❌ Error: {} ({})", msg, err_type);
     });
 
-    provider.start_stream(on_partial.clone(), on_final.clone(), on_error.clone()).await.unwrap();
+    provider
+        .start_stream(
+            on_partial.clone(),
+            on_final.clone(),
+            on_error.clone(),
+            noop_connection_quality(),
+        )
+        .await
+        .unwrap();
 
     // Отправляем немного данных
     println!("📤 Отправляем начальные данные...");
@@ -647,7 +696,10 @@ async fn test_e2e_keepalive_mechanism() {
 
     // Возобновляем стрим
     println!("▶️  Возобновляем стрим...");
-    provider.resume_stream(on_partial, on_final, on_error).await.unwrap();
+    provider
+        .resume_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await
+        .unwrap();
 
     // Отправляем данные снова - соединение должно быть живым
     println!("📤 Отправляем данные после паузы...");
@@ -683,7 +735,15 @@ async fn test_e2e_recovery_after_connection_loss() {
 
     // Первое соединение
     println!("🔌 Устанавливаем соединение...");
-    provider.start_stream(on_partial.clone(), on_final.clone(), on_error.clone()).await.unwrap();
+    provider
+        .start_stream(
+            on_partial.clone(),
+            on_final.clone(),
+            on_error.clone(),
+            noop_connection_quality(),
+        )
+        .await
+        .unwrap();
 
     // Отправляем данные
     for _ in 0..5 {
@@ -700,7 +760,9 @@ async fn test_e2e_recovery_after_connection_loss() {
 
     // Восстанавливаем соединение
     println!("🔄 Восстанавливаем соединение...");
-    let recovery_result = provider.start_stream(on_partial, on_final, on_error).await;
+    let recovery_result = provider
+        .start_stream(on_partial, on_final, on_error, noop_connection_quality())
+        .await;
     assert!(recovery_result.is_ok(), "Восстановление соединения должно работать");
 
     // Проверяем что можем отправлять данные
@@ -747,7 +809,15 @@ async fn test_e2e_long_session_with_pauses() {
         eprintln!("❌ Error: {} ({})", msg, err_type);
     });
 
-    provider.start_stream(on_partial.clone(), on_final.clone(), on_error.clone()).await.unwrap();
+    provider
+        .start_stream(
+            on_partial.clone(),
+            on_final.clone(),
+            on_error.clone(),
+            noop_connection_quality(),
+        )
+        .await
+        .unwrap();
 
     println!("🎙️  Длинная сессия с паузами (имитация реального использования)...");
 
@@ -769,7 +839,15 @@ async fn test_e2e_long_session_with_pauses() {
 
         // Возобновляем
         println!("▶️  Возобновляем...");
-        provider.resume_stream(on_partial.clone(), on_final.clone(), on_error.clone()).await.unwrap();
+        provider
+            .resume_stream(
+                on_partial.clone(),
+                on_final.clone(),
+                on_error.clone(),
+                noop_connection_quality(),
+            )
+            .await
+            .unwrap();
     }
 
     // Финальный отрезок
@@ -811,7 +889,10 @@ async fn test_e2e_performance_comparison() {
     let on_f = Arc::new(|_: Transcription| {});
     let on_e = Arc::new(|_: String, _: String| {});
 
-    deepgram.start_stream(on_p.clone(), on_f.clone(), on_e.clone()).await.unwrap();
+    deepgram
+        .start_stream(on_p.clone(), on_f.clone(), on_e.clone(), noop_connection_quality())
+        .await
+        .unwrap();
 
     for chunk in &test_chunks {
         deepgram.send_audio(chunk).await.unwrap();
@@ -836,7 +917,10 @@ async fn test_e2e_performance_comparison() {
         .with_language("en");
     assemblyai.initialize(&config).await.unwrap();
 
-    assemblyai.start_stream(on_p, on_f, on_e).await.unwrap();
+    assemblyai
+        .start_stream(on_p, on_f, on_e, noop_connection_quality())
+        .await
+        .unwrap();
 
     for chunk in &test_chunks {
         assemblyai.send_audio(chunk).await.unwrap();
