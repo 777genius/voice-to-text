@@ -427,11 +427,12 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
-            // Обрабатываем клик по иконке в Dock (macOS)
-            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event {
+        .run(|_app, _event| {
+            // Клик по иконке в Dock (только macOS)
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = _event {
                 if !has_visible_windows {
-                    if let Some(window) = app.get_webview_window("main") {
+                    if let Some(window) = _app.get_webview_window("main") {
                         if let Err(e) = crate::presentation::commands::show_webview_window_on_active_monitor(&window) {
                             log::error!("Failed to show window on Dock click: {}", e);
                             let _ = window.show();
