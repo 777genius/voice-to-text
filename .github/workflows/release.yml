@@ -38,6 +38,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Checkout state-sync
+        uses: actions/checkout@v4
+        with:
+          repository: 777genius/state-sync
+          path: ../state-sync
+
       # Установка Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
