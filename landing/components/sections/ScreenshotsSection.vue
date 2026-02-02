@@ -27,6 +27,23 @@ function prev() {
 function next() {
   activeIndex.value = (activeIndex.value + 1) % totalSlides;
 }
+
+// Touch/swipe support
+const touchStartX = ref(0);
+const touchEndX = ref(0);
+
+function onTouchStart(e: TouchEvent) {
+  touchStartX.value = e.changedTouches[0].screenX;
+}
+
+function onTouchEnd(e: TouchEvent) {
+  touchEndX.value = e.changedTouches[0].screenX;
+  const diff = touchStartX.value - touchEndX.value;
+  if (Math.abs(diff) > 50) {
+    if (diff > 0) next();
+    else prev();
+  }
+}
 </script>
 
 <template>
@@ -38,9 +55,9 @@ function next() {
       <div class="screenshots-section__grid-pattern" />
     </div>
 
-    <div class="screenshots-section__layout">
-      <!-- Left: text + toggle -->
-      <div class="screenshots-section__content">
+    <div class="screenshots-section__container">
+      <!-- Header area -->
+      <div class="screenshots-section__header">
         <span class="screenshots-section__badge">{{ t("nav.screenshots") }}</span>
         <h2 class="screenshots-section__title">
           {{ t("screenshots.sectionTitle") }}
@@ -49,72 +66,69 @@ function next() {
           {{ t("screenshots.sectionSubtitle") }}
         </p>
 
-        <!-- Screenshot theme toggle (local, not global) -->
-        <div class="screenshots-section__toggle">
-          <span
-            class="screenshots-section__toggle-label"
-            :class="{ 'screenshots-section__toggle-label--active': !isScreenshotDark }"
-          >
-            <v-icon size="18" icon="mdi-weather-sunny" />
-            {{ t("screenshots.light") }}
-          </span>
-          <button
-            class="screenshots-section__switch"
-            :class="{ 'screenshots-section__switch--dark': isScreenshotDark }"
-            role="switch"
-            :aria-checked="isScreenshotDark"
-            :aria-label="t('screenshots.toggleTheme')"
-            @click="toggleScreenshotTheme"
-          >
-            <span class="screenshots-section__switch-thumb" />
-          </button>
-          <span
-            class="screenshots-section__toggle-label"
-            :class="{ 'screenshots-section__toggle-label--active': isScreenshotDark }"
-          >
-            <v-icon size="18" icon="mdi-weather-night" />
-            {{ t("screenshots.dark") }}
-          </span>
-        </div>
+        <!-- Controls row: toggle + navigation -->
+        <div class="screenshots-section__controls">
+          <!-- Screenshot theme toggle -->
+          <div class="screenshots-section__toggle">
+            <span
+              class="screenshots-section__toggle-label"
+              :class="{ 'screenshots-section__toggle-label--active': !isScreenshotDark }"
+            >
+              <v-icon size="18" icon="mdi-weather-sunny" />
+              {{ t("screenshots.light") }}
+            </span>
+            <button
+              class="screenshots-section__switch"
+              :class="{ 'screenshots-section__switch--dark': isScreenshotDark }"
+              role="switch"
+              :aria-checked="isScreenshotDark"
+              :aria-label="t('screenshots.toggleTheme')"
+              @click="toggleScreenshotTheme"
+            >
+              <span class="screenshots-section__switch-thumb" />
+            </button>
+            <span
+              class="screenshots-section__toggle-label"
+              :class="{ 'screenshots-section__toggle-label--active': isScreenshotDark }"
+            >
+              <v-icon size="18" icon="mdi-weather-night" />
+              {{ t("screenshots.dark") }}
+            </span>
+          </div>
 
-        <!-- Slide indicators / tabs -->
-        <div class="screenshots-section__tabs">
-          <button
-            v-for="(shot, index) in screenshots"
-            :key="shot.id"
-            class="screenshots-section__tab"
-            :class="{ 'screenshots-section__tab--active': activeIndex === index }"
-            @click="goTo(index)"
-          >
-            <span class="screenshots-section__tab-dot" />
-            <span class="screenshots-section__tab-label">{{ t(shot.labelKey) }}</span>
-          </button>
-        </div>
-
-        <!-- Navigation arrows -->
-        <div class="screenshots-section__nav">
-          <button class="screenshots-section__nav-btn" aria-label="Previous" @click="prev">
-            <v-icon size="20" icon="mdi-chevron-left" />
-          </button>
-          <span class="screenshots-section__nav-count">
-            {{ activeIndex + 1 }} / {{ totalSlides }}
-          </span>
-          <button class="screenshots-section__nav-btn" aria-label="Next" @click="next">
-            <v-icon size="20" icon="mdi-chevron-right" />
-          </button>
+          <!-- Navigation arrows (mobile/tablet only) -->
+          <div class="screenshots-section__nav">
+            <button class="screenshots-section__nav-btn" aria-label="Previous" @click="prev">
+              <v-icon size="20" icon="mdi-chevron-left" />
+            </button>
+            <span class="screenshots-section__nav-count">
+              {{ activeIndex + 1 }} / {{ totalSlides }}
+            </span>
+            <button class="screenshots-section__nav-btn" aria-label="Next" @click="next">
+              <v-icon size="20" icon="mdi-chevron-right" />
+            </button>
+          </div>
         </div>
       </div>
 
-      <!-- Right: screenshot slider extending to edge -->
-      <div class="screenshots-section__slider-wrap">
+      <!-- Screenshots grid / slider -->
+      <div
+        class="screenshots-section__gallery"
+        @touchstart.passive="onTouchStart"
+        @touchend.passive="onTouchEnd"
+      >
         <div
-          class="screenshots-section__slider-track"
-          :style="{ transform: `translateX(-${activeIndex * 100}%)` }"
+          class="screenshots-section__track"
+          :style="{ '--active-index': activeIndex }"
         >
           <div
-            v-for="shot in screenshots"
+            v-for="(shot, index) in screenshots"
             :key="shot.id"
             class="screenshots-section__slide"
+            :class="{
+              'screenshots-section__slide--active': activeIndex === index,
+            }"
+            @click="goTo(index)"
           >
             <div class="screenshots-section__card">
               <div class="screenshots-section__card-glow" />
@@ -142,6 +156,18 @@ function next() {
           </div>
         </div>
       </div>
+
+      <!-- Dot indicators (mobile/tablet) -->
+      <div class="screenshots-section__dots">
+        <button
+          v-for="(shot, index) in screenshots"
+          :key="shot.id"
+          class="screenshots-section__dot"
+          :class="{ 'screenshots-section__dot--active': activeIndex === index }"
+          :aria-label="`Go to slide ${index + 1}`"
+          @click="goTo(index)"
+        />
+      </div>
     </div>
   </section>
 </template>
@@ -150,8 +176,8 @@ function next() {
 .screenshots-section {
   position: relative;
   overflow: hidden;
-  padding-top: 32px !important;
-  padding-bottom: 32px !important;
+  padding-top: 48px !important;
+  padding-bottom: 48px !important;
 }
 
 /* ─── Background ─── */
@@ -195,23 +221,19 @@ function next() {
   mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, black, transparent);
 }
 
-/* ─── Layout ─── */
-.screenshots-section__layout {
-  display: flex;
-  align-items: center;
-  gap: 24px;
+/* ─── Container ─── */
+.screenshots-section__container {
   position: relative;
   z-index: 1;
   max-width: 1400px;
   margin: 0 auto;
-  padding-left: clamp(16px, 4vw, 64px);
-  /* No padding-right so slider extends to edge */
+  padding: 0 clamp(16px, 4vw, 64px);
 }
 
-/* ─── Left Content ─── */
-.screenshots-section__content {
-  flex: 0 0 260px;
-  max-width: 280px;
+/* ─── Header ─── */
+.screenshots-section__header {
+  text-align: center;
+  margin-bottom: 36px;
 }
 
 .screenshots-section__badge {
@@ -224,26 +246,36 @@ function next() {
   text-transform: uppercase;
   background: linear-gradient(135deg, rgba(249, 115, 22, 0.15), rgba(6, 182, 212, 0.15));
   color: #f97316;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
   border: 1px solid rgba(249, 115, 22, 0.2);
 }
 
 .screenshots-section__title {
-  font-size: 1.6rem;
+  font-size: 2rem;
   font-weight: 800;
   letter-spacing: -0.03em;
   line-height: 1.15;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
   background: linear-gradient(135deg, currentColor 0%, rgba(249, 115, 22, 0.8) 100%);
   -webkit-background-clip: text;
   background-clip: text;
 }
 
 .screenshots-section__subtitle {
-  font-size: 0.85rem;
+  font-size: 0.95rem;
   opacity: 0.6;
   line-height: 1.5;
-  margin: 0 0 14px;
+  margin: 0 auto 20px;
+  max-width: 520px;
+}
+
+/* ─── Controls ─── */
+.screenshots-section__controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  flex-wrap: wrap;
 }
 
 /* ─── Theme Toggle ─── */
@@ -251,12 +283,11 @@ function next() {
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  padding: 6px 12px;
+  padding: 6px 14px;
   border-radius: 100px;
   background: rgba(255, 255, 255, 0.5);
   backdrop-filter: blur(8px);
   border: 1px solid rgba(249, 115, 22, 0.12);
-  margin-bottom: 12px;
 }
 
 .screenshots-section__toggle-label {
@@ -307,69 +338,9 @@ function next() {
   transform: translateX(18px);
 }
 
-/* ─── Slide Tabs ─── */
-.screenshots-section__tabs {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-bottom: 10px;
-}
-
-.screenshots-section__tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
-  border-radius: 8px;
-  border: 1px solid transparent;
-  background: rgba(255, 255, 255, 0.3);
-  backdrop-filter: blur(8px);
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: inherit;
-  opacity: 0.5;
-  cursor: pointer;
-  transition:
-    opacity 0.3s ease,
-    background 0.3s ease,
-    border-color 0.3s ease,
-    transform 0.2s ease;
-  text-align: left;
-}
-
-.screenshots-section__tab:hover {
-  opacity: 0.75;
-  transform: translateX(4px);
-}
-
-.screenshots-section__tab--active {
-  opacity: 1;
-  background: linear-gradient(135deg, rgba(249, 115, 22, 0.1), rgba(6, 182, 212, 0.08));
-  border-color: rgba(249, 115, 22, 0.25);
-}
-
-.screenshots-section__tab-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-  opacity: 0.3;
-  transition: opacity 0.3s ease, background 0.3s ease;
-  flex-shrink: 0;
-}
-
-.screenshots-section__tab--active .screenshots-section__tab-dot {
-  opacity: 1;
-  background: #f97316;
-}
-
-.screenshots-section__tab-label {
-  letter-spacing: 0.02em;
-}
-
-/* ─── Navigation ─── */
+/* ─── Navigation (visible on mobile/tablet) ─── */
 .screenshots-section__nav {
-  display: inline-flex;
+  display: none;
   align-items: center;
   gap: 12px;
 }
@@ -378,9 +349,9 @@ function next() {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
   border: 1px solid rgba(249, 115, 22, 0.15);
   background: rgba(255, 255, 255, 0.5);
   backdrop-filter: blur(8px);
@@ -402,36 +373,45 @@ function next() {
   font-variant-numeric: tabular-nums;
 }
 
-/* ─── Right Slider ─── */
-.screenshots-section__slider-wrap {
-  flex: 1;
-  min-width: 0;
+/* ─── Gallery (3-column grid on desktop) ─── */
+.screenshots-section__gallery {
   overflow: hidden;
-  /* Extend to right edge */
-  margin-right: calc(-1 * clamp(16px, 4vw, 64px));
 }
 
-.screenshots-section__slider-track {
-  display: flex;
+.screenshots-section__track {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
   transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  transform: none !important;
 }
 
 .screenshots-section__slide {
-  flex: 0 0 100%;
   min-width: 0;
-  padding-right: 12px;
+  cursor: pointer;
+  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.screenshots-section__slide:hover {
+  transform: translateY(-6px);
 }
 
 /* ─── Card ─── */
 .screenshots-section__card {
   position: relative;
-  border-radius: 14px 0 0 14px;
+  border-radius: 16px;
   overflow: hidden;
   transition:
     transform 0.45s cubic-bezier(0.4, 0, 0.2, 1),
     box-shadow 0.45s cubic-bezier(0.4, 0, 0.2, 1);
   box-shadow:
-    0 24px 80px rgba(249, 115, 22, 0.1),
+    0 8px 32px rgba(249, 115, 22, 0.08),
+    0 4px 16px rgba(0, 0, 0, 0.04);
+}
+
+.screenshots-section__slide:hover .screenshots-section__card {
+  box-shadow:
+    0 20px 60px rgba(249, 115, 22, 0.12),
     0 8px 32px rgba(0, 0, 0, 0.06);
 }
 
@@ -450,8 +430,7 @@ function next() {
 .screenshots-section__card-inner {
   background: rgba(255, 255, 255, 0.6);
   border: 1px solid rgba(249, 115, 22, 0.1);
-  border-right: none;
-  border-radius: 14px 0 0 14px;
+  border-radius: 16px;
   backdrop-filter: blur(16px);
   overflow: hidden;
 }
@@ -461,7 +440,7 @@ function next() {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 10px 14px;
   border-bottom: 1px solid rgba(249, 115, 22, 0.06);
   background: rgba(255, 255, 255, 0.4);
 }
@@ -501,9 +480,33 @@ function next() {
 .screenshots-section__image {
   width: 100%;
   height: auto;
-  max-height: 340px;
   object-fit: contain;
   display: block;
+}
+
+/* ─── Dot indicators (mobile/tablet) ─── */
+.screenshots-section__dots {
+  display: none;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.screenshots-section__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(249, 115, 22, 0.2);
+  cursor: pointer;
+  transition: all 0.3s ease;
+  padding: 0;
+}
+
+.screenshots-section__dot--active {
+  background: #f97316;
+  width: 24px;
+  border-radius: 100px;
 }
 
 /* ─── Screenshot Transition ─── */
@@ -563,20 +566,6 @@ function next() {
   color: #fdba74;
 }
 
-.v-theme--dark .screenshots-section__tab {
-  background: rgba(255, 255, 255, 0.04);
-  border-color: transparent;
-}
-
-.v-theme--dark .screenshots-section__tab--active {
-  background: linear-gradient(135deg, rgba(251, 146, 60, 0.12), rgba(34, 211, 238, 0.08));
-  border-color: rgba(251, 146, 60, 0.25);
-}
-
-.v-theme--dark .screenshots-section__tab--active .screenshots-section__tab-dot {
-  background: #fdba74;
-}
-
 .v-theme--dark .screenshots-section__nav-btn {
   background: rgba(255, 255, 255, 0.04);
   border-color: rgba(251, 146, 60, 0.1);
@@ -589,8 +578,14 @@ function next() {
 
 .v-theme--dark .screenshots-section__card {
   box-shadow:
-    0 24px 80px rgba(0, 0, 0, 0.4),
-    0 0 0 1px rgba(251, 146, 60, 0.1);
+    0 8px 32px rgba(0, 0, 0, 0.3),
+    0 0 0 1px rgba(251, 146, 60, 0.08);
+}
+
+.v-theme--dark .screenshots-section__slide:hover .screenshots-section__card {
+  box-shadow:
+    0 20px 60px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(251, 146, 60, 0.15);
 }
 
 .v-theme--dark .screenshots-section__card-glow {
@@ -627,6 +622,14 @@ function next() {
   color: #94a3b8;
 }
 
+.v-theme--dark .screenshots-section__dot {
+  background: rgba(251, 146, 60, 0.2);
+}
+
+.v-theme--dark .screenshots-section__dot--active {
+  background: #fdba74;
+}
+
 /* ─── Light Theme ─── */
 .v-theme--light .screenshots-section__orb {
   opacity: 0.05;
@@ -658,97 +661,74 @@ function next() {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
 }
 
-.v-theme--light .screenshots-section__tab {
-  background: rgba(255, 255, 255, 0.6);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
-}
-
 .v-theme--light .screenshots-section__nav-btn {
   background: rgba(255, 255, 255, 0.7);
 }
 
-/* ─── Responsive ─── */
-@media (max-width: 960px) {
-  .screenshots-section {
-    padding-top: 24px !important;
-    padding-bottom: 24px !important;
-  }
-
-  .screenshots-section__layout {
-    flex-direction: column;
-    padding-left: clamp(16px, 4vw, 32px);
-    padding-right: clamp(16px, 4vw, 32px);
+/* ─── Responsive: Tablet (2 columns + slider) ─── */
+@media (max-width: 1024px) {
+  .screenshots-section__track {
+    display: flex;
     gap: 16px;
+    /* Each slide is 50% - 8px; shift by (50% + 8px) per index */
+    transform: translateX(calc(var(--active-index, 0) * (-50% - 8px))) !important;
   }
 
-  .screenshots-section__content {
-    flex: none;
-    max-width: 100%;
-    text-align: center;
+  .screenshots-section__slide {
+    flex: 0 0 calc(50% - 8px);
+    min-width: calc(50% - 8px);
   }
 
-  .screenshots-section__tabs {
-    flex-direction: row;
-    justify-content: center;
-    flex-wrap: wrap;
-  }
-
-  .screenshots-section__tab:hover {
-    transform: translateY(-1px);
+  .screenshots-section__slide:hover {
+    transform: none;
   }
 
   .screenshots-section__nav {
-    justify-content: center;
-    width: 100%;
+    display: inline-flex;
   }
 
-  .screenshots-section__title {
-    font-size: 1.4rem;
-  }
-
-  .screenshots-section__subtitle {
-    font-size: 0.82rem;
-  }
-
-  .screenshots-section__image {
-    max-height: 280px;
-  }
-
-  .screenshots-section__slider-wrap {
-    margin-right: calc(-1 * clamp(16px, 4vw, 32px));
-    width: calc(100% + clamp(16px, 4vw, 32px));
-  }
-
-  .screenshots-section__card {
-    border-radius: 14px 0 0 14px;
-  }
-
-  .screenshots-section__card-inner {
-    border-radius: 14px 0 0 14px;
+  .screenshots-section__dots {
+    display: flex;
   }
 }
 
-@media (max-width: 600px) {
+/* ─── Responsive: Mobile (1 column + slider) ─── */
+@media (max-width: 680px) {
   .screenshots-section {
-    padding-top: 20px !important;
-    padding-bottom: 20px !important;
+    padding-top: 32px !important;
+    padding-bottom: 32px !important;
   }
 
-  .screenshots-section__layout {
-    gap: 12px;
+  .screenshots-section__header {
+    margin-bottom: 24px;
   }
 
   .screenshots-section__title {
-    font-size: 1.2rem;
+    font-size: 1.5rem;
   }
 
   .screenshots-section__subtitle {
-    font-size: 0.78rem;
-    margin-bottom: 10px;
+    font-size: 0.85rem;
+    margin-bottom: 16px;
   }
 
-  .screenshots-section__image {
-    max-height: 220px;
+  .screenshots-section__track {
+    display: flex;
+    gap: 12px;
+    transform: translateX(calc(var(--active-index, 0) * (-100% - 12px))) !important;
+  }
+
+  .screenshots-section__slide {
+    flex: 0 0 100%;
+    min-width: 100%;
+  }
+
+  .screenshots-section__card {
+    border-radius: 14px;
+  }
+
+  .screenshots-section__card-inner {
+    border-radius: 14px;
   }
 
   .screenshots-section__toggle {
@@ -783,14 +763,9 @@ function next() {
     height: 6px;
   }
 
-  .screenshots-section__tab {
-    padding: 5px 8px;
-    font-size: 0.72rem;
-  }
-
   .screenshots-section__nav-btn {
-    width: 30px;
-    height: 30px;
+    width: 32px;
+    height: 32px;
   }
 }
 </style>

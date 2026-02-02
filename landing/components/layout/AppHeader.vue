@@ -1,28 +1,23 @@
 <script setup lang="ts">
-import { useDisplay } from "vuetify";
+import { useDisplay } from 'vuetify';
 
 const { t } = useI18n();
 const { smAndDown } = useDisplay();
 const menuOpen = ref(false);
 
 const navItems = computed(() => [
-  { id: "features", label: t("nav.features") },
-  { id: "pricing", label: t("nav.pricing") },
-  { id: "download", label: t("nav.download") },
+  { id: 'features', label: t('nav.features') },
+  { id: 'pricing', label: t('nav.pricing') },
+  { id: 'download', label: t('nav.download') },
 ]);
 </script>
 
 <template>
   <v-app-bar flat class="app-header">
-    <v-container class="d-flex align-center gap-4 header-container ml-24">
+    <v-container class="d-flex align-center header-container ml-24">
       <AppLogo />
       <div class="nav-links ml-6" v-show="!smAndDown">
-        <v-btn
-          v-for="item in navItems"
-          :key="item.id"
-          variant="text"
-          :href="`#${item.id}`"
-        >
+        <v-btn v-for="item in navItems" :key="item.id" variant="text" :href="`#${item.id}`">
           {{ item.label }}
         </v-btn>
       </div>
@@ -65,7 +60,13 @@ const navItems = computed(() => [
 <style scoped>
 .nav-links {
   display: flex;
-  gap: 8px;
+  align-self: stretch;
+  align-items: stretch;
+}
+
+.nav-links :deep(.v-btn) {
+  height: 100% !important;
+  border-radius: 0;
 }
 
 .header-container {
