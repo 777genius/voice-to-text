@@ -5,7 +5,7 @@ const { t } = useI18n();
 const openSourceIcons = [
   'mdi-source-branch',
   'mdi-account-group-outline',
-  'mdi-license',
+  'mdi-update',
 ];
 </script>
 

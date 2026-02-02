@@ -53,11 +53,11 @@
     }
   ],
   "openSource": {
-    "title": "Entièrement open source",
+    "title": "Open source",
     "bullets": [
       "Code source disponible sur GitHub — inspectez, modifiez et compilez librement",
       "Développement communautaire avec issues ouvertes et contributions",
-      "Licence MIT — utilisable dans des projets personnels et commerciaux"
+      "Mises à jour régulières et processus de développement transparent"
     ],
     "note": "Transparence et confiance grâce au code ouvert."
   },

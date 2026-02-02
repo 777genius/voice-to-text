@@ -36,6 +36,16 @@ const getDownloadVersion = (asset: (typeof downloadAssets)[number]) => {
   }
   return resolve(asset.os, asset.arch)?.version || null;
 };
+
+const orderedAssets = computed(() => {
+  const assets = [...downloadAssets];
+  const selectedIndex = assets.findIndex((a) => a.id === downloadStore.selectedId);
+  if (selectedIndex === -1 || selectedIndex === 1) return assets;
+  const centerIndex = 1;
+  const selected = assets.splice(selectedIndex, 1)[0];
+  assets.splice(centerIndex, 0, selected);
+  return assets;
+});
 </script>
 
 <template>
@@ -57,9 +67,9 @@ const getDownloadVersion = (asset: (typeof downloadAssets)[number]) => {
       </div>
 
       <!-- Platform cards -->
-      <div class="download-section__cards">
+      <TransitionGroup name="download-reorder" tag="div" class="download-section__cards">
         <div
-          v-for="(asset, index) in downloadAssets"
+          v-for="(asset, index) in orderedAssets"
           :key="asset.id"
           class="download-section__card"
           :class="{ 'download-section__card--active': downloadStore.selectedId === asset.id }"
@@ -107,7 +117,7 @@ const getDownloadVersion = (asset: (typeof downloadAssets)[number]) => {
             <span>{{ t("download.detected") }}</span>
           </div>
         </div>
-      </div>
+      </TransitionGroup>
     </v-container>
   </section>
 </template>
@@ -394,6 +404,11 @@ const getDownloadVersion = (asset: (typeof downloadAssets)[number]) => {
   font-weight: 600;
   color: #22c55e;
   opacity: 0.9;
+}
+
+/* ─── Reorder Transition ─── */
+.download-reorder-move {
+  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 @keyframes downloadFadeUp {
