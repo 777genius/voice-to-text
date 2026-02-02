@@ -8,8 +8,8 @@ import { useI18n } from 'vue-i18n';
 import { SttProviderType } from '@/types';
 import { invoke } from '@tauri-apps/api/core';
 import { isTauriAvailable } from '@/utils/tauri';
-import { bumpUiPrefsRevision, CMD_UPDATE_UI_PREFERENCES } from '@/windowing/stateSync';
-import { normalizeUiLocale } from '@/i18n.locales';
+import { bumpUiPrefsRevision, CMD_UPDATE_UI_PREFERENCES, readUiPreferencesFromStorage } from '@/windowing/stateSync';
+import { sttLangToUiLocale, normalizeSttLanguage } from '@/i18n.locales';
 import { useSettingsStore } from '../../store/settingsStore';
 import { tauriSettingsService } from '../../infrastructure/adapters/TauriSettingsService';
 import { useAppConfigStore } from '@/stores/appConfig';
@@ -88,13 +88,15 @@ export function useSettings() {
         const sttConfigStoreInstance = useSttConfigStore();
         const appConfigStoreInstance = useAppConfigStore();
 
-        // Язык UI: localStorage имеет приоритет
-        const storedLocale = normalizeUiLocale(localStorage.getItem('uiLocale'));
-        locale.value = storedLocale;
-        localStorage.setItem('uiLocale', storedLocale);
+        // STT-язык: берём из localStorage (сохранённый ранее) или дефолт
+        const storedSttLang = normalizeSttLanguage(localStorage.getItem('sttLanguage') || localStorage.getItem('uiLocale'));
+        const uiLocale = sttLangToUiLocale(storedSttLang);
+        locale.value = uiLocale;
+        localStorage.setItem('uiLocale', uiLocale);
+        localStorage.setItem('sttLanguage', storedSttLang);
 
         store.setProvider(SttProviderType.Backend);
-        store.setLanguage(storedLocale);
+        store.setLanguage(storedSttLang);
 
         if (appConfigStoreInstance.isLoaded) {
           store.setMicrophoneSensitivity(appConfigStoreInstance.microphoneSensitivity);
@@ -120,10 +122,12 @@ export function useSettings() {
 
         // Если sttConfig store уже загружен (например, в тестах) — можно синхронизировать
         if (sttConfigStoreInstance.isLoaded) {
-          const next = normalizeUiLocale(sttConfigStoreInstance.language);
-          store.setLanguage(next);
-          locale.value = next;
-          localStorage.setItem('uiLocale', next);
+          const sttLang = normalizeSttLanguage(sttConfigStoreInstance.language);
+          store.setLanguage(sttLang);
+          const fallbackLocale = sttLangToUiLocale(sttLang);
+          locale.value = fallbackLocale;
+          localStorage.setItem('uiLocale', fallbackLocale);
+          localStorage.setItem('sttLanguage', sttLang);
         }
 
         return;
@@ -143,20 +147,13 @@ export function useSettings() {
       store.setDeepgramApiKey('');
       store.setAssemblyaiApiKey('');
 
-      // Синхронизируем локаль UI: localStorage имеет приоритет
-      // (пользователь мог выбрать язык на экране входа до загрузки конфига)
-      const storedLocale = localStorage.getItem('uiLocale');
-      if (storedLocale) {
-        const next = normalizeUiLocale(storedLocale);
-        locale.value = next;
-        store.setLanguage(next);
-        if (storedLocale !== next) localStorage.setItem('uiLocale', next);
-      } else {
-        const next = normalizeUiLocale(store.language);
-        locale.value = next;
-        store.setLanguage(next);
-        localStorage.setItem('uiLocale', next);
-      }
+      // Синхронизируем UI-локаль: STT-язык из store.language маппим на UI-локаль
+      const sttLang = normalizeSttLanguage(store.language);
+      store.setLanguage(sttLang);
+      const uiLocale = sttLangToUiLocale(sttLang);
+      locale.value = uiLocale;
+      localStorage.setItem('uiLocale', uiLocale);
+      localStorage.setItem('sttLanguage', sttLang);
 
       // Загружаем App конфиг — из sync store если уже загружен, иначе invoke
       const appConfigStoreInstance = useAppConfigStore();
@@ -266,25 +263,29 @@ export function useSettings() {
   }
 
   /**
-   * Синхронизировать локаль UI с выбранным языком
-   * Вызывается вручную когда нужно применить изменения
+   * Синхронизировать локаль UI с выбранным STT-языком.
+   * STT-язык (store.language) отправляется в бэкенд как есть,
+   * а UI переключается на ближайшую поддерживаемую локаль (fallback).
+   * Например: ja → en, uk → uk, be → ru
    */
   function syncLocale(): void {
-    const next = normalizeUiLocale(store.language);
+    const uiLocale = sttLangToUiLocale(store.language);
     const prev = localStorage.getItem('uiLocale');
 
-    locale.value = next;
-    if (prev !== next) {
-      localStorage.setItem('uiLocale', next);
+    locale.value = uiLocale;
+    localStorage.setItem('sttLanguage', store.language);
+    if (prev !== uiLocale) {
+      localStorage.setItem('uiLocale', uiLocale);
     }
-    if (!isTauriAvailable() && prev !== next) bumpUiPrefsRevision();
+    if (!isTauriAvailable() && prev !== uiLocale) bumpUiPrefsRevision();
 
     // Синхронизация через state-sync: сохраняем в Rust и уведомляем другие окна
     if (isTauriAvailable()) {
       try {
         void invoke(CMD_UPDATE_UI_PREFERENCES, {
           theme: localStorage.getItem('uiTheme') || 'dark',
-          locale: next,
+          locale: uiLocale,
+          use_system_theme: readUiPreferencesFromStorage().useSystemTheme,
         });
       } catch {}
     }

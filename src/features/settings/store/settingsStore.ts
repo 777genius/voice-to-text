@@ -27,6 +27,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const theme = ref<AppTheme>(
     (localStorage.getItem('uiTheme') as AppTheme) ?? 'dark'
   );
+  const useSystemTheme = ref<boolean>(readUiPreferencesFromStorage().useSystemTheme);
   const recordingHotkey = ref('CmdOrCtrl+Shift+X');
   const microphoneSensitivity = ref(95);
   const selectedAudioDevice = ref('');
@@ -67,6 +68,7 @@ export const useSettingsStore = defineStore('settings', () => {
     assemblyaiApiKey: assemblyaiApiKey.value,
     whisperModel: whisperModel.value,
     theme: theme.value,
+    useSystemTheme: useSystemTheme.value,
     recordingHotkey: recordingHotkey.value,
     microphoneSensitivity: microphoneSensitivity.value,
     selectedAudioDevice: selectedAudioDevice.value,
@@ -122,6 +124,31 @@ export const useSettingsStore = defineStore('settings', () => {
         void invoke(CMD_UPDATE_UI_PREFERENCES, {
           theme: next,
           locale: normalizeUiLocale(localStorage.getItem('uiLocale')),
+          use_system_theme: readUiPreferencesFromStorage().useSystemTheme,
+        });
+      } catch {}
+    }
+  }
+
+  function setUseSystemTheme(value: boolean) {
+    const next = Boolean(value);
+    const changed = useSystemTheme.value !== next;
+    useSystemTheme.value = next;
+    if (changed) {
+      writeUiPreferencesCacheToStorage({
+        ...readUiPreferencesFromStorage(),
+        useSystemTheme: next,
+      });
+      if (!isTauriAvailable()) bumpUiPrefsRevision();
+    }
+
+    if (isTauriAvailable()) {
+      if (!changed) return;
+      try {
+        void invoke(CMD_UPDATE_UI_PREFERENCES, {
+          theme: normalizeUiTheme(localStorage.getItem('uiTheme')),
+          locale: normalizeUiLocale(localStorage.getItem('uiLocale')),
+          use_system_theme: next,
         });
       } catch {}
     }
@@ -187,6 +214,7 @@ export const useSettingsStore = defineStore('settings', () => {
       assemblyaiApiKey.value = state.assemblyaiApiKey;
     if (state.whisperModel !== undefined) whisperModel.value = state.whisperModel;
     if (state.theme !== undefined) setTheme(state.theme);
+    if (state.useSystemTheme !== undefined) setUseSystemTheme(state.useSystemTheme);
     if (state.recordingHotkey !== undefined)
       recordingHotkey.value = state.recordingHotkey;
     if (state.microphoneSensitivity !== undefined)
@@ -207,6 +235,7 @@ export const useSettingsStore = defineStore('settings', () => {
     assemblyaiApiKey,
     whisperModel,
     theme,
+    useSystemTheme,
     recordingHotkey,
     microphoneSensitivity,
     selectedAudioDevice,
@@ -231,6 +260,7 @@ export const useSettingsStore = defineStore('settings', () => {
     setAssemblyaiApiKey,
     setWhisperModel,
     setTheme,
+    setUseSystemTheme,
     setRecordingHotkey,
     setMicrophoneSensitivity,
     setSelectedAudioDevice,

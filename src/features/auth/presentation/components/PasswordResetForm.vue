@@ -27,6 +27,12 @@ const codeRules = computed(() => [
   (v: string) => /^\d{6}$/.test(v) || t('auth.rules.codeFormat'),
 ]);
 
+function onPasteCode(e: ClipboardEvent) {
+  e.preventDefault();
+  const raw = e.clipboardData?.getData('text') || '';
+  code.value = raw.replace(/\D/g, '').slice(0, 6);
+}
+
 const passwordRules = computed(() => [
   (v: string) => !!v || t('auth.rules.passwordRequired'),
   (v: string) => v.length >= 12 || t('auth.rules.passwordMinLength'),
@@ -123,6 +129,7 @@ onUnmounted(() => {
         autofocus
         class="mb-4"
         autocomplete="one-time-code"
+        @paste="onPasteCode"
       />
 
       <v-btn

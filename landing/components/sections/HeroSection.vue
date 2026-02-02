@@ -25,11 +25,6 @@ const waveformHeights = Array.from({ length: 32 }, (_, i) => {
       <v-row align="center" justify="space-between">
         <!-- Left: Text content -->
         <v-col cols="12" md="6" class="hero-section__content">
-          <span class="hero-section__badge">
-            <span class="hero-section__badge-dot" />
-            {{ t("hero.badge") }}
-          </span>
-
           <h1 class="hero-section__title">
             {{ content.hero.title }}
           </h1>

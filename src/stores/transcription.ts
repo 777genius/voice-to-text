@@ -162,12 +162,36 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     return errorType.value === 'connection' || errorType.value === 'timeout';
   });
 
+  const visibleAccumulatedText = computed(() => {
+    return animatedAccumulatedText.value || accumulatedText.value;
+  });
+
+  const visiblePartialText = computed(() => {
+    return animatedPartialText.value || partialText.value;
+  });
+
+  const hasVisibleTranscriptionText = computed(() => {
+    // В UI обычно показываем final + анимированный accumulated + анимированный partial.
+    // Но на некоторых переходах (или если анимация временно выключена/сброшена) реальные данные могут быть в raw полях.
+    // Поэтому считаем "есть текст" по обоим источникам — так UI-стили не зависят от анимационного слоя.
+    const visible = `${finalText.value} ${visibleAccumulatedText.value} ${visiblePartialText.value}`.trim();
+    return visible.length > 0;
+  });
+
+  const isListeningPlaceholder = computed(() => {
+    return status.value === RecordingStatus.Recording && !hasVisibleTranscriptionText.value;
+  });
+
+  const isConnectingPlaceholder = computed(() => {
+    return status.value === RecordingStatus.Starting && !hasVisibleTranscriptionText.value;
+  });
+
   const displayText = computed(() => {
     const t = i18n.global.t;
     // Показываем: финальный текст + анимированный накопленный + анимированный промежуточный
     const final = finalText.value;
-    const accumulated = animatedAccumulatedText.value;
-    const partial = animatedPartialText.value;
+    const accumulated = visibleAccumulatedText.value;
+    const partial = visiblePartialText.value;
 
     // Собираем все части которые есть
     const parts = [];
@@ -1308,6 +1332,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     isConnecting,
     connectAttempt,
     connectMaxAttempts,
+    hasVisibleTranscriptionText,
+    isListeningPlaceholder,
+    isConnectingPlaceholder,
     displayText,
 
     // Actions

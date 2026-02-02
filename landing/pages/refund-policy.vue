@@ -5,81 +5,108 @@ usePageSeo("meta.refundPolicyTitle", "meta.refundPolicyDescription");
 <template>
   <v-container class="section legal-page">
     <h1 class="text-h4 section-title">Refund Policy</h1>
-    <p class="text-body-2 legal-updated">Last updated: February 1, 2026</p>
+    <p class="text-body-2 legal-updated">Last updated: February 2, 2026</p>
 
     <div class="legal-content">
       <section class="legal-section">
         <h2 class="text-h6">1. Overview</h2>
         <p>
-          This Refund Policy explains how refunds work for paid subscriptions to VoicetextAI (the "Service").
-          If you have questions, contact us at
-          <a href="mailto:iliyazelenkog@gmail.com">iliyazelenkog@gmail.com</a>.
-        </p>
-        <p>
-          This policy does not limit any statutory rights you may have under applicable consumer protection laws.
+          This Refund Policy applies to paid subscriptions to VoicetextAI (the "Service").
+          All payments are processed by
+          <a href="https://www.paddle.com" target="_blank" rel="noopener">Paddle.com</a>,
+          which acts as the Merchant of Record for all transactions.
         </p>
       </section>
 
       <section class="legal-section">
-        <h2 class="text-h6">2. Who processes payments</h2>
+        <h2 class="text-h6">2. 14-Day Refund Period</h2>
         <p>
-          Payments for subscriptions may be processed by Paddle, our payment provider. In many cases Paddle acts as
-          the Merchant of Record, meaning charges and refunds are processed through Paddle and returned to the
-          original payment method when approved.
+          You may request a full refund within 14 days of your purchase or subscription renewal
+          date, for any reason. Refunds are processed by Paddle and returned to the original
+          payment method.
+        </p>
+        <p>
+          Your refund rights are governed by
+          <a href="https://www.paddle.com/legal/checkout-buyer-terms" target="_blank" rel="noopener">Paddle's Buyer Terms</a>.
+          This policy does not limit any statutory rights you may have under applicable consumer
+          protection laws.
         </p>
       </section>
 
       <section class="legal-section">
-        <h2 class="text-h6">3. Refund eligibility</h2>
+        <h2 class="text-h6">3. Subscriptions and Cancellations</h2>
         <p>
-          We handle refund requests on a case-by-case basis. In general, we will consider a refund if:
+          You can cancel your subscription at any time. Cancellation takes effect at the end of the
+          current billing period. If you wish to request a refund, please do so within the 14-day
+          refund period described above.
         </p>
+      </section>
+
+      <section class="legal-section">
+        <h2 class="text-h6">4. How to Request a Refund</h2>
+        <p>You can request a refund in two ways:</p>
         <ul>
-          <li>You request it within 14 days of the charge date</li>
-          <li>The request is reasonable and not abusive or fraudulent</li>
+          <li>
+            Through the refund link in your Paddle receipt or the
+            <a href="https://www.paddle.com" target="_blank" rel="noopener">Paddle customer portal</a>
+          </li>
+          <li>
+            By contacting us at
+            <a href="mailto:iliyazelenkog@gmail.com">iliyazelenkog@gmail.com</a>
+          </li>
         </ul>
         <p>
-          We may decline refunds in cases of abuse, repeated refund requests, or where usage indicates the Service was
-          consumed substantially.
+          Once approved, refunds are typically processed within several business days depending on
+          your bank or card provider.
         </p>
       </section>
 
       <section class="legal-section">
-        <h2 class="text-h6">4. Subscriptions and cancellations</h2>
+        <h2 class="text-h6">5. Changes to This Policy</h2>
         <p>
-          You can cancel your subscription at any time. Cancellation takes effect at the end of the current billing
-          period unless required otherwise by applicable law. Cancelling does not automatically trigger a refund for
-          the current billing period.
-        </p>
-      </section>
-
-      <section class="legal-section">
-        <h2 class="text-h6">5. How to request a refund</h2>
-        <p>
-          To request a refund, email
-          <a href="mailto:iliyazelenkog@gmail.com">iliyazelenkog@gmail.com</a>
-          and include:
-        </p>
-        <ul>
-          <li>The email address used for the purchase</li>
-          <li>The approximate charge date and amount</li>
-          <li>Any receipt/invoice ID (if you have it)</li>
-          <li>A short description of the issue</li>
-        </ul>
-        <p>
-          If a refund is approved, it will be issued to the original payment method. Processing times depend on your
-          bank/card provider and may take several business days.
-        </p>
-      </section>
-
-      <section class="legal-section">
-        <h2 class="text-h6">6. Changes to this policy</h2>
-        <p>
-          We may update this Refund Policy from time to time. We will indicate changes by updating the "Last updated"
-          date above.
+          We may update this Refund Policy from time to time. Changes will be indicated by updating
+          the "Last updated" date above.
         </p>
       </section>
     </div>
   </v-container>
 </template>
 
+<style scoped>
+.legal-page {
+  max-width: 800px;
+}
+
+.legal-updated {
+  color: rgba(var(--v-theme-on-background), 0.6);
+  margin-bottom: 32px;
+}
+
+.legal-content {
+  line-height: 1.7;
+}
+
+.legal-section {
+  margin-bottom: 32px;
+}
+
+.legal-section h2 {
+  margin-bottom: 12px;
+}
+
+.legal-section p {
+  margin-bottom: 12px;
+}
+
+.legal-section ul {
+  margin: 8px 0 16px 24px;
+}
+
+.legal-section li {
+  margin-bottom: 6px;
+}
+
+.legal-section a {
+  color: rgb(var(--v-theme-primary));
+}
+</style>

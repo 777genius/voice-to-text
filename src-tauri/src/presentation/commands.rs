@@ -812,12 +812,19 @@ pub async fn update_ui_preferences(
     window: Window,
     theme: String,
     locale: String,
+    use_system_theme: Option<bool>,
 ) -> Result<(), String> {
-    log::info!("Command: update_ui_preferences - theme: {}, locale: {}", theme, locale);
+    let use_system_theme = use_system_theme.unwrap_or(false);
+    log::info!(
+        "Command: update_ui_preferences - theme: {}, locale: {}, use_system_theme: {}",
+        theme,
+        locale,
+        use_system_theme
+    );
 
     {
         let current = state.ui_preferences.read().await;
-        if current.theme == theme && current.locale == locale {
+        if current.theme == theme && current.locale == locale && current.use_system_theme == use_system_theme {
             return Ok(());
         }
     }
@@ -825,6 +832,7 @@ pub async fn update_ui_preferences(
     let prefs = crate::domain::UiPreferences {
         theme: theme.clone(),
         locale: locale.clone(),
+        use_system_theme,
     };
 
     // Сохраняем в state

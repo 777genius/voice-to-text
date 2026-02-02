@@ -4,8 +4,7 @@ type Variant = { url: string | null; platformKey: string | null; version: string
 
 type DownloadsApiResponse = {
   ok: boolean;
-  source: "tauri-updater";
-  updaterUrl: string;
+  source: "github-releases";
   fetchedAt: string;
   version: string | null;
   notes: string | null;

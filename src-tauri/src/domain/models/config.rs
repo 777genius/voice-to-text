@@ -176,6 +176,8 @@ impl Default for AppConfig {
 pub struct UiPreferences {
     pub theme: String,
     pub locale: String,
+    #[serde(default)]
+    pub use_system_theme: bool,
 }
 
 impl Default for UiPreferences {
@@ -183,6 +185,7 @@ impl Default for UiPreferences {
         Self {
             theme: "dark".to_string(),
             locale: "ru".to_string(),
+            use_system_theme: false,
         }
     }
 }

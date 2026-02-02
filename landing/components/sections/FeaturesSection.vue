@@ -35,7 +35,7 @@ const items = computed(() =>
         </p>
       </div>
 
-      <v-row>
+      <v-row justify="center">
         <v-col
           v-for="(item, index) in items"
           :key="item.id"

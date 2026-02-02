@@ -1,20 +1,21 @@
 <script setup lang="ts">
 /**
- * Иконка флага страны по коду локали.
+ * Иконка флага страны по коду языка.
+ * Поддерживает как UI-локали, так и STT-языки.
  * Использует CDN flagcdn.com (SVG).
  */
 
 import { computed } from 'vue';
-import { getFlagUrl, type UiLocale } from '@/i18n.locales';
+import { getSttFlagUrl } from '@/i18n.locales';
 
 const props = withDefaults(defineProps<{
-  locale: UiLocale;
+  locale: string;
   size?: number;
 }>(), {
   size: 18,
 });
 
-const src = computed(() => getFlagUrl(props.locale));
+const src = computed(() => getSttFlagUrl(props.locale));
 const imgSize = computed(() => `${props.size}px`);
 </script>
 

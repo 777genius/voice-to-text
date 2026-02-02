@@ -9,13 +9,20 @@ import type { UiLocale, UiTheme } from '@/i18n.locales';
 export type UiPreferences = {
   theme: UiTheme;
   locale: UiLocale;
+  useSystemTheme: boolean;
 };
 
 export const UI_PREFS_THEME_KEY = 'uiTheme';
 export const UI_PREFS_LOCALE_KEY = 'uiLocale';
+export const UI_PREFS_USE_SYSTEM_THEME_KEY = 'uiUseSystemTheme';
 export const UI_PREFS_REVISION_KEY = 'uiPrefsRevision';
 // Флаг разовой миграции localStorage → Rust (в Tauri режиме).
 export const UI_PREFS_MIGRATED_TO_RUST_KEY = 'uiPrefs:migratedToRust';
+
+function normalizeUseSystemTheme(value: string | null | undefined): boolean {
+  const raw = (value ?? '').trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes';
+}
 
 function readRevisionRaw(): string {
   return localStorage.getItem(UI_PREFS_REVISION_KEY) ?? '0';
@@ -42,6 +49,7 @@ export function readUiPreferencesFromStorage(): UiPreferences {
   return {
     theme: normalizeUiTheme(localStorage.getItem(UI_PREFS_THEME_KEY)),
     locale: normalizeUiLocale(localStorage.getItem(UI_PREFS_LOCALE_KEY)),
+    useSystemTheme: normalizeUseSystemTheme(localStorage.getItem(UI_PREFS_USE_SYSTEM_THEME_KEY)),
   };
 }
 
@@ -53,10 +61,12 @@ export function writeUiPreferencesCacheToStorage(next: UiPreferences): UiPrefere
   const normalized: UiPreferences = {
     theme: normalizeUiTheme(next.theme),
     locale: normalizeUiLocale(next.locale),
+    useSystemTheme: Boolean(next.useSystemTheme),
   };
 
   localStorage.setItem(UI_PREFS_THEME_KEY, normalized.theme);
   localStorage.setItem(UI_PREFS_LOCALE_KEY, normalized.locale);
+  localStorage.setItem(UI_PREFS_USE_SYSTEM_THEME_KEY, normalized.useSystemTheme ? '1' : '0');
   return normalized;
 }
 
@@ -64,16 +74,22 @@ export function writeUiPreferencesToStorage(next: UiPreferences): { revision: st
   const normalized: UiPreferences = {
     theme: normalizeUiTheme(next.theme),
     locale: normalizeUiLocale(next.locale),
+    useSystemTheme: Boolean(next.useSystemTheme),
   };
 
   const prevTheme = normalizeUiTheme(localStorage.getItem(UI_PREFS_THEME_KEY));
   const prevLocale = normalizeUiLocale(localStorage.getItem(UI_PREFS_LOCALE_KEY));
-  const changed = prevTheme !== normalized.theme || prevLocale !== normalized.locale;
+  const prevUseSystemTheme = normalizeUseSystemTheme(localStorage.getItem(UI_PREFS_USE_SYSTEM_THEME_KEY));
+  const changed =
+    prevTheme !== normalized.theme ||
+    prevLocale !== normalized.locale ||
+    prevUseSystemTheme !== normalized.useSystemTheme;
 
   // Всегда пишем значения (чтобы не держать "дырки" при отсутствии ключей),
   // но ревизию увеличиваем только если реально что-то поменялось.
   localStorage.setItem(UI_PREFS_THEME_KEY, normalized.theme);
   localStorage.setItem(UI_PREFS_LOCALE_KEY, normalized.locale);
+  localStorage.setItem(UI_PREFS_USE_SYSTEM_THEME_KEY, normalized.useSystemTheme ? '1' : '0');
 
   const revision = changed ? bumpUiPrefsRevision() : getUiPrefsRevision();
   return { revision, data: normalized };

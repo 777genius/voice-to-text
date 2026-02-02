@@ -1,15 +1,10 @@
 <script setup lang="ts">
 const { languages, loading } = useSupportedLanguages();
-
-const { t } = useI18n();
 </script>
 
 <template>
   <div v-if="!loading && languages.length > 0" class="supported-languages">
     <v-container class="supported-languages__container">
-      <span class="supported-languages__label text-medium-emphasis">
-        {{ t("languages.supported") }}
-      </span>
       <div class="supported-languages__flags">
         <img
           v-for="lang in languages"
@@ -29,8 +24,6 @@ const { t } = useI18n();
 
 <style scoped>
 .supported-languages {
-  background: rgba(var(--v-theme-surface-variant), 0.08);
-  border-bottom: 1px solid rgba(var(--v-border-color), 0.08);
   padding: 8px 0;
 }
 
@@ -38,14 +31,6 @@ const { t } = useI18n();
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.supported-languages__label {
-  font-size: 0.8rem;
-  font-weight: 500;
-  white-space: nowrap;
 }
 
 .supported-languages__flags {
@@ -62,19 +47,9 @@ const { t } = useI18n();
   border-radius: 3px;
   object-fit: cover;
   flex-shrink: 0;
-  transition: transform 0.15s ease;
-}
-
-.supported-languages__flag:hover {
-  transform: scale(1.3);
 }
 
 @media (max-width: 600px) {
-  .supported-languages__container {
-    flex-direction: column;
-    gap: 6px;
-  }
-
   .supported-languages__flags {
     gap: 4px;
   }

@@ -21,6 +21,13 @@ const codeRules = computed(() => [
   (v: string) => /^\d{6}$/.test(v) || t('auth.rules.codeFormat'),
 ]);
 
+function onPaste(e: ClipboardEvent) {
+  e.preventDefault();
+  const raw = e.clipboardData?.getData('text') || '';
+  const digits = raw.replace(/\D/g, '').slice(0, 6);
+  code.value = digits;
+}
+
 async function submit() {
   if (!formValid.value) return;
   await verification.verify(code.value);
@@ -101,6 +108,7 @@ onUnmounted(() => {
       autofocus
       class="mb-4"
       autocomplete="one-time-code"
+      @paste="onPaste"
     />
 
     <v-btn

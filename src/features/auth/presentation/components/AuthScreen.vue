@@ -182,26 +182,31 @@ function switchToReset() {
 
 .auth-card {
   width: 100%;
-  height: 100%;
+  max-height: 100%;
   background: #1e1e1e;
   border-radius: 20px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   padding: 32px 24px;
   overflow-y: auto;
+  scrollbar-width: none;
   display: flex;
   flex-direction: column;
-  justify-content: center;
+}
+
+.auth-card::-webkit-scrollbar {
+  display: none;
 }
 
 .auth-header {
   text-align: center;
+  margin-top: auto;
   margin-bottom: 24px;
 }
 
 .auth-content {
   width: 100%;
   max-width: 380px;
-  margin: 0 auto;
+  margin: 0 auto auto;
 }
 
 /* Светлая тема */

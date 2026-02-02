@@ -378,7 +378,18 @@ const minimizeWindow = async () => {
 
       <!-- Transcription Display -->
       <div class="transcription-area">
-        <p ref="transcriptionTextRef" class="transcription-text" :class="{ recording: store.isRecording, starting: store.isStarting }">
+        <!-- UX: синий — только для распознанного текста. "Говорите..." белым (базовый цвет). Пульсация — только для "Подключение..." -->
+        <p
+          ref="transcriptionTextRef"
+          class="transcription-text"
+          :class="{
+            recording: store.hasVisibleTranscriptionText,
+            starting: store.isConnectingPlaceholder,
+          }"
+          :style="{
+            color: store.hasVisibleTranscriptionText ? 'var(--color-accent)' : 'var(--color-text)',
+          }"
+        >
           {{ store.displayText }}
         </p>
 
@@ -644,7 +655,7 @@ const minimizeWindow = async () => {
 }
 
 .transcription-text {
-  font-size: 17px;
+  font-size: 18.5px;
   color: var(--color-text);
   text-align: left;
   line-height: 1.5;
@@ -659,11 +670,11 @@ const minimizeWindow = async () => {
 }
 
 .transcription-text.recording {
-  color: var(--color-accent);
+  color: var(--color-accent) !important;
 }
 
 .transcription-text.starting {
-  color: var(--color-accent);
+  color: var(--color-text);
   font-style: italic;
   opacity: 0.8;
   animation: fade-pulse 1.5s ease-in-out infinite;
@@ -833,7 +844,6 @@ const minimizeWindow = async () => {
   display: flex;
   justify-content: center;
   padding-top: var(--spacing-xs);
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
   width: 100%;
   box-sizing: border-box;
   margin-top: var(--spacing-xs);

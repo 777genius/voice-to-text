@@ -25,6 +25,7 @@ describe('settingsStore cross-window UI sync', () => {
     expect(invokeMock).toHaveBeenCalledWith(CMD_UPDATE_UI_PREFERENCES, {
       theme: 'light',
       locale: 'ru',
+      use_system_theme: false,
     });
   });
 });
