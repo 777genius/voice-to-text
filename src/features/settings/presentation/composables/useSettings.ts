@@ -99,13 +99,13 @@ export function useSettings() {
         store.setLanguage(storedSttLang);
 
         if (appConfigStoreInstance.isLoaded) {
-          store.setMicrophoneSensitivity(appConfigStoreInstance.microphoneSensitivity);
+          store.setMicrophoneSensitivity(appConfigStoreInstance.microphoneSensitivity, { persist: false });
           store.setRecordingHotkey(appConfigStoreInstance.recordingHotkey);
           store.setAutoCopyToClipboard(appConfigStoreInstance.autoCopyToClipboard);
           store.setAutoPasteText(appConfigStoreInstance.autoPasteText);
           store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
         } else {
-          store.setMicrophoneSensitivity(95);
+          store.setMicrophoneSensitivity(95, { persist: false });
           store.setRecordingHotkey('CmdOrCtrl+Shift+X');
           store.setAutoCopyToClipboard(true);
           store.setAutoPasteText(false);
@@ -158,7 +158,7 @@ export function useSettings() {
       // Загружаем App конфиг — из sync store если уже загружен, иначе invoke
       const appConfigStoreInstance = useAppConfigStore();
       if (appConfigStoreInstance.isLoaded) {
-        store.setMicrophoneSensitivity(appConfigStoreInstance.microphoneSensitivity);
+        store.setMicrophoneSensitivity(appConfigStoreInstance.microphoneSensitivity, { persist: false });
         store.setRecordingHotkey(appConfigStoreInstance.recordingHotkey);
         store.setAutoCopyToClipboard(appConfigStoreInstance.autoCopyToClipboard);
         store.setAutoPasteText(appConfigStoreInstance.autoPasteText);
@@ -166,7 +166,7 @@ export function useSettings() {
       } else {
         try {
           const appConfig = await tauriSettingsService.getAppConfig();
-          store.setMicrophoneSensitivity(appConfig.microphone_sensitivity ?? 95);
+          store.setMicrophoneSensitivity(appConfig.microphone_sensitivity ?? 95, { persist: false });
           store.setRecordingHotkey(appConfig.recording_hotkey ?? 'CmdOrCtrl+Shift+X');
           store.setAutoCopyToClipboard(appConfig.auto_copy_to_clipboard ?? true);
           store.setAutoPasteText(appConfig.auto_paste_text ?? false);

@@ -10,6 +10,7 @@ import { isTauriAvailable } from '@/utils/tauri';
 import {
   bumpUiPrefsRevision,
   CMD_UPDATE_UI_PREFERENCES,
+  CMD_UPDATE_APP_CONFIG,
   readUiPreferencesFromStorage,
   writeUiPreferencesCacheToStorage,
 } from '@/windowing/stateSync';
@@ -33,6 +34,10 @@ export const useSettingsStore = defineStore('settings', () => {
   const selectedAudioDevice = ref('');
   const autoCopyToClipboard = ref(true);
   const autoPasteText = ref(false);
+
+  // Debounce для автосохранения чувствительности (иначе будем спамить invoke при перетаскивании слайдера)
+  let micSensitivityPersistTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastPersistedMicSensitivity: number | null = null;
 
   // Список доступных устройств
   const availableAudioDevices = ref<string[]>([]);
@@ -158,8 +163,30 @@ export const useSettingsStore = defineStore('settings', () => {
     recordingHotkey.value = value;
   }
 
-  function setMicrophoneSensitivity(value: number) {
-    microphoneSensitivity.value = value;
+  function setMicrophoneSensitivity(value: number, opts?: { persist?: boolean }) {
+    const next = Math.max(0, Math.min(200, Math.round(value)));
+    microphoneSensitivity.value = next;
+
+    const shouldPersist = opts?.persist ?? true;
+    if (!shouldPersist) return;
+    if (!isTauriAvailable()) return;
+
+    if (micSensitivityPersistTimer) {
+      clearTimeout(micSensitivityPersistTimer);
+      micSensitivityPersistTimer = null;
+    }
+
+    micSensitivityPersistTimer = setTimeout(() => {
+      // Защита от лишних вызовов: если уже отправляли это значение — не дёргаем бэкенд.
+      if (lastPersistedMicSensitivity === microphoneSensitivity.value) return;
+
+      try {
+        void invoke(CMD_UPDATE_APP_CONFIG, {
+          microphone_sensitivity: microphoneSensitivity.value,
+        });
+        lastPersistedMicSensitivity = microphoneSensitivity.value;
+      } catch {}
+    }, 250);
   }
 
   function setSelectedAudioDevice(value: string) {
