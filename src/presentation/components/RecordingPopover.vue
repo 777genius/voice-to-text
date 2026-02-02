@@ -19,6 +19,7 @@ import AudioVisualizer from './AudioVisualizer.vue';
 import { playShowSound, playDoneSound } from '../../utils/sound';
 import { isTauriAvailable } from '../../utils/tauri';
 import { EVENT_SETTINGS_FOCUS_UPDATES } from '@/types';
+import { EVENT_RECORDING_WINDOW_SHOWN } from '@/types';
 
 // Простая поддержка перетаскивания мышью по шапке
 async function onDragMouseDown(e: MouseEvent) {
@@ -63,8 +64,8 @@ let isHotkeyProcessing = false;
 
 let unlistenHotkey: UnlistenFn | null = null;
 let unlistenAutoHide: UnlistenFn | null = null;
-let unlistenWindowFocus: UnlistenFn | null = null;
 let unlistenStartRequested: UnlistenFn | null = null;
+let unlistenWindowShown: UnlistenFn | null = null;
 
 // Ref для элемента транскрипции (для автоскролла)
 const transcriptionTextRef = ref<HTMLElement | null>(null);
@@ -133,13 +134,19 @@ onMounted(async () => {
   await appConfigStore.startSync();
   await sttConfigStore.startSync();
 
-  // Очищаем текст при показе окна (когда получает фокус)
-  const window = getCurrentWebviewWindow();
-  unlistenWindowFocus = await window.onFocusChanged(({ payload: focused }) => {
-    if (focused) {
-      store.clearText();
-      // Сбрасываем высоту окна к базовой при очистке текста
-      setWindowHeight(BASE_WINDOW_HEIGHT);
+  // Очищаем UI при фактическом показе окна (НЕ через focus: main может быть nonactivating NSPanel).
+  // Важно: не очищаем посреди активной записи — иначе можно потерять текст если пользователь скрыл и снова показал окно.
+  unlistenWindowShown = await listen(EVENT_RECORDING_WINDOW_SHOWN, async () => {
+    // Если UI рассинхронизировался (например окно было скрыто и JS "заморозили"),
+    // сначала сверяемся с backend: он источник правды по статусу записи.
+    const backendStatus = await store.reconcileBackendStatus('window_shown');
+    if (backendStatus === 'Idle' || backendStatus === null) {
+      // После reconcile UI должен быть не в Recording — тогда смело чистим.
+      if (!store.isRecording && !store.isStarting && !store.isProcessing) {
+        store.clearText();
+        setWindowHeight(BASE_WINDOW_HEIGHT);
+      }
+      return;
     }
   });
 
@@ -153,21 +160,21 @@ onMounted(async () => {
     console.log('[Hotkey] Received recording:start-requested');
     console.log('[Hotkey] store.status =', store.status);
     console.log('[Hotkey] store.isIdle =', store.isIdle);
-    // Важно: доверяем Rust-стороне (она эмитит это событие только когда считает что запись можно стартовать).
-    // В dev/HMR бывает рассинхрон: Rust уже вернулся в Idle, а frontend остался в Error → раньше hotkey "залипал".
-    // Разрешаем старт и из Error, но не вмешиваемся если уже идёт старт/запись/обработка.
-    if (store.isStarting || store.isProcessing || store.isRecording) {
-      console.log('[Hotkey] Skipped - already busy');
+    // Важно: доверяем Rust-стороне, но UI может рассинхронизироваться (особенно когда окно скрыто).
+    // Поэтому сначала сверяемся с backend, а потом решаем можно ли стартовать.
+    const backendStatus = await store.reconcileBackendStatus('start_requested');
+    if (backendStatus && backendStatus !== 'Idle') {
+      console.log('[Hotkey] Skipped - backend not idle:', backendStatus);
       return;
     }
 
-    if (store.isIdle || store.hasError) {
-      console.log('[Hotkey] Starting recording...');
-      await store.startRecording();
-      console.log('[Hotkey] startRecording completed');
-    } else {
-      console.log('[Hotkey] Skipped - not idle');
-    }
+    // Гарантируем "чистый лист" перед новым стартом.
+    store.clearText();
+    setWindowHeight(BASE_WINDOW_HEIGHT);
+
+    console.log('[Hotkey] Starting recording...');
+    await store.startRecording();
+    console.log('[Hotkey] startRecording completed');
   });
 
   // Слушаем статус для звука и автоскрытия окна при остановке
@@ -205,11 +212,11 @@ onUnmounted(() => {
   if (unlistenAutoHide) {
     unlistenAutoHide();
   }
-  if (unlistenWindowFocus) {
-    unlistenWindowFocus();
-  }
   if (unlistenStartRequested) {
     unlistenStartRequested();
+  }
+  if (unlistenWindowShown) {
+    unlistenWindowShown();
   }
 });
 

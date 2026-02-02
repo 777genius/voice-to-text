@@ -17,6 +17,7 @@ export interface Transcription {
 }
 
 export interface PartialTranscriptionPayload {
+  session_id: number;
   text: string;
   timestamp: number;
   is_segment_final: boolean; // true когда сегмент финализирован (но речь продолжается)
@@ -25,6 +26,7 @@ export interface PartialTranscriptionPayload {
 }
 
 export interface FinalTranscriptionPayload {
+  session_id: number;
   text: string;
   confidence?: number;
   language?: string;
@@ -32,6 +34,7 @@ export interface FinalTranscriptionPayload {
 }
 
 export interface RecordingStatusPayload {
+  session_id: number;
   status: RecordingStatus;
   stopped_via_hotkey?: boolean;
 }
@@ -42,6 +45,7 @@ export interface ErrorPayload {
 }
 
 export interface TranscriptionErrorPayload {
+  session_id: number;
   error: string;
   error_type: 'connection' | 'configuration' | 'processing' | 'timeout' | 'authentication';
 }
@@ -53,6 +57,7 @@ export enum ConnectionQuality {
 }
 
 export interface ConnectionQualityPayload {
+  session_id: number;
   quality: ConnectionQuality;
   reason?: string;
 }
@@ -64,6 +69,7 @@ export const EVENT_RECORDING_STATUS = 'recording:status';
 export const EVENT_TRANSCRIPTION_ERROR = 'transcription:error';
 export const EVENT_CONNECTION_QUALITY = 'connection:quality';
 export const EVENT_ERROR = 'app:error';
+export const EVENT_RECORDING_WINDOW_SHOWN = 'recording:window-shown';
 
 // STT Configuration types
 export enum SttProviderType {

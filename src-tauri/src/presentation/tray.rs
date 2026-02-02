@@ -5,6 +5,7 @@ use tauri::{
 };
 
 use crate::presentation::commands::show_webview_window_on_active_monitor;
+use crate::presentation::events::EVENT_RECORDING_WINDOW_SHOWN;
 
 /// Создает и настраивает system tray иконку с меню
 pub fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
@@ -41,6 +42,7 @@ pub fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                         if let Err(e) = show_webview_window_on_active_monitor(&window) {
                             log::error!("Failed to show window: {}", e);
                         }
+                        let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
                         if let Err(e) = window.set_focus() {
                             log::error!("Failed to focus window: {}", e);
                         }
@@ -52,6 +54,7 @@ pub fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                         if let Err(e) = show_webview_window_on_active_monitor(&window) {
                             log::error!("Failed to show window: {}", e);
                         }
+                        let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
                         // Эмитируем событие для переключения на настройки
                         if let Err(e) = app.emit("tray:open-settings", ()) {
                             log::error!("Failed to emit settings event: {}", e);
@@ -89,6 +92,7 @@ pub fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                         }
                         Ok(false) => {
                             let _ = show_webview_window_on_active_monitor(&window);
+                            let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
                             let _ = window.set_focus();
                         }
                         Err(e) => {

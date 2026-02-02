@@ -85,11 +85,12 @@ pub struct BackendProvider {
     /// Используется для предотвращения race condition при закрытии WebSocket
     is_closed: Arc<AtomicBool>,
 
-    // Callbacks
-    on_partial_callback: Option<TranscriptionCallback>,
-    on_final_callback: Option<TranscriptionCallback>,
-    on_error_callback: Option<ErrorCallback>,
-    on_connection_quality_callback: Option<ConnectionQualityCallback>,
+    // Callbacks: active/pending (для keep-alive режима).
+    //
+    // Важно: receiver task живёт дольше одной "записи" (мы держим WS живым между старт/стопами).
+    // Поэтому нельзя захватывать callbacks в spawn при start_stream — иначе при resume_stream
+    // они не обновятся и события будут уходить в старую "сессию" UI.
+    callbacks: Arc<Mutex<CallbackState>>,
     on_usage_update_callback: Option<UsageUpdateCallback>,
 
     // Статистика
@@ -101,6 +102,26 @@ pub struct BackendProvider {
 
     next_send_at: Option<std::time::Instant>,
     batch_started_at: Option<std::time::Instant>,
+}
+
+#[derive(Clone)]
+struct CallbackSet {
+    on_partial: TranscriptionCallback,
+    on_final: TranscriptionCallback,
+    on_error: ErrorCallback,
+    on_connection_quality: ConnectionQualityCallback,
+}
+
+#[derive(Default)]
+struct CallbackState {
+    active: Option<CallbackSet>,
+    pending: Option<CallbackSet>,
+    // При keep-alive: новые callbacks активируем только после первого ACK,
+    // чтобы "поздние" сообщения от предыдущей записи не попадали в новую UI-сессию.
+    swap_on_next_ack: bool,
+    // Защита от "поздних" ACK старой записи:
+    // активируем pending только когда получили ACK с seq БОЛЬШЕ последнего отправленного seq на момент resume_stream.
+    swap_after_seq: u64,
 }
 
 impl BackendProvider {
@@ -116,10 +137,7 @@ impl BackendProvider {
             receiver_task: None,
             keepalive_task: None,
             is_closed: Arc::new(AtomicBool::new(true)), // Изначально закрыто
-            on_partial_callback: None,
-            on_final_callback: None,
-            on_error_callback: None,
-            on_connection_quality_callback: None,
+            callbacks: Arc::new(Mutex::new(CallbackState::default())),
             on_usage_update_callback: None,
             sent_chunks_count: 0,
             sent_bytes_total: 0,
@@ -306,11 +324,19 @@ impl SttProvider for BackendProvider {
         let ws_write = Arc::new(Mutex::new(write));
         self.ws_write = Some(ws_write.clone());
 
-        // Сохраняем callbacks
-        self.on_partial_callback = Some(on_partial.clone());
-        self.on_final_callback = Some(on_final.clone());
-        self.on_error_callback = Some(on_error.clone());
-        self.on_connection_quality_callback = Some(on_connection_quality.clone());
+        // Сохраняем callbacks как "active" (для receiver task).
+        {
+            let mut state = self.callbacks.lock().await;
+            state.active = Some(CallbackSet {
+                on_partial: on_partial.clone(),
+                on_final: on_final.clone(),
+                on_error: on_error.clone(),
+                on_connection_quality: on_connection_quality.clone(),
+            });
+            state.pending = None;
+            state.swap_on_next_ack = false;
+            state.swap_after_seq = 0;
+        }
 
         // Отправляем Config message
         let provider_name = match config.provider {
@@ -331,11 +357,9 @@ impl SttProvider for BackendProvider {
         self.send_json(&config_msg).await?;
         log::debug!("Config message sent");
 
-        // Запускаем receiver task для обработки сообщений от сервера
-        let on_partial_cb = on_partial;
-        let on_final_cb = on_final;
-        let on_error_cb = on_error.clone();
-        let on_quality_cb = on_connection_quality;
+        // Запускаем receiver task для обработки сообщений от сервера.
+        // Берём callbacks из self.callbacks, чтобы они могли обновляться при resume_stream.
+        let callbacks_state = self.callbacks.clone();
         let on_usage_cb = self.on_usage_update_callback.clone();
         let is_closed_flag = self.is_closed.clone();
 
@@ -351,11 +375,38 @@ impl SttProvider for BackendProvider {
                                     ServerMessage::Ready { session_id } => {
                                         log::info!("Session ready: {}", session_id);
                                         // Уведомляем о хорошем качестве связи
-                                        on_quality_cb("Good".to_string(), None);
+                                        let cb = {
+                                            let state = callbacks_state.lock().await;
+                                            state
+                                                .active
+                                                .as_ref()
+                                                .map(|c| c.on_connection_quality.clone())
+                                        };
+                                        if let Some(cb) = cb {
+                                            cb("Good".to_string(), None);
+                                        }
                                     }
 
                                     ServerMessage::Ack { seq } => {
                                         log::trace!("Ack received: seq={}", seq);
+                                        // Если есть pending callbacks (новая UI-сессия) — активируем их на первом ACK.
+                                        // Это даёт чёткую границу между "старыми" и "новыми" результатами.
+                                        let swapped = {
+                                            let mut state = callbacks_state.lock().await;
+                                            if state.swap_on_next_ack && seq > state.swap_after_seq {
+                                                state.swap_on_next_ack = false;
+                                                state.swap_after_seq = 0;
+                                                if state.pending.is_some() {
+                                                    state.active = state.pending.take();
+                                                }
+                                                true
+                                            } else {
+                                                false
+                                            }
+                                        };
+                                        if swapped {
+                                            log::debug!("Callbacks switched after first ACK (new recording session)");
+                                        }
                                     }
 
                                     ServerMessage::Partial { text, confidence } => {
@@ -364,7 +415,13 @@ impl SttProvider for BackendProvider {
                                         if let Some(conf) = confidence {
                                             transcription = transcription.with_confidence(conf);
                                         }
-                                        on_partial_cb(transcription);
+                                        let cb = {
+                                            let state = callbacks_state.lock().await;
+                                            state.active.as_ref().map(|c| c.on_partial.clone())
+                                        };
+                                        if let Some(cb) = cb {
+                                            cb(transcription);
+                                        }
                                     }
 
                                     ServerMessage::Final {
@@ -383,7 +440,13 @@ impl SttProvider for BackendProvider {
                                         if let Some(conf) = confidence {
                                             transcription = transcription.with_confidence(conf);
                                         }
-                                        on_final_cb(transcription);
+                                        let cb = {
+                                            let state = callbacks_state.lock().await;
+                                            state.active.as_ref().map(|c| c.on_final.clone())
+                                        };
+                                        if let Some(cb) = cb {
+                                            cb(transcription);
+                                        }
                                     }
 
                                     ServerMessage::UsageUpdate {
@@ -413,12 +476,27 @@ impl SttProvider for BackendProvider {
                                             session_id,
                                             last_seq_acked
                                         );
-                                        on_quality_cb("Good".to_string(), None);
+                                        let cb = {
+                                            let state = callbacks_state.lock().await;
+                                            state
+                                                .active
+                                                .as_ref()
+                                                .map(|c| c.on_connection_quality.clone())
+                                        };
+                                        if let Some(cb) = cb {
+                                            cb("Good".to_string(), None);
+                                        }
                                     }
 
                                     ServerMessage::Error { code, message } => {
                                         log::error!("Server error: {} - {}", code, message);
-                                        on_error_cb(message, code);
+                                        let cb = {
+                                            let state = callbacks_state.lock().await;
+                                            state.active.as_ref().map(|c| c.on_error.clone())
+                                        };
+                                        if let Some(cb) = cb {
+                                            cb(message, code);
+                                        }
                                     }
                                 }
                             }
@@ -447,7 +525,13 @@ impl SttProvider for BackendProvider {
                     Err(e) => {
                         log::error!("WebSocket error: {}", e);
                         is_closed_flag.store(true, Ordering::SeqCst);
-                        on_error_cb(e.to_string(), "connection".to_string());
+                        let cb = {
+                            let state = callbacks_state.lock().await;
+                            state.active.as_ref().map(|c| c.on_error.clone())
+                        };
+                        if let Some(cb) = cb {
+                            cb(e.to_string(), "connection".to_string());
+                        }
                         break;
                     }
                 }
@@ -629,6 +713,13 @@ impl SttProvider for BackendProvider {
         self.session_id = None;
         self.next_send_at = None;
         self.batch_started_at = None;
+        {
+            let mut state = self.callbacks.lock().await;
+            state.active = None;
+            state.pending = None;
+            state.swap_on_next_ack = false;
+            state.swap_after_seq = 0;
+        }
 
         log::info!(
             "BackendProvider: Stream stopped (sent {} chunks, {} bytes)",
@@ -662,6 +753,13 @@ impl SttProvider for BackendProvider {
         self.is_streaming = false;
         self.is_paused = false;
         self.session_id = None;
+        {
+            let mut state = self.callbacks.lock().await;
+            state.active = None;
+            state.pending = None;
+            state.swap_on_next_ack = false;
+            state.swap_after_seq = 0;
+        }
 
         Ok(())
     }
@@ -681,6 +779,8 @@ impl SttProvider for BackendProvider {
                 self.audio_batch_frames = 0;
                 self.next_send_at = None;
                 self.batch_started_at = None;
+                self.sent_chunks_count += 1;
+                self.sent_bytes_total += bytes.len();
                 let _ = ws_write.lock().await.send(Message::Binary(bytes)).await;
             }
         }
@@ -703,11 +803,19 @@ impl SttProvider for BackendProvider {
             return Err(SttError::Connection("Connection closed".to_string()));
         }
 
-        // На практике callbacks не обязаны меняться, но обновим их на всякий случай.
-        self.on_partial_callback = Some(on_partial);
-        self.on_final_callback = Some(on_final);
-        self.on_error_callback = Some(on_error);
-        self.on_connection_quality_callback = Some(on_connection_quality);
+        // Готовим pending callbacks. Активируем их только после первого ACK на новое аудио,
+        // чтобы не словить "поздние" результаты от предыдущей записи в новую UI-сессию.
+        {
+            let mut state = self.callbacks.lock().await;
+            state.pending = Some(CallbackSet {
+                on_partial,
+                on_final,
+                on_error,
+                on_connection_quality,
+            });
+            state.swap_on_next_ack = true;
+            state.swap_after_seq = self.sent_chunks_count as u64;
+        }
 
         self.is_paused = false;
         Ok(())

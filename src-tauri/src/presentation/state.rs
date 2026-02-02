@@ -1,6 +1,7 @@
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
+use tauri::Manager;
 
 use crate::application::TranscriptionService;
 use crate::domain::{AppConfig, Transcription, AudioCapture, UiPreferences};
@@ -79,6 +80,13 @@ pub struct AppState {
     /// Дебаунс для глобального hotkey записи.
     /// Нужен из‑за key repeat / случайных двойных срабатываний, которые выглядят как "мигание" окна.
     pub last_recording_hotkey_ms: AtomicU64,
+
+    /// Счётчик сессий записи. Нужен, чтобы маркировать события transcription:* и не смешивать сессии.
+    pub transcription_session_seq: AtomicU64,
+
+    /// Активная (последняя запущенная) сессия записи.
+    /// Используется для маркировки статусов Idle/Error, которые эмитятся "в обход" start_recording callbacks.
+    pub active_transcription_session_id: AtomicU64,
 }
 
 impl AppState {
@@ -113,6 +121,8 @@ impl AppState {
                     last_focused_app_bundle_id: Arc::new(RwLock::new(None)),
                     is_authenticated: Arc::new(RwLock::new(false)),
                     last_recording_hotkey_ms: AtomicU64::new(0),
+                    transcription_session_seq: AtomicU64::new(0),
+                    active_transcription_session_id: AtomicU64::new(0),
                 };
             }
         };
@@ -147,6 +157,8 @@ impl AppState {
                     last_focused_app_bundle_id: Arc::new(RwLock::new(None)),
                     is_authenticated: Arc::new(RwLock::new(false)),
                     last_recording_hotkey_ms: AtomicU64::new(0),
+                    transcription_session_seq: AtomicU64::new(0),
+                    active_transcription_session_id: AtomicU64::new(0),
                 };
             }
         };
@@ -188,6 +200,8 @@ impl AppState {
             last_focused_app_bundle_id: Arc::new(RwLock::new(None)),
             is_authenticated: Arc::new(RwLock::new(false)),
             last_recording_hotkey_ms: AtomicU64::new(0),
+            transcription_session_seq: AtomicU64::new(0),
+            active_transcription_session_id: AtomicU64::new(0),
         }
     }
 
@@ -224,9 +238,14 @@ impl AppState {
 
                         // Эмитим событие в UI
                         use tauri::Emitter;
+                        let session_id = app_handle
+                            .try_state::<AppState>()
+                            .map(|s| s.active_transcription_session_id.load(Ordering::Relaxed))
+                            .unwrap_or(0);
                         let _ = app_handle.emit(
                             crate::presentation::events::EVENT_RECORDING_STATUS,
                             crate::presentation::RecordingStatusPayload {
+                                session_id,
                                 status: crate::domain::RecordingStatus::Idle,
                                 stopped_via_hotkey: false,
                             },

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
 
 use crate::domain::{RecordingStatus, AudioCapture};
@@ -16,6 +17,14 @@ pub async fn start_recording(
 ) -> Result<String, String> {
     log::info!("Command: start_recording");
 
+    // Новый идентификатор сессии записи. Маркируем им все события transcription:* и recording:status,
+    // чтобы frontend мог игнорировать "поздние" сообщения от предыдущей сессии.
+    let session_id = state.transcription_session_seq.fetch_add(1, Ordering::Relaxed) + 1;
+    state
+        .active_transcription_session_id
+        .store(session_id, Ordering::Relaxed);
+    log::info!("Recording session started: session_id={}", session_id);
+
     let app_handle_clone = app_handle.clone();
     let state_partial = state.partial_transcription.clone();
 
@@ -30,7 +39,7 @@ pub async fn start_recording(
             *state_partial.write().await = Some(text.clone());
 
             // Emit event to frontend
-            let payload = PartialTranscriptionPayload::from(transcription);
+            let payload = PartialTranscriptionPayload::from_transcription(transcription, session_id);
             if let Err(e) = app_handle.emit(EVENT_TRANSCRIPTION_PARTIAL, payload) {
                 log::error!("Failed to emit partial transcription event: {}", e);
             }
@@ -67,7 +76,7 @@ pub async fn start_recording(
             drop(history);
 
             // Emit event to frontend
-            let payload = FinalTranscriptionPayload::from(transcription.clone());
+            let payload = FinalTranscriptionPayload::from_transcription(transcription.clone(), session_id);
             if let Err(e) = app_handle.emit(EVENT_TRANSCRIPTION_FINAL, payload) {
                 log::error!("Failed to emit final transcription event: {}", e);
             }
@@ -106,7 +115,7 @@ pub async fn start_recording(
             log::error!("STT error occurred: {} (type: {})", error, error_type);
 
             // Emit error event to frontend
-            let payload = TranscriptionErrorPayload { error, error_type };
+            let payload = TranscriptionErrorPayload { session_id, error, error_type };
             if let Err(e) = app_handle.emit(EVENT_TRANSCRIPTION_ERROR, payload) {
                 log::error!("Failed to emit transcription error event: {}", e);
             }
@@ -115,6 +124,7 @@ pub async fn start_recording(
             let _ = app_handle.emit(
                 EVENT_RECORDING_STATUS,
                 RecordingStatusPayload {
+                    session_id,
                     status: RecordingStatus::Error,
                     stopped_via_hotkey: false,
                 },
@@ -133,6 +143,7 @@ pub async fn start_recording(
 
             // Emit connection quality event to frontend
             let payload = ConnectionQualityPayload {
+                session_id,
                 quality: match quality.as_str() {
                     "Good" => crate::presentation::events::ConnectionQuality::Good,
                     "Poor" => crate::presentation::events::ConnectionQuality::Poor,
@@ -153,6 +164,7 @@ pub async fn start_recording(
     let _ = app_handle.emit(
         EVENT_RECORDING_STATUS,
         RecordingStatusPayload {
+            session_id,
             status: RecordingStatus::Starting,
             stopped_via_hotkey: false,
         },
@@ -177,6 +189,7 @@ pub async fn start_recording(
     let _ = app_handle.emit(
         EVENT_RECORDING_STATUS,
         RecordingStatusPayload {
+            session_id,
             status: RecordingStatus::Recording,
             stopped_via_hotkey: false,
         },
@@ -193,6 +206,8 @@ pub async fn stop_recording(
 ) -> Result<String, String> {
     log::info!("Command: stop_recording");
 
+    let session_id = state.active_transcription_session_id.load(Ordering::Relaxed);
+
     let result = state
         .transcription_service
         .stop_recording()
@@ -204,6 +219,7 @@ pub async fn stop_recording(
     let _ = app_handle.emit(
         EVENT_RECORDING_STATUS,
         RecordingStatusPayload {
+            session_id,
             status: RecordingStatus::Idle,
             stopped_via_hotkey: false,
         },
@@ -406,6 +422,10 @@ pub async fn toggle_window(
         }
 
         show_window_on_active_monitor(&window)?;
+
+        // Сообщаем фронту, что окно показано (для надёжного reset UI).
+        // Не используем focus, т.к. main на macOS может быть nonactivating NSPanel.
+        let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
     }
 
     Ok(())
@@ -446,6 +466,9 @@ pub async fn toggle_recording_with_window(
                 }
 
                 show_window_on_active_monitor(&window)?;
+
+                // Сообщаем фронту, что окно показано (для надёжного reset UI).
+                let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
             }
 
             // Запускаем запись
@@ -460,7 +483,7 @@ pub async fn toggle_recording_with_window(
             // Останавливаем запись
             let _result = state
                 .transcription_service
-                .stop_recording()
+                .stop_recording_hard()
                 .await
                 .map_err(|e| e.to_string())?;
 
@@ -468,10 +491,12 @@ pub async fn toggle_recording_with_window(
 
             // Эмитируем статус Idle с флагом stopped_via_hotkey
             // Frontend скроет окно когда получит этот статус
+            let session_id = state.active_transcription_session_id.load(Ordering::Relaxed);
             log::info!("Emitting status: Idle (stopped_via_hotkey: TRUE) - window will auto-hide");
             let _ = app_handle.emit(
                 EVENT_RECORDING_STATUS,
                 RecordingStatusPayload {
+                    session_id,
                     status: RecordingStatus::Idle,
                     stopped_via_hotkey: true,
                 },
@@ -522,12 +547,19 @@ pub async fn toggle_recording_with_window_internal(
                     }
                 }
                 show_webview_window_on_active_monitor(&window)?;
+
+                // Сообщаем фронту, что окно показано (для надёжного reset UI).
+                let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
             }
 
-            // Запускаем запись через emit - frontend должен вызвать start_recording
-            use tauri::Emitter;
-            let _ = app_handle.emit("recording:start-requested", ());
-            log::info!("Recording start requested via hotkey");
+            // ВАЖНО: стартуем запись на Rust-стороне.
+            // Иначе, когда окно было скрыто, WebView/JS могут быть "усыплены" и не обработать event,
+            // из-за чего хоткей откроет окно, но запись не стартует и UI останется в старом состоянии.
+            let state_handle = app_handle
+                .try_state::<AppState>()
+                .ok_or_else(|| "AppState не доступен".to_string())?;
+            start_recording(state_handle, app_handle.clone()).await?;
+            log::info!("Recording started via hotkey (internal)");
         }
         RecordingStatus::Starting => {
             log::debug!("Ignoring toggle - recording is starting");
@@ -535,14 +567,16 @@ pub async fn toggle_recording_with_window_internal(
         RecordingStatus::Recording => {
             let _result = state
                 .transcription_service
-                .stop_recording()
+                .stop_recording_hard()
                 .await
                 .map_err(|e| e.to_string())?;
 
             log::info!("Recording stopped via hotkey");
+            let session_id = state.active_transcription_session_id.load(Ordering::Relaxed);
             let _ = app_handle.emit(
                 EVENT_RECORDING_STATUS,
                 RecordingStatusPayload {
+                    session_id,
                     status: RecordingStatus::Idle,
                     stopped_via_hotkey: true,
                 },
@@ -1517,6 +1551,7 @@ pub async fn show_recording_window(app_handle: AppHandle) -> Result<(), String> 
     // Показываем recording окно (NSPanel - появляется поверх fullscreen, без фокуса)
     if let Some(window) = app_handle.get_webview_window("main") {
         show_webview_window_on_active_monitor(&window)?;
+        let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
         if let Err(e) = window.set_always_on_top(true) {
             log::warn!("Failed to enable always-on-top for main window: {}", e);
         }

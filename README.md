@@ -1,6 +1,6 @@
 # VoicetextAI
 
-Privacy-focused voice-to-text application with offline support, built with Tauri, Rust, and Vue 3.
+Voice-to-text application using AI, built with Tauri, Rust, and Vue 3.
 
 ## Architecture
 

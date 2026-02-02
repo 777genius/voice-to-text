@@ -20,17 +20,17 @@
   },
   "dependencies": {
     "@mdi/font": "^7.4.47",
-    "pinia": "^2.1.0",
-    "refresh-fetch": "^0.9.0",
-    "vue": "^3.4.0",
     "@statesync/core": "file:../state-sync/packages/core",
     "@statesync/pinia": "file:../state-sync/packages/pinia",
     "@statesync/tauri": "file:../state-sync/packages/tauri",
+    "pinia": "^2.1.0",
+    "refresh-fetch": "^0.9.0",
+    "vue": "^3.4.0",
     "vue-i18n": "^11.2.8",
     "vuetify": "^3.7.0"
   },
   "devDependencies": {
-    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/api": "^2.9.1",
     "@tauri-apps/cli": "^2.0.0",
     "@tauri-apps/plugin-clipboard-manager": "^2.0.0",
     "@tauri-apps/plugin-deep-link": "^2.0.0",
@@ -41,17 +41,17 @@
     "@tauri-apps/plugin-updater": "^2.0.0",
     "@vitejs/plugin-vue": "^5.0.0",
     "@vitest/coverage-v8": "^4.0.17",
+    "@wdio/cli": "^9.19.0",
+    "@wdio/local-runner": "^9.19.0",
+    "@wdio/mocha-framework": "^9.19.0",
+    "@wdio/spec-reporter": "^9.19.0",
+    "expect-webdriverio": "^5.4.0",
     "jsdom": "^27.4.0",
     "typescript": "^5.9.3",
     "vite": "^5.0.0",
     "vite-plugin-vuetify": "^2.0.4",
     "vitest": "^4.0.17",
     "vue-tsc": "^3.1.0",
-    "@wdio/cli": "^9.19.0",
-    "@wdio/local-runner": "^9.19.0",
-    "@wdio/mocha-framework": "^9.19.0",
-    "@wdio/spec-reporter": "^9.19.0",
-    "webdriverio": "^9.19.0",
-    "expect-webdriverio": "^5.4.0"
+    "webdriverio": "^9.19.0"
   }
 }

@@ -422,6 +422,48 @@ impl TranscriptionService {
         }
     }
 
+    /// Жёсткая остановка: всегда закрывает STT stream и выкидывает провайдера, без keep-alive.
+    ///
+    /// Нужна для hotkey сценария: пользователь ожидает новую "сессию" с чистого листа при следующем открытии окна,
+    /// и мы не должны получать отложенные partial/final от предыдущей речи после возобновления соединения.
+    pub async fn stop_recording_hard(&self) -> Result<String> {
+        let mut status = self.status.write().await;
+
+        if *status != RecordingStatus::Recording {
+            anyhow::bail!("Not recording");
+        }
+
+        *status = RecordingStatus::Processing;
+        drop(status);
+
+        // Stop audio capture
+        self.audio_capture
+            .write()
+            .await
+            .stop_capture()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to stop audio capture: {}", e))?;
+
+        // Отменяем таймер неактивности, если он был запущен (на всякий случай)
+        if let Some(timer) = self.inactivity_timer_task.write().await.take() {
+            timer.abort();
+            let _ = timer.await;
+        }
+
+        // Жёстко закрываем провайдера и соединение
+        {
+            let mut provider_opt = self.stt_provider.write().await;
+            if let Some(provider) = provider_opt.as_mut() {
+                let _ = provider.stop_stream().await;
+            }
+            *provider_opt = None;
+        }
+
+        *self.status.write().await = RecordingStatus::Idle;
+        log::info!("Recording stopped (hard), provider connection closed");
+        Ok("Transcription completed".to_string())
+    }
+
     /// Get current recording status
     pub async fn get_status(&self) -> RecordingStatus {
         *self.status.read().await

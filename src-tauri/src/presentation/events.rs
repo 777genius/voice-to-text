@@ -13,6 +13,10 @@ pub const EVENT_MICROPHONE_TEST_LEVEL: &str = "microphone_test:level";
 pub const EVENT_TRANSCRIPTION_ERROR: &str = "transcription:error";
 pub const EVENT_CONNECTION_QUALITY: &str = "connection:quality";
 
+// UI lifecycle events
+// Важно: это не "focus", потому что main окно на macOS может быть nonactivating NSPanel и не получать фокус.
+pub const EVENT_RECORDING_WINDOW_SHOWN: &str = "recording:window-shown";
+
 // State-sync протокол: invalidation event для синхронизации между окнами
 pub const EVENT_STATE_SYNC_INVALIDATION: &str = "state-sync:invalidation";
 
@@ -29,6 +33,9 @@ pub struct StateSyncInvalidationPayload {
 /// Payload for partial transcription event
 #[derive(Debug, Clone, Serialize)]
 pub struct PartialTranscriptionPayload {
+    /// Уникальный идентификатор сессии записи (монотонно растёт).
+    /// Нужен, чтобы frontend мог игнорировать "поздние" события от предыдущей сессии.
+    pub session_id: u64,
     pub text: String,
     pub timestamp: i64,
     pub is_segment_final: bool, // true когда сегмент финализирован (is_final=true в Deepgram)
@@ -36,9 +43,10 @@ pub struct PartialTranscriptionPayload {
     pub duration: f64, // длительность utterance в секундах (от Deepgram)
 }
 
-impl From<Transcription> for PartialTranscriptionPayload {
-    fn from(t: Transcription) -> Self {
+impl PartialTranscriptionPayload {
+    pub fn from_transcription(t: Transcription, session_id: u64) -> Self {
         Self {
+            session_id,
             text: t.text,
             timestamp: t.timestamp,
             is_segment_final: t.is_final, // передаем флаг финализации сегмента
@@ -51,15 +59,18 @@ impl From<Transcription> for PartialTranscriptionPayload {
 /// Payload for final transcription event
 #[derive(Debug, Clone, Serialize)]
 pub struct FinalTranscriptionPayload {
+    /// Уникальный идентификатор сессии записи (монотонно растёт).
+    pub session_id: u64,
     pub text: String,
     pub confidence: Option<f32>,
     pub language: Option<String>,
     pub timestamp: i64,
 }
 
-impl From<Transcription> for FinalTranscriptionPayload {
-    fn from(t: Transcription) -> Self {
+impl FinalTranscriptionPayload {
+    pub fn from_transcription(t: Transcription, session_id: u64) -> Self {
         Self {
+            session_id,
             text: t.text,
             confidence: t.confidence,
             language: t.language,
@@ -71,6 +82,8 @@ impl From<Transcription> for FinalTranscriptionPayload {
 /// Payload for recording status event
 #[derive(Debug, Clone, Serialize)]
 pub struct RecordingStatusPayload {
+    /// Уникальный идентификатор сессии записи (монотонно растёт).
+    pub session_id: u64,
     pub status: RecordingStatus,
     #[serde(default)]
     pub stopped_via_hotkey: bool,
@@ -100,6 +113,7 @@ pub struct MicrophoneTestLevelPayload {
 /// Payload for transcription error event
 #[derive(Debug, Clone, Serialize)]
 pub struct TranscriptionErrorPayload {
+    pub session_id: u64,
     pub error: String,
     pub error_type: String, // "connection", "configuration", "processing", "timeout", "authentication"
 }
@@ -119,6 +133,7 @@ pub enum ConnectionQuality {
 /// Payload for connection quality event
 #[derive(Debug, Clone, Serialize)]
 pub struct ConnectionQualityPayload {
+    pub session_id: u64,
     pub quality: ConnectionQuality,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>, // дополнительная информация о причине
