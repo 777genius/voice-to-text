@@ -104,8 +104,6 @@ const messages = {
       },
       updates: {
         label: 'App updates',
-        hintLine1: 'The app checks for updates every 6 hours in the background.',
-        hintLine2: 'A check is also performed when you open settings.',
         check: 'Check for updates',
         checking: 'Checking...',
         availableTitle: 'New version available {version}',
@@ -351,8 +349,6 @@ const messages = {
       },
       updates: {
         label: 'Обновления приложения',
-        hintLine1: 'Приложение автоматически проверяет обновления каждые 6 часов в фоновом режиме.',
-        hintLine2: 'Проверка также выполняется при открытии настроек.',
         check: 'Проверить обновления',
         checking: 'Проверка...',
         availableTitle: 'Доступна новая версия {version}',
@@ -598,8 +594,6 @@ const messages = {
       },
       updates: {
         label: 'Actualizaciones de la app',
-        hintLine1: 'La app busca actualizaciones cada 6 horas en segundo plano.',
-        hintLine2: 'También se realiza una comprobación al abrir ajustes.',
         check: 'Buscar actualizaciones',
         checking: 'Comprobando...',
         availableTitle: 'Nueva versión disponible {version}',
@@ -845,8 +839,6 @@ const messages = {
       },
       updates: {
         label: 'Mises à jour',
-        hintLine1: "L'application vérifie les mises à jour toutes les 6 heures en arrière-plan.",
-        hintLine2: 'Une vérification est aussi lancée à l’ouverture des réglages.',
         check: 'Vérifier les mises à jour',
         checking: 'Vérification...',
         availableTitle: 'Nouvelle version disponible {version}',
@@ -1092,8 +1084,6 @@ const messages = {
       },
       updates: {
         label: 'App-Updates',
-        hintLine1: 'Die App prüft alle 6 Stunden im Hintergrund auf Updates.',
-        hintLine2: 'Beim Öffnen der Einstellungen wird ebenfalls geprüft.',
         check: 'Updates prüfen',
         checking: 'Prüfen...',
         availableTitle: 'Neue Version verfügbar {version}',
@@ -1339,8 +1329,6 @@ const messages = {
       },
       updates: {
         label: 'Оновлення застосунку',
-        hintLine1: 'Застосунок перевіряє оновлення кожні 6 годин у фоновому режимі.',
-        hintLine2: 'Перевірка також виконується при відкритті налаштувань.',
         check: 'Перевірити оновлення',
         checking: 'Перевірка...',
         availableTitle: 'Доступна нова версія {version}',

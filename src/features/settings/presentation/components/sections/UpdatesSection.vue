@@ -100,11 +100,6 @@ onUnmounted(() => {
     :class="{ 'updates-section--highlight': isHighlighted }"
   >
     <SettingGroup :title="t('settings.updates.label')">
-      <div class="text-caption text-medium-emphasis mb-3">
-        <p class="mb-1">{{ t('settings.updates.hintLine1') }}</p>
-        <p class="mb-0">{{ t('settings.updates.hintLine2') }}</p>
-      </div>
-
       <div class="d-flex flex-column ga-3">
         <div v-if="updateStore.currentVersion" class="text-caption text-medium-emphasis">
           {{ t('settings.updates.currentVersion', { version: updateStore.currentVersion }) }}

@@ -26,11 +26,11 @@ struct UpdateInstallStagePayload {
     version: String,
 }
 
-/// Запускает фоновую проверку обновлений каждые 6 часов
+/// Запускает фоновую проверку обновлений: сразу при старте, далее каждые 6 часов
 pub fn start_background_update_check<R: Runtime>(app: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
-        // Первая проверка через 2 минуты после запуска
-        tokio::time::sleep(Duration::from_secs(120)).await;
+        // Небольшая задержка чтобы приложение успело инициализироваться
+        tokio::time::sleep(Duration::from_secs(5)).await;
 
         loop {
             log::info!("Checking for app updates (background check)");
