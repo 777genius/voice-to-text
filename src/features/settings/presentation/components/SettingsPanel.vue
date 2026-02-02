@@ -9,6 +9,7 @@ import { useI18n } from 'vue-i18n';
 import UpdateDialog from '@/presentation/components/UpdateDialog.vue';
 import { useSettings } from '../composables/useSettings';
 import { useSettingsTheme } from '../composables/useSettingsTheme';
+import { useSettingsStore } from '../../store/settingsStore';
 
 // Секции
 import LanguageSection from './sections/LanguageSection.vue';
@@ -38,6 +39,7 @@ const { initializeTheme } = useSettingsTheme();
 
 // Диалог обновления
 const showUpdateDialog = ref(false);
+const settingsStore = useSettingsStore();
 
 // Загрузка конфигурации при монтировании
 onMounted(async () => {
@@ -45,17 +47,24 @@ onMounted(async () => {
   await loadConfig();
 });
 
+function handleClose(): void {
+  // Не блокируем закрытие окна настройками автосохранения.
+  // invoke отправится сразу, даже если UI закроется в этот же тик.
+  void settingsStore.flushMicrophoneSensitivityPersist();
+  emit('close');
+}
+
 // Сохранение и закрытие
 async function handleSave() {
   const success = await saveConfig();
   if (success) {
-    emit('close');
+    handleClose();
   }
 }
 </script>
 
 <template>
-  <div class="settings-overlay" @click.self="emit('close')">
+  <div class="settings-overlay" @click.self="handleClose">
     <v-card class="settings-panel" elevation="0">
       <!-- Заголовок -->
       <v-card-title class="d-flex justify-space-between align-center pa-4">
@@ -64,7 +73,7 @@ async function handleSave() {
           icon="mdi-close"
           variant="text"
           size="small"
-          @click="emit('close')"
+          @click="handleClose"
         />
       </v-card-title>
 
@@ -120,7 +129,7 @@ async function handleSave() {
         <v-spacer />
         <v-btn
           variant="text"
-          @click="emit('close')"
+          @click="handleClose"
         >
           {{ t('settings.cancel') }}
         </v-btn>

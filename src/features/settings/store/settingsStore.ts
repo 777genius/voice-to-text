@@ -168,7 +168,12 @@ export const useSettingsStore = defineStore('settings', () => {
     microphoneSensitivity.value = next;
 
     const shouldPersist = opts?.persist ?? true;
-    if (!shouldPersist) return;
+    if (!shouldPersist) {
+      // Значение пришло из backend/sync — считаем его "уже сохранённым",
+      // чтобы flush при закрытии окна не дёргал update_app_config без реальных изменений.
+      lastPersistedMicSensitivity = next;
+      return;
+    }
     if (!isTauriAvailable()) return;
 
     if (micSensitivityPersistTimer) {
@@ -187,6 +192,25 @@ export const useSettingsStore = defineStore('settings', () => {
         lastPersistedMicSensitivity = microphoneSensitivity.value;
       } catch {}
     }, 250);
+  }
+
+  async function flushMicrophoneSensitivityPersist(): Promise<void> {
+    if (!isTauriAvailable()) return;
+    if (micSensitivityPersistTimer) {
+      clearTimeout(micSensitivityPersistTimer);
+      micSensitivityPersistTimer = null;
+    }
+
+    const next = Math.max(0, Math.min(200, Math.round(microphoneSensitivity.value)));
+    microphoneSensitivity.value = next;
+    if (lastPersistedMicSensitivity === next) return;
+
+    try {
+      await invoke(CMD_UPDATE_APP_CONFIG, { microphone_sensitivity: next });
+      lastPersistedMicSensitivity = next;
+    } catch {
+      // Тут намеренно молчим: пользователь закрывает окно, не надо мешать UX.
+    }
   }
 
   function setSelectedAudioDevice(value: string) {
@@ -290,6 +314,7 @@ export const useSettingsStore = defineStore('settings', () => {
     setUseSystemTheme,
     setRecordingHotkey,
     setMicrophoneSensitivity,
+    flushMicrophoneSensitivityPersist,
     setSelectedAudioDevice,
     setAutoCopyToClipboard,
     setAutoPasteText,

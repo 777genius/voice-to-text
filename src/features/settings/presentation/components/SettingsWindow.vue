@@ -9,6 +9,7 @@ import { useSttConfigStore } from '@/stores/sttConfig';
 import UpdateDialog from '@/presentation/components/UpdateDialog.vue';
 import { useSettings } from '../composables/useSettings';
 import { useSettingsTheme } from '../composables/useSettingsTheme';
+import { useSettingsStore } from '../../store/settingsStore';
 
 // Секции
 import LanguageSection from './sections/LanguageSection.vue';
@@ -26,6 +27,7 @@ const { initializeTheme } = useSettingsTheme();
 
 const appConfigStore = useAppConfigStore();
 const sttConfigStore = useSttConfigStore();
+const settingsStore = useSettingsStore();
 
 const showUpdateDialog = ref(false);
 
@@ -60,6 +62,8 @@ onUnmounted(() => {
 
 async function handleClose(): Promise<void> {
   showUpdateDialog.value = false;
+  // Не блокируем закрытие окна: flush может занять время (I/O), а закрытие должно быть мгновенным.
+  void settingsStore.flushMicrophoneSensitivityPersist();
   try {
     await invoke('show_recording_window');
   } catch {}
