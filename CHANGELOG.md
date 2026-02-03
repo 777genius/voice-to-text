@@ -1,84 +1,115 @@
 # Changelog
 
-Все изменения проекта VoicetextAI документируются в этом файле.
+All notable changes to VoicetextAI are documented in this file.
 
-Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/),
-версионирование — [Semantic Versioning](https://semver.org/).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/).
+
+---
+
+## [0.7.1] — 2026-02-03
+
+### Improved
+- Enhanced error handling in transcription service
+- Refactored transcription service architecture
+
+### Added
+- Changelog utilities
+
+---
+
+## [0.7.0] — 2026-02-02
+
+### Added
+- Support for 45 speech recognition languages (Deepgram Nova-3) instead of 6
+- Separation of recognition language (STT) and interface language (UI) — when selecting a language without translation, UI falls back to the nearest available locale
+- Multilingual mode with real-time auto-detection of 10 languages
+- Hint when selecting multilingual mode listing supported languages
+- System theme support in settings
+
+### Changed
+- `FlagIcon` component extended to work with any language code (not just UI locales)
+- Language selection in settings now shows full list of STT languages with flags
+- Improved settings panel and window close handling
+- Updated microphone sensitivity handling
+- Redesigned landing page components and localization
 
 ---
 
 ## [0.6.0] — 2026-02-02
 
-### Добавлено
-- Улучшенное управление сессиями транскрипции с синхронизацией UI в реальном времени
-- Компонент `FlagIcon` — SVG-флаги для отображения поддерживаемых языков
-- Файл локалей `i18n.locales.ts` для централизованного управления языками
-- Конфигурация деплоя на Render (`render.yaml`)
-- Документация по процессу релиза (`docs/RELEASE.md`)
+### Added
+- Enhanced transcription session management with real-time UI synchronization
+- `FlagIcon` component — SVG flags for displaying supported languages
+- Locales file `i18n.locales.ts` for centralized language management
+- Render deployment configuration (`render.yaml`)
+- Release process documentation (`docs/RELEASE.md`)
 
-### Изменено
-- Ребрендинг проекта: переименование в VoicetextAI по всему проекту
-- Переработан лендинг: новый дизайн секций pricing, FAQ, footer
-- Обновлён компонент `SupportedLanguages` — переход на SVG-флаги
-- Улучшена секция `HotkeySection` в настройках
-- Рефакторинг `RecordingPopover` — улучшена синхронизация состояний
-- Рефакторинг `transcription store` — расширенное управление сессиями
-- Обновлён backend STT-сервис: улучшена обработка сессий и событий
-- Обновлены зависимости
+### Changed
+- Project rebranding: renamed to VoicetextAI throughout the project
+- Redesigned landing page: new design for pricing, FAQ, footer sections
+- Updated `SupportedLanguages` component — switched to SVG flags
+- Improved `HotkeySection` in settings
+- Refactored `RecordingPopover` — improved state synchronization
+- Refactored `transcription store` — extended session management
+- Updated backend STT service: improved session and event handling
+- Updated dependencies
 
-### Исправлено
-- Корректное отображение флагов языков в компоненте выбора языка
-- Синхронизация состояния транскрипции между окнами
+### Fixed
+- Correct display of language flags in language selector
+- Transcription state synchronization between windows
 
 ## [0.5.1] — 2026-02-01
 
-### Исправлено
-- Добавлены продовые env-переменные в release workflow
-- Смена продового API-домена на `api.voicetext.site`
+### Fixed
+- Added production env variables to release workflow
+- Changed production API domain to `api.voicetext.site`
 
 ## [0.5.0] — 2026-02-01
 
-### Добавлено
-- Полноценный экран настроек с выбором аудио-устройства
-- OAuth2 аутентификация (Google)
-- State-Sync протокол для синхронизации состояния между окнами
-- Лендинг с поддержкой 6 языков (EN, RU, ES, FR, DE, UK)
-- Страницы Privacy Policy и Terms of Service
-- E2E тесты (WebDriverIO)
-- Лицензия Apache 2.0
+### Added
+- Full-featured settings screen with audio device selection
+- OAuth2 authentication (Google)
+- State-Sync protocol for state synchronization between windows
+- Landing page with support for 6 languages (EN, RU, ES, FR, DE, UK)
+- Privacy Policy and Terms of Service pages
+- E2E tests (WebDriverIO)
+- Apache 2.0 license
 
-### Изменено
-- Обновлены иконки приложения для всех платформ
-- Обновлены зависимости
+### Changed
+- Updated app icons for all platforms
+- Updated dependencies
 
-### Исправлено
-- Совместимость с Windows
-- Race condition при обработке токенов аутентификации
-- Компиляция `RunEvent::Reopen` на Linux/Windows
-- Паттерны `.gitignore` блокировали исходные файлы
+### Fixed
+- Windows compatibility
+- Race condition in authentication token handling
+- `RunEvent::Reopen` compilation on Linux/Windows
+- `.gitignore` patterns were blocking source files
 
 ## [0.4.1] — 2025-12-19
 
-### Исправлено
-- Ложные срабатывания keep-alive и индикатора качества связи
+### Fixed
+- False positives in keep-alive and connection quality indicator
 
 ## [0.4.0] — 2025-11-23
 
-### Добавлено
-- Security-обновления
+### Added
+- Security updates
 
 ## [0.3.0] — 2025-10-25
 
-### Добавлено
-- Первый публичный релиз с базовым функционалом
-- Транскрипция через Deepgram (Nova-2/3)
-- Глобальные горячие клавиши
-- Автокопирование в буфер обмена
-- Системный трей
-- Поддержка macOS, Windows, Linux
+### Added
+- First public release with basic functionality
+- Transcription via Deepgram (Nova-2/3)
+- Global hotkeys
+- Auto-copy to clipboard
+- System tray
+- Support for macOS, Windows, Linux
 
 ---
 
+[0.7.1]: https://github.com/777genius/voice-to-text/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/777genius/voice-to-text/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/777genius/voice-to-text/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/777genius/voice-to-text/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/777genius/voice-to-text/compare/v0.4.1...v0.5.0

@@ -46,31 +46,41 @@ const onChange = async (value: string | LocaleCode) => {
 </script>
 
 <template>
-  <!-- Icon-only mode: simple button with dropdown menu -->
-  <v-menu v-if="props.iconOnly" location="bottom">
+  <!-- Icon-only mode -->
+  <v-menu v-if="props.iconOnly" location="bottom" :close-on-content-click="false">
     <template #activator="{ props: menuProps }">
       <v-btn variant="text" v-bind="menuProps" :aria-label="t('language.label')">
         <Icon :name="currentFlagIcon" class="language-switcher__flag-icon" />
       </v-btn>
     </template>
-    <v-list density="compact">
-      <v-list-item
-        v-for="item in items"
-        :key="item.value"
-        @click="onChange(item.value)"
-      >
-        <template #title>
-          <span class="language-switcher__item">
-            <Icon :name="item.flagIcon" class="language-switcher__flag-icon" />
-            <span>{{ item.title }}</span>
-          </span>
-        </template>
-      </v-list-item>
-    </v-list>
+    <v-autocomplete
+      :items="items"
+      :model-value="locale"
+      density="compact"
+      variant="solo-filled"
+      hide-details
+      auto-select-first
+      class="language-switcher__menu-autocomplete"
+      @update:model-value="onChange"
+    >
+      <template #selection>
+        <Icon :name="currentFlagIcon" class="language-switcher__flag-icon" />
+      </template>
+      <template #item="{ item, props: itemProps }">
+        <v-list-item v-bind="itemProps">
+          <template #title>
+            <span class="language-switcher__item">
+              <Icon :name="item.raw.flagIcon" class="language-switcher__flag-icon" />
+              <span>{{ item.raw.title }}</span>
+            </span>
+          </template>
+        </v-list-item>
+      </template>
+    </v-autocomplete>
   </v-menu>
 
-  <!-- Standard select mode -->
-  <v-select
+  <!-- Standard mode with search -->
+  <v-autocomplete
     v-else
     :label="props.compact ? undefined : t('language.label')"
     :placeholder="props.compact ? t('language.label') : undefined"
@@ -79,8 +89,9 @@ const onChange = async (value: string | LocaleCode) => {
     density="compact"
     :variant="props.compact ? 'plain' : 'outlined'"
     hide-details
+    auto-select-first
     @update:model-value="onChange"
-    :style="props.fullWidth ? { maxWidth: '100%', width: '100%' } : { maxWidth: '180px' }"
+    :style="props.fullWidth ? { maxWidth: '100%', width: '100%' } : { maxWidth: '220px' }"
     :class="{
       'language-switcher--full': props.fullWidth,
       'language-switcher--compact': props.compact
@@ -101,7 +112,7 @@ const onChange = async (value: string | LocaleCode) => {
         </template>
       </v-list-item>
     </template>
-  </v-select>
+  </v-autocomplete>
 </template>
 
 <style scoped>
@@ -140,5 +151,9 @@ const onChange = async (value: string | LocaleCode) => {
 
 .language-switcher--compact :deep(.v-field__overlay) {
   background-color: transparent;
+}
+
+.language-switcher__menu-autocomplete {
+  min-width: 220px;
 }
 </style>

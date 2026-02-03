@@ -2,12 +2,36 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
 
-use crate::domain::{RecordingStatus, AudioCapture};
+use crate::domain::{AudioCapture, RecordingStatus, SttConnectionCategory, SttError};
 use crate::infrastructure::ConfigStore;
 use crate::presentation::{
     events::*, AppState, AudioLevelPayload, FinalTranscriptionPayload, PartialTranscriptionPayload,
     RecordingStatusPayload, MicrophoneTestLevelPayload, TranscriptionErrorPayload, ConnectionQualityPayload,
 };
+
+fn classify_transcription_error_type_from_stt(err: &SttError) -> String {
+    // ВАЖНО: во фронте error_type используется для connect-retry, поэтому
+    // тут нельзя делать "умный" парсинг строки — только типы и детали.
+    match err {
+        SttError::Authentication(_) => "authentication".to_string(),
+        SttError::Configuration(_) => "configuration".to_string(),
+        SttError::Connection(conn) => {
+            if conn.details.category == Some(SttConnectionCategory::Timeout) {
+                "timeout".to_string()
+            } else {
+                "connection".to_string()
+            }
+        }
+        SttError::Processing(_) | SttError::Unsupported(_) | SttError::Internal(_) => "processing".to_string(),
+    }
+}
+
+fn error_details_from_stt(err: &SttError) -> Option<TranscriptionErrorDetailsPayload> {
+    match err {
+        SttError::Connection(conn) => Some(conn.details.clone().into()),
+        _ => None,
+    }
+}
 
 /// Start recording voice
 #[tauri::command]
@@ -108,14 +132,23 @@ pub async fn start_recording(
     let app_handle_error = app_handle.clone();
 
     // Callback for error handling
-    let on_error = Arc::new(move |error: String, error_type: String| {
+    let on_error = Arc::new(move |err: SttError| {
         let app_handle = app_handle_error.clone();
 
         tokio::spawn(async move {
+            let error_type = classify_transcription_error_type_from_stt(&err);
+            let error_details = error_details_from_stt(&err);
+            let error = err.to_string();
+
             log::error!("STT error occurred: {} (type: {})", error, error_type);
 
             // Emit error event to frontend
-            let payload = TranscriptionErrorPayload { session_id, error, error_type };
+            let payload = TranscriptionErrorPayload {
+                session_id,
+                error,
+                error_type,
+                error_details,
+            };
             if let Err(e) = app_handle.emit(EVENT_TRANSCRIPTION_ERROR, payload) {
                 log::error!("Failed to emit transcription error event: {}", e);
             }
@@ -171,18 +204,36 @@ pub async fn start_recording(
     );
 
     // Start recording (async - WebSocket connect, audio capture start)
-    state
+    let start_result = state
         .transcription_service
         .start_recording(
             on_partial,
             on_final,
             on_audio_level,
             on_audio_spectrum,
-            on_error,
-            on_connection_quality,
+            on_error.clone(),
+            on_connection_quality.clone(),
         )
-        .await
-        .map_err(|e| e.to_string())?;
+        .await;
+
+    // Важно: если старт провалился ДО того, как провайдер успел вызвать on_error (например, упали на handshake/connection refused),
+    // UI останется в Starting и будет ощущение "подключение идёт, но ничего не происходит".
+    // Поэтому здесь явно отправляем error + status=Error тем же контрактом, что и в runtime-ошибках.
+    if let Err(e) = start_result {
+        // Стараемся извлечь исходную причину максимально надёжно (без парсинга строки).
+        let stt = e.downcast_ref::<SttError>().cloned().unwrap_or_else(|| {
+            SttError::Internal(e.to_string())
+        });
+        let error = stt.to_string();
+        let error_type = classify_transcription_error_type_from_stt(&stt);
+
+        log::error!("Failed to start recording: {} (type: {})", error, error_type);
+
+        // Сначала transcription:error, потом recording:status=Error (во фронте есть логика suppression/retry).
+        on_error(stt);
+
+        return Err(error);
+    }
 
     // Emit Recording status after successful start
     log::debug!("Emitting status: Recording (stopped_via_hotkey: false)");
@@ -812,12 +863,19 @@ pub async fn update_ui_preferences(
     window: Window,
     theme: String,
     locale: String,
+    use_system_theme: Option<bool>,
 ) -> Result<(), String> {
-    log::info!("Command: update_ui_preferences - theme: {}, locale: {}", theme, locale);
+    let use_system_theme = use_system_theme.unwrap_or(false);
+    log::info!(
+        "Command: update_ui_preferences - theme: {}, locale: {}, use_system_theme: {}",
+        theme,
+        locale,
+        use_system_theme
+    );
 
     {
         let current = state.ui_preferences.read().await;
-        if current.theme == theme && current.locale == locale {
+        if current.theme == theme && current.locale == locale && current.use_system_theme == use_system_theme {
             return Ok(());
         }
     }
@@ -825,6 +883,7 @@ pub async fn update_ui_preferences(
     let prefs = crate::domain::UiPreferences {
         theme: theme.clone(),
         locale: locale.clone(),
+        use_system_theme,
     };
 
     // Сохраняем в state

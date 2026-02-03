@@ -15,6 +15,11 @@ export function useSettingsTheme() {
   const store = useSettingsStore();
   const vuetifyTheme = useTheme();
 
+  const useSystemTheme = computed({
+    get: () => store.useSystemTheme,
+    set: (value: boolean) => store.setUseSystemTheme(value),
+  });
+
   const currentTheme = computed({
     get: () => store.theme,
     set: (value: AppTheme) => setTheme(value),
@@ -64,6 +69,7 @@ export function useSettingsTheme() {
   }
 
   return {
+    useSystemTheme,
     currentTheme,
     isDark,
     setTheme,

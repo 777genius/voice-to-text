@@ -11,7 +11,9 @@ use tokio_tungstenite::{connect_async, tungstenite::Message, WebSocketStream, Ma
 use tokio::net::TcpStream;
 
 use crate::domain::{
-    AudioChunk, ConnectionQualityCallback, ErrorCallback, SttConfig, SttError, SttProvider, SttResult, Transcription, TranscriptionCallback,
+    AudioChunk, ConnectionQualityCallback, ErrorCallback, SttConfig, SttConnectionCategory,
+    SttConnectionDetails, SttConnectionError, SttError, SttProvider, SttResult, Transcription,
+    TranscriptionCallback,
 };
 use crate::infrastructure::embedded_keys;
 
@@ -174,11 +176,21 @@ impl SttProvider for DeepgramProvider {
             .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
             .header("Authorization", format!("Token {}", api_key))
             .body(())
-            .map_err(|e| SttError::Connection(format!("Failed to build WS request: {}", e)))?;
+            .map_err(|e| {
+                SttError::Connection(SttConnectionError::simple(format!(
+                    "Failed to build WS request: {}",
+                    e
+                )))
+            })?;
 
         let (ws_stream, _response) = connect_async(request)
             .await
-            .map_err(|e| SttError::Connection(format!("WS connection failed: {}", e)))?;
+            .map_err(|e| {
+                SttError::Connection(SttConnectionError::simple(format!(
+                    "WS connection failed: {}",
+                    e
+                )))
+            })?;
 
         log::info!("Deepgram WebSocket connected");
 
@@ -297,20 +309,44 @@ impl SttProvider for DeepgramProvider {
 
                         // Проверяем тип закрытия - если это ошибка, уведомляем UI
                         if let Some(close_frame) = &frame {
-                            // Определяем тип ошибки по сообщению
                             let reason = close_frame.reason.to_string();
-                            let error_type = if reason.contains("timeout") || reason.contains("net0001") {
-                                "timeout"
-                            } else if reason.contains("auth") || reason.contains("401") {
-                                "authentication"
-                            } else {
-                                "connection"
-                            };
+                            let code_u16 = u16::from(close_frame.code);
 
                             // Вызываем error callback если это не нормальное закрытие
-                            if close_frame.code != tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal {
-                                log::error!("Deepgram connection closed with error: {} (type: {})", reason, error_type);
-                                on_error_for_receiver(reason.clone(), error_type.to_string());
+                            if close_frame.code
+                                != tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal
+                            {
+                                let stt_err = if reason.to_lowercase().contains("auth")
+                                    || reason.contains("401")
+                                {
+                                    SttError::Authentication(reason.clone())
+                                } else {
+                                    let category = if reason.to_lowercase().contains("timeout")
+                                        || reason.to_lowercase().contains("net0001")
+                                    {
+                                        SttConnectionCategory::Timeout
+                                    } else if matches!(code_u16, 1012 | 1013 | 1014) {
+                                        SttConnectionCategory::ServerUnavailable
+                                    } else {
+                                        SttConnectionCategory::Unknown
+                                    };
+
+                                    SttError::Connection(SttConnectionError {
+                                        message: reason.clone(),
+                                        details: SttConnectionDetails {
+                                            category: Some(category),
+                                            ws_close_code: Some(code_u16),
+                                            ..Default::default()
+                                        },
+                                    })
+                                };
+
+                                log::error!(
+                                    "Deepgram connection closed with error: {} (code: {})",
+                                    reason,
+                                    code_u16
+                                );
+                                on_error_for_receiver(stt_err);
                             }
                         }
 
@@ -527,10 +563,13 @@ impl SttProvider for DeepgramProvider {
 
                                 // Уведомляем UI об ошибке
                                 if let Some(callback) = &self.on_error_callback {
-                                    callback(
-                                        format!("Connection lost: {}", reconnect_error),
-                                        "connection".to_string()
-                                    );
+                                    callback(SttError::Connection(SttConnectionError {
+                                        message: format!("Connection lost: {}", reconnect_error),
+                                        details: SttConnectionDetails {
+                                            category: Some(SttConnectionCategory::ServerUnavailable),
+                                            ..Default::default()
+                                        },
+                                    }));
                                 }
 
                                 self.is_streaming = false;
@@ -540,7 +579,10 @@ impl SttProvider for DeepgramProvider {
                     }
 
                     // Меньше 3 ошибок - просто возвращаем ошибку без reconnect
-                    return Err(SttError::Connection(format!("WebSocket send failed: {}", e)));
+                    return Err(SttError::Connection(SttConnectionError::simple(format!(
+                        "WebSocket send failed: {}",
+                        e
+                    ))));
                 }
             }
         }
@@ -759,7 +801,7 @@ impl SttProvider for DeepgramProvider {
             }
             self.ws_write = None;
 
-            return Err(SttError::Connection(error_msg));
+            return Err(SttError::Connection(SttConnectionError::simple(error_msg)));
         }
 
         self.is_paused = false;
@@ -1158,10 +1200,10 @@ impl DeepgramProvider {
         self.is_reconnecting = false;
         self.is_streaming = false;
 
-        Err(SttError::Connection(format!(
+        Err(SttError::Connection(SttConnectionError::simple(format!(
             "Failed to reconnect after {} attempts",
             MAX_ATTEMPTS
-        )))
+        ))))
     }
 
     /// Обрабатываем входящее сообщение от Deepgram

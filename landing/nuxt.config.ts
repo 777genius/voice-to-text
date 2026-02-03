@@ -11,6 +11,15 @@ const tauriUpdaterUrl =
 export default defineNuxtConfig({
   compatibilityDate: "2026-01-19",
   ssr: true,
+  app: {
+    head: {
+      link: [
+        // Ускоряем загрузку внешних ресурсов
+        { rel: "preconnect", href: "https://api.voicetext.site" },
+        { rel: "dns-prefetch", href: "https://api.voicetext.site" }
+      ]
+    }
+  },
   modules: [
     "@pinia/nuxt",
     "@nuxtjs/i18n",
@@ -67,8 +76,8 @@ export default defineNuxtConfig({
     name: "VoicetextAI"
   },
   runtimeConfig: {
-    // Приватный токен не обязателен (мы в основном читаем public latest.json),
-    // но оставляем на будущее, если захотим дергать GitHub API без лимитов.
+    // Опциональный токен для GitHub API: без него лимит 60 req/час на IP,
+    // с токеном — 5000 req/час. Для прода рекомендуется выставить GITHUB_TOKEN.
     github: {
       token: process.env.GITHUB_TOKEN
     },

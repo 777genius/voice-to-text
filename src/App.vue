@@ -20,7 +20,7 @@ import {
 import type { RevisionSyncHandle } from './windowing/stateSync';
 import { isTauriAvailable } from './utils/tauri';
 import { i18n } from './i18n';
-import { normalizeUiLocale, normalizeUiTheme } from './i18n.locales';
+import { normalizeUiLocale, normalizeUiTheme, type UiTheme } from './i18n.locales';
 import { createAuthStateSync } from './windowing/stateSync/authStateSync';
 import { createUiPreferencesSync } from './windowing/stateSync/uiPreferencesSync';
 
@@ -28,6 +28,10 @@ const auth = useAuth();
 const authState = useAuthState();
 const theme = useTheme();
 const { setupUpdateListener, cleanupUpdateListener } = useUpdater();
+
+const userThemePref = ref<UiTheme>(normalizeUiTheme(localStorage.getItem(UI_PREFS_THEME_KEY)));
+const useSystemThemePref = ref<boolean>(readUiPreferencesFromStorage().useSystemTheme);
+const systemTheme = ref<UiTheme>('dark');
 
 // Флаг завершения инициализации (чтобы не мелькал AuthScreen)
 const isInitialized = ref(false);
@@ -89,11 +93,8 @@ watch(
 );
 
 function applyThemeValue(value: string): void {
-  const next = normalizeUiTheme(value);
+  const next = normalizeUiTheme(value) as UiTheme;
   theme.global.name.value = next;
-
-  // Держим localStorage в консистентном состоянии (как кэш).
-  writeUiPreferencesCacheToStorage({ ...readUiPreferencesFromStorage(), theme: next });
   document.documentElement.dataset.uiTheme = next;
 
   if (next === 'light') {
@@ -102,6 +103,71 @@ function applyThemeValue(value: string): void {
     document.documentElement.classList.remove('theme-light');
   }
 }
+
+function writeUiPrefsCache(next: Partial<ReturnType<typeof readUiPreferencesFromStorage>>): void {
+  const current = readUiPreferencesFromStorage();
+  writeUiPreferencesCacheToStorage({ ...current, ...next });
+}
+
+function applyThemePreference(value: string): void {
+  const next = normalizeUiTheme(value) as UiTheme;
+  userThemePref.value = next;
+  writeUiPrefsCache({ theme: next });
+}
+
+function applyUseSystemThemePreference(value: boolean): void {
+  const next = Boolean(value);
+  useSystemThemePref.value = next;
+  writeUiPrefsCache({ useSystemTheme: next });
+}
+
+function getSystemTheme(): UiTheme {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return 'dark';
+  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+}
+
+let systemThemeMql: MediaQueryList | null = null;
+let systemThemeListener: ((e: MediaQueryListEvent) => void) | null = null;
+
+function startSystemThemeSync(): void {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+  systemThemeMql = window.matchMedia('(prefers-color-scheme: light)');
+  systemTheme.value = getSystemTheme();
+
+  systemThemeListener = () => {
+    systemTheme.value = getSystemTheme();
+  };
+
+  // Safari fallback
+  if (typeof systemThemeMql.addEventListener === 'function') {
+    systemThemeMql.addEventListener('change', systemThemeListener);
+  } else {
+    // eslint-disable-next-line deprecation/deprecation
+    systemThemeMql.addListener(systemThemeListener as any);
+  }
+}
+
+function stopSystemThemeSync(): void {
+  if (!systemThemeMql || !systemThemeListener) return;
+  if (typeof systemThemeMql.removeEventListener === 'function') {
+    systemThemeMql.removeEventListener('change', systemThemeListener);
+  } else {
+    // eslint-disable-next-line deprecation/deprecation
+    systemThemeMql.removeListener(systemThemeListener as any);
+  }
+  systemThemeMql = null;
+  systemThemeListener = null;
+}
+
+const effectiveTheme = computed<UiTheme>(() =>
+  useSystemThemePref.value ? systemTheme.value : userThemePref.value
+);
+
+watch(
+  () => effectiveTheme.value,
+  (t) => applyThemeValue(t),
+  { immediate: true },
+);
 
 function applyLocaleValue(value: string): void {
   const next = normalizeUiLocale(value);
@@ -115,21 +181,6 @@ function applyLocaleValue(value: string): void {
     }
   }
 }
-
-// Синхронизация темы с localStorage
-const storedTheme = normalizeUiTheme(localStorage.getItem(UI_PREFS_THEME_KEY));
-theme.global.name.value = storedTheme;
-
-watch(() => theme.global.name.value, (newTheme) => {
-  const next = normalizeUiTheme(String(newTheme));
-  const prev = localStorage.getItem(UI_PREFS_THEME_KEY);
-  if (prev !== next) {
-    writeUiPreferencesCacheToStorage({ ...readUiPreferencesFromStorage(), theme: next });
-    if (!isTauriAvailable()) {
-      bumpUiPrefsRevision();
-    }
-  }
-});
 
 // При смене состояния авторизации - синхронизируем с backend и переключаем окна
 watch(() => authState.isAuthenticated.value, async (isAuth) => {
@@ -172,6 +223,7 @@ let authSyncHandle: RevisionSyncHandle | null = null;
 let uiPrefsSyncHandle: RevisionSyncHandle | null = null;
 
 onMounted(async () => {
+  startSystemThemeSync();
   await setupUpdateListener();
 
   try {
@@ -223,8 +275,9 @@ onMounted(async () => {
     uiPrefsSyncHandle = createUiPreferencesSync({
       listen,
       invoke,
-      applyTheme: (t) => applyThemeValue(t),
+      applyTheme: (t) => applyThemePreference(t),
       applyLocale: (l) => applyLocaleValue(l),
+      applyUseSystemTheme: (v) => applyUseSystemThemePreference(v),
     });
 
     try {
@@ -249,6 +302,7 @@ onUnmounted(() => {
     uiPrefsSyncHandle.stop();
     uiPrefsSyncHandle = null;
   }
+  stopSystemThemeSync();
   cleanupUpdateListener();
 });
 

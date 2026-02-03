@@ -53,6 +53,7 @@ export type AuthStateSnapshotData = {
 export type UiPreferencesSnapshotData = {
   theme: UiTheme;
   locale: UiLocale;
+  use_system_theme: boolean;
 };
 
 // Переиспользуем envelope из state-sync, чтобы не плодить дубли.

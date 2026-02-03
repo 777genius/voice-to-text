@@ -1,10 +1,18 @@
 use std::{
     sync::{Arc, Mutex},
+    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
 use tauri::{AppHandle, Emitter, Runtime};
 use tauri_plugin_updater::UpdaterExt;
+
+/// Защита от двойного старта установки.
+///
+/// В Tauri окна — это отдельные webview'ы, и пользователь теоретически может нажать "Обновить"
+/// в двух местах почти одновременно. Обновление — это ресурсная операция, поэтому делаем простой
+/// глобальный lock на процесс.
+static INSTALL_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Информация о доступном обновлении, которую отдаём во frontend.
 #[derive(Clone, serde::Serialize)]
@@ -26,11 +34,11 @@ struct UpdateInstallStagePayload {
     version: String,
 }
 
-/// Запускает фоновую проверку обновлений каждые 6 часов
+/// Запускает фоновую проверку обновлений: сразу при старте, далее каждые 6 часов
 pub fn start_background_update_check<R: Runtime>(app: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
-        // Первая проверка через 2 минуты после запуска
-        tokio::time::sleep(Duration::from_secs(120)).await;
+        // Небольшая задержка чтобы приложение успело инициализироваться
+        tokio::time::sleep(Duration::from_secs(5)).await;
 
         loop {
             log::info!("Checking for app updates (background check)");
@@ -102,7 +110,14 @@ pub async fn check_and_install_update<R: Runtime>(
         .build()
         .map_err(|e| format!("Failed to build updater: {}", e))?;
 
-    match updater.check().await {
+    if INSTALL_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("Update installation is already in progress".to_string());
+    }
+
+    let result = match updater.check().await {
         Ok(Some(update)) => {
             let version = update.version.clone();
             let current_version = update.current_version.clone();
@@ -199,5 +214,11 @@ pub async fn check_and_install_update<R: Runtime>(
             log::error!("Update check failed: {}", e);
             Err(format!("Failed to check for updates: {}", e))
         }
-    }
+    };
+
+    // В случае успеха приложение перезапустится (и код дальше не продолжится).
+    // Если же мы дошли до сюда — значит либо обновления нет, либо была ошибка, и lock надо снять.
+    INSTALL_IN_PROGRESS.store(false, Ordering::SeqCst);
+
+    result
 }

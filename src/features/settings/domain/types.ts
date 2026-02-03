@@ -64,6 +64,7 @@ export interface SettingsState {
 
   // Тема
   theme: AppTheme;
+  useSystemTheme: boolean;
 
   // Горячая клавиша
   recordingHotkey: string;

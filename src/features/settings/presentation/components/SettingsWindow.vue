@@ -9,6 +9,7 @@ import { useSttConfigStore } from '@/stores/sttConfig';
 import UpdateDialog from '@/presentation/components/UpdateDialog.vue';
 import { useSettings } from '../composables/useSettings';
 import { useSettingsTheme } from '../composables/useSettingsTheme';
+import { useSettingsStore } from '../../store/settingsStore';
 
 // Секции
 import LanguageSection from './sections/LanguageSection.vue';
@@ -26,6 +27,7 @@ const { initializeTheme } = useSettingsTheme();
 
 const appConfigStore = useAppConfigStore();
 const sttConfigStore = useSttConfigStore();
+const settingsStore = useSettingsStore();
 
 const showUpdateDialog = ref(false);
 
@@ -44,6 +46,10 @@ onMounted(async () => {
 
   unlistenOpened = await listen<boolean>('settings-window-opened', async () => {
     if (isLoading.value) return;
+    // Если пользователь быстро закрыл настройки после изменения чувствительности,
+    // debounce/flush мог не успеть примениться до refresh(). В таком случае refresh подтянет старое (95)
+    // и перетрёт UI. Поэтому сначала "дожимаем" pending значение, и только потом делаем refresh + loadConfig.
+    await settingsStore.flushMicrophoneSensitivityPersist();
     // Подтягиваем свежий конфиг через per-topic handles, дожидаемся завершения
     await Promise.all([appConfigStore.refresh(), sttConfigStore.refresh()]);
     await loadConfig();
@@ -60,6 +66,8 @@ onUnmounted(() => {
 
 async function handleClose(): Promise<void> {
   showUpdateDialog.value = false;
+  // Не блокируем закрытие окна: flush может занять время (I/O), а закрытие должно быть мгновенным.
+  void settingsStore.flushMicrophoneSensitivityPersist();
   try {
     await invoke('show_recording_window');
   } catch {}

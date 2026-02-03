@@ -85,6 +85,11 @@ function onGetStarted(plan: { id: string }) {
           </div>
         </v-col>
       </v-row>
+
+      <p class="pricing-section__refund-note">
+        <v-icon size="16" class="pricing-section__refund-icon">mdi-shield-check-outline</v-icon>
+        {{ t("pricing.refundNote") }}
+      </p>
     </v-container>
   </section>
 </template>
@@ -355,6 +360,24 @@ function onGetStarted(plan: { id: string }) {
   box-shadow: 0 6px 30px rgba(139, 92, 246, 0.45);
   transform: translateY(-1px);
   background: linear-gradient(135deg, #7c3aed, #0891b2);
+}
+
+/* Refund note */
+.pricing-section__refund-note {
+  text-align: center;
+  margin-top: 32px;
+  font-size: 0.85rem;
+  opacity: 0.55;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  position: relative;
+  z-index: 1;
+}
+
+.pricing-section__refund-icon {
+  opacity: 0.7;
 }
 
 @keyframes fadeInUp {

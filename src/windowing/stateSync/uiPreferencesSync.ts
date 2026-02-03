@@ -23,6 +23,7 @@ import {
   UI_PREFS_MIGRATED_TO_RUST_KEY,
   UI_PREFS_THEME_KEY,
   UI_PREFS_LOCALE_KEY,
+  UI_PREFS_USE_SYSTEM_THEME_KEY,
   readUiPreferencesFromStorage,
 } from './uiPreferences';
 import { normalizeUiLocale, normalizeUiTheme } from '@/i18n.locales';
@@ -33,6 +34,7 @@ export interface CreateUiPreferencesSyncOptions {
 
   applyTheme: (theme: UiPreferencesSnapshotData['theme']) => void;
   applyLocale: (locale: UiPreferencesSnapshotData['locale']) => void;
+  applyUseSystemTheme: (useSystemTheme: UiPreferencesSnapshotData['use_system_theme']) => void;
 
   onError?: (ctx: { phase: string; error: unknown }) => void;
 }
@@ -40,7 +42,7 @@ export interface CreateUiPreferencesSyncOptions {
 export function createUiPreferencesSync(
   options: CreateUiPreferencesSyncOptions,
 ): RevisionSyncHandle {
-  const { listen, invoke, applyTheme, applyLocale, onError } = options;
+  const { listen, invoke, applyTheme, applyLocale, applyUseSystemTheme, onError } = options;
 
   return createTauriRevisionSync<UiPreferencesSnapshotData>({
     topic: TOPIC_UI_PREFERENCES,
@@ -53,6 +55,7 @@ export function createUiPreferencesSync(
         const data: UiPreferencesSnapshotData = {
           theme: normalizeUiTheme(snapshot.data.theme),
           locale: normalizeUiLocale(snapshot.data.locale),
+          use_system_theme: Boolean(snapshot.data.use_system_theme),
         };
 
         // Разовая миграция localStorage → Rust (один раз на устройство)
@@ -60,6 +63,7 @@ export function createUiPreferencesSync(
         if (!migrated) {
           const storedThemeRaw = localStorage.getItem(UI_PREFS_THEME_KEY);
           const storedLocaleRaw = localStorage.getItem(UI_PREFS_LOCALE_KEY);
+          const storedUseSystemThemeRaw = localStorage.getItem(UI_PREFS_USE_SYSTEM_THEME_KEY);
           const stored = readUiPreferencesFromStorage();
 
           // Мигрируем только если Rust на дефолтах —
@@ -67,18 +71,21 @@ export function createUiPreferencesSync(
           const rustIsDefault = data.theme === 'dark' && data.locale === 'ru';
           const hasLocalDiff =
             (storedThemeRaw && stored.theme !== data.theme) ||
-            (storedLocaleRaw && stored.locale !== data.locale);
+            (storedLocaleRaw && stored.locale !== data.locale) ||
+            (storedUseSystemThemeRaw && stored.useSystemTheme !== data.use_system_theme);
 
           if (rustIsDefault && hasLocalDiff) {
             // Применяем ЛОКАЛЬНЫЕ значения, а не дефолтный snapshot —
             // чтобы при ошибке invoke localStorage не потерялся
             applyTheme(stored.theme);
             applyLocale(stored.locale);
+            applyUseSystemTheme(stored.useSystemTheme);
 
             try {
               await invoke(CMD_UPDATE_UI_PREFERENCES, {
                 theme: stored.theme,
                 locale: stored.locale,
+                use_system_theme: stored.useSystemTheme,
               });
               localStorage.setItem(UI_PREFS_MIGRATED_TO_RUST_KEY, '1');
             } catch (err: unknown) {
@@ -94,6 +101,7 @@ export function createUiPreferencesSync(
         // Rust — source of truth
         applyTheme(data.theme);
         applyLocale(data.locale);
+        applyUseSystemTheme(data.use_system_theme);
       },
     },
     onError: (ctx) => {

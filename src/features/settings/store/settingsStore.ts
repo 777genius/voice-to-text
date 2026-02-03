@@ -10,6 +10,7 @@ import { isTauriAvailable } from '@/utils/tauri';
 import {
   bumpUiPrefsRevision,
   CMD_UPDATE_UI_PREFERENCES,
+  CMD_UPDATE_APP_CONFIG,
   readUiPreferencesFromStorage,
   writeUiPreferencesCacheToStorage,
 } from '@/windowing/stateSync';
@@ -27,11 +28,16 @@ export const useSettingsStore = defineStore('settings', () => {
   const theme = ref<AppTheme>(
     (localStorage.getItem('uiTheme') as AppTheme) ?? 'dark'
   );
+  const useSystemTheme = ref<boolean>(readUiPreferencesFromStorage().useSystemTheme);
   const recordingHotkey = ref('CmdOrCtrl+Shift+X');
   const microphoneSensitivity = ref(95);
   const selectedAudioDevice = ref('');
   const autoCopyToClipboard = ref(true);
   const autoPasteText = ref(false);
+
+  // Debounce для автосохранения чувствительности (иначе будем спамить invoke при перетаскивании слайдера)
+  let micSensitivityPersistTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastPersistedMicSensitivity: number | null = null;
 
   // Список доступных устройств
   const availableAudioDevices = ref<string[]>([]);
@@ -67,6 +73,7 @@ export const useSettingsStore = defineStore('settings', () => {
     assemblyaiApiKey: assemblyaiApiKey.value,
     whisperModel: whisperModel.value,
     theme: theme.value,
+    useSystemTheme: useSystemTheme.value,
     recordingHotkey: recordingHotkey.value,
     microphoneSensitivity: microphoneSensitivity.value,
     selectedAudioDevice: selectedAudioDevice.value,
@@ -122,6 +129,31 @@ export const useSettingsStore = defineStore('settings', () => {
         void invoke(CMD_UPDATE_UI_PREFERENCES, {
           theme: next,
           locale: normalizeUiLocale(localStorage.getItem('uiLocale')),
+          use_system_theme: readUiPreferencesFromStorage().useSystemTheme,
+        });
+      } catch {}
+    }
+  }
+
+  function setUseSystemTheme(value: boolean) {
+    const next = Boolean(value);
+    const changed = useSystemTheme.value !== next;
+    useSystemTheme.value = next;
+    if (changed) {
+      writeUiPreferencesCacheToStorage({
+        ...readUiPreferencesFromStorage(),
+        useSystemTheme: next,
+      });
+      if (!isTauriAvailable()) bumpUiPrefsRevision();
+    }
+
+    if (isTauriAvailable()) {
+      if (!changed) return;
+      try {
+        void invoke(CMD_UPDATE_UI_PREFERENCES, {
+          theme: normalizeUiTheme(localStorage.getItem('uiTheme')),
+          locale: normalizeUiLocale(localStorage.getItem('uiLocale')),
+          use_system_theme: next,
         });
       } catch {}
     }
@@ -131,8 +163,56 @@ export const useSettingsStore = defineStore('settings', () => {
     recordingHotkey.value = value;
   }
 
-  function setMicrophoneSensitivity(value: number) {
-    microphoneSensitivity.value = value;
+  function setMicrophoneSensitivity(value: number, opts?: { persist?: boolean }) {
+    const next = Math.max(0, Math.min(200, Math.round(value)));
+    microphoneSensitivity.value = next;
+
+    const shouldPersist = opts?.persist ?? true;
+    if (!shouldPersist) {
+      // Значение пришло из backend/sync — считаем его "уже сохранённым",
+      // чтобы flush при закрытии окна не дёргал update_app_config без реальных изменений.
+      lastPersistedMicSensitivity = next;
+      return;
+    }
+    if (!isTauriAvailable()) return;
+
+    if (micSensitivityPersistTimer) {
+      clearTimeout(micSensitivityPersistTimer);
+      micSensitivityPersistTimer = null;
+    }
+
+    micSensitivityPersistTimer = setTimeout(() => {
+      // Защита от лишних вызовов: если уже отправляли это значение — не дёргаем бэкенд.
+      if (lastPersistedMicSensitivity === microphoneSensitivity.value) return;
+
+      try {
+        void invoke(CMD_UPDATE_APP_CONFIG, {
+          // Tauri command args ожидают camelCase (Rust: microphone_sensitivity)
+          microphoneSensitivity: microphoneSensitivity.value,
+        });
+        lastPersistedMicSensitivity = microphoneSensitivity.value;
+      } catch {}
+    }, 250);
+  }
+
+  async function flushMicrophoneSensitivityPersist(): Promise<void> {
+    if (!isTauriAvailable()) return;
+    if (micSensitivityPersistTimer) {
+      clearTimeout(micSensitivityPersistTimer);
+      micSensitivityPersistTimer = null;
+    }
+
+    const next = Math.max(0, Math.min(200, Math.round(microphoneSensitivity.value)));
+    microphoneSensitivity.value = next;
+    if (lastPersistedMicSensitivity === next) return;
+
+    try {
+      // Tauri command args ожидают camelCase (Rust: microphone_sensitivity)
+      await invoke(CMD_UPDATE_APP_CONFIG, { microphoneSensitivity: next });
+      lastPersistedMicSensitivity = next;
+    } catch {
+      // Тут намеренно молчим: пользователь закрывает окно, не надо мешать UX.
+    }
   }
 
   function setSelectedAudioDevice(value: string) {
@@ -187,6 +267,7 @@ export const useSettingsStore = defineStore('settings', () => {
       assemblyaiApiKey.value = state.assemblyaiApiKey;
     if (state.whisperModel !== undefined) whisperModel.value = state.whisperModel;
     if (state.theme !== undefined) setTheme(state.theme);
+    if (state.useSystemTheme !== undefined) setUseSystemTheme(state.useSystemTheme);
     if (state.recordingHotkey !== undefined)
       recordingHotkey.value = state.recordingHotkey;
     if (state.microphoneSensitivity !== undefined)
@@ -207,6 +288,7 @@ export const useSettingsStore = defineStore('settings', () => {
     assemblyaiApiKey,
     whisperModel,
     theme,
+    useSystemTheme,
     recordingHotkey,
     microphoneSensitivity,
     selectedAudioDevice,
@@ -231,8 +313,10 @@ export const useSettingsStore = defineStore('settings', () => {
     setAssemblyaiApiKey,
     setWhisperModel,
     setTheme,
+    setUseSystemTheme,
     setRecordingHotkey,
     setMicrophoneSensitivity,
+    flushMicrophoneSensitivityPersist,
     setSelectedAudioDevice,
     setAutoCopyToClipboard,
     setAutoPasteText,

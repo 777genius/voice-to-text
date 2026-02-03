@@ -5,11 +5,22 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
 <template>
   <v-container class="section legal-page">
     <h1 class="text-h4 section-title">Terms of Service</h1>
-    <p class="text-body-2 legal-updated">Last updated: February 1, 2025</p>
+    <p class="text-body-2 legal-updated">Last updated: February 2, 2026</p>
 
     <div class="legal-content">
       <section class="legal-section">
-        <h2 class="text-h6">1. Acceptance of Terms</h2>
+        <h2 class="text-h6">1. About VoicetextAI</h2>
+        <p>
+          VoicetextAI is developed and operated by Iliya Zelenko ("Developer", "we", "us").
+          All payments are processed by
+          <a href="https://www.paddle.com" target="_blank" rel="noopener">Paddle.com</a>,
+          which acts as the Merchant of Record for all transactions. Your purchase is also governed by
+          <a href="https://www.paddle.com/legal/checkout-buyer-terms" target="_blank" rel="noopener">Paddle's Buyer Terms</a>.
+        </p>
+      </section>
+
+      <section class="legal-section">
+        <h2 class="text-h6">2. Acceptance of Terms</h2>
         <p>
           By accessing or using VoicetextAI (the "Service"), you agree to be bound by these Terms
           of Service ("Terms"). If you do not agree to these Terms, do not use the Service.
@@ -22,7 +33,7 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
       </section>
 
       <section class="legal-section">
-        <h2 class="text-h6">2. Description of Service</h2>
+        <h2 class="text-h6">3. Description of Service</h2>
         <p>
           VoicetextAI is a desktop application that provides real-time voice-to-text transcription
           powered by Deepgram Nova-3. Key features include:
@@ -37,7 +48,7 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
       </section>
 
       <section class="legal-section">
-        <h2 class="text-h6">3. User Accounts</h2>
+        <h2 class="text-h6">4. User Accounts</h2>
         <p>
           To access certain features of the Service, you may need to create an account. You are
           responsible for:
@@ -57,7 +68,7 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
       </section>
 
       <section class="legal-section">
-        <h2 class="text-h6">4. Acceptable Use</h2>
+        <h2 class="text-h6">5. Acceptable Use</h2>
         <p>You agree not to use the Service to:</p>
         <ul>
           <li>Violate any applicable laws or regulations</li>
@@ -76,7 +87,7 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
       </section>
 
       <section class="legal-section">
-        <h2 class="text-h6">5. Third-Party Services</h2>
+        <h2 class="text-h6">6. Third-Party Services</h2>
         <p>
           The Service uses Deepgram as a third-party speech-to-text provider. Your use of this
           provider is subject to their terms of service and privacy policy. We are not
@@ -85,10 +96,11 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
       </section>
 
       <section class="legal-section">
-        <h2 class="text-h6">6. Payments and Subscriptions</h2>
+        <h2 class="text-h6">7. Payments and Subscriptions</h2>
         <p>
-          Certain features of the Service may require a paid subscription. By subscribing, you agree
-          to the following:
+          Certain features of the Service may require a paid subscription. All billing and payment
+          processing is handled by Paddle as Merchant of Record. By subscribing, you agree to the
+          following:
         </p>
         <ul>
           <li>
@@ -100,12 +112,9 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
             takes effect at the end of the current billing period.
           </li>
           <li>
-            <strong>Refunds:</strong> Refund requests are handled on a case-by-case basis. Please
-            review our
-            <a href="/refund-policy">Refund Policy</a>
-            and contact us at
-            <a href="mailto:iliyazelenkog@gmail.com">iliyazelenkog@gmail.com</a>
-            for refund inquiries.
+            <strong>Refunds:</strong> You may request a full refund within 14 days of your purchase
+            or renewal date, for any reason. Refunds are processed by Paddle. Please review our
+            <a href="/refund-policy">Refund Policy</a> for details.
           </li>
           <li>
             <strong>Price Changes:</strong> We may change subscription prices with at least 30 days'
@@ -116,7 +125,7 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
       </section>
 
       <section class="legal-section">
-        <h2 class="text-h6">7. Intellectual Property</h2>
+        <h2 class="text-h6">8. Intellectual Property</h2>
         <p>
           The Service, including its design, code, graphics, logos, and trademarks, is the property
           of VoicetextAI and is protected by intellectual property laws. You are granted a limited,
@@ -129,7 +138,7 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
       </section>
 
       <section class="legal-section">
-        <h2 class="text-h6">8. Privacy</h2>
+        <h2 class="text-h6">9. Privacy</h2>
         <p>
           Your use of the Service is also governed by our
           <a href="/privacy-policy">Privacy Policy</a>, which is incorporated into these Terms by
@@ -138,7 +147,7 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
       </section>
 
       <section class="legal-section">
-        <h2 class="text-h6">9. Disclaimer of Warranties</h2>
+        <h2 class="text-h6">10. Disclaimer of Warranties</h2>
         <p>
           THE SERVICE IS PROVIDED "AS IS" AND "AS AVAILABLE" WITHOUT WARRANTIES OF ANY KIND, WHETHER
           EXPRESS, IMPLIED, OR STATUTORY. WE DISCLAIM ALL WARRANTIES, INCLUDING BUT NOT LIMITED TO
@@ -153,7 +162,7 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
       </section>
 
       <section class="legal-section">
-        <h2 class="text-h6">10. Limitation of Liability</h2>
+        <h2 class="text-h6">11. Limitation of Liability</h2>
         <p>
           TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL VOICETEXTAI, ITS
           OFFICERS, DIRECTORS, EMPLOYEES, OR AGENTS BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL,
@@ -170,7 +179,7 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
       </section>
 
       <section class="legal-section">
-        <h2 class="text-h6">11. Indemnification</h2>
+        <h2 class="text-h6">12. Indemnification</h2>
         <p>
           You agree to indemnify and hold harmless VoicetextAI and its affiliates, officers,
           agents, and employees from any claim, liability, damage, loss, or expense (including
@@ -180,7 +189,7 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
       </section>
 
       <section class="legal-section">
-        <h2 class="text-h6">12. Governing Law</h2>
+        <h2 class="text-h6">13. Governing Law</h2>
         <p>
           These Terms shall be governed by and construed in accordance with the laws of the State of
           Delaware, United States, without regard to its conflict of law provisions. Any disputes
@@ -189,7 +198,7 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
       </section>
 
       <section class="legal-section">
-        <h2 class="text-h6">13. Termination</h2>
+        <h2 class="text-h6">14. Termination</h2>
         <p>
           We may terminate or suspend your access to the Service at any time, with or without cause,
           with or without notice. Upon termination, your right to use the Service ceases immediately.
@@ -199,7 +208,7 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
       </section>
 
       <section class="legal-section">
-        <h2 class="text-h6">14. Severability</h2>
+        <h2 class="text-h6">15. Severability</h2>
         <p>
           If any provision of these Terms is found to be unenforceable or invalid, that provision
           shall be limited or eliminated to the minimum extent necessary so that the remaining Terms
@@ -208,7 +217,7 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
       </section>
 
       <section class="legal-section">
-        <h2 class="text-h6">15. Contact Us</h2>
+        <h2 class="text-h6">16. Contact Us</h2>
         <p>
           If you have questions about these Terms of Service, please contact us at:
         </p>

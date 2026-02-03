@@ -3,13 +3,13 @@
  * Инкапсулирует загрузку, сохранение и валидацию конфигурации
  */
 
-import { computed } from 'vue';
+import { computed, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { SttProviderType } from '@/types';
 import { invoke } from '@tauri-apps/api/core';
 import { isTauriAvailable } from '@/utils/tauri';
-import { bumpUiPrefsRevision, CMD_UPDATE_UI_PREFERENCES } from '@/windowing/stateSync';
-import { normalizeUiLocale } from '@/i18n.locales';
+import { bumpUiPrefsRevision, CMD_UPDATE_UI_PREFERENCES, readUiPreferencesFromStorage } from '@/windowing/stateSync';
+import { sttLangToUiLocale, normalizeSttLanguage } from '@/i18n.locales';
 import { useSettingsStore } from '../../store/settingsStore';
 import { tauriSettingsService } from '../../infrastructure/adapters/TauriSettingsService';
 import { useAppConfigStore } from '@/stores/appConfig';
@@ -88,22 +88,24 @@ export function useSettings() {
         const sttConfigStoreInstance = useSttConfigStore();
         const appConfigStoreInstance = useAppConfigStore();
 
-        // Язык UI: localStorage имеет приоритет
-        const storedLocale = normalizeUiLocale(localStorage.getItem('uiLocale'));
-        locale.value = storedLocale;
-        localStorage.setItem('uiLocale', storedLocale);
+        // STT-язык: берём из localStorage (сохранённый ранее) или дефолт
+        const storedSttLang = normalizeSttLanguage(localStorage.getItem('sttLanguage') || localStorage.getItem('uiLocale'));
+        const uiLocale = sttLangToUiLocale(storedSttLang);
+        locale.value = uiLocale;
+        localStorage.setItem('uiLocale', uiLocale);
+        localStorage.setItem('sttLanguage', storedSttLang);
 
         store.setProvider(SttProviderType.Backend);
-        store.setLanguage(storedLocale);
+        store.setLanguage(storedSttLang);
 
         if (appConfigStoreInstance.isLoaded) {
-          store.setMicrophoneSensitivity(appConfigStoreInstance.microphoneSensitivity);
+          store.setMicrophoneSensitivity(appConfigStoreInstance.microphoneSensitivity, { persist: false });
           store.setRecordingHotkey(appConfigStoreInstance.recordingHotkey);
           store.setAutoCopyToClipboard(appConfigStoreInstance.autoCopyToClipboard);
           store.setAutoPasteText(appConfigStoreInstance.autoPasteText);
           store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
         } else {
-          store.setMicrophoneSensitivity(95);
+          store.setMicrophoneSensitivity(95, { persist: false });
           store.setRecordingHotkey('CmdOrCtrl+Shift+X');
           store.setAutoCopyToClipboard(true);
           store.setAutoPasteText(false);
@@ -120,10 +122,12 @@ export function useSettings() {
 
         // Если sttConfig store уже загружен (например, в тестах) — можно синхронизировать
         if (sttConfigStoreInstance.isLoaded) {
-          const next = normalizeUiLocale(sttConfigStoreInstance.language);
-          store.setLanguage(next);
-          locale.value = next;
-          localStorage.setItem('uiLocale', next);
+          const sttLang = normalizeSttLanguage(sttConfigStoreInstance.language);
+          store.setLanguage(sttLang);
+          const fallbackLocale = sttLangToUiLocale(sttLang);
+          locale.value = fallbackLocale;
+          localStorage.setItem('uiLocale', fallbackLocale);
+          localStorage.setItem('sttLanguage', sttLang);
         }
 
         return;
@@ -143,25 +147,18 @@ export function useSettings() {
       store.setDeepgramApiKey('');
       store.setAssemblyaiApiKey('');
 
-      // Синхронизируем локаль UI: localStorage имеет приоритет
-      // (пользователь мог выбрать язык на экране входа до загрузки конфига)
-      const storedLocale = localStorage.getItem('uiLocale');
-      if (storedLocale) {
-        const next = normalizeUiLocale(storedLocale);
-        locale.value = next;
-        store.setLanguage(next);
-        if (storedLocale !== next) localStorage.setItem('uiLocale', next);
-      } else {
-        const next = normalizeUiLocale(store.language);
-        locale.value = next;
-        store.setLanguage(next);
-        localStorage.setItem('uiLocale', next);
-      }
+      // Синхронизируем UI-локаль: STT-язык из store.language маппим на UI-локаль
+      const sttLang = normalizeSttLanguage(store.language);
+      store.setLanguage(sttLang);
+      const uiLocale = sttLangToUiLocale(sttLang);
+      locale.value = uiLocale;
+      localStorage.setItem('uiLocale', uiLocale);
+      localStorage.setItem('sttLanguage', sttLang);
 
       // Загружаем App конфиг — из sync store если уже загружен, иначе invoke
       const appConfigStoreInstance = useAppConfigStore();
       if (appConfigStoreInstance.isLoaded) {
-        store.setMicrophoneSensitivity(appConfigStoreInstance.microphoneSensitivity);
+        store.setMicrophoneSensitivity(appConfigStoreInstance.microphoneSensitivity, { persist: false });
         store.setRecordingHotkey(appConfigStoreInstance.recordingHotkey);
         store.setAutoCopyToClipboard(appConfigStoreInstance.autoCopyToClipboard);
         store.setAutoPasteText(appConfigStoreInstance.autoPasteText);
@@ -169,7 +166,7 @@ export function useSettings() {
       } else {
         try {
           const appConfig = await tauriSettingsService.getAppConfig();
-          store.setMicrophoneSensitivity(appConfig.microphone_sensitivity ?? 95);
+          store.setMicrophoneSensitivity(appConfig.microphone_sensitivity ?? 95, { persist: false });
           store.setRecordingHotkey(appConfig.recording_hotkey ?? 'CmdOrCtrl+Shift+X');
           store.setAutoCopyToClipboard(appConfig.auto_copy_to_clipboard ?? true);
           store.setAutoPasteText(appConfig.auto_paste_text ?? false);
@@ -213,6 +210,10 @@ export function useSettings() {
     store.clearError();
 
     try {
+      // Важно: даём Vue применить последние изменения из v-model (например, если пользователь
+      // только что отпустил слайдер и сразу нажал "Сохранить").
+      await nextTick();
+
       // Сохраняем STT конфиг
       const sttConfigData: SttConfigData = {
         // Выбор провайдера выключен: всегда Backend
@@ -226,13 +227,39 @@ export function useSettings() {
       await tauriSettingsService.updateSttConfig(sttConfigData);
 
       // Сохраняем App конфиг
+      // Отдельно сохраняем чувствительность: это критично для UX, и так мы избегаем
+      // любых странностей сериализации/комбинации полей в одном invoke.
       await tauriSettingsService.updateAppConfig({
         microphone_sensitivity: store.microphoneSensitivity,
+      });
+
+      // Остальные поля можно сохранить вторым вызовом.
+      await tauriSettingsService.updateAppConfig({
         recording_hotkey: store.recordingHotkey,
         auto_copy_to_clipboard: store.autoCopyToClipboard,
         auto_paste_text: store.autoPasteText,
         selected_audio_device: store.selectedAudioDevice,
       });
+
+      // Жёсткая проверка: иногда UI может думать что сохранили, но по факту snapshot остался старым.
+      // Такое лучше ловить сразу, иначе пользователь видит "сохранилось", а при следующем открытии снова 95.
+      try {
+        const snap1 = await tauriSettingsService.getAppConfig();
+        if (snap1.microphone_sensitivity !== store.microphoneSensitivity) {
+          // Повторяем только sensitivity — минимальный безопасный ретрай.
+          await tauriSettingsService.updateAppConfig({
+            microphone_sensitivity: store.microphoneSensitivity,
+          });
+          const snap2 = await tauriSettingsService.getAppConfig();
+          if (snap2.microphone_sensitivity !== store.microphoneSensitivity) {
+            throw new Error(
+              `Чувствительность не сохранилась: ожидали ${store.microphoneSensitivity}, получили ${snap2.microphone_sensitivity}`,
+            );
+          }
+        }
+      } catch (verifyErr) {
+        throw verifyErr;
+      }
 
       store.setSaveStatus('success');
       return true;
@@ -266,25 +293,29 @@ export function useSettings() {
   }
 
   /**
-   * Синхронизировать локаль UI с выбранным языком
-   * Вызывается вручную когда нужно применить изменения
+   * Синхронизировать локаль UI с выбранным STT-языком.
+   * STT-язык (store.language) отправляется в бэкенд как есть,
+   * а UI переключается на ближайшую поддерживаемую локаль (fallback).
+   * Например: ja → en, uk → uk, be → ru
    */
   function syncLocale(): void {
-    const next = normalizeUiLocale(store.language);
+    const uiLocale = sttLangToUiLocale(store.language);
     const prev = localStorage.getItem('uiLocale');
 
-    locale.value = next;
-    if (prev !== next) {
-      localStorage.setItem('uiLocale', next);
+    locale.value = uiLocale;
+    localStorage.setItem('sttLanguage', store.language);
+    if (prev !== uiLocale) {
+      localStorage.setItem('uiLocale', uiLocale);
     }
-    if (!isTauriAvailable() && prev !== next) bumpUiPrefsRevision();
+    if (!isTauriAvailable() && prev !== uiLocale) bumpUiPrefsRevision();
 
     // Синхронизация через state-sync: сохраняем в Rust и уведомляем другие окна
     if (isTauriAvailable()) {
       try {
         void invoke(CMD_UPDATE_UI_PREFERENCES, {
           theme: localStorage.getItem('uiTheme') || 'dark',
-          locale: next,
+          locale: uiLocale,
+          use_system_theme: readUiPreferencesFromStorage().useSystemTheme,
         });
       } catch {}
     }

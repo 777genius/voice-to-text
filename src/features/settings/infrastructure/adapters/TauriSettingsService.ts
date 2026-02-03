@@ -49,13 +49,29 @@ class TauriSettingsService {
   }
 
   async updateAppConfig(config: Partial<AppConfigData>): Promise<void> {
-    await invoke(CMD_UPDATE_APP_CONFIG, {
-      microphone_sensitivity: config.microphone_sensitivity,
-      recording_hotkey: config.recording_hotkey,
-      auto_copy_to_clipboard: config.auto_copy_to_clipboard,
-      auto_paste_text: config.auto_paste_text,
-      selected_audio_device: config.selected_audio_device,
-    });
+    // Важно: не отправляем undefined в invoke — в разных рантаймах это может вести себя по-разному.
+    // Шлём только реально заданные поля.
+    const args: Record<string, unknown> = {};
+
+    // В Tauri args для команд ожидаются в camelCase.
+    // Rust параметры при этом остаются в snake_case (Tauri сам мапит имена).
+    if (typeof config.microphone_sensitivity === 'number') {
+      args.microphoneSensitivity = Math.round(config.microphone_sensitivity);
+    }
+    if (typeof config.recording_hotkey === 'string') {
+      args.recordingHotkey = config.recording_hotkey;
+    }
+    if (typeof config.auto_copy_to_clipboard === 'boolean') {
+      args.autoCopyToClipboard = config.auto_copy_to_clipboard;
+    }
+    if (typeof config.auto_paste_text === 'boolean') {
+      args.autoPasteText = config.auto_paste_text;
+    }
+    if (typeof config.selected_audio_device === 'string' || config.selected_audio_device === null) {
+      args.selectedAudioDevice = config.selected_audio_device;
+    }
+
+    await invoke(CMD_UPDATE_APP_CONFIG, args);
   }
 
   // Аудио устройства

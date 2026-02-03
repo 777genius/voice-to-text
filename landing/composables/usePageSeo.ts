@@ -1,5 +1,7 @@
 import { computed } from "vue";
 import { supportedLocales, defaultLocale } from "~/data/i18n";
+import { getContent } from "~/data/content";
+import type { LocaleCode } from "~/data/i18n";
 import ogImage from "~/assets/images/screenshots/light.svg";
 
 type PageSeoImage = {
@@ -90,10 +92,20 @@ export const usePageSeo = (titleKey: string, descriptionKey: string, options: Pa
         "@type": "WebSite",
         name: siteName,
         url: siteUrl
+      },
+      {
+        "@context": "https://schema.org",
+        "@type": "Organization",
+        name: siteName,
+        url: siteUrl,
+        logo: `${siteUrl}/favicon.ico`,
+        sameAs: [
+          `https://github.com/${config.public.githubRepo}`
+        ]
       }
     ];
 
-    // Для главной и страницы скачивания добавим более “вкусную” разметку.
+    // Для главной и страницы скачивания добавим более "вкусную" разметку.
     const isDownload = canonicalPath.value.endsWith("/download");
     const isHome = canonicalPath.value === "/";
     if (isHome || isDownload) {
@@ -114,14 +126,36 @@ export const usePageSeo = (titleKey: string, descriptionKey: string, options: Pa
       });
     }
 
+    // FAQ rich snippets — Google показывает их прямо в выдаче
+    if (isHome) {
+      const content = getContent(locale.value as LocaleCode);
+      if (content.faq?.length) {
+        jsonLd.push({
+          "@context": "https://schema.org",
+          "@type": "FAQPage",
+          mainEntity: content.faq.map((item) => ({
+            "@type": "Question",
+            name: item.question,
+            acceptedAnswer: {
+              "@type": "Answer",
+              // HTML-теги из ответа убираем для JSON-LD
+              text: item.answer.replace(/<[^>]*>/g, "")
+            }
+          }))
+        });
+      }
+    }
+
     return {
       htmlAttrs: { lang: locale.value || "en" },
       link: links,
       meta: [
+        { name: "author", content: "iliyazelenkog@gmail.com" },
         { name: "application-name", content: siteName },
         { name: "apple-mobile-web-app-title", content: siteName },
         { name: "format-detection", content: "telephone=no" },
-        { name: "theme-color", content: "#6366f1" }
+        { name: "theme-color", content: "#6366f1" },
+        { name: "keywords", content: "voice to text, speech recognition, transcription, deepgram, desktop app, free, open source, real-time" }
       ],
       script: jsonLd.map((item) => ({
         type: "application/ld+json",

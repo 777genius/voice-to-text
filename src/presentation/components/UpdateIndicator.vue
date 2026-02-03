@@ -11,28 +11,33 @@ const updateStore = useUpdateStore();
 </script>
 
 <template>
-  <v-chip
+  <v-btn
     v-if="updateStore.availableVersion"
     color="success"
     variant="flat"
-    size="small"
-    prepend-icon="mdi-arrow-up-circle"
+    size="x-small"
+    :title="t('settings.updates.badgeAvailable')"
     class="update-indicator no-drag"
     @click="$emit('click')"
   >
+    <v-icon size="14" class="update-indicator__icon">mdi-arrow-up-circle</v-icon>
     {{ t('settings.updates.indicator') }}
-  </v-chip>
+  </v-btn>
 </template>
 
 <style scoped>
 .update-indicator {
   cursor: pointer;
-  font-weight: 500;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  font-weight: 600;
+  min-width: 0;
+  padding-inline: 6px;
+  letter-spacing: 0.2px;
+  text-transform: none;
+  font-size: 11px;
+  min-height: 18px;
 }
 
-.update-indicator:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(76, 175, 80, 0.3);
+.update-indicator__icon {
+  margin-right: 4px;
 }
 </style>
