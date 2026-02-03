@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { listen, type UnlistenFn, emit } from '@tauri-apps/api/event';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { LogicalSize } from '@tauri-apps/api/dpi';
@@ -10,7 +10,6 @@ import { useTranscriptionStore } from '../../stores/transcription';
 import { useAppConfigStore } from '../../stores/appConfig';
 import { useSttConfigStore } from '../../stores/sttConfig';
 import { useAuthStore } from '../../features/auth/store/authStore';
-import { useUpdateStore } from '../../stores/update';
 import { SettingsPanel } from '../../features/settings';
 import ProfilePopover from './ProfilePopover.vue';
 import UpdateIndicator from './UpdateIndicator.vue';
@@ -18,7 +17,6 @@ import UpdateDialog from './UpdateDialog.vue';
 import AudioVisualizer from './AudioVisualizer.vue';
 import { playShowSound, playDoneSound } from '../../utils/sound';
 import { isTauriAvailable } from '../../utils/tauri';
-import { EVENT_SETTINGS_FOCUS_UPDATES } from '@/types';
 import { EVENT_RECORDING_WINDOW_SHOWN } from '@/types';
 
 // Простая поддержка перетаскивания мышью по шапке
@@ -42,7 +40,6 @@ const store = useTranscriptionStore();
 const appConfigStore = useAppConfigStore();
 const sttConfigStore = useSttConfigStore();
 const authStore = useAuthStore();
-const updateStore = useUpdateStore();
 const { t } = useI18n();
 const showSettings = ref(false);
 const showProfile = ref(false);
@@ -274,29 +271,6 @@ const openSettings = () => {
   showSettings.value = true;
 };
 
-const openUpdatesInSettings = async () => {
-  // Fallback: если settings окно ещё не успело повесить listener — оно заберёт фокус из localStorage.
-  try {
-    localStorage.setItem('settings:pending-focus', JSON.stringify({ target: 'updates', ts: Date.now() }));
-  } catch {}
-
-  if (isTauriAvailable()) {
-    try {
-      await invoke('show_settings_window');
-    } catch {}
-
-    // Если окно уже поднято — отработает сразу (без повторной проверки обновлений).
-    try {
-      void emit(EVENT_SETTINGS_FOCUS_UPDATES, { ts: Date.now() });
-    } catch {}
-
-    return;
-  }
-
-  // Web fallback: откроем модалку, секция сама подхватит pending-focus.
-  showSettings.value = true;
-};
-
 const openProfile = () => {
   showProfile.value = true;
 };
@@ -329,19 +303,9 @@ const minimizeWindow = async () => {
         <div class="title-row">
           <div class="title">{{ t('app.title') }}</div>
           <span v-if="appVersion" class="app-version">{{ appVersion }}</span>
-          <v-chip
-            v-if="updateStore.availableVersion"
-            class="update-badge no-drag"
-            color="success"
-            size="x-small"
-            variant="flat"
-            @click="openUpdatesInSettings"
-          >
-            {{ t('settings.updates.badgeAvailable') }}
-          </v-chip>
+          <UpdateIndicator class="no-drag" @click="showUpdateDialog = true" />
         </div>
         <div class="header-right">
-          <UpdateIndicator @click="showUpdateDialog = true" />
           <button class="minimize-button no-drag" @click="minimizeWindow" :title="t('main.minimize')">
             <span class="mdi mdi-window-minimize"></span>
           </button>
@@ -929,10 +893,5 @@ const minimizeWindow = async () => {
   align-items: center;
   gap: 4px;
   min-width: 0;
-}
-
-.update-badge {
-  flex-shrink: 0;
-  font-weight: 600;
 }
 </style>

@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getVersion } from '@tauri-apps/api/app';
 import { useUpdateStore } from '../stores/update';
 import { isTauriAvailable } from '@/utils/tauri';
+import { loadUpdateNotesFromChangelog } from '@/utils/changelog';
 import {
   EVENT_UPDATE_AVAILABLE,
   EVENT_UPDATE_DOWNLOAD_PROGRESS,
@@ -22,6 +23,16 @@ let unlistenUpdateInstalling: UnlistenFn | null = null;
 // Единый источник логики обновлений для всех компонентов (DRY)
 export function useUpdater() {
   const store = useUpdateStore();
+
+  async function resolveUpdateNotes(version: string, fallbackBody?: string): Promise<string | undefined> {
+    try {
+      const notes = await loadUpdateNotesFromChangelog(version);
+      if (notes) return notes;
+    } catch (err) {
+      console.warn('Failed to load update notes from changelog:', err);
+    }
+    return fallbackBody?.trim() ? fallbackBody : undefined;
+  }
 
   async function loadCurrentVersion(): Promise<string | null> {
     if (!isTauriAvailable()) {
@@ -54,7 +65,8 @@ export function useUpdater() {
       const update = await invoke<AppUpdateInfo | null>('check_for_updates');
 
       if (update) {
-        store.setAvailableUpdate(update.version, update.body);
+        const notes = await resolveUpdateNotes(update.version, update.body);
+        store.setAvailableUpdate(update.version, notes);
         return update.version;
       } else {
         store.setLatest(true);
@@ -103,7 +115,15 @@ export function useUpdater() {
     try {
       unlistenUpdateAvailable = await listen<AppUpdateInfo>(EVENT_UPDATE_AVAILABLE, (event) => {
         console.log('Update available event received:', event.payload);
-        store.setAvailableUpdate(event.payload.version, event.payload.body);
+        // Сразу фиксируем факт обновления, а "что нового" подтягиваем отдельно.
+        // Так мы не показываем пользователю мусор из GitHub Release, если он откроет диалог мгновенно.
+        store.setAvailableUpdate(event.payload.version);
+        void (async () => {
+          const notes = await resolveUpdateNotes(event.payload.version, event.payload.body);
+          if (notes !== store.releaseNotes) {
+            store.setAvailableUpdate(event.payload.version, notes);
+          }
+        })();
       });
 
       unlistenUpdateDownloadStarted = await listen<{ version: string }>(

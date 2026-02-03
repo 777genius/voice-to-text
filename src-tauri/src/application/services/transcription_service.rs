@@ -7,6 +7,7 @@ use crate::domain::{
     ErrorCallback, RecordingStatus, SttConfig, SttError, SttProvider,
     SttProviderFactory, TranscriptionCallback,
 };
+
 use crate::application::AudioSpectrumAnalyzer;
 
 type Result<T> = anyhow::Result<T>;
@@ -140,7 +141,7 @@ impl TranscriptionService {
                     // Важно: статус откатываем СИНХРОННО. Иначе возможен race:
                     // UI уже увидел Starting, но хоткей/команды будут думать что всё ещё Starting и игнорировать toggle.
                     *self.status.write().await = RecordingStatus::Idle;
-                    return Err(anyhow::anyhow!("Failed to create STT provider: {}", e));
+                    return Err(anyhow::Error::new(e).context("Failed to create STT provider"));
                 }
             };
 
@@ -148,7 +149,7 @@ impl TranscriptionService {
                     log::error!("Failed to initialize STT provider: {}", e);
                 *self.status.write().await = RecordingStatus::Idle;
                 let _ = provider.abort().await;
-                return Err(anyhow::anyhow!("Failed to initialize STT provider: {}", e));
+                return Err(anyhow::Error::new(e).context("Failed to initialize STT provider"));
             }
 
             if let Err(e) = provider
@@ -162,7 +163,7 @@ impl TranscriptionService {
             {
                 *self.status.write().await = RecordingStatus::Idle;
                 let _ = provider.abort().await;
-                return Err(anyhow::anyhow!("Failed to start STT stream: {}", e));
+                return Err(anyhow::Error::new(e).context("Failed to start STT stream"));
             }
 
             *self.stt_provider.write().await = Some(provider);
@@ -306,10 +307,9 @@ impl TranscriptionService {
                 // Лучше остановить запись и показать ошибку, чем молча "писать" в пустоту.
                 if provider_guard.is_none() {
                     drop(provider_guard);
-                    on_error_for_processor(
+                    on_error_for_processor(SttError::Processing(
                         "STT provider is not available (stream not active)".to_string(),
-                        "processing".to_string(),
-                    );
+                    ));
                     if last_quality != Some("Poor") {
                         on_connection_quality_for_processor(
                             "Poor".to_string(),
@@ -359,39 +359,24 @@ impl TranscriptionService {
                         }
                         }
                         Err(e) => {
-                            let error_msg = e.to_string();
-
-                            // Определяем тип ошибки и критичность
-                        let (error_type, is_critical) = match &e {
-                            SttError::Authentication(_) => ("authentication", true),
-                            SttError::Configuration(_) => ("configuration", true),
-                            SttError::Connection(msg) => {
-                                let lower = msg.to_lowercase();
-                                if lower.contains("timeout") || lower.contains("timed out") {
-                                    ("timeout", false)
-                                } else {
-                                    ("connection", false)
+                            // Определяем тип ошибки и критичность по ТИПУ, а не по парсингу строки.
+                            let (error_type, is_critical) = match &e {
+                                SttError::Authentication(_) => ("authentication", true),
+                                SttError::Configuration(_) => ("configuration", true),
+                                SttError::Connection(conn) => {
+                                    if conn.details.category == Some(crate::domain::SttConnectionCategory::Timeout) {
+                                        ("timeout", false)
+                                    } else {
+                                        ("connection", false)
+                                    }
                                 }
-                            }
-                            SttError::Processing(msg) | SttError::Internal(msg) => {
-                                let lower = msg.to_lowercase();
-                                if lower.contains("timeout") || lower.contains("timed out") {
-                                    ("timeout", false)
-                                } else if lower.contains("websocket")
-                                    || lower.contains("handshake")
-                                    || lower.contains("connection")
-                                {
-                                ("connection", false)
-                            } else {
-                                ("processing", false)
-                                }
-                            }
-                            SttError::Unsupported(_) => ("processing", true),
+                                SttError::Processing(_) | SttError::Internal(_) => ("processing", false),
+                                SttError::Unsupported(_) => ("processing", true),
                             };
 
                             if is_critical {
-                                log::error!("STT critical error ({}): {}", error_type, error_msg);
-                                on_error_for_processor(error_msg.clone(), error_type.to_string());
+                                log::error!("STT critical error ({}): {}", error_type, e);
+                                on_error_for_processor(e.clone());
                             on_connection_quality_for_processor(
                                 "Poor".to_string(),
                                 Some("Критическая ошибка соединения".to_string()),
@@ -419,7 +404,7 @@ impl TranscriptionService {
                             log::warn!(
                                 "STT temporary error ({}): {} - continuing ({}/{})",
                                 error_type,
-                                error_msg,
+                                e,
                                 consecutive_errors,
                                 MAX_CONSECUTIVE_ERRORS
                             );
@@ -431,7 +416,7 @@ impl TranscriptionService {
                                 "Too many consecutive errors ({}), stopping recording to avoid stuck state",
                                 consecutive_errors
                             );
-                            on_error_for_processor(error_msg.clone(), error_type.to_string());
+                            on_error_for_processor(e.clone());
                             on_connection_quality_for_processor(
                                 "Poor".to_string(),
                                 Some("Соединение нестабильно, запись остановлена".to_string()),
@@ -453,7 +438,7 @@ impl TranscriptionService {
                         if consecutive_errors == 1 && last_quality != Some("Poor") {
                             on_connection_quality_for_processor(
                                 "Poor".to_string(),
-                                Some(format!("{}: {}", error_type, error_msg)),
+                                Some(format!("{}: {}", error_type, e)),
                             );
                             last_quality = Some("Poor");
                         }

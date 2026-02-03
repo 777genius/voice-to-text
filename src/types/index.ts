@@ -48,6 +48,26 @@ export interface TranscriptionErrorPayload {
   session_id: number;
   error: string;
   error_type: 'connection' | 'configuration' | 'processing' | 'timeout' | 'authentication';
+  error_details?: TranscriptionErrorDetailsPayload;
+}
+
+export interface TranscriptionErrorDetailsPayload {
+  category?:
+    | 'offline'
+    | 'dns'
+    | 'tls'
+    | 'refused'
+    | 'reset'
+    | 'timeout'
+    | 'http'
+    | 'server_unavailable'
+    | 'closed'
+    | 'unknown';
+  httpStatus?: number;
+  wsCloseCode?: number;
+  ioErrorKind?: string;
+  osError?: number;
+  serverCode?: string;
 }
 
 export enum ConnectionQuality {

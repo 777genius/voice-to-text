@@ -2,46 +2,35 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
 
-use crate::domain::{RecordingStatus, AudioCapture};
+use crate::domain::{AudioCapture, RecordingStatus, SttConnectionCategory, SttError};
 use crate::infrastructure::ConfigStore;
 use crate::presentation::{
     events::*, AppState, AudioLevelPayload, FinalTranscriptionPayload, PartialTranscriptionPayload,
     RecordingStatusPayload, MicrophoneTestLevelPayload, TranscriptionErrorPayload, ConnectionQualityPayload,
 };
 
-fn classify_transcription_error_type(raw: &str) -> String {
-    // Делаем классификацию максимально "практичной":
-    // этот error_type используется во фронте для connect-retry и отображения понятных сообщений.
-    let lower = raw.to_lowercase();
-
-    if lower.contains("authentication error")
-        || lower.contains("unauthorized")
-        || lower.contains("401")
-        || (lower.contains("token") && lower.contains("auth"))
-    {
-        return "authentication".to_string();
+fn classify_transcription_error_type_from_stt(err: &SttError) -> String {
+    // ВАЖНО: во фронте error_type используется для connect-retry, поэтому
+    // тут нельзя делать "умный" парсинг строки — только типы и детали.
+    match err {
+        SttError::Authentication(_) => "authentication".to_string(),
+        SttError::Configuration(_) => "configuration".to_string(),
+        SttError::Connection(conn) => {
+            if conn.details.category == Some(SttConnectionCategory::Timeout) {
+                "timeout".to_string()
+            } else {
+                "connection".to_string()
+            }
+        }
+        SttError::Processing(_) | SttError::Unsupported(_) | SttError::Internal(_) => "processing".to_string(),
     }
+}
 
-    if lower.contains("timeout") || lower.contains("timed out") {
-        return "timeout".to_string();
+fn error_details_from_stt(err: &SttError) -> Option<TranscriptionErrorDetailsPayload> {
+    match err {
+        SttError::Connection(conn) => Some(conn.details.clone().into()),
+        _ => None,
     }
-
-    if lower.contains("configuration error") {
-        return "configuration".to_string();
-    }
-
-    // Включаем сюда websocket/handshake/refused и т.п.
-    if lower.contains("connection error")
-        || lower.contains("websocket")
-        || lower.contains("handshake")
-        || lower.contains("connection refused")
-        || lower.contains("broken pipe")
-        || lower.contains("network")
-    {
-        return "connection".to_string();
-    }
-
-    "processing".to_string()
 }
 
 /// Start recording voice
@@ -143,14 +132,23 @@ pub async fn start_recording(
     let app_handle_error = app_handle.clone();
 
     // Callback for error handling
-    let on_error = Arc::new(move |error: String, error_type: String| {
+    let on_error = Arc::new(move |err: SttError| {
         let app_handle = app_handle_error.clone();
 
         tokio::spawn(async move {
+            let error_type = classify_transcription_error_type_from_stt(&err);
+            let error_details = error_details_from_stt(&err);
+            let error = err.to_string();
+
             log::error!("STT error occurred: {} (type: {})", error, error_type);
 
             // Emit error event to frontend
-            let payload = TranscriptionErrorPayload { session_id, error, error_type };
+            let payload = TranscriptionErrorPayload {
+                session_id,
+                error,
+                error_type,
+                error_details,
+            };
             if let Err(e) = app_handle.emit(EVENT_TRANSCRIPTION_ERROR, payload) {
                 log::error!("Failed to emit transcription error event: {}", e);
             }
@@ -222,13 +220,17 @@ pub async fn start_recording(
     // UI останется в Starting и будет ощущение "подключение идёт, но ничего не происходит".
     // Поэтому здесь явно отправляем error + status=Error тем же контрактом, что и в runtime-ошибках.
     if let Err(e) = start_result {
-        let error = e.to_string();
-        let error_type = classify_transcription_error_type(&error);
+        // Стараемся извлечь исходную причину максимально надёжно (без парсинга строки).
+        let stt = e.downcast_ref::<SttError>().cloned().unwrap_or_else(|| {
+            SttError::Internal(e.to_string())
+        });
+        let error = stt.to_string();
+        let error_type = classify_transcription_error_type_from_stt(&stt);
 
         log::error!("Failed to start recording: {} (type: {})", error, error_type);
 
         // Сначала transcription:error, потом recording:status=Error (во фронте есть логика suppression/retry).
-        on_error(error.clone(), error_type.clone());
+        on_error(stt);
 
         return Err(error);
     }

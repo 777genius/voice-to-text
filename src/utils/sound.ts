@@ -5,52 +5,124 @@
 import showSoundUrl from '../assets/sounds/show.mp3';
 import doneSoundUrl from '../assets/sounds/done.mp3';
 
-// Предзагружаем звуки для быстрого воспроизведения
-const showAudio = new Audio(showSoundUrl);
-const doneAudio = new Audio(doneSoundUrl);
+type SoundName = 'show' | 'done';
 
-// Устанавливаем громкость
-showAudio.volume = 0.5;
-doneAudio.volume = 0.5;
+type SoundConfig = {
+  url: string;
+  volume: number;
+};
 
-// Освобождаем медиа-контроль после окончания звука
-// Это предотвращает перехват системных медиа-кнопок приложением
-showAudio.addEventListener('ended', () => {
-  showAudio.pause();
-  showAudio.currentTime = 0;
-});
+const SOUND_CONFIG: Record<SoundName, SoundConfig> = {
+  show: { url: showSoundUrl, volume: 0.5 },
+  done: { url: doneSoundUrl, volume: 0.5 },
+};
 
-doneAudio.addEventListener('ended', () => {
-  doneAudio.pause();
-  doneAudio.currentTime = 0;
-});
+let audioContext: AudioContext | null = null;
+const decodedBuffers = new Map<string, Promise<AudioBuffer>>();
+
+function getAudioContext(): AudioContext | null {
+  try {
+    const Ctor = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctor) return null;
+    if (!audioContext) {
+      // Важно: используем Web Audio, а не <audio>, чтобы короткие UI-звуки
+      // не становились "Now Playing" в macOS и не перехватывали системные media keys.
+      audioContext = new Ctor({ latencyHint: 'interactive' });
+    }
+    return audioContext;
+  } catch (err) {
+    console.warn('[Sound] Failed to create AudioContext:', err);
+    return null;
+  }
+}
+
+async function decodeBuffer(url: string): Promise<AudioBuffer> {
+  const cached = decodedBuffers.get(url);
+  if (cached) return cached;
+
+  const promise = (async () => {
+    const ctx = getAudioContext();
+    if (!ctx) {
+      throw new Error('AudioContext is not available');
+    }
+
+    const res = await fetch(url);
+    if (!res.ok) {
+      throw new Error(`Failed to fetch sound: ${res.status} ${res.statusText}`);
+    }
+    const arr = await res.arrayBuffer();
+    return await ctx.decodeAudioData(arr);
+  })();
+
+  decodedBuffers.set(url, promise);
+  return promise;
+}
+
+function fallbackPlayWithHtmlAudio(url: string, volume: number): void {
+  try {
+    const audio = new Audio(url);
+    audio.volume = volume;
+    audio.addEventListener(
+      'ended',
+      () => {
+        try {
+          audio.pause();
+          // Важно "отвязать" src, чтобы даже в fallback режиме не оставаться последним медиаплеером.
+          audio.removeAttribute('src');
+          audio.load();
+        } catch {
+          // ignore
+        }
+      },
+      { once: true },
+    );
+    void audio.play();
+  } catch (err) {
+    console.warn('[Sound] Failed to play sound in fallback mode:', err);
+  }
+}
+
+async function playUiSound(name: SoundName): Promise<void> {
+  const { url, volume } = SOUND_CONFIG[name];
+
+  const ctx = getAudioContext();
+  if (!ctx) {
+    fallbackPlayWithHtmlAudio(url, volume);
+    return;
+  }
+
+  try {
+    if (ctx.state === 'suspended') {
+      await ctx.resume();
+    }
+
+    const buffer = await decodeBuffer(url);
+
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+
+    const gain = ctx.createGain();
+    gain.gain.value = volume;
+
+    source.connect(gain);
+    gain.connect(ctx.destination);
+
+    source.start(0);
+  } catch (err) {
+    console.warn(`[Sound] Failed to play "${name}" sound:`, err);
+  }
+}
 
 /**
  * Проигрывает звук при открытии окна
  */
 export function playShowSound(): void {
-  try {
-    // Перематываем на начало если звук уже играл
-    showAudio.currentTime = 0;
-    showAudio.play().catch(err => {
-      console.warn('Failed to play show sound:', err);
-    });
-  } catch (err) {
-    console.warn('Failed to play show sound:', err);
-  }
+  void playUiSound('show');
 }
 
 /**
  * Проигрывает звук при успешном завершении записи и копировании в буфер
  */
 export function playDoneSound(): void {
-  try {
-    // Перематываем на начало если звук уже играл
-    doneAudio.currentTime = 0;
-    doneAudio.play().catch(err => {
-      console.warn('Failed to play done sound:', err);
-    });
-  } catch (err) {
-    console.warn('Failed to play done sound:', err);
-  }
+  void playUiSound('done');
 }

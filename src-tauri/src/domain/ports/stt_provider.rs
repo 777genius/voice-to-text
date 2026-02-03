@@ -7,13 +7,13 @@ use crate::domain::models::{AudioChunk, SttConfig, Transcription};
 pub type SttResult<T> = Result<T, SttError>;
 
 /// Errors that can occur during speech-to-text operations
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, Clone)]
 pub enum SttError {
     #[error("Configuration error: {0}")]
     Configuration(String),
 
     #[error("Connection error: {0}")]
-    Connection(String),
+    Connection(SttConnectionError),
 
     #[error("Authentication error: {0}")]
     Authentication(String),
@@ -28,6 +28,64 @@ pub enum SttError {
     Internal(String),
 }
 
+/// Более структурированная информация о сетевой/WS ошибке.
+/// Нужна, чтобы UI мог показывать точную причину не на основе парсинга строки.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SttConnectionDetails {
+    /// Категория ошибки (для понятного текста в UI).
+    pub category: Option<SttConnectionCategory>,
+    /// HTTP статус, если ошибка произошла на этапе handshake.
+    pub http_status: Option<u16>,
+    /// Close code WebSocket (если сервер закрыл соединение).
+    pub ws_close_code: Option<u16>,
+    /// std::io::ErrorKind, если есть (например ConnectionRefused).
+    pub io_error_kind: Option<String>,
+    /// raw OS error code (если доступно).
+    pub os_error: Option<i32>,
+    /// Код ошибки от сервера (если пришёл `ServerMessage::Error`).
+    pub server_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SttConnectionCategory {
+    Offline,
+    Dns,
+    Tls,
+    Refused,
+    Reset,
+    Timeout,
+    Http,
+    ServerUnavailable,
+    Closed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{message}")]
+pub struct SttConnectionError {
+    pub message: String,
+    pub details: SttConnectionDetails,
+}
+
+impl SttConnectionError {
+    pub fn simple(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            details: SttConnectionDetails::default(),
+        }
+    }
+
+    pub fn with_category(message: impl Into<String>, category: SttConnectionCategory) -> Self {
+        Self {
+            message: message.into(),
+            details: SttConnectionDetails {
+                category: Some(category),
+                ..Default::default()
+            },
+        }
+    }
+}
+
 /// Callback type for receiving transcription updates
 pub type TranscriptionCallback = Arc<dyn Fn(Transcription) + Send + Sync>;
 
@@ -38,7 +96,7 @@ pub type AudioLevelCallback = Arc<dyn Fn(f32) + Send + Sync>;
 pub type AudioSpectrumCallback = Arc<dyn Fn([f32; 48]) + Send + Sync>;
 
 /// Callback type for receiving errors (error message, error type)
-pub type ErrorCallback = Arc<dyn Fn(String, String) + Send + Sync>;
+pub type ErrorCallback = Arc<dyn Fn(SttError) + Send + Sync>;
 
 /// Callback type for receiving connection quality updates
 /// Параметры: (quality: String, reason: Option<String>)

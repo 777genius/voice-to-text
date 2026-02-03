@@ -2,6 +2,7 @@
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useUpdater } from '../../composables/useUpdater';
+import { renderMarkdownToSafeHtml } from '@/utils/markdown';
 
 const props = defineProps<{
   modelValue: boolean;
@@ -13,6 +14,12 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const { store, installUpdate } = useUpdater();
+
+const releaseNotesHtml = computed(() => {
+  const notes = store.releaseNotes;
+  if (!notes) return '';
+  return renderMarkdownToSafeHtml(notes);
+});
 
 const isOpen = computed({
   get: () => props.modelValue,
@@ -43,8 +50,7 @@ async function handleInstall() {
           <span class="version-label">v{{ store.availableVersion }}</span>
         </div>
 
-        <div v-if="store.releaseNotes" class="release-notes">
-          {{ store.releaseNotes }}
+        <div v-if="store.releaseNotes" class="release-notes" v-html="releaseNotesHtml">
         </div>
 
         <p class="update-hint">
@@ -128,10 +134,45 @@ async function handleInstall() {
   border-radius: 8px;
   font-size: 14px;
   line-height: 1.5;
-  white-space: pre-wrap;
   margin-bottom: 12px;
   max-height: 200px;
   overflow-y: auto;
+}
+
+.release-notes :deep(.md-h3) {
+  font-weight: 700;
+  margin: 8px 0 6px;
+}
+
+.release-notes :deep(.md-p) {
+  margin: 4px 0;
+}
+
+.release-notes :deep(.md-ul) {
+  margin: 6px 0 10px;
+  padding-left: 18px;
+}
+
+.release-notes :deep(.md-li) {
+  margin: 2px 0;
+}
+
+.release-notes :deep(code) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+    monospace;
+  font-size: 0.92em;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: rgba(var(--v-theme-on-surface), 0.08);
+}
+
+.release-notes :deep(a) {
+  color: rgb(var(--v-theme-primary));
+  text-decoration: none;
+}
+
+.release-notes :deep(a:hover) {
+  text-decoration: underline;
 }
 
 .update-hint {

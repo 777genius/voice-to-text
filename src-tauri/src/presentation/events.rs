@@ -1,6 +1,7 @@
 use serde::Serialize;
 
 use crate::domain::{RecordingStatus, Transcription};
+use crate::domain::{SttConnectionCategory, SttConnectionDetails};
 
 /// Event names for Tauri event system
 pub const EVENT_TRANSCRIPTION_PARTIAL: &str = "transcription:partial";
@@ -116,8 +117,56 @@ pub struct TranscriptionErrorPayload {
     pub session_id: u64,
     pub error: String,
     pub error_type: String, // "connection", "configuration", "processing", "timeout", "authentication"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_details: Option<TranscriptionErrorDetailsPayload>,
 }
 
+/// Детали ошибки для UI (сериализуемый формат).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptionErrorDetailsPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ws_close_code: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub io_error_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os_error: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_code: Option<String>,
+}
+
+impl From<SttConnectionDetails> for TranscriptionErrorDetailsPayload {
+    fn from(value: SttConnectionDetails) -> Self {
+        Self {
+            category: value.category.map(stt_category_to_string),
+            http_status: value.http_status,
+            ws_close_code: value.ws_close_code,
+            io_error_kind: value.io_error_kind,
+            os_error: value.os_error,
+            server_code: value.server_code,
+        }
+    }
+}
+
+fn stt_category_to_string(cat: SttConnectionCategory) -> String {
+    match cat {
+        SttConnectionCategory::Offline => "offline",
+        SttConnectionCategory::Dns => "dns",
+        SttConnectionCategory::Tls => "tls",
+        SttConnectionCategory::Refused => "refused",
+        SttConnectionCategory::Reset => "reset",
+        SttConnectionCategory::Timeout => "timeout",
+        SttConnectionCategory::Http => "http",
+        SttConnectionCategory::ServerUnavailable => "server_unavailable",
+        SttConnectionCategory::Closed => "closed",
+        SttConnectionCategory::Unknown => "unknown",
+    }
+    .to_string()
+}
 /// Connection quality states
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "PascalCase")]

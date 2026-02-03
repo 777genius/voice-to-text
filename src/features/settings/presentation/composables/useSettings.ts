@@ -3,7 +3,7 @@
  * Инкапсулирует загрузку, сохранение и валидацию конфигурации
  */
 
-import { computed } from 'vue';
+import { computed, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { SttProviderType } from '@/types';
 import { invoke } from '@tauri-apps/api/core';
@@ -210,6 +210,10 @@ export function useSettings() {
     store.clearError();
 
     try {
+      // Важно: даём Vue применить последние изменения из v-model (например, если пользователь
+      // только что отпустил слайдер и сразу нажал "Сохранить").
+      await nextTick();
+
       // Сохраняем STT конфиг
       const sttConfigData: SttConfigData = {
         // Выбор провайдера выключен: всегда Backend
@@ -223,13 +227,39 @@ export function useSettings() {
       await tauriSettingsService.updateSttConfig(sttConfigData);
 
       // Сохраняем App конфиг
+      // Отдельно сохраняем чувствительность: это критично для UX, и так мы избегаем
+      // любых странностей сериализации/комбинации полей в одном invoke.
       await tauriSettingsService.updateAppConfig({
         microphone_sensitivity: store.microphoneSensitivity,
+      });
+
+      // Остальные поля можно сохранить вторым вызовом.
+      await tauriSettingsService.updateAppConfig({
         recording_hotkey: store.recordingHotkey,
         auto_copy_to_clipboard: store.autoCopyToClipboard,
         auto_paste_text: store.autoPasteText,
         selected_audio_device: store.selectedAudioDevice,
       });
+
+      // Жёсткая проверка: иногда UI может думать что сохранили, но по факту snapshot остался старым.
+      // Такое лучше ловить сразу, иначе пользователь видит "сохранилось", а при следующем открытии снова 95.
+      try {
+        const snap1 = await tauriSettingsService.getAppConfig();
+        if (snap1.microphone_sensitivity !== store.microphoneSensitivity) {
+          // Повторяем только sensitivity — минимальный безопасный ретрай.
+          await tauriSettingsService.updateAppConfig({
+            microphone_sensitivity: store.microphoneSensitivity,
+          });
+          const snap2 = await tauriSettingsService.getAppConfig();
+          if (snap2.microphone_sensitivity !== store.microphoneSensitivity) {
+            throw new Error(
+              `Чувствительность не сохранилась: ожидали ${store.microphoneSensitivity}, получили ${snap2.microphone_sensitivity}`,
+            );
+          }
+        }
+      } catch (verifyErr) {
+        throw verifyErr;
+      }
 
       store.setSaveStatus('success');
       return true;

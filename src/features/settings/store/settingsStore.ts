@@ -187,7 +187,8 @@ export const useSettingsStore = defineStore('settings', () => {
 
       try {
         void invoke(CMD_UPDATE_APP_CONFIG, {
-          microphone_sensitivity: microphoneSensitivity.value,
+          // Tauri command args ожидают camelCase (Rust: microphone_sensitivity)
+          microphoneSensitivity: microphoneSensitivity.value,
         });
         lastPersistedMicSensitivity = microphoneSensitivity.value;
       } catch {}
@@ -206,7 +207,8 @@ export const useSettingsStore = defineStore('settings', () => {
     if (lastPersistedMicSensitivity === next) return;
 
     try {
-      await invoke(CMD_UPDATE_APP_CONFIG, { microphone_sensitivity: next });
+      // Tauri command args ожидают camelCase (Rust: microphone_sensitivity)
+      await invoke(CMD_UPDATE_APP_CONFIG, { microphoneSensitivity: next });
       lastPersistedMicSensitivity = next;
     } catch {
       // Тут намеренно молчим: пользователь закрывает окно, не надо мешать UX.

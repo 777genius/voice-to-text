@@ -53,6 +53,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const connectMaxAttempts = ref<number>(0);
   const lastConnectFailure = ref<TranscriptionErrorPayload['error_type'] | null>(null);
   const lastConnectFailureRaw = ref<string>('');
+  const lastConnectFailureDetails = ref<TranscriptionErrorPayload['error_details'] | null>(null);
 
   // STT auth ошибки чаще всего означают "access token протух" (TTL ~15 минут).
   // Это НЕ должно выкидывать пользователя из аккаунта — сначала пробуем тихо обновить токен.
@@ -864,28 +865,19 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               detectErrorTypeFromRaw(event.payload.error) ??
               'connection';
             lastConnectFailureRaw.value = event.payload.error;
+            lastConnectFailureDetails.value = event.payload.error_details ?? null;
             console.warn('[ConnectRetry] Suppressed error during connect:', event.payload);
             return;
           }
 
           // Остальные ошибки показываем пользователю
-          let errorMessage = '';
-          switch (event.payload.error_type) {
-            case 'timeout':
-              errorMessage = i18n.global.t('errors.timeout');
-              break;
-            case 'connection':
-              errorMessage = i18n.global.t('errors.connection');
-              break;
-            case 'processing':
-              errorMessage = i18n.global.t('errors.processing');
-              break;
-            default:
-              errorMessage = i18n.global.t('errors.generic', { error: event.payload.error });
-          }
+          const normalizedType =
+            asKnownErrorType(event.payload.error_type) ??
+            detectErrorTypeFromRaw(event.payload.error) ??
+            'connection';
 
-          error.value = errorMessage;
-          errorType.value = event.payload.error_type;
+          error.value = mapErrorMessage(normalizedType, event.payload.error, event.payload.error_details);
+          errorType.value = normalizedType;
           status.value = RecordingStatus.Error;
         }
       );
@@ -946,12 +938,125 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     return null;
   }
 
-  function mapErrorMessage(type: TranscriptionErrorPayload['error_type'] | null, raw: string): string {
+  function isOffline(): boolean {
+    try {
+      // navigator.onLine в Tauri работает, но иногда даёт false positives,
+      // поэтому используем это только как "точный" сигнал офлайна.
+      if (typeof navigator === 'undefined') return false;
+      if (typeof navigator.onLine !== 'boolean') return false;
+      return navigator.onLine === false;
+    } catch {
+      return false;
+    }
+  }
+
+  function extractHttpStatusFromRaw(raw: string): number | null {
+    // Примеры raw:
+    // - "WS connection failed: HTTP error: 503 Service Unavailable"
+    // - "WS connection failed: HTTP error: 502"
+    const match = String(raw ?? '').match(/\bHTTP error:\s*(\d{3})\b/i);
+    if (!match) return null;
+    const status = Number(match[1]);
+    return Number.isFinite(status) ? status : null;
+  }
+
+  function mapConnectionErrorMessage(
+    raw: string,
+    details: TranscriptionErrorPayload['error_details'] | null | undefined
+  ): string {
+    const category = details?.category;
+    if (category) {
+      if (category === 'offline') return i18n.global.t('errors.connectionOffline');
+      if (category === 'dns') return i18n.global.t('errors.connectionDns');
+      if (category === 'tls') return i18n.global.t('errors.connectionTls');
+      if (category === 'timeout') return i18n.global.t('errors.timeout');
+      if (category === 'http') {
+        return details?.httpStatus
+          ? i18n.global.t('errors.connectionHttp', { status: details.httpStatus })
+          : i18n.global.t('errors.connection');
+      }
+      if (
+        category === 'server_unavailable' ||
+        category === 'refused' ||
+        category === 'reset' ||
+        category === 'closed'
+      ) {
+        return i18n.global.t('errors.connectionServerUnavailable');
+      }
+    }
+
+    const text = String(raw ?? '');
+    const lower = text.toLowerCase();
+
+    if (isOffline()) return i18n.global.t('errors.connectionOffline');
+
+    // Иногда timeout прилетает в connection типе — лучше показать явный timeout текст.
+    if (lower.includes('timeout') || lower.includes('timed out')) {
+      return i18n.global.t('errors.timeout');
+    }
+
+    const httpStatus = extractHttpStatusFromRaw(text);
+    if (httpStatus) {
+      // 502/503/504 часто выглядят как "сервер перезапускается/обновляется" (в т.ч. hot reload).
+      if (httpStatus === 502 || httpStatus === 503 || httpStatus === 504) {
+        return i18n.global.t('errors.connectionServerUnavailable');
+      }
+      return i18n.global.t('errors.connectionHttp', { status: httpStatus });
+    }
+
+    // DNS/резолвинг (часто VPN/прокси/нет интернета)
+    if (
+      lower.includes('dns') ||
+      lower.includes('enotfound') ||
+      lower.includes('failed to lookup') ||
+      lower.includes('name or service not known') ||
+      lower.includes('nodename nor servname provided') ||
+      lower.includes('could not resolve')
+    ) {
+      return i18n.global.t('errors.connectionDns');
+    }
+
+    // TLS/сертификаты/SSL
+    if (
+      lower.includes('tls') ||
+      lower.includes('ssl') ||
+      lower.includes('certificate') ||
+      lower.includes('invalid peer certificate') ||
+      lower.includes('unknown issuer')
+    ) {
+      return i18n.global.t('errors.connectionTls');
+    }
+
+    // Похоже на рестарт/обрыв сокета: connection refused/reset/broken pipe и т.п.
+    if (
+      lower.includes('connection refused') ||
+      lower.includes('econnrefused') ||
+      lower.includes('os error 61') || // macOS: connection refused
+      lower.includes('os error 111') || // linux: connection refused
+      lower.includes('connection reset') ||
+      lower.includes('reset by peer') ||
+      lower.includes('broken pipe') ||
+      lower.includes('connection closed') ||
+      lower.includes('unexpected eof') ||
+      lower.includes('handshake') ||
+      lower.includes('websocket')
+    ) {
+      return i18n.global.t('errors.connectionServerUnavailable');
+    }
+
+    return i18n.global.t('errors.connection');
+  }
+
+  function mapErrorMessage(
+    type: TranscriptionErrorPayload['error_type'] | null,
+    raw: string,
+    details?: TranscriptionErrorPayload['error_details'] | null
+  ): string {
     switch (type) {
       case 'timeout':
         return i18n.global.t('errors.timeout');
       case 'connection':
-        return i18n.global.t('errors.connection');
+        return mapConnectionErrorMessage(raw, details);
       case 'processing':
         return i18n.global.t('errors.processing');
       case 'authentication':
@@ -1192,6 +1297,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
           // Если ошибка пришла не через events, пробуем классифицировать по raw строке
           const raw = lastConnectFailureRaw.value || String(err ?? '');
+          const details = lastConnectFailureDetails.value;
           const detected = failureType || detectErrorTypeFromRaw(raw) || 'connection';
 
           // Auth ошибка: обычно это протухший access token.
@@ -1221,7 +1327,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
           if (!isRetriable || isLastAttempt) {
             errorType.value = detected;
-            error.value = mapErrorMessage(detected, raw);
+            error.value = mapErrorMessage(detected, raw, details);
       status.value = RecordingStatus.Error;
             return;
           }
@@ -1237,6 +1343,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       connectMaxAttempts.value = 0;
       lastConnectFailure.value = null;
       lastConnectFailureRaw.value = '';
+      lastConnectFailureDetails.value = null;
     }
   }
 

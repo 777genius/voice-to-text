@@ -9,7 +9,8 @@ use tokio_tungstenite::{connect_async, tungstenite::Message, WebSocketStream, Ma
 use tokio::net::TcpStream;
 
 use crate::domain::{
-    AudioChunk, SttConfig, SttError, SttProvider, SttResult, Transcription, TranscriptionCallback,
+    AudioChunk, SttConfig, SttConnectionCategory, SttConnectionError, SttError, SttProvider,
+    SttResult, Transcription, TranscriptionCallback,
 };
 use crate::infrastructure::embedded_keys;
 
@@ -146,11 +147,21 @@ impl SttProvider for AssemblyAIProvider {
             .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
             .header("Authorization", &api_key)
             .body(())
-            .map_err(|e| SttError::Connection(format!("Failed to build WS request: {}", e)))?;
+            .map_err(|e| {
+                SttError::Connection(SttConnectionError::simple(format!(
+                    "Failed to build WS request: {}",
+                    e
+                )))
+            })?;
 
         let (ws_stream, _response) = connect_async(request)
             .await
-            .map_err(|e| SttError::Connection(format!("WS connection failed: {}", e)))?;
+            .map_err(|e| {
+                SttError::Connection(SttConnectionError::simple(format!(
+                    "WS connection failed: {}",
+                    e
+                )))
+            })?;
 
         log::info!("AssemblyAI WebSocket connected");
 
@@ -227,7 +238,12 @@ impl SttProvider for AssemblyAIProvider {
             self.session_ready.notified()
         )
         .await
-        .map_err(|_| SttError::Connection("Timeout waiting for SessionBegins".to_string()))?;
+        .map_err(|_| {
+            SttError::Connection(SttConnectionError::with_category(
+                "Timeout waiting for SessionBegins".to_string(),
+                SttConnectionCategory::Timeout,
+            ))
+        })?;
 
         log::info!("AssemblyAI stream started successfully");
         Ok(())
