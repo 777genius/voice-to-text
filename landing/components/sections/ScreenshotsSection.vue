@@ -171,26 +171,25 @@ onUnmounted(() => {
             }"
             @click="openLightbox(index)"
           >
-            <div class="screenshots-section__card">
-              <div class="screenshots-section__card-glow" />
-              <div class="screenshots-section__card-inner">
-                <div class="screenshots-section__card-header">
-                  <span class="screenshots-section__card-label">{{ t(shot.labelKey) }}</span>
-                </div>
-                <Transition name="screenshot-fade" mode="out-in">
-                  <img
-                    :key="`${shot.id}-${screenshotTheme}`"
-                    class="screenshots-section__image"
-                    :src="isScreenshotDark ? shot.darkSrc : shot.lightSrc"
-                    :alt="t(shot.labelKey)"
-                    :width="shot.width"
-                    :height="shot.height"
-                    loading="lazy"
-                    decoding="async"
-                  />
-                </Transition>
+            <div class="screenshots-section__image-wrapper">
+              <Transition name="screenshot-fade" mode="out-in">
+                <img
+                  :key="`${shot.id}-${screenshotTheme}`"
+                  class="screenshots-section__image"
+                  :src="isScreenshotDark ? shot.darkSrc : shot.lightSrc"
+                  :alt="t(shot.labelKey)"
+                  :width="shot.width"
+                  :height="shot.height"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </Transition>
+              <!-- Zoom icon overlay -->
+              <div class="screenshots-section__zoom-overlay">
+                <v-icon class="screenshots-section__zoom-icon" icon="mdi-magnify-plus-outline" />
               </div>
             </div>
+            <span class="screenshots-section__caption">{{ t(shot.labelKey) }}</span>
           </div>
         </div>
       </div>
@@ -296,8 +295,8 @@ onUnmounted(() => {
 .screenshots-section {
   position: relative;
   overflow: hidden;
-  padding-top: 48px !important;
-  padding-bottom: 48px !important;
+  padding-top: 32px !important;
+  padding-bottom: 24px !important;
 }
 
 /* ─── Background ─── */
@@ -345,15 +344,16 @@ onUnmounted(() => {
 .screenshots-section__container {
   position: relative;
   z-index: 1;
-  max-width: 1400px;
+  max-width: 100%;
   margin: 0 auto;
-  padding: 0 clamp(16px, 4vw, 64px);
+  padding: 0;
 }
 
 /* ─── Header ─── */
 .screenshots-section__header {
   text-align: center;
-  margin-bottom: 36px;
+  margin-bottom: 24px;
+  padding: 0 16px;
 }
 
 .screenshots-section__badge {
@@ -501,7 +501,7 @@ onUnmounted(() => {
 .screenshots-section__track {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 24px;
+  gap: 2px;
   transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
   transform: none !important;
 }
@@ -516,60 +516,40 @@ onUnmounted(() => {
   transform: translateY(-6px);
 }
 
-/* ─── Card ─── */
-.screenshots-section__card {
+/* ─── Image Wrapper ─── */
+.screenshots-section__image-wrapper {
   position: relative;
-  border-radius: 16px;
+  border-radius: 0;
   overflow: hidden;
-  transition:
-    transform 0.45s cubic-bezier(0.4, 0, 0.2, 1),
-    box-shadow 0.45s cubic-bezier(0.4, 0, 0.2, 1);
-  box-shadow:
-    0 8px 32px rgba(249, 115, 22, 0.08),
-    0 4px 16px rgba(0, 0, 0, 0.04);
+  box-shadow: none;
+  transition: none;
 }
 
-.screenshots-section__slide:hover .screenshots-section__card {
-  box-shadow:
-    0 20px 60px rgba(249, 115, 22, 0.12),
-    0 8px 32px rgba(0, 0, 0, 0.06);
+.screenshots-section__slide:hover .screenshots-section__image-wrapper {
+  box-shadow: none;
 }
 
-.screenshots-section__card-glow {
+/* ─── Zoom Overlay ─── */
+.screenshots-section__zoom-overlay {
   position: absolute;
   inset: 0;
-  background: radial-gradient(
-    ellipse 80% 40% at 50% 0%,
-    rgba(249, 115, 22, 0.06),
-    transparent 70%
-  );
-  pointer-events: none;
-  z-index: 1;
-}
-
-.screenshots-section__card-inner {
-  background: rgba(255, 255, 255, 0.6);
-  border: 1px solid rgba(249, 115, 22, 0.1);
-  border-radius: 16px;
-  backdrop-filter: blur(16px);
-  overflow: hidden;
-}
-
-/* ─── Card Header (window chrome) ─── */
-.screenshots-section__card-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  border-bottom: 1px solid rgba(249, 115, 22, 0.06);
-  background: rgba(255, 255, 255, 0.4);
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.4);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
 }
 
-.screenshots-section__card-label {
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  opacity: 0.5;
+.screenshots-section__slide:hover .screenshots-section__zoom-overlay {
+  opacity: 1;
+}
+
+.screenshots-section__zoom-icon {
+  font-size: 48px !important;
+  color: #fff;
+  filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.3));
 }
 
 /* ─── Image ─── */
@@ -578,6 +558,17 @@ onUnmounted(() => {
   height: auto;
   object-fit: contain;
   display: block;
+}
+
+/* ─── Caption ─── */
+.screenshots-section__caption {
+  display: block;
+  text-align: center;
+  margin-top: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  opacity: 0.7;
+  letter-spacing: 0.02em;
 }
 
 /* ─── Dot indicators (mobile/tablet) ─── */
@@ -672,38 +663,17 @@ onUnmounted(() => {
   border-color: rgba(251, 146, 60, 0.25);
 }
 
-.v-theme--dark .screenshots-section__card {
-  box-shadow:
-    0 8px 32px rgba(0, 0, 0, 0.3),
-    0 0 0 1px rgba(251, 146, 60, 0.08);
+.v-theme--dark .screenshots-section__image-wrapper {
+  box-shadow: none;
 }
 
-.v-theme--dark .screenshots-section__slide:hover .screenshots-section__card {
-  box-shadow:
-    0 20px 60px rgba(0, 0, 0, 0.5),
-    0 0 0 1px rgba(251, 146, 60, 0.15);
+.v-theme--dark .screenshots-section__slide:hover .screenshots-section__image-wrapper {
+  box-shadow: none;
 }
 
-.v-theme--dark .screenshots-section__card-glow {
-  background: radial-gradient(
-    ellipse 80% 40% at 50% 0%,
-    rgba(251, 146, 60, 0.08),
-    transparent 70%
-  );
-}
-
-.v-theme--dark .screenshots-section__card-inner {
-  background: rgba(255, 255, 255, 0.04);
-  border-color: rgba(251, 146, 60, 0.08);
-}
-
-.v-theme--dark .screenshots-section__card-header {
-  border-bottom-color: rgba(255, 255, 255, 0.06);
-  background: rgba(255, 255, 255, 0.03);
-}
-
-.v-theme--dark .screenshots-section__card-label {
+.v-theme--dark .screenshots-section__caption {
   color: #94a3b8;
+  opacity: 0.9;
 }
 
 .v-theme--dark .screenshots-section__dot {
@@ -727,16 +697,7 @@ onUnmounted(() => {
   color: #475569;
 }
 
-.v-theme--light .screenshots-section__card-inner {
-  background: rgba(255, 255, 255, 0.85);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 4px 16px rgba(0, 0, 0, 0.02);
-}
-
-.v-theme--light .screenshots-section__card-header {
-  background: rgba(249, 250, 251, 0.8);
-}
-
-.v-theme--light .screenshots-section__card-label {
+.v-theme--light .screenshots-section__caption {
   color: #64748b;
 }
 
@@ -753,14 +714,14 @@ onUnmounted(() => {
 @media (max-width: 1024px) {
   .screenshots-section__track {
     display: flex;
-    gap: 16px;
-    /* Each slide is 50% - 8px; shift by (50% + 8px) per index */
-    transform: translateX(calc(var(--active-index, 0) * (-50% - 8px))) !important;
+    gap: 2px;
+    /* Each slide is 50% - 1px; shift by (50% + 1px) per index */
+    transform: translateX(calc(var(--active-index, 0) * (-50% - 1px))) !important;
   }
 
   .screenshots-section__slide {
-    flex: 0 0 calc(50% - 8px);
-    min-width: calc(50% - 8px);
+    flex: 0 0 calc(50% - 1px);
+    min-width: calc(50% - 1px);
   }
 
   .screenshots-section__slide:hover {
@@ -798,8 +759,8 @@ onUnmounted(() => {
 
   .screenshots-section__track {
     display: flex;
-    gap: 12px;
-    transform: translateX(calc(var(--active-index, 0) * (-100% - 12px))) !important;
+    gap: 2px;
+    transform: translateX(calc(var(--active-index, 0) * (-100% - 2px))) !important;
   }
 
   .screenshots-section__slide {
@@ -807,12 +768,13 @@ onUnmounted(() => {
     min-width: 100%;
   }
 
-  .screenshots-section__card {
-    border-radius: 14px;
+  .screenshots-section__image-wrapper {
+    border-radius: 0;
   }
 
-  .screenshots-section__card-inner {
-    border-radius: 14px;
+  .screenshots-section__caption {
+    font-size: 0.78rem;
+    margin-top: 10px;
   }
 
   .screenshots-section__toggle {
@@ -838,18 +800,13 @@ onUnmounted(() => {
     transform: translateX(16px);
   }
 
-  .screenshots-section__card-header {
-    padding: 6px 10px;
-  }
-
-  .screenshots-section__card-dots span {
-    width: 6px;
-    height: 6px;
-  }
-
   .screenshots-section__nav-btn {
     width: 32px;
     height: 32px;
+  }
+
+  .screenshots-section__zoom-icon {
+    font-size: 32px !important;
   }
 }
 </style>
@@ -933,8 +890,8 @@ onUnmounted(() => {
 
 .lightbox__image-wrapper {
   position: relative;
-  max-width: 90vw;
-  max-height: 85vh;
+  max-width: 95vw;
+  max-height: 90vh;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1000,10 +957,10 @@ onUnmounted(() => {
 
 .lightbox__image {
   max-width: 100%;
-  max-height: 75vh;
+  max-height: 85vh;
   object-fit: contain;
-  border-radius: 12px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  border-radius: 14px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
 }
 
 .lightbox__caption {
