@@ -22,9 +22,19 @@ const openSourceIcons = [
       <div class="opensource-section__layout">
         <!-- Left: Header content -->
         <div class="opensource-section__header">
-          <span class="opensource-section__badge">{{ t('nav.openSource') }}</span>
           <h2 class="opensource-section__title">{{ content.openSource.title }}</h2>
           <p class="opensource-section__note">{{ content.openSource.note }}</p>
+
+          <v-btn
+            href="https://github.com/777genius/voice-to-text"
+            target="_blank"
+            rel="noopener"
+            variant="flat"
+            class="opensource-section__btn mt-6"
+            prepend-icon="mdi-github"
+          >
+            {{ t('nav.viewOnGithub') }}
+          </v-btn>
 
           <!-- Code visual -->
           <div class="opensource-section__visual">
@@ -124,20 +134,6 @@ const openSourceIcons = [
   position: relative;
 }
 
-.opensource-section__badge {
-  display: inline-block;
-  padding: 6px 18px;
-  border-radius: 100px;
-  font-size: 0.8rem;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  background: linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(99, 102, 241, 0.15));
-  color: #8b5cf6;
-  margin-bottom: 20px;
-  border: 1px solid rgba(139, 92, 246, 0.2);
-}
-
 .opensource-section__title {
   font-size: 2.4rem;
   font-weight: 800;
@@ -155,6 +151,22 @@ const openSourceIcons = [
   line-height: 1.7;
   margin: 0;
   max-width: 400px;
+}
+
+.opensource-section__btn {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.9), rgba(99, 102, 241, 0.9)) !important;
+  color: white !important;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 0 24px;
+  height: 44px;
+  border-radius: 12px;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.opensource-section__btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(139, 92, 246, 0.3);
 }
 
 /* --- Visual --- */
@@ -329,12 +341,6 @@ const openSourceIcons = [
     linear-gradient(90deg, rgba(167, 139, 250, 0.04) 1px, transparent 1px);
 }
 
-.v-theme--dark .opensource-section__badge {
-  background: linear-gradient(135deg, rgba(167, 139, 250, 0.15), rgba(129, 140, 248, 0.15));
-  color: #c4b5fd;
-  border-color: rgba(167, 139, 250, 0.25);
-}
-
 .v-theme--dark .opensource-section__title {
   background: linear-gradient(135deg, #e2e8f0 0%, #c4b5fd 100%);
   -webkit-background-clip: text;
@@ -396,10 +402,6 @@ const openSourceIcons = [
 /* --- Light Theme --- */
 .v-theme--light .opensource-section__orb {
   opacity: 0.05;
-}
-
-.v-theme--light .opensource-section__badge {
-  color: #7c3aed;
 }
 
 .v-theme--light .opensource-section__card {

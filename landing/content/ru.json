@@ -80,7 +80,7 @@
     {
       "id": "openSource",
       "question": "Проект с открытым кодом?",
-      "answer": "Да, код open source на <a href='https://github.com/777genius/VoicetextAI' target='_blank'>GitHub</a>."
+      "answer": "Да, код open source на <a href='https://github.com/777genius/voice-to-text' target='_blank'>GitHub</a>."
     }
   ],
   "download": {
