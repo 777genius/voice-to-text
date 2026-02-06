@@ -29,7 +29,7 @@ const languageOptions = computed<SttLanguageOption[]>(() =>
 const isMulti = computed(() => language.value === 'multi');
 
 watch(language, () => {
-  syncLocale();
+  syncLocale({ persist: false });
 });
 </script>
 

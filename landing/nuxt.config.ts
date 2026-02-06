@@ -56,7 +56,7 @@ export default defineNuxtConfig({
         "/sitemap.xml",
         "/robots.txt",
         "/_robots.txt",
-        "/releases.json"
+        // "/releases.json" — теперь подгружаем с GitHub API в рантайме
       ]
     }
   },

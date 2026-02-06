@@ -9,7 +9,7 @@ import SettingGroup from '../shared/SettingGroup.vue';
 import { useSettingsTheme } from '../../composables/useSettingsTheme';
 
 const { t } = useI18n();
-const { currentTheme, setTheme, useSystemTheme } = useSettingsTheme();
+const { currentTheme, setTheme, useSystemTheme } = useSettingsTheme({ persist: false });
 
 type ThemeSegment = 'light' | 'dark' | 'auto';
 

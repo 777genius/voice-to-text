@@ -8,8 +8,13 @@ import { useI18n } from 'vue-i18n';
 import { SttProviderType } from '@/types';
 import { invoke } from '@tauri-apps/api/core';
 import { isTauriAvailable } from '@/utils/tauri';
-import { bumpUiPrefsRevision, CMD_UPDATE_UI_PREFERENCES, readUiPreferencesFromStorage } from '@/windowing/stateSync';
-import { sttLangToUiLocale, normalizeSttLanguage } from '@/i18n.locales';
+import {
+  bumpUiPrefsRevision,
+  CMD_UPDATE_UI_PREFERENCES,
+  readUiPreferencesFromStorage,
+  writeUiPreferencesCacheToStorage,
+} from '@/windowing/stateSync';
+import { sttLangToUiLocale, normalizeSttLanguage, normalizeUiTheme } from '@/i18n.locales';
 import { useSettingsStore } from '../../store/settingsStore';
 import { tauriSettingsService } from '../../infrastructure/adapters/TauriSettingsService';
 import { useAppConfigStore } from '@/stores/appConfig';
@@ -31,7 +36,7 @@ export function useSettings() {
 
   const language = computed({
     get: () => store.language,
-    set: (value: string) => store.setLanguage(value),
+    set: (value: string) => store.setLanguage(value, { persist: false }),
   });
 
   const deepgramApiKey = computed({
@@ -56,7 +61,7 @@ export function useSettings() {
 
   const microphoneSensitivity = computed({
     get: () => store.microphoneSensitivity,
-    set: (value: number) => store.setMicrophoneSensitivity(value),
+    set: (value: number) => store.setMicrophoneSensitivity(value, { persist: false }),
   });
 
   const selectedAudioDevice = computed({
@@ -278,6 +283,9 @@ export function useSettings() {
         throw verifyErr;
       }
 
+      // UI preferences (theme/locale/system-theme) сохраняем только по "Save".
+      persistUiPreferences();
+
       store.setSaveStatus('success');
       return true;
     } catch (err) {
@@ -315,27 +323,62 @@ export function useSettings() {
    * а UI переключается на ближайшую поддерживаемую локаль (fallback).
    * Например: ja → en, uk → uk, be → ru
    */
-  function syncLocale(): void {
+  function syncLocale(opts?: { persist?: boolean }): void {
+    const shouldPersist = opts?.persist ?? true;
     const uiLocale = sttLangToUiLocale(store.language);
     const prev = localStorage.getItem('uiLocale');
 
     locale.value = uiLocale;
+    document.documentElement.dataset.uiLocale = uiLocale;
+
+    if (!shouldPersist) return;
+
     localStorage.setItem('sttLanguage', store.language);
-    if (prev !== uiLocale) {
-      localStorage.setItem('uiLocale', uiLocale);
-    }
+    if (prev !== uiLocale) localStorage.setItem('uiLocale', uiLocale);
     if (!isTauriAvailable() && prev !== uiLocale) bumpUiPrefsRevision();
 
     // Синхронизация через state-sync: сохраняем в Rust и уведомляем другие окна
     if (isTauriAvailable()) {
       try {
         void invoke(CMD_UPDATE_UI_PREFERENCES, {
-          theme: localStorage.getItem('uiTheme') || 'dark',
+          theme: normalizeUiTheme(store.theme),
           locale: uiLocale,
-          use_system_theme: readUiPreferencesFromStorage().useSystemTheme,
+          use_system_theme: Boolean(store.useSystemTheme),
         });
       } catch {}
     }
+  }
+
+  function persistUiPreferences(): void {
+    const uiLocale = sttLangToUiLocale(store.language);
+
+    // Применяем локально (preview уже мог быть, но это идемпотентно)
+    locale.value = uiLocale;
+    document.documentElement.dataset.uiLocale = uiLocale;
+
+    // Пишем в localStorage как в кэш "последнее применённое"
+    writeUiPreferencesCacheToStorage({
+      ...readUiPreferencesFromStorage(),
+      theme: normalizeUiTheme(store.theme),
+      locale: uiLocale,
+      useSystemTheme: Boolean(store.useSystemTheme),
+    });
+
+    // STT язык тоже держим в localStorage (для web preview / fallback)
+    localStorage.setItem('sttLanguage', store.language);
+
+    if (!isTauriAvailable()) {
+      bumpUiPrefsRevision();
+      return;
+    }
+
+    try {
+      void invoke(CMD_UPDATE_UI_PREFERENCES, {
+        theme: normalizeUiTheme(store.theme),
+        locale: uiLocale,
+        use_system_theme: Boolean(store.useSystemTheme),
+      });
+    } catch {}
   }
 
   return {
@@ -368,6 +411,7 @@ export function useSettings() {
     saveConfig,
     syncLocale,
     requestAccessibilityPermission,
+    persistUiPreferences,
     clearError: () => store.clearError(),
   };
 }

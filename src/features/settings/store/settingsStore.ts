@@ -157,11 +157,13 @@ export const useSettingsStore = defineStore('settings', () => {
     whisperModel.value = value;
   }
 
-  function setTheme(value: AppTheme) {
+  function setTheme(value: AppTheme, opts?: { persist?: boolean }) {
     const next = normalizeUiTheme(value);
     const changed = theme.value !== next;
     theme.value = next;
-    if (changed) {
+
+    const shouldPersist = opts?.persist ?? true;
+    if (changed && shouldPersist) {
       writeUiPreferencesCacheToStorage({
         ...readUiPreferencesFromStorage(),
         theme: next,
@@ -177,7 +179,7 @@ export const useSettingsStore = defineStore('settings', () => {
     }
 
     // Синхронизация через state-sync: сохраняем в Rust и уведомляем другие окна
-    if (isTauriAvailable()) {
+    if (isTauriAvailable() && shouldPersist) {
       if (!changed) return;
       try {
         void invoke(CMD_UPDATE_UI_PREFERENCES, {
@@ -189,11 +191,13 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
-  function setUseSystemTheme(value: boolean) {
+  function setUseSystemTheme(value: boolean, opts?: { persist?: boolean }) {
     const next = Boolean(value);
     const changed = useSystemTheme.value !== next;
     useSystemTheme.value = next;
-    if (changed) {
+
+    const shouldPersist = opts?.persist ?? true;
+    if (changed && shouldPersist) {
       writeUiPreferencesCacheToStorage({
         ...readUiPreferencesFromStorage(),
         useSystemTheme: next,
@@ -201,7 +205,7 @@ export const useSettingsStore = defineStore('settings', () => {
       if (!isTauriAvailable()) bumpUiPrefsRevision();
     }
 
-    if (isTauriAvailable()) {
+    if (isTauriAvailable() && shouldPersist) {
       if (!changed) return;
       try {
         void invoke(CMD_UPDATE_UI_PREFERENCES, {
@@ -319,12 +323,12 @@ export const useSettingsStore = defineStore('settings', () => {
     if (state.assemblyaiApiKey !== undefined)
       assemblyaiApiKey.value = state.assemblyaiApiKey;
     if (state.whisperModel !== undefined) whisperModel.value = state.whisperModel;
-    if (state.theme !== undefined) setTheme(state.theme);
-    if (state.useSystemTheme !== undefined) setUseSystemTheme(state.useSystemTheme);
+    if (state.theme !== undefined) setTheme(state.theme, { persist: false });
+    if (state.useSystemTheme !== undefined) setUseSystemTheme(state.useSystemTheme, { persist: false });
     if (state.recordingHotkey !== undefined)
       recordingHotkey.value = state.recordingHotkey;
     if (state.microphoneSensitivity !== undefined)
-      microphoneSensitivity.value = state.microphoneSensitivity;
+      setMicrophoneSensitivity(state.microphoneSensitivity, { persist: false });
     if (state.selectedAudioDevice !== undefined)
       selectedAudioDevice.value = state.selectedAudioDevice;
     if (state.autoCopyToClipboard !== undefined)

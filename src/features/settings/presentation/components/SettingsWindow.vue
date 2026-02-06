@@ -10,6 +10,7 @@ import UpdateDialog from '@/presentation/components/UpdateDialog.vue';
 import { useSettings } from '../composables/useSettings';
 import { useSettingsTheme } from '../composables/useSettingsTheme';
 import { useSettingsStore } from '../../store/settingsStore';
+import type { SettingsState } from '../../domain/types';
 
 // Секции
 import LanguageSection from './sections/LanguageSection.vue';
@@ -20,7 +21,7 @@ import AudioDeviceSection from './sections/AudioDeviceSection.vue';
 import MicTestSection from './sections/MicTestSection.vue';
 import UpdatesSection from './sections/UpdatesSection.vue';
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
 const { loadConfig, saveConfig, isSaving, isLoading, errorMessage, clearError } =
   useSettings();
 const { initializeTheme } = useSettingsTheme();
@@ -33,10 +34,46 @@ const showUpdateDialog = ref(false);
 
 let unlistenOpened: UnlistenFn | null = null;
 
+const baselineState = ref<SettingsState | null>(null);
+const baselineUiLocale = ref<string>('');
+
+function snapshotSettingsState(): SettingsState {
+  return {
+    provider: settingsStore.provider,
+    language: settingsStore.language,
+    deepgramApiKey: settingsStore.deepgramApiKey,
+    assemblyaiApiKey: settingsStore.assemblyaiApiKey,
+    whisperModel: settingsStore.whisperModel,
+    theme: settingsStore.theme,
+    useSystemTheme: settingsStore.useSystemTheme,
+    recordingHotkey: settingsStore.recordingHotkey,
+    microphoneSensitivity: settingsStore.microphoneSensitivity,
+    selectedAudioDevice: settingsStore.selectedAudioDevice,
+    autoCopyToClipboard: settingsStore.autoCopyToClipboard,
+    autoPasteText: settingsStore.autoPasteText,
+  };
+}
+
+function captureBaseline(): void {
+  baselineState.value = snapshotSettingsState();
+  baselineUiLocale.value = String(locale.value ?? '');
+}
+
+function discardDraftChanges(): void {
+  if (baselineState.value) {
+    settingsStore.applyState(baselineState.value);
+  }
+  if (baselineUiLocale.value) {
+    locale.value = baselineUiLocale.value;
+    document.documentElement.dataset.uiLocale = baselineUiLocale.value;
+  }
+}
+
 onMounted(async () => {
   initializeTheme();
   if (!isTauriAvailable()) {
     await loadConfig();
+    captureBaseline();
     return;
   }
 
@@ -46,17 +83,14 @@ onMounted(async () => {
 
   unlistenOpened = await listen<boolean>('settings-window-opened', async () => {
     if (isLoading.value) return;
-    // Если пользователь быстро закрыл настройки после изменения чувствительности,
-    // debounce/flush мог не успеть примениться до refresh(). В таком случае refresh подтянет старое (95)
-    // и перетрёт UI. Поэтому сначала "дожимаем" pending значение, и только потом делаем refresh + loadConfig.
-    await settingsStore.flushSttLanguagePersist();
-    await settingsStore.flushMicrophoneSensitivityPersist();
     // Подтягиваем свежий конфиг через per-topic handles, дожидаемся завершения
     await Promise.all([appConfigStore.refresh(), sttConfigStore.refresh()]);
     await loadConfig();
+    captureBaseline();
   });
 
   await loadConfig();
+  captureBaseline();
 });
 
 onUnmounted(() => {
@@ -65,11 +99,14 @@ onUnmounted(() => {
   }
 });
 
-async function handleClose(): Promise<void> {
+async function handleClose(opts?: { discard?: boolean }): Promise<void> {
   showUpdateDialog.value = false;
-  void settingsStore.flushSttLanguagePersist();
-  // Не блокируем закрытие окна: flush может занять время (I/O), а закрытие должно быть мгновенным.
-  void settingsStore.flushMicrophoneSensitivityPersist();
+  const shouldDiscard = opts?.discard ?? true;
+  if (shouldDiscard) {
+    discardDraftChanges();
+  } else {
+    captureBaseline();
+  }
   try {
     await invoke('show_recording_window');
   } catch {}
@@ -79,7 +116,7 @@ async function handleSave(): Promise<void> {
   const success = await saveConfig();
   if (!success) return;
 
-  await handleClose();
+  await handleClose({ discard: false });
 }
 </script>
 

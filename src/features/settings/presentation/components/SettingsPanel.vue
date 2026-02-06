@@ -10,6 +10,7 @@ import UpdateDialog from '@/presentation/components/UpdateDialog.vue';
 import { useSettings } from '../composables/useSettings';
 import { useSettingsTheme } from '../composables/useSettingsTheme';
 import { useSettingsStore } from '../../store/settingsStore';
+import type { SettingsState } from '../../domain/types';
 
 // Секции
 import LanguageSection from './sections/LanguageSection.vue';
@@ -24,7 +25,7 @@ const emit = defineEmits<{
   close: [];
 }>();
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
 const {
   loadConfig,
   saveConfig,
@@ -45,13 +46,51 @@ const settingsStore = useSettingsStore();
 onMounted(async () => {
   initializeTheme();
   await loadConfig();
+  captureBaseline();
 });
 
-function handleClose(): void {
-  // Не блокируем закрытие окна настройками автосохранения.
-  // invoke отправится сразу, даже если UI закроется в этот же тик.
-  void settingsStore.flushSttLanguagePersist();
-  void settingsStore.flushMicrophoneSensitivityPersist();
+const baselineState = ref<SettingsState | null>(null);
+const baselineUiLocale = ref<string>('');
+
+function snapshotSettingsState(): SettingsState {
+  return {
+    provider: settingsStore.provider,
+    language: settingsStore.language,
+    deepgramApiKey: settingsStore.deepgramApiKey,
+    assemblyaiApiKey: settingsStore.assemblyaiApiKey,
+    whisperModel: settingsStore.whisperModel,
+    theme: settingsStore.theme,
+    useSystemTheme: settingsStore.useSystemTheme,
+    recordingHotkey: settingsStore.recordingHotkey,
+    microphoneSensitivity: settingsStore.microphoneSensitivity,
+    selectedAudioDevice: settingsStore.selectedAudioDevice,
+    autoCopyToClipboard: settingsStore.autoCopyToClipboard,
+    autoPasteText: settingsStore.autoPasteText,
+  };
+}
+
+function captureBaseline(): void {
+  baselineState.value = snapshotSettingsState();
+  baselineUiLocale.value = String(locale.value ?? '');
+}
+
+function discardDraftChanges(): void {
+  if (baselineState.value) {
+    settingsStore.applyState(baselineState.value);
+  }
+  if (baselineUiLocale.value) {
+    locale.value = baselineUiLocale.value;
+    document.documentElement.dataset.uiLocale = baselineUiLocale.value;
+  }
+}
+
+function handleClose(opts?: { discard?: boolean }): void {
+  const shouldDiscard = opts?.discard ?? true;
+  if (shouldDiscard) {
+    discardDraftChanges();
+  } else {
+    captureBaseline();
+  }
   emit('close');
 }
 
@@ -59,7 +98,7 @@ function handleClose(): void {
 async function handleSave() {
   const success = await saveConfig();
   if (success) {
-    handleClose();
+    handleClose({ discard: false });
   }
 }
 </script>
