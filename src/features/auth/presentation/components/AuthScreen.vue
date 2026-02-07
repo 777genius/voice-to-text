@@ -138,12 +138,30 @@ function switchToReset() {
 <style scoped>
 .auth-screen {
   width: 100%;
-  height: 100vh;
+  height: 100%;
+  min-height: 100vh;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   background: transparent;
   position: relative;
+  padding: 48px 16px 24px;
+  overflow-y: auto;
+}
+
+.auth-screen::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.auth-screen::-webkit-scrollbar-track {
+  background: transparent;
+}
+.auth-screen::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+}
+.v-theme--light .auth-screen::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.18);
 }
 
 .top-controls {
