@@ -6,6 +6,7 @@ const { content } = useLandingContent();
 const { t, locale } = useI18n();
 const downloadStore = useDownloadStore();
 const { data: releaseData, resolve } = useReleaseDownloads();
+const { trackDownloadClick } = useAnalytics();
 
 onMounted(() => downloadStore.init());
 
@@ -111,7 +112,7 @@ const sortedAssets = computed(() => {
           <a
             class="download-section__btn"
             :href="getDownloadUrl(asset)"
-            @click.stop="downloadStore.setSelected(asset.id)"
+            @click.stop="trackDownloadClick({ os: asset.os, arch: asset.arch, version: getDownloadVersion(asset), source: 'download_section' }); downloadStore.setSelected(asset.id)"
           >
             <v-icon size="18" class="download-section__btn-icon">mdi-download</v-icon>
             <span>{{ t("download.title") }}</span>

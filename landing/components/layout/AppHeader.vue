@@ -4,6 +4,7 @@ import { useDisplay } from 'vuetify';
 const { t } = useI18n();
 const { smAndDown } = useDisplay();
 const menuOpen = ref(false);
+const { trackNavClick } = useAnalytics();
 
 const navItems = computed(() => [
   { id: 'features', label: t('nav.features') },
@@ -17,7 +18,7 @@ const navItems = computed(() => [
     <v-container class="d-flex align-center header-container ml-24">
       <AppLogo />
       <div class="nav-links ml-6" v-show="!smAndDown">
-        <v-btn v-for="item in navItems" :key="item.id" variant="text" :href="`#${item.id}`">
+        <v-btn v-for="item in navItems" :key="item.id" variant="text" :href="`#${item.id}`" @click="trackNavClick(item.id)">
           {{ item.label }}
         </v-btn>
       </div>
@@ -42,7 +43,7 @@ const navItems = computed(() => [
                 :key="item.id"
                 :title="item.label"
                 :href="`#${item.id}`"
-                @click="menuOpen = false"
+                @click="trackNavClick(item.id); menuOpen = false"
               />
             </v-list>
             <v-divider />

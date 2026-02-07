@@ -30,8 +30,11 @@ const currentFlagIcon = computed(() => {
   return flagIconMap[locale.value as string] ?? "circle-flags:xx";
 });
 
+const { trackLanguageSwitch } = useAnalytics();
+
 const onChange = async (value: string | LocaleCode) => {
   const nextLocale = value as LocaleCode;
+  trackLanguageSwitch(locale.value as string, nextLocale);
   localeStore.setLocale(nextLocale, true);
   if (nuxtApp.$i18n?.setLocale) {
     await nuxtApp.$i18n.setLocale(nextLocale);

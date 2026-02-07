@@ -1,10 +1,20 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 
 const { content } = useLandingContent();
 const { t } = useI18n();
+const { trackFaqExpand } = useAnalytics();
 
 const openPanels = ref<number[]>([]);
+
+watch(openPanels, (newVal, oldVal) => {
+  const prev = new Set(oldVal ?? []);
+  const opened = (newVal ?? []).filter((i) => !prev.has(i));
+  for (const idx of opened) {
+    const faq = content.value?.faq?.[idx];
+    if (faq) trackFaqExpand(faq.id, faq.question);
+  }
+});
 
 const faqIcons = [
   'mdi-monitor-cellphone',

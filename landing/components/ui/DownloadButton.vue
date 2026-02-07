@@ -2,7 +2,8 @@
 const { t } = useI18n();
 const { label } = usePlatform();
 const downloadStore = useDownloadStore();
-const { resolveUrlOrFallback } = useReleaseDownloads();
+const { resolveUrlOrFallback, data: releaseData } = useReleaseDownloads();
+const { trackDownloadClick } = useAnalytics();
 
 onMounted(() => downloadStore.init());
 
@@ -23,7 +24,7 @@ const href = computed(() => {
 </script>
 
 <template>
-  <v-btn color="primary" size="large" :href="href">
+  <v-btn color="primary" size="large" :href="href" @click="trackDownloadClick({ os: downloadStore.os, arch: downloadStore.arch, version: releaseData?.version, source: 'hero' })">
     {{ t('hero.ctaPrimary', { platform: label }) }}
   </v-btn>
 </template>

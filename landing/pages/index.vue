@@ -4,6 +4,7 @@ import { resolveComponent } from "vue";
 import { sectionOrder } from "~/data/sections";
 
 usePageSeo("meta.homeTitle", "meta.homeDescription");
+useTrackSections();
 
 const sectionComponents: Record<string, Component> = {
   hero: resolveComponent("HeroSection"),
