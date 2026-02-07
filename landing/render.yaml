@@ -7,6 +7,8 @@ services:
     envVars:
       - key: NUXT_PUBLIC_SITE_URL
         value: https://voicetext.site
+      - key: NUXT_PUBLIC_GTAG_ID
+        value: G-P246DMZRND
     autoDeploy: true
     headers:
       - path: /*
