@@ -68,13 +68,13 @@ let unlistenWindowShown: UnlistenFn | null = null;
 const transcriptionTextRef = ref<HTMLElement | null>(null);
 
 // Динамическая высота окна при росте текста
-// Padding контейнера: 18px top + 42px bottom = 60px вертикально, 24px × 2 = 48px горизонтально
-const SHADOW_PADDING_X = 48;
-const SHADOW_PADDING_Y = 60;
-const WINDOW_WIDTH = 460 + SHADOW_PADDING_X; // 508
-const BASE_WINDOW_HEIGHT = 330 + SHADOW_PADDING_Y; // 390
+// Padding контейнера: 36px top + 84px bottom = 120px вертикально, 48px × 2 = 96px горизонтально
+const SHADOW_PADDING_X = 96;
+const SHADOW_PADDING_Y = 120;
+const WINDOW_WIDTH = 460 + SHADOW_PADDING_X; // 556
+const BASE_WINDOW_HEIGHT = 330 + SHADOW_PADDING_Y; // 450
 const TEXT_THRESHOLD_PX = 128;
-const MAX_WINDOW_HEIGHT = 700 + SHADOW_PADDING_Y; // 760
+const MAX_WINDOW_HEIGHT = 700 + SHADOW_PADDING_Y; // 820
 const NON_TEXT_HEIGHT = 200;
 
 function adjustWindowHeight() {
@@ -431,11 +431,11 @@ const minimizeWindow = async () => {
   box-sizing: border-box;
   overflow: visible;
   background: transparent;
-  padding: 18px 24px 42px;
+  padding: 36px 48px 84px;
 }
 
 :global(.os-windows) .popover-container {
-  padding: 18px 24px 42px;
+  padding: 36px 48px 84px;
 }
 
 .popover {
