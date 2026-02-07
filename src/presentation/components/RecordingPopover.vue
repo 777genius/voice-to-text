@@ -437,7 +437,7 @@ const minimizeWindow = async () => {
 
 .popover {
   background: var(--glass-bg);
-  border: none;
+  border: 1px solid var(--glass-border);
   border-radius: inherit;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
   width: 100%;

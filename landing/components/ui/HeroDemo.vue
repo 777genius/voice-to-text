@@ -80,8 +80,8 @@ function generateFakeData() {
       // Центр громче, края тише — как в реальном спектре речи
       const center = BAR_COUNT / 2;
       const dist = Math.abs(i - center) / center;
-      const centerBoost = Math.pow(1 - dist, 1.3);
-      const base = 0.12 + centerBoost * 0.55;
+      const centerBoost = Math.pow(1 - dist, 1.8);
+      const base = 0.08 + centerBoost * 0.65;
       const wave = Math.sin(t * 1.8 + barPhases[i]) * 0.22
                  + Math.sin(t * 0.9 + barPhases[i] * 2.3) * 0.15
                  + Math.sin(t * 3.0 + barPhases[i] * 0.7) * 0.10
@@ -154,7 +154,7 @@ function render() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, width, height);
 
-  const maxBarHeight = height * 0.98;
+  const maxBarHeight = height * 0.82;
   const baseY = height;
   const base = 0.02;
   const noiseAmp = 0.04;
@@ -403,7 +403,7 @@ onUnmounted(() => {
   -webkit-backdrop-filter: blur(20px);
   border: 1px solid rgba(255, 255, 255, 0.08);
   overflow: hidden;
-  min-height: 280px;
+  min-height: 330px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
 }
 
@@ -427,8 +427,8 @@ onUnmounted(() => {
   z-index: 1;
   display: flex;
   flex-direction: column;
-  padding: 12px;
-  min-height: 280px;
+  padding: 8px 12px;
+  min-height: 330px;
 }
 
 /* ─── Header ─── */
@@ -567,12 +567,13 @@ onUnmounted(() => {
 .hero-demo__footer {
   display: flex;
   justify-content: center;
-  padding: 4px 0 2px;
+  padding-top: 4px;
+  margin-top: 4px;
 }
 
 .hero-demo__hint {
   font-size: 13px;
-  color: rgba(255, 255, 255, 0.35);
+  color: #a0a0a0;
 }
 
 /* ─── Responsive ─── */
@@ -586,12 +587,12 @@ onUnmounted(() => {
 @media (max-width: 600px) {
   .hero-demo {
     border-radius: 12px;
-    min-height: 240px;
+    min-height: 280px;
   }
 
   .hero-demo__content {
-    padding: 10px;
-    min-height: 240px;
+    padding: 8px 10px;
+    min-height: 280px;
   }
 
   .hero-demo__title {
