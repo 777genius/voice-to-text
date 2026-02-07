@@ -217,7 +217,7 @@ onMounted(() => {
     :scrim="false"
     @update:model-value="emit('close')"
   >
-    <v-card>
+    <v-card class="profile-card">
       <v-card-title class="d-flex align-center">
         <v-icon class="mr-2">mdi-account-circle</v-icon>
         {{ t('profile.title') }}
@@ -422,3 +422,10 @@ onMounted(() => {
     </v-card>
   </v-dialog>
 </template>
+
+<style scoped>
+.profile-card {
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+}
+</style>
