@@ -218,9 +218,7 @@ onMounted(() => {
     @update:model-value="emit('close')"
   >
     <v-card class="profile-card">
-      <v-card-title class="d-flex align-center">
-        <v-icon class="mr-2">mdi-account-circle</v-icon>
-        {{ t('profile.title') }}
+      <v-card-title class="d-flex align-center">        
         <v-spacer />
         <v-btn
           icon="mdi-close"
