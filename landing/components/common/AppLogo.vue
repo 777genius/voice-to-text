@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import logoImg from '~/assets/logo-192.png';
+import logoImg from '~/assets/logo-128.webp';
 </script>
 
 <template>
@@ -24,9 +24,10 @@ import logoImg from '~/assets/logo-192.png';
 }
 
 .app-logo__icon {
-  width: 32px;
-  height: 32px;
+  width: 48px;
+  height: 48px;
   border-radius: 6px;
   flex-shrink: 0;
+  margin-right: 16px;
 }
 </style>
