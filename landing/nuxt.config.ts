@@ -23,7 +23,9 @@ export default defineNuxtConfig({
         { rel: "apple-touch-icon", sizes: "192x192", href: "/logo-192.png" },
         // Ускоряем загрузку внешних ресурсов
         { rel: "preconnect", href: "https://api.voicetext.site" },
-        { rel: "dns-prefetch", href: "https://api.voicetext.site" }
+        { rel: "dns-prefetch", href: "https://api.voicetext.site" },
+        { rel: "preconnect", href: "https://www.googletagmanager.com" },
+        { rel: "preconnect", href: "https://www.google-analytics.com" }
       ]
     }
   },
@@ -32,7 +34,8 @@ export default defineNuxtConfig({
     "@nuxtjs/i18n",
     "@vueuse/nuxt",
     "nuxt-icon",
-    "@nuxt/eslint"
+    "@nuxt/eslint",
+    "nuxt-gtag"
   ],
   css: ["@mdi/font/css/materialdesignicons.css", "~/assets/styles/main.scss"],
   components: [
@@ -84,6 +87,12 @@ export default defineNuxtConfig({
   site: {
     url: siteUrl,
     name: "VoicetextAI"
+  },
+  gtag: {
+    id: process.env.NUXT_PUBLIC_GTAG_ID,
+    config: {
+      send_page_view: true
+    }
   },
   runtimeConfig: {
     // Опциональный токен для GitHub API: без него лимит 60 req/час на IP,
