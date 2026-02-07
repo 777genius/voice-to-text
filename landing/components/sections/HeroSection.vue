@@ -13,13 +13,6 @@ const releaseDate = computed(() => {
   });
 });
 
-// Deterministic waveform heights for SSR consistency
-const waveformHeights = Array.from({ length: 32 }, (_, i) => {
-  const idx = i + 1;
-  // Seeded pseudo-random using a simple LCG-like approach
-  const pseudo = ((idx * 2654435761) >>> 0) % 100;
-  return 20 + Math.sin(idx * 0.6) * 40 + (pseudo / 100) * 30;
-});
 </script>
 
 <template>
@@ -79,53 +72,16 @@ const waveformHeights = Array.from({ length: 32 }, (_, i) => {
           </div>
         </v-col>
 
-        <!-- Right: Preview card -->
+        <!-- Right: Interactive demo -->
         <v-col cols="12" md="5">
           <div class="hero-section__preview">
-            <!-- Card glow -->
             <div class="hero-section__preview-glow" />
-
-            <div class="hero-section__preview-inner">
-              <!-- Top bar -->
-              <div class="hero-section__preview-bar">
-                <div class="hero-section__preview-dots">
-                  <span /><span /><span />
-                </div>
-                <span class="hero-section__preview-label">{{ t("hero.preview") }}</span>
-              </div>
-
-              <!-- Waveform visualization -->
-              <div class="hero-section__waveform">
-                <div
-                  v-for="(height, i) in waveformHeights"
-                  :key="i"
-                  class="hero-section__waveform-bar"
-                  :style="{
-                    '--bar-index': i + 1,
-                    '--bar-height': `${height}%`,
-                  }"
-                />
-              </div>
-
-              <!-- Transcription preview -->
-              <div class="hero-section__transcription">
-                <div class="hero-section__transcription-line hero-section__transcription-line--1">
-                  <span class="hero-section__transcription-text">{{ t("hero.transcription.sample") }}</span>
-                </div>
-                <div class="hero-section__transcription-line hero-section__transcription-line--2">
-                  <span class="hero-section__transcription-cursor" />
-                </div>
-              </div>
-
-              <!-- Status bar -->
-              <div class="hero-section__preview-status">
-                <div class="hero-section__status-recording">
-                  <span class="hero-section__status-dot" />
-                  <span>{{ t("hero.status.recording") }}</span>
-                </div>
-                <span class="hero-section__status-time">0:04</span>
-              </div>
-            </div>
+            <ClientOnly>
+              <LazyHeroDemo />
+              <template #fallback>
+                <div class="hero-demo-fallback" />
+              </template>
+            </ClientOnly>
           </div>
         </v-col>
       </v-row>
@@ -364,152 +320,11 @@ const waveformHeights = Array.from({ length: 32 }, (_, i) => {
   50% { opacity: 0.5; transform: scale(1.02); }
 }
 
-.hero-section__preview-inner {
-  position: relative;
-  z-index: 1;
-  border-radius: 20px;
-  padding: 24px;
-  background: rgba(255, 255, 255, 0.6);
-  border: 1px solid rgba(99, 102, 241, 0.1);
-  backdrop-filter: blur(24px);
-  overflow: hidden;
-}
-
-/* ─── Preview top bar ─── */
-.hero-section__preview-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 24px;
-}
-
-.hero-section__preview-dots {
-  display: flex;
-  gap: 6px;
-}
-
-.hero-section__preview-dots span {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-}
-
-.hero-section__preview-dots span:nth-child(1) {
-  background: #ef4444;
-}
-
-.hero-section__preview-dots span:nth-child(2) {
-  background: #f59e0b;
-}
-
-.hero-section__preview-dots span:nth-child(3) {
-  background: #22c55e;
-}
-
-.hero-section__preview-label {
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  opacity: 0.4;
-}
-
-/* ─── Waveform ─── */
-.hero-section__waveform {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  height: 80px;
-  margin-bottom: 24px;
-  padding: 0 8px;
-}
-
-.hero-section__waveform-bar {
-  flex: 1;
-  max-width: 6px;
-  height: var(--bar-height, 30%);
-  border-radius: 100px;
-  background: linear-gradient(180deg, #6366f1, #ec4899);
-  opacity: 0.7;
-  animation: waveAnimate 1.5s ease-in-out infinite alternate;
-  animation-delay: calc(var(--bar-index, 0) * 0.05s);
-}
-
-@keyframes waveAnimate {
-  0% { transform: scaleY(0.4); opacity: 0.4; }
-  100% { transform: scaleY(1); opacity: 0.8; }
-}
-
-/* ─── Transcription ─── */
-.hero-section__transcription {
-  margin-bottom: 20px;
-  padding: 16px;
-  border-radius: 12px;
-  background: rgba(0, 0, 0, 0.03);
-  min-height: 60px;
-}
-
-.hero-section__transcription-line {
-  display: flex;
-  align-items: center;
-}
-
-.hero-section__transcription-line--1 {
-  margin-bottom: 8px;
-}
-
-.hero-section__transcription-text {
-  font-size: 0.92rem;
-  line-height: 1.5;
-  opacity: 0.7;
-  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
-}
-
-.hero-section__transcription-cursor {
-  width: 2px;
-  height: 18px;
-  background: #6366f1;
-  border-radius: 1px;
-  animation: cursorBlink 1s step-end infinite;
-}
-
-@keyframes cursorBlink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
-}
-
-/* ─── Status bar ─── */
-.hero-section__preview-status {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding-top: 16px;
-  border-top: 1px solid rgba(0, 0, 0, 0.06);
-}
-
-.hero-section__status-recording {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: #ef4444;
-}
-
-.hero-section__status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #ef4444;
-  animation: pulse 1.5s ease-in-out infinite;
-}
-
-.hero-section__status-time {
-  font-size: 0.8rem;
-  font-weight: 600;
-  opacity: 0.45;
-  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+/* ─── SSR Fallback ─── */
+.hero-demo-fallback {
+  border-radius: 16px;
+  background: #1a1a1a;
+  min-height: 280px;
 }
 
 /* ─── Entrance animations ─── */
@@ -595,41 +410,8 @@ const waveformHeights = Array.from({ length: 32 }, (_, i) => {
   color: #94a3b8;
 }
 
-.v-theme--dark .hero-section__preview-inner {
-  background: rgba(255, 255, 255, 0.04);
-  border-color: rgba(129, 140, 248, 0.12);
-}
-
 .v-theme--dark .hero-section__preview-glow {
   opacity: 0.25;
-}
-
-.v-theme--dark .hero-section__transcription {
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.v-theme--dark .hero-section__transcription-text {
-  color: #cbd5e1;
-}
-
-.v-theme--dark .hero-section__transcription-cursor {
-  background: #a5b4fc;
-}
-
-.v-theme--dark .hero-section__preview-status {
-  border-top-color: rgba(255, 255, 255, 0.06);
-}
-
-.v-theme--dark .hero-section__status-time {
-  color: #94a3b8;
-}
-
-.v-theme--dark .hero-section__waveform-bar {
-  background: linear-gradient(180deg, #818cf8, #f472b6);
-}
-
-.v-theme--dark .hero-section__preview-label {
-  color: #94a3b8;
 }
 
 /* ─── Light Theme ─── */
@@ -656,27 +438,8 @@ const waveformHeights = Array.from({ length: 32 }, (_, i) => {
   color: #94a3b8;
 }
 
-.v-theme--light .hero-section__preview-inner {
-  background: rgba(255, 255, 255, 0.75);
-  box-shadow:
-    0 4px 32px rgba(99, 102, 241, 0.08),
-    0 1px 4px rgba(0, 0, 0, 0.04);
-}
-
-.v-theme--light .hero-section__transcription {
-  background: rgba(99, 102, 241, 0.04);
-}
-
-.v-theme--light .hero-section__transcription-text {
-  color: #334155;
-}
-
 .v-theme--light .hero-section__trust-item {
   color: #475569;
-}
-
-.v-theme--light .hero-section__status-time {
-  color: #64748b;
 }
 
 /* ─── Responsive ─── */
@@ -728,15 +491,6 @@ const waveformHeights = Array.from({ length: 32 }, (_, i) => {
 
   .hero-section__trust-item {
     font-size: 0.75rem;
-  }
-
-  .hero-section__preview-inner {
-    padding: 18px;
-  }
-
-  .hero-section__waveform {
-    height: 60px;
-    margin-bottom: 18px;
   }
 
   .hero-section__badge {
