@@ -214,6 +214,7 @@ onMounted(() => {
   <v-dialog
     :model-value="true"
     max-width="360"
+    :scrim="false"
     @update:model-value="emit('close')"
   >
     <v-card>
