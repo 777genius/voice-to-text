@@ -1,6 +1,6 @@
 {
   "name": "voice-to-text",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "type": "module",
   "description": "Privacy-focused voice-to-text application with offline support",
   "scripts": {
