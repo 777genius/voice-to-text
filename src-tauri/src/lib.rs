@@ -365,6 +365,21 @@ pub fn run() {
                             );
                         }
 
+                        // UX: keep-alive должен быть заметно полезным для частых hotkey-сессий.
+                        // Если TTL слишком маленький, пользователь снова увидит "Подключение..." уже через минуту-две.
+                        // Поэтому для backend провайдера держим минимум 5 минут.
+                        const MIN_BACKEND_KEEPALIVE_TTL_SECS: u64 = 300;
+                        if saved_config.provider == crate::domain::SttProviderType::Backend
+                            && saved_config.keep_alive_ttl_secs < MIN_BACKEND_KEEPALIVE_TTL_SECS
+                        {
+                            saved_config.keep_alive_ttl_secs = MIN_BACKEND_KEEPALIVE_TTL_SECS;
+                            config_migrated = true;
+                            log::info!(
+                                "Migrated keep_alive_ttl_secs for backend provider to {}s",
+                                saved_config.keep_alive_ttl_secs
+                            );
+                        }
+
                         // Best-effort: сохраняем миграцию обратно на диск, чтобы настройка была стабильной.
                         if config_migrated {
                             if let Err(e) = ConfigStore::save_config(&saved_config).await {
@@ -403,8 +418,39 @@ pub fn run() {
                 }
 
                 // Загружаем конфигурацию приложения
-                if let Ok(saved_app_config) = ConfigStore::load_app_config().await {
+                if let Ok(mut saved_app_config) = ConfigStore::load_app_config().await {
                     if let Some(state) = app_handle.try_state::<AppState>() {
+                        // Миграция хоткея: старые версии могли сохранить DOM-токены типа Backquote,
+                        // которые не всегда парсятся shortcut парсером. Нормализуем и сохраняем обратно.
+                        let raw_hotkey = saved_app_config.recording_hotkey.clone();
+                        match crate::infrastructure::hotkey::normalize_recording_hotkey(&raw_hotkey) {
+                            Some(normalized) => {
+                                if normalized != raw_hotkey {
+                                    log::info!(
+                                        "Migrated recording hotkey from '{}' to '{}'",
+                                        raw_hotkey,
+                                        normalized
+                                    );
+                                    saved_app_config.recording_hotkey = normalized;
+                                    if let Err(e) = ConfigStore::save_app_config(&saved_app_config).await {
+                                        log::warn!("Failed to persist migrated app config hotkey: {}", e);
+                                    }
+                                }
+                            }
+                            None => {
+                                log::warn!(
+                                    "Invalid recording hotkey in app config ('{}'), resetting to default ('{}')",
+                                    raw_hotkey,
+                                    crate::infrastructure::hotkey::DEFAULT_RECORDING_HOTKEY
+                                );
+                                saved_app_config.recording_hotkey =
+                                    crate::infrastructure::hotkey::DEFAULT_RECORDING_HOTKEY.to_string();
+                                if let Err(e) = ConfigStore::save_app_config(&saved_app_config).await {
+                                    log::warn!("Failed to persist reset app config hotkey: {}", e);
+                                }
+                            }
+                        }
+
                         *state.config.write().await = saved_app_config.clone();
 
                         state.transcription_service
@@ -462,17 +508,14 @@ pub fn run() {
                         }
                     }
                 }
-            });
 
-            // Регистрируем горячую клавишу для записи
-            let app_handle_for_hotkey = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                // Ждем небольшую задержку чтобы конфигурация успела загрузиться
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-                // Вызываем команду регистрации горячей клавиши
-                if let Some(state) = app_handle_for_hotkey.try_state::<AppState>() {
-                    let handle = app_handle_for_hotkey.clone();
+                // Регистрируем горячую клавишу ПОСЛЕ загрузки app-config.
+                //
+                // Иначе возможна гонка: отдельная задача регистрирует дефолтный хоткей
+                // до того, как `load_app_config()` успеет обновить `state.config`,
+                // и тогда UI показывает новое значение, а реально работает дефолт.
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    let handle = app_handle.clone();
                     match commands::register_recording_hotkey(state, handle).await {
                         Ok(_) => log::info!("Recording hotkey registered successfully"),
                         Err(e) => {
@@ -483,6 +526,19 @@ pub fn run() {
                             #[cfg(not(target_os = "macos"))]
                             log::warn!("    Recommended: Ctrl+Shift+X, Alt+X, or Ctrl+Shift+R");
                         }
+                    }
+                }
+            });
+
+            // Регистрируем хоткей сразу (на дефолтном/текущем state.config),
+            // чтобы он работал даже до завершения загрузки конфигов.
+            // После загрузки app-config выше мы перерегистрируем хоткей еще раз (итоговое значение).
+            let app_handle_for_hotkey_init = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(state) = app_handle_for_hotkey_init.try_state::<AppState>() {
+                    let handle = app_handle_for_hotkey_init.clone();
+                    if let Err(e) = commands::register_recording_hotkey(state, handle).await {
+                        log::error!("Failed to register recording hotkey (early init): {}", e);
                     }
                 }
             });

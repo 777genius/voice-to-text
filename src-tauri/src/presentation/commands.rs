@@ -536,7 +536,7 @@ pub async fn toggle_recording_with_window(
             // Останавливаем запись
             let _result = state
                 .transcription_service
-                .stop_recording_hard()
+                .stop_recording()
                 .await
                 .map_err(|e| e.to_string())?;
 
@@ -620,7 +620,7 @@ pub async fn toggle_recording_with_window_internal(
         RecordingStatus::Recording => {
             let _result = state
                 .transcription_service
-                .stop_recording_hard()
+                .stop_recording()
                 .await
                 .map_err(|e| e.to_string())?;
 
@@ -1228,14 +1228,96 @@ pub async fn register_recording_hotkey(
     let hotkey = state.config.read().await.recording_hotkey.clone();
     log::info!("Command: register_recording_hotkey - hotkey: {}", hotkey);
 
+    // ВАЖНО: сначала убеждаемся, что хоткей парсится, и только потом снимаем текущие регистрации.
+    // Иначе при ошибке парсинга мы останемся вообще без хоткея.
+    let (effective_hotkey, shortcut) = match hotkey.parse::<Shortcut>() {
+        Ok(sc) => (hotkey.clone(), sc),
+        Err(parse_err) => {
+            // Пытаемся нормализовать строку (например Backquote -> `).
+            if let Some(normalized) = crate::infrastructure::hotkey::normalize_recording_hotkey(&hotkey) {
+                match normalized.parse::<Shortcut>() {
+                    Ok(sc) => {
+                        log::warn!(
+                            "Hotkey '{}' failed to parse ({}), using normalized '{}'",
+                            hotkey,
+                            parse_err,
+                            normalized
+                        );
+                        // Best-effort: фиксируем нормализованное значение в SoT + на диск,
+                        // чтобы UI и фактический хоткей не расходились.
+                        if normalized != hotkey {
+                            let (should_save, config_snapshot) = {
+                                let mut cfg = state.config.write().await;
+                                let changed = cfg.recording_hotkey != normalized;
+                                if changed {
+                                    cfg.recording_hotkey = normalized.clone();
+                                }
+                                (changed, cfg.clone())
+                            };
+                            if should_save {
+                                if let Err(e) = crate::infrastructure::ConfigStore::save_app_config(&config_snapshot).await {
+                                    log::warn!("Failed to persist normalized hotkey to app_config.json: {}", e);
+                                }
+                            }
+                        }
+                        (normalized, sc)
+                    }
+                    Err(_) => {
+                        // Фоллбек на дефолт: всегда должен работать.
+                        let fallback = crate::infrastructure::hotkey::DEFAULT_RECORDING_HOTKEY.to_string();
+                        let sc = fallback
+                            .parse::<Shortcut>()
+                            .map_err(|e| format!("Failed to parse fallback hotkey '{}': {}", fallback, e))?;
+                        log::error!(
+                            "Failed to parse hotkey '{}' ({}). Falling back to '{}'",
+                            hotkey,
+                            parse_err,
+                            fallback
+                        );
+
+                        // Синхронизируем SoT на дефолт, чтобы UI не показывал неработающее значение.
+                        let config_snapshot = {
+                            let mut cfg = state.config.write().await;
+                            cfg.recording_hotkey = fallback.clone();
+                            cfg.clone()
+                        };
+                        if let Err(e) = crate::infrastructure::ConfigStore::save_app_config(&config_snapshot).await {
+                            log::warn!("Failed to persist fallback hotkey to app_config.json: {}", e);
+                        }
+
+                        (fallback, sc)
+                    }
+                }
+            } else {
+                let fallback = crate::infrastructure::hotkey::DEFAULT_RECORDING_HOTKEY.to_string();
+                let sc = fallback
+                    .parse::<Shortcut>()
+                    .map_err(|e| format!("Failed to parse fallback hotkey '{}': {}", fallback, e))?;
+                log::error!(
+                    "Failed to parse hotkey '{}' ({}). Falling back to '{}'",
+                    hotkey,
+                    parse_err,
+                    fallback
+                );
+
+                let config_snapshot = {
+                    let mut cfg = state.config.write().await;
+                    cfg.recording_hotkey = fallback.clone();
+                    cfg.clone()
+                };
+                if let Err(e) = crate::infrastructure::ConfigStore::save_app_config(&config_snapshot).await {
+                    log::warn!("Failed to persist fallback hotkey to app_config.json: {}", e);
+                }
+
+                (fallback, sc)
+            }
+        }
+    };
+
     // Отменяем все старые регистрации
     if let Err(e) = app_handle.global_shortcut().unregister_all() {
         log::warn!("Failed to unregister all shortcuts: {}", e);
     }
-
-    // Парсим новую горячую клавишу
-    let shortcut = hotkey.parse::<Shortcut>()
-        .map_err(|e| format!("Failed to parse hotkey '{}': {}", hotkey, e))?;
 
     // Создаем обработчик - вызываем toggle напрямую вместо события
     // Важно: фильтруем только Pressed события, иначе срабатывает и на key down, и на key up
@@ -1273,9 +1355,9 @@ pub async fn register_recording_hotkey(
                 }
             }
         });
-    }).map_err(|e| format!("Failed to register hotkey '{}': {}", hotkey, e))?;
+    }).map_err(|e| format!("Failed to register hotkey '{}': {}", effective_hotkey, e))?;
 
-    log::info!("Successfully registered hotkey: {}", hotkey);
+    log::info!("Successfully registered hotkey: {}", effective_hotkey);
     Ok(())
 }
 

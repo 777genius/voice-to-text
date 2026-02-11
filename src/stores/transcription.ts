@@ -174,6 +174,52 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
+  function ensureActiveSessionForIncomingEvent(payloadSessionId: number, source: string): boolean {
+    bumpLastSeenSessionId(payloadSessionId);
+
+    // Никогда не принимаем события от "закрытых" сессий.
+    if (payloadSessionId <= closedSessionIdFloor.value) {
+      return false;
+    }
+
+    // Если по какой-то причине пропустили recording:status (например, запись стартовала на Rust-стороне
+    // сразу после show window, пока WebView ещё инициализируется), sessionId во фронте останется null,
+    // и мы начнём игнорировать transcription:* навсегда, показывая "Подключение...".
+    //
+    // Чтобы UI самовосстанавливался, "усыновляем" session_id из первого пришедшего события,
+    // но только когда ожидаем активный стрим (Starting/Recording/Processing или connect-retry).
+    if (sessionId.value === null) {
+      const canAdopt =
+        awaitingSessionStart.value ||
+        isConnecting.value ||
+        status.value === RecordingStatus.Starting ||
+        status.value === RecordingStatus.Recording ||
+        status.value === RecordingStatus.Processing;
+
+      if (!canAdopt) return false;
+
+      console.warn('[STT] Adopted sessionId from event:', {
+        source,
+        payloadSessionId,
+        status: status.value,
+        awaitingSessionStart: awaitingSessionStart.value,
+        isConnecting: isConnecting.value,
+        closedFloor: closedSessionIdFloor.value,
+      });
+
+      sessionId.value = payloadSessionId;
+      awaitingSessionStart.value = false;
+
+      // Если мы "залипли" в Starting из-за пропущенного recording:status=Recording,
+      // но уже видим события transcription:* — значит запись реально идёт.
+      if (status.value === RecordingStatus.Starting) {
+        status.value = RecordingStatus.Recording;
+      }
+    }
+
+    return payloadSessionId === sessionId.value;
+  }
+
   async function reconcileBackendStatus(reason: string): Promise<RecordingStatus | null> {
     if (!isTauriAvailable()) return null;
 
@@ -419,11 +465,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       unlistenPartial = await listen<PartialTranscriptionPayload>(
         EVENT_TRANSCRIPTION_PARTIAL,
         async (event) => {
-          // Защита: игнорируем любые "поздние" partial события от предыдущих сессий.
-          if (event.payload.session_id <= closedSessionIdFloor.value) {
-            return;
-          }
-          if (sessionId.value === null || event.payload.session_id !== sessionId.value) {
+          if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:partial')) {
             return;
           }
 
@@ -544,11 +586,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       unlistenFinal = await listen<FinalTranscriptionPayload>(
         EVENT_TRANSCRIPTION_FINAL,
         async (event) => {
-          // Защита: игнорируем любые "поздние" final события от предыдущих сессий.
-          if (event.payload.session_id <= closedSessionIdFloor.value) {
-            return;
-          }
-          if (sessionId.value === null || event.payload.session_id !== sessionId.value) {
+          if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:final')) {
             return;
           }
 
@@ -887,11 +925,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       unlistenError = await listen<TranscriptionErrorPayload>(
         EVENT_TRANSCRIPTION_ERROR,
         async (event) => {
-          // Защита: игнорируем ошибки от старых сессий, иначе можно "залипнуть" в Error при новом запуске.
-          if (event.payload.session_id <= closedSessionIdFloor.value) {
-            return;
-          }
-          if (sessionId.value === null || event.payload.session_id !== sessionId.value) {
+          if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:error')) {
             return;
           }
 
@@ -1074,11 +1108,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       unlistenConnectionQuality = await listen<ConnectionQualityPayload>(
         EVENT_CONNECTION_QUALITY,
         (event) => {
-          // Защита: игнорируем "поздние" апдейты качества от старых сессий.
-          if (event.payload.session_id <= closedSessionIdFloor.value) {
-            return;
-          }
-          if (sessionId.value === null || event.payload.session_id !== sessionId.value) {
+          if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'connection:quality')) {
             return;
           }
 

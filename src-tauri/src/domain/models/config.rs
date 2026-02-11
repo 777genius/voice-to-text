@@ -74,7 +74,7 @@ pub struct SttConfig {
 }
 
 fn default_keep_alive_ttl_secs() -> u64 {
-    120
+    300
 }
 
 impl Default for SttConfig {
@@ -213,7 +213,7 @@ mod tests {
         assert!(config.backend_auth_token.is_none());
         assert!(config.backend_url.is_none());
         assert!(!config.keep_connection_alive);
-        assert_eq!(config.keep_alive_ttl_secs, 120);
+        assert_eq!(config.keep_alive_ttl_secs, 300);
     }
 
     #[test]

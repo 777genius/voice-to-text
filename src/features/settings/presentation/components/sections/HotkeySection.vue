@@ -86,18 +86,18 @@ function formatHotkeyFromKeyboardEvent(event: KeyboardEvent): string | null {
     key = /^\d$/.test(num) ? num : `Numpad${num}`;
   } else {
     const codeKeyMap: Record<string, string> = {
-      Backquote: 'Backquote',
-      Minus: 'Minus',
-      Equal: 'Equal',
-      BracketLeft: 'BracketLeft',
-      BracketRight: 'BracketRight',
-      Backslash: 'Backslash',
-      IntlBackslash: 'IntlBackslash',
-      Semicolon: 'Semicolon',
-      Quote: 'Quote',
-      Comma: 'Comma',
-      Period: 'Period',
-      Slash: 'Slash',
+      Backquote: '`',
+      Minus: '-',
+      Equal: '=',
+      BracketLeft: '[',
+      BracketRight: ']',
+      Backslash: '\\',
+      IntlBackslash: '\\',
+      Semicolon: ';',
+      Quote: "'",
+      Comma: ',',
+      Period: '.',
+      Slash: '/',
     };
 
     if (codeKeyMap[code]) {

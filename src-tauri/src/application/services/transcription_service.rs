@@ -586,7 +586,18 @@ impl TranscriptionService {
             *self.inactivity_timer_task.write().await = Some(inactivity_timer);
             *self.status.write().await = RecordingStatus::Idle;
 
-            log::info!("Recording paused, connection kept alive (will auto-close in 30 min)");
+            let ttl_secs_for_log = ttl_secs;
+            if ttl_secs_for_log >= 60 {
+                log::info!(
+                    "Recording paused, connection kept alive (will auto-close in {} min)",
+                    (ttl_secs_for_log + 59) / 60
+                );
+            } else {
+                log::info!(
+                    "Recording paused, connection kept alive (will auto-close in {}s)",
+                    ttl_secs_for_log
+                );
+            }
             Ok("Recording paused, connection kept alive".to_string())
         } else {
             // Обычная остановка для провайдеров без keep-alive
