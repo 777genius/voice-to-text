@@ -6,6 +6,8 @@ use std::{
 
 use tauri::{AppHandle, Emitter, Runtime};
 use tauri_plugin_updater::UpdaterExt;
+#[cfg(target_os = "windows")]
+use super::config_store::ConfigStore;
 
 /// Защита от двойного старта установки.
 ///
