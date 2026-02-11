@@ -71,6 +71,64 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const autoCopyEnabled = computed(() => appConfig.autoCopyToClipboard);
   const autoPasteEnabled = computed(() => appConfig.autoPasteText);
 
+  // Auth store — нужен, чтобы корректно сбрасывать ошибки записи после успешной авторизации,
+  // если ошибка относилась к предыдущему пользователю/токену.
+  const authStore = useAuthStore();
+
+  function clearRecordingUiError(reason: string): void {
+    // Не трогаем активную запись, чтобы не скрывать реальные проблемы во время стрима.
+    if (
+      status.value === RecordingStatus.Starting ||
+      status.value === RecordingStatus.Recording ||
+      status.value === RecordingStatus.Processing
+    ) {
+      return;
+    }
+
+    if (error.value || errorType.value || status.value === RecordingStatus.Error) {
+      console.info('[STT] Clearing recording error after auth change:', reason);
+    }
+
+    // Возвращаем UI в "готов" состояние.
+    if (status.value === RecordingStatus.Error) status.value = RecordingStatus.Idle;
+    error.value = null;
+    errorType.value = null;
+
+    // И сбрасываем контекст последней неудачной попытки подключения,
+    // чтобы новые попытки стартовали "с чистого листа".
+    lastConnectFailure.value = null;
+    lastConnectFailureRaw.value = '';
+    lastConnectFailureDetails.value = null;
+    suppressNextErrorStatus = false;
+  }
+
+  // После успешной авторизации (или смены пользователя) очищаем "залипшую" ошибку на экране записи.
+  watch(
+    () =>
+      [
+        authStore.isAuthenticated,
+        authStore.session?.user?.id ?? null,
+        authStore.accessToken ?? null,
+      ] as const,
+    ([isAuthed, userId, token], [prevAuthed, prevUserId, prevToken]) => {
+      if (!isAuthed) return;
+
+      const becameAuthed = !prevAuthed && isAuthed;
+      const userChanged = !!userId && !!prevUserId && userId !== prevUserId;
+      const tokenChanged = !!token && !!prevToken && token !== prevToken;
+
+      // Если токен обновился (refresh) или пользователь сменился — старые ошибки
+      // (401/429/прочие) могли относиться к прежней сессии.
+      if (userChanged) {
+        clearRecordingUiError('user_changed');
+      } else if (becameAuthed) {
+        clearRecordingUiError('authenticated');
+      } else if (tokenChanged) {
+        clearRecordingUiError('token_refreshed');
+      }
+    }
+  );
+
   // Флаг для защиты от дублирования auto-paste
   // Хранит значение finalText на момент последней успешной вставки
   const lastPastedFinalText = ref<string>('');
@@ -1437,6 +1495,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           const details = lastConnectFailureDetails.value;
           const detected = failureType || detectErrorTypeFromRaw(raw) || 'connection';
 
+          const httpStatus = details?.httpStatus ?? extractHttpStatusFromRaw(raw);
+          const serverCode = details?.serverCode;
+          const isLimitExceeded =
+            details?.category === 'limit_exceeded' || serverCode === 'LIMIT_EXCEEDED';
+
           // Auth ошибка: обычно это протухший access token.
           // Пробуем один раз обновить сессию и продолжить retry-цикл.
           if (detected === 'authentication') {
@@ -1451,14 +1514,22 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             return;
           }
 
+          if (isLimitExceeded) {
+            errorType.value = 'limit_exceeded';
+            error.value = mapErrorMessage('limit_exceeded', raw, details);
+            status.value = RecordingStatus.Error;
+            return;
+          }
+
           const isRetriable = detected === 'connection' || detected === 'timeout';
           const isLastAttempt = attempt >= connectMaxAttempts.value;
           const isRateLimited =
             details?.category === 'rate_limited' ||
-            details?.httpStatus === 429 ||
             // Fallback: иногда category не проставляется, но сервер код есть.
-            details?.serverCode === 'RATE_LIMIT_EXCEEDED' ||
-            details?.serverCode === 'TOO_MANY_SESSIONS';
+            serverCode === 'RATE_LIMIT_EXCEEDED' ||
+            serverCode === 'TOO_MANY_SESSIONS' ||
+            // Если кода нет, но это 429 — бэкоффим как rate limit (кроме limit_exceeded, см. выше).
+            httpStatus === 429;
 
           console.warn('[ConnectRetry] Connect attempt failed:', {
             attempt,
@@ -1478,7 +1549,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           // Короткая пауза перед следующей попыткой
           let backoffMs = calcBackoffMs(attempt);
           if (isRateLimited) {
-            const serverCode = details?.serverCode;
             const jitter = Math.floor(Math.random() * 250);
             // 429 нельзя ретраить "быстро": иначе сами усугубляем лимит.
             // При TOO_MANY_SESSIONS обычно достаточно пары секунд (сервер успевает закрыть старую сессию).

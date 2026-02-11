@@ -403,6 +403,16 @@ impl SttProvider for BackendProvider {
                         }
                     }
 
+                    // Для WS-handshake ошибок tungstenite часто не отдаёт body, поэтому
+                    // backend дублирует код в заголовке.
+                    if server_code.is_none() {
+                        server_code = resp
+                            .headers()
+                            .get("x-voicetext-error-code")
+                            .and_then(|v| v.to_str().ok())
+                            .map(|s| s.to_string());
+                    }
+
                     // Иногда retry-after приходит только хедером (например, глобальный rate limit middleware).
                     if retry_after_secs.is_none() {
                         retry_after_secs = resp
