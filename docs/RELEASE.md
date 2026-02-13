@@ -22,9 +22,9 @@
 
 | Тип | Когда | Пример |
 |-----|-------|--------|
-| **patch** (`0.5.1` → `0.5.2`) | Баг-фиксы, мелкие правки | Исправлен краш при записи |
-| **minor** (`0.5.2` → `0.6.0`) | Новый функционал, улучшения | Добавлен новый STT провайдер |
-| **major** (`0.6.0` → `1.0.0`) | Ломающие изменения, крупные переработки | Смена архитектуры, удаление API |
+| **patch** (`0.9.3` → `0.9.4`) | Баг-фиксы, мелкие правки | Исправлен краш при записи |
+| **minor** (`0.9.4` → `0.10.0`) | Новый функционал, улучшения | Добавлен новый STT провайдер |
+| **major** (`0.9.x` → `1.0.0`) | Ломающие изменения, крупные переработки | Смена архитектуры, удаление API |
 
 ---
 
@@ -42,14 +42,14 @@ grep '^version' src-tauri/Cargo.toml
 
 | Файл | Поле | Пример |
 |------|------|--------|
-| `package.json` | `"version"` | `"0.6.0"` |
-| `src-tauri/tauri.conf.json` | `"version"` | `"0.6.0"` |
-| `src-tauri/Cargo.toml` | `version` | `"0.6.0"` |
+| `package.json` | `"version"` | `"0.9.4"` |
+| `src-tauri/tauri.conf.json` | `"version"` | `"0.9.4"` |
+| `src-tauri/Cargo.toml` | `version` | `"0.9.4"` |
 
 ```bash
-# Быстрая замена (пример: 0.5.1 → 0.6.0)
-OLD="0.5.1"
-NEW="0.6.0"
+# Быстрая замена (пример: 0.9.3 → 0.9.4)
+OLD="0.9.3"
+NEW="0.9.4"
 
 sed -i '' "s/\"version\": \"$OLD\"/\"version\": \"$NEW\"/" package.json src-tauri/tauri.conf.json
 sed -i '' "s/^version = \"$OLD\"/version = \"$NEW\"/" src-tauri/Cargo.toml
@@ -67,23 +67,24 @@ grep '^version' src-tauri/Cargo.toml
 
 ## 3. Обновить CHANGELOG.md
 
-Открыть `CHANGELOG.md` в корне проекта и добавить секцию для новой версии.
+Открыть `CHANGELOG.md` в корне `frontend/` и добавить секцию для новой версии (в начало, после заголовка).
+Этот файл используется как источник "Что нового" для автообновления (если не хватает текста из GitHub Release).
 
 ### Формат записи
 
 ```markdown
-## [0.6.0] — 2026-02-02
+## [0.9.4] — 2026-02-13
 
-### Добавлено
+### Added
 - Описание новой фичи
 
-### Изменено
+### Changed
 - Описание изменённого поведения
 
-### Исправлено
+### Fixed
 - Описание бага который починили
 
-### Удалено
+### Removed
 - Что убрали (если убирали)
 ```
 
@@ -91,10 +92,10 @@ grep '^version' src-tauri/Cargo.toml
 
 ```bash
 # Посмотреть коммиты с последнего релиза
-git log v0.5.1..HEAD --oneline
+git log v0.9.3..HEAD --oneline
 
 # Более подробно, с датами
-git log v0.5.1..HEAD --pretty=format:"%h %s (%ai)"
+git log v0.9.3..HEAD --pretty=format:"%h %s (%ai)"
 ```
 
 ### Категории
@@ -112,7 +113,7 @@ git log v0.5.1..HEAD --pretty=format:"%h %s (%ai)"
 
 ```bash
 git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml CHANGELOG.md
-git commit -m "release: v0.6.0"
+git commit -m "release: v0.9.4"
 ```
 
 Формат коммита: `release: v<версия>`
@@ -123,11 +124,11 @@ git commit -m "release: v0.6.0"
 
 ```bash
 # Создать аннотированный tag
-git tag v0.6.0
+git tag v0.9.4
 
 # Запушить коммит и tag
-git push origin master
-git push origin v0.6.0
+git push origin HEAD
+git push origin v0.9.4
 ```
 
 > После пуша тега GitHub Actions автоматически запустит сборку на всех платформах
@@ -157,8 +158,8 @@ gh run view <run-id> --log-failed
 Нужно обновить описание:
 
 ```bash
-gh release edit v0.6.0 \
-  --title "v0.6.0 — Краткое описание" \
+gh release edit v0.9.4 \
+  --title "v0.9.4 — Краткое описание" \
   --notes "$(cat <<'EOF'
 ## Что нового
 
@@ -190,7 +191,7 @@ gh release edit v0.6.0 \
 
 ---
 
-**Полный список изменений:** https://github.com/777genius/voice-to-text/compare/v0.5.1...v0.6.0
+**Полный список изменений:** https://github.com/777genius/voice-to-text/compare/v0.9.3...v0.9.4
 EOF
 )"
 ```
@@ -242,6 +243,7 @@ EOF
 - [ ] `git status` чистый (нет незакоммиченных файлов)
 - [ ] Тесты проходят: `pnpm test:run`
 - [ ] Билд проходит локально: `pnpm build`
+- [ ] (Опционально) Rust-тесты проходят: `cargo test` (в `src-tauri/`)
 - [ ] Tag создан и запушен
 - [ ] GitHub Actions сборка прошла
 - [ ] Описание релиза на GitHub обновлено
@@ -253,8 +255,8 @@ EOF
 
 ```bash
 # Задать версию
-VERSION="0.6.0"
-OLD_VERSION="0.5.1"
+VERSION="0.9.4"
+OLD_VERSION="0.9.3"
 
 # 1. Обновить версии
 sed -i '' "s/\"version\": \"$OLD_VERSION\"/\"version\": \"$VERSION\"/" package.json src-tauri/tauri.conf.json
@@ -266,7 +268,7 @@ sed -i '' "s/^version = \"$OLD_VERSION\"/version = \"$VERSION\"/" src-tauri/Carg
 git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml CHANGELOG.md
 git commit -m "release: v$VERSION"
 git tag "v$VERSION"
-git push origin master
+git push origin HEAD
 git push origin "v$VERSION"
 
 # 4. Следить за сборкой
@@ -307,7 +309,7 @@ git push origin v0.6.1
 git tag --sort=-v:refname
 
 # Коммиты между релизами
-git log v0.5.0..v0.5.1 --oneline
+git log v0.9.3..v0.9.4 --oneline
 
 # Статус GitHub Actions
 gh run list --limit 5
@@ -316,9 +318,9 @@ gh run list --limit 5
 gh release list
 
 # Удалить tag (если ошибся)
-git tag -d v0.6.0
-git push origin --delete v0.6.0
+git tag -d v0.9.4
+git push origin --delete v0.9.4
 
 # Удалить GitHub Release
-gh release delete v0.6.0 --yes
+gh release delete v0.9.4 --yes
 ```

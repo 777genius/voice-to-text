@@ -14,7 +14,8 @@ type ChangelogSource = GithubRepoRef & {
 const RELEASE_REPO: ChangelogSource = {
   owner: '777genius',
   repo: 'voice-to-text',
-  changelogPath: 'frontend/CHANGELOG.md',
+  // В релиз-репозитории changelog лежит в корне (см. кандидаты ниже).
+  changelogPath: 'CHANGELOG.md',
 };
 
 const CHANGELOG_PATH_CANDIDATES = Array.from(
@@ -48,7 +49,7 @@ export function extractChangelogSection(changelog: string, version: string): str
     'm'
   );
 
-  const headerMatch = headerRe.exec(changelog);
+  const headerMatch = changelog.match(headerRe);
   if (!headerMatch || headerMatch.index == null) return null;
 
   // Начинаем с конца строки заголовка версии.
@@ -56,10 +57,9 @@ export function extractChangelogSection(changelog: string, version: string): str
   const contentStart = afterHeaderIdx === -1 ? changelog.length : afterHeaderIdx + 1;
 
   // Конец секции — следующий заголовок версии (## ...), начиная со следующей строки.
-  const nextHeaderRe = /^##\s+/gm;
-  nextHeaderRe.lastIndex = contentStart;
-  const nextHeaderMatch = nextHeaderRe.exec(changelog);
-  const contentEnd = nextHeaderMatch?.index ?? changelog.length;
+  const remainder = changelog.slice(contentStart);
+  const nextHeaderMatch = remainder.match(/^##\s+/m);
+  const contentEnd = nextHeaderMatch?.index != null ? contentStart + nextHeaderMatch.index : changelog.length;
 
   const section = changelog.slice(contentStart, contentEnd).trim();
   return section ? section : null;

@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.9.4] — 2026-02-13
+
+### Changed
+- Updater release notes loader now starts from `CHANGELOG.md` in the release repository (fewer failed fetch attempts)
+- Updated release process documentation
+
+---
+
+## [0.9.3] — 2026-02-11
+
+### Added
+- Hotkey management: normalized hotkey strings for cross-platform compatibility
+- Session keep-alive: backend provider TTL increased to 5 minutes minimum for hotkey sessions
+- Auto-session handling: incoming transcription events now ensure an active session exists
+
+### Changed
+- Improved logging for hotkey registration and session lifecycle
+- HotkeySection component refactored for cleaner hotkey display and editing
+
+### Fixed
+- Aligned Tauri NPM packages (`@tauri-apps/api`, `@tauri-apps/plugin-updater`) with crate versions to fix version mismatch build warning
+
+---
+
+## [0.9.2] — 2026-02-11
+
+### Changed
+- Rate-limit backoff logic refactored: `LIMIT_EXCEEDED` exits immediately, `TOO_MANY_SESSIONS` and `RATE_LIMIT_EXCEEDED` use appropriate backoff with jitter
+
+### Fixed
+- WS error header parsing: parse `x-voicetext-error-code` header from handshake responses for reliable error classification when response body is unavailable
+- Immediate limit detection: detect `LIMIT_EXCEEDED` server code during connect retries and show limit error immediately instead of retrying
+- Auth recovery: clear stale recording errors (401/429) after successful token refresh or user change so the UI doesn't show outdated error messages
+- Windows build: added missing `ConfigStore` import in updater module (`#[cfg(target_os = "windows")]`)
+
+---
+
+## [0.9.1] — 2026-02-11
+
+### Changed
+- Vite dev server port now configurable via `VITE_PORT` environment variable
+- Refactored test error callbacks to use standardized logging helper
+- Cleaned up unused imports in updater and backend modules
+
+### Fixed
+- Improved WebSocket error classification: server 429 responses now parsed for specific error codes (`LIMIT_EXCEEDED`, `TOO_MANY_SESSIONS`, `RATE_LIMIT_EXCEEDED`) instead of generic connection errors
+- Fixed shared state for limit detection: `last_remaining_secs` promoted to `Arc<AtomicU32>` so `send_audio()` correctly returns `LimitExceeded` instead of `Closed` when connection drops due to usage limit
+- Prevented duplicate API calls on limit exceeded: early return guard stops redundant `/api/v1/account/licenses` fetches when multiple limit events fire
+- Fixed UI state flashing during 401 token refresh: `reconcileBackendStatus` no longer overwrites `Starting` with `Idle` during the race between window_shown event and start_recording
+- Added error downgrade protection: once limit exceeded is set, subsequent non-critical errors cannot overwrite it
+
+---
+
+## [0.9.0] — 2026-02-10
+
+### Added
+- Profile window for user profile management (account info, license, gift codes)
+- Demo mode for state synchronization between multiple windows
+
+### Changed
+- Settings window height reduced for better screen fit
+- Settings window header now supports drag-to-move
+- Added CodeRabbit configuration for automated code reviews
+- Profile feature decomposed into clean architecture: domain types, composable, section components
+
+### Fixed
+- Smart HTTP 429 (rate limit) handling with automatic retry and proper error propagation
+- Landing page visualizer bars: soft clamp with reduced amplitude for smoother animation
+
+---
+
 ## [0.8.1] — 2026-02-07
 
 ### Added
@@ -162,6 +233,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+[0.9.4]: https://github.com/777genius/voice-to-text/compare/v0.9.3...v0.9.4
+[0.9.3]: https://github.com/777genius/voice-to-text/compare/v0.9.2...v0.9.3
+[0.9.2]: https://github.com/777genius/voice-to-text/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/777genius/voice-to-text/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/777genius/voice-to-text/compare/v0.8.1...v0.9.0
+[0.8.1]: https://github.com/777genius/voice-to-text/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/777genius/voice-to-text/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/777genius/voice-to-text/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/777genius/voice-to-text/compare/v0.7.0...v0.7.1
