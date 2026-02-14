@@ -99,7 +99,6 @@ onUnmounted(() => {
     <div class="screenshots-section__container">
       <!-- Header area -->
       <div class="screenshots-section__header">
-        <span class="screenshots-section__badge">{{ t("nav.screenshots") }}</span>
         <h2 class="screenshots-section__title">
           {{ t("screenshots.sectionTitle") }}
         </h2>

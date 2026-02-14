@@ -127,7 +127,6 @@ function openCheckout() {
 
     <v-container>
       <div class="pricing-section__header">
-        <span class="pricing-section__badge">{{ t("nav.pricing") }}</span>
         <h2 class="pricing-section__title">
           {{ t("pricing.sectionTitle") }}
         </h2>

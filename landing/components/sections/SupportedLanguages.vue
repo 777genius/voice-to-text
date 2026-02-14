@@ -17,10 +17,6 @@ const { t } = useI18n();
 
     <v-container fluid class="languages-section__container">
       <div class="languages-section__header">
-        <span class="languages-section__badge">
-          <v-icon size="14">mdi-translate</v-icon>
-          {{ t("languages.badge") }}
-        </span>
         <h2 class="languages-section__title">
           {{ t("languages.title") }}
         </h2>

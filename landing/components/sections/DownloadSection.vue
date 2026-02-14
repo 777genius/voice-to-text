@@ -71,7 +71,6 @@ const sortedAssets = computed(() => {
     <v-container>
       <!-- Header -->
       <div class="download-section__header">
-        <span class="download-section__badge">{{ t("nav.download") }}</span>
         <h2 class="download-section__title">{{ content.download.title }}</h2>
         <p class="download-section__subtitle">{{ content.download.note }}</p>
       </div>
