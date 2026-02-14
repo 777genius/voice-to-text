@@ -555,6 +555,7 @@ onUnmounted(() => {
 .screenshots-section__image {
   width: 100%;
   height: auto;
+  aspect-ratio: 640 / 400;
   object-fit: contain;
   display: block;
 }

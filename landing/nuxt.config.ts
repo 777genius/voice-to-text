@@ -90,6 +90,7 @@ export default defineNuxtConfig({
   },
   gtag: {
     id: process.env.NUXT_PUBLIC_GTAG_ID,
+    loadingStrategy: "defer",
     config: {
       send_page_view: true
     }

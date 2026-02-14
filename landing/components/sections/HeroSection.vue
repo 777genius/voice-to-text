@@ -73,7 +73,7 @@ const releaseDate = computed(() => {
         </v-col>
 
         <!-- Right: Interactive demo -->
-        <v-col cols="12" md="5">
+        <v-col cols="12" md="5" class="hero-section__demo-col">
           <div class="hero-section__preview">
             <div class="hero-section__preview-glow" />
             <ClientOnly>
@@ -324,7 +324,13 @@ const releaseDate = computed(() => {
 .hero-demo-fallback {
   border-radius: 16px;
   background: #1a1a1a;
-  min-height: 280px;
+  min-height: 330px;
+}
+
+@media (max-width: 600px) {
+  .hero-demo-fallback {
+    min-height: 280px;
+  }
 }
 
 /* ─── Entrance animations ─── */
@@ -440,6 +446,17 @@ const releaseDate = computed(() => {
 
 .v-theme--light .hero-section__trust-item {
   color: #475569;
+}
+
+/* ─── Demo column: скрыта на мобильных через media query (SSR-safe) ─── */
+.hero-section__demo-col {
+  display: flex;
+}
+
+@media (max-width: 959px) {
+  .hero-section__demo-col {
+    display: none;
+  }
 }
 
 /* ─── Responsive ─── */

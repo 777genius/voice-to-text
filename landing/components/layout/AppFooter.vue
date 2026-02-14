@@ -6,7 +6,7 @@ const year = new Date().getFullYear();
 <template>
   <footer class="app-footer">
     <v-container class="app-footer__inner">
-      <span class="app-footer__copy">{{ t("footer.copyright", { year }) }}</span>
+      <span class="app-footer__copy">{{ t("footer.copyright", { year }) }} · {{ t("footer.tagline") }}</span>
       <div class="app-footer__links">
         <NuxtLink class="app-footer__link" to="/terms">{{ t("footer.links.terms") }}</NuxtLink>
         <span class="app-footer__sep">·</span>
