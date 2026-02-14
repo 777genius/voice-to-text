@@ -9,14 +9,14 @@ dependencies:
     specifier: ^7.4.47
     version: 7.4.47
   '@statesync/core':
-    specifier: file:../state-sync/packages/core
-    version: file:../state-sync/packages/core
+    specifier: ^1.1.0
+    version: 1.1.0
   '@statesync/pinia':
-    specifier: file:../state-sync/packages/pinia
-    version: file:../state-sync/packages/pinia(@statesync/core@1.1.0)
+    specifier: ^2.0.0
+    version: 2.0.0(@statesync/core@1.1.0)
   '@statesync/tauri':
-    specifier: file:../state-sync/packages/tauri
-    version: file:../state-sync/packages/tauri(@statesync/core@1.1.0)(@tauri-apps/api@2.10.1)
+    specifier: ^2.0.0
+    version: 2.0.0(@statesync/core@1.1.0)(@tauri-apps/api@2.10.1)
   pinia:
     specifier: ^2.1.0
     version: 2.3.1(typescript@5.9.3)(vue@3.5.22)
@@ -1178,6 +1178,34 @@ packages:
   /@standard-schema/spec@1.1.0:
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
     dev: true
+
+  /@statesync/core@1.1.0:
+    resolution: {integrity: sha512-/DsNO+jir3isnIbj18QglQNgBBZXRwjmB0MY7/SU0VOnDMxKHGFCfDMS+eELwCvJIEBIdpr5XIfBjE/rzBLGyg==}
+    engines: {node: '>=18'}
+    dev: false
+
+  /@statesync/pinia@2.0.0(@statesync/core@1.1.0):
+    resolution: {integrity: sha512-o6Lr1cxQarAiwXa6daPyH540A6/iG2dAOU9i3b+dSCt49KpZQuIkBsUACMdoYHhY6YzJh+KLQWTvGxb7QXBwrA==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      '@statesync/core': ^1.1.0
+    dependencies:
+      '@statesync/core': 1.1.0
+    dev: false
+
+  /@statesync/tauri@2.0.0(@statesync/core@1.1.0)(@tauri-apps/api@2.10.1):
+    resolution: {integrity: sha512-0tupGyRFA4DkMfkyPmKtDfwstO4AYahnrGzBzZ2ONDnBGdgjH/oxBeydzOz67JcMDjIJYASNMCHL2LYTz9Zmyw==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      '@statesync/core': ^1.1.0
+      '@tauri-apps/api': '>=2'
+    peerDependenciesMeta:
+      '@tauri-apps/api':
+        optional: true
+    dependencies:
+      '@statesync/core': 1.1.0
+      '@tauri-apps/api': 2.10.1
+    dev: false
 
   /@tauri-apps/api@2.10.1:
     resolution: {integrity: sha512-hKL/jWf293UDSUN09rR69hrToyIXBb8CjGaWC7gfinvnQrBVvnLr08FeFi38gxtugAVyVcTa5/FD/Xnkb1siBw==}
@@ -4997,36 +5025,3 @@ packages:
       compress-commons: 6.0.2
       readable-stream: 4.7.0
     dev: true
-
-  file:../state-sync/packages/core:
-    resolution: {directory: ../state-sync/packages/core, type: directory}
-    name: '@statesync/core'
-    engines: {node: '>=18'}
-    dev: false
-
-  file:../state-sync/packages/pinia(@statesync/core@1.1.0):
-    resolution: {directory: ../state-sync/packages/pinia, type: directory}
-    id: file:../state-sync/packages/pinia
-    name: '@statesync/pinia'
-    engines: {node: '>=18'}
-    peerDependencies:
-      '@statesync/core': ^1.1.0
-    dependencies:
-      '@statesync/core': file:../state-sync/packages/core
-    dev: false
-
-  file:../state-sync/packages/tauri(@statesync/core@1.1.0)(@tauri-apps/api@2.10.1):
-    resolution: {directory: ../state-sync/packages/tauri, type: directory}
-    id: file:../state-sync/packages/tauri
-    name: '@statesync/tauri'
-    engines: {node: '>=18'}
-    peerDependencies:
-      '@statesync/core': ^1.1.0
-      '@tauri-apps/api': '>=2'
-    peerDependenciesMeta:
-      '@tauri-apps/api':
-        optional: true
-    dependencies:
-      '@statesync/core': file:../state-sync/packages/core
-      '@tauri-apps/api': 2.10.1
-    dev: false

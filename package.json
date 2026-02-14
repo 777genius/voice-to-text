@@ -20,9 +20,9 @@
   },
   "dependencies": {
     "@mdi/font": "^7.4.47",
-    "@statesync/core": "file:../state-sync/packages/core",
-    "@statesync/pinia": "file:../state-sync/packages/pinia",
-    "@statesync/tauri": "file:../state-sync/packages/tauri",
+    "@statesync/core": "^1.1.0",
+    "@statesync/pinia": "^2.0.0",
+    "@statesync/tauri": "^2.0.0",
     "pinia": "^2.1.0",
     "refresh-fetch": "^0.9.0",
     "vue": "^3.4.0",

@@ -45,6 +45,9 @@ export default defineConfig({
           port: 1421,
         }
       : undefined,
+    watch: {
+      ignored: ['**/landing/**'],
+    },
   },
 
   // Env prefix for Tauri
