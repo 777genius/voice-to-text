@@ -300,6 +300,7 @@ const releaseDate = computed(() => {
 /* ─── Preview Card ─── */
 .hero-section__preview {
   position: relative;
+  width: 100%;
   animation: heroSlideUp 0.9s ease both;
   animation-delay: 0.3s;
 }

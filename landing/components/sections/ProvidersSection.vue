@@ -27,7 +27,6 @@ const NOVA3_URL = "https://deepgram.com/learn/introducing-nova-3-speech-to-text-
     <v-container>
       <!-- Section header -->
       <div class="providers-section__header">
-        <span class="providers-section__badge">{{ t("nav.providers") }}</span>
         <h2 class="providers-section__title">
           {{ t("providers.sectionTitle") }}
         </h2>
