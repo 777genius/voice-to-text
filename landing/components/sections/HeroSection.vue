@@ -79,7 +79,12 @@ const releaseDate = computed(() => {
           <div class="hero-section__preview">
             <div class="hero-section__preview-glow" />
             <ClientOnly>
-              <LazyHeroDemo />
+              <Suspense>
+                <LazyHeroDemo />
+                <template #fallback>
+                  <div class="hero-demo-fallback" />
+                </template>
+              </Suspense>
               <template #fallback>
                 <div class="hero-demo-fallback" />
               </template>
