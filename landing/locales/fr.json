@@ -55,6 +55,10 @@
     "popular": "Le plus populaire",
     "refundNote": "Garantie de remboursement de 14 jours. Paiements via Paddle."
   },
+  "testimonials": {
+    "sectionTitle": "Ce que disent les utilisateurs",
+    "sectionSubtitle": "De vrais retours de vrais utilisateurs"
+  },
   "faq": {
     "sectionTitle": "Des questions ? Nous avons les réponses",
     "subtitle": "Réponses aux questions fréquentes"

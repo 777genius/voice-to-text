@@ -2,7 +2,6 @@ import { computed } from "vue";
 import { supportedLocales, defaultLocale } from "~/data/i18n";
 import { getContent } from "~/data/content";
 import type { LocaleCode } from "~/data/i18n";
-import ogImage from "~/assets/images/screenshots/light.svg";
 
 type PageSeoImage = {
   url: string;
@@ -35,10 +34,10 @@ export const usePageSeo = (titleKey: string, descriptionKey: string, options: Pa
   const resolvedImage = computed<PageSeoImage>(() => {
     if (options.image) return options.image;
     return {
-      url: ogImage,
+      url: "/og-image.png",
       width: 1200,
-      height: 750,
-      type: "image/svg+xml",
+      height: 630,
+      type: "image/png",
       alt: `${siteName} — voice-to-text app`
     };
   });

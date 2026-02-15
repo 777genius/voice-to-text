@@ -11,6 +11,7 @@ useTrackSections();
     <LazySupportedLanguages />
     <LazyScreenshotsSection />
     <LazyPricingSection />
+    <LazyTestimonialsSection />
     <LazyDownloadSection />
     <LazyPrivacySection />
     <LazyFAQSection />

@@ -97,6 +97,13 @@
     "title": "Download",
     "note": "Choose your platform and install in minutes."
   },
+  "testimonials": [
+    { "id": "user1", "name": "Alex M.", "role": "Developer", "text": "Replaced my expensive transcription tool. Works faster and it's free." },
+    { "id": "user2", "name": "Sarah K.", "role": "Content creator", "text": "I dictate blog posts while walking. The accuracy is impressive." },
+    { "id": "user3", "name": "Marco R.", "role": "Student", "text": "Perfect for lecture notes. Just press the hotkey and talk." },
+    { "id": "user4", "name": "Yuki T.", "role": "Product manager", "text": "Finally a voice-to-text that works on Linux. Simple and reliable." },
+    { "id": "user5", "name": "Lisa W.", "role": "Freelancer", "text": "The real-time transcription is incredibly fast. No lag at all." }
+  ],
   "pricing": [
     {
       "id": "free",

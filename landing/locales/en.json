@@ -55,6 +55,10 @@
     "popular": "Most Popular",
     "refundNote": "14-day money-back guarantee. Payments processed by Paddle."
   },
+  "testimonials": {
+    "sectionTitle": "What users say",
+    "sectionSubtitle": "Real feedback from real users"
+  },
   "faq": {
     "sectionTitle": "Got questions? We've got answers",
     "subtitle": "Answers to frequently asked questions"

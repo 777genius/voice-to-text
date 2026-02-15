@@ -26,6 +26,11 @@ export default defineNuxtConfig({
         { rel: "icon", type: "image/x-icon", href: "/favicon.ico" },
         { rel: "icon", type: "image/png", sizes: "32x32", href: "/favicon-32.png" },
         { rel: "apple-touch-icon", sizes: "192x192", href: "/logo-192.png" },
+        // LCP: подключаем Inter через Google Fonts для стабильного рендеринга текста
+        { rel: "preconnect", href: "https://fonts.googleapis.com" },
+        { rel: "preconnect", href: "https://fonts.gstatic.com", crossorigin: "" },
+        { rel: "preload", href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap", as: "style" },
+        { rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" },
         // Ускоряем загрузку внешних ресурсов
         { rel: "preconnect", href: "https://api.voicetext.site" },
         { rel: "dns-prefetch", href: "https://api.voicetext.site" },

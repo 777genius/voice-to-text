@@ -97,6 +97,13 @@
     "title": "Télécharger",
     "note": "Choisissez votre plateforme et installez en quelques minutes."
   },
+  "testimonials": [
+    { "id": "user1", "name": "Alex M.", "role": "Développeur", "text": "A remplacé mon outil de transcription coûteux. Plus rapide et gratuit." },
+    { "id": "user2", "name": "Sarah K.", "role": "Créatrice de contenu", "text": "Je dicte mes articles de blog en marchant. La précision est impressionnante." },
+    { "id": "user3", "name": "Marco R.", "role": "Étudiant", "text": "Parfait pour les notes de cours. Appuyez sur le raccourci et parlez." },
+    { "id": "user4", "name": "Yuki T.", "role": "Chef de produit", "text": "Enfin un outil voix-en-texte qui fonctionne sur Linux. Simple et fiable." },
+    { "id": "user5", "name": "Lisa W.", "role": "Freelance", "text": "La transcription en temps réel est incroyablement rapide. Aucun délai." }
+  ],
   "pricing": [
     {
       "id": "free",

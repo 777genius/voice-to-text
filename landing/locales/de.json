@@ -55,6 +55,10 @@
     "popular": "Beliebteste",
     "refundNote": "14 Tage Geld-zurück-Garantie. Zahlungen über Paddle."
   },
+  "testimonials": {
+    "sectionTitle": "Was Nutzer sagen",
+    "sectionSubtitle": "Echtes Feedback von echten Nutzern"
+  },
   "faq": {
     "sectionTitle": "Fragen? Wir haben Antworten",
     "subtitle": "Antworten auf häufig gestellte Fragen"

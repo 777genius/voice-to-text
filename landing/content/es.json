@@ -97,6 +97,13 @@
     "title": "Descargar",
     "note": "Elige tu plataforma e instálalo en minutos."
   },
+  "testimonials": [
+    { "id": "user1", "name": "Alex M.", "role": "Desarrollador", "text": "Reemplazó mi costosa herramienta de transcripción. Funciona más rápido y es gratis." },
+    { "id": "user2", "name": "Sarah K.", "role": "Creadora de contenido", "text": "Dicto publicaciones de blog mientras camino. La precisión es impresionante." },
+    { "id": "user3", "name": "Marco R.", "role": "Estudiante", "text": "Perfecto para apuntes de clase. Solo pulsa el atajo y habla." },
+    { "id": "user4", "name": "Yuki T.", "role": "Product manager", "text": "Por fin un voz-a-texto que funciona en Linux. Simple y fiable." },
+    { "id": "user5", "name": "Lisa W.", "role": "Freelancer", "text": "La transcripción en tiempo real es increíblemente rápida. Sin retraso alguno." }
+  ],
   "pricing": [
     {
       "id": "free",

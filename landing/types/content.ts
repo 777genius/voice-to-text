@@ -44,6 +44,13 @@ export interface PricingPlan {
   highlighted?: boolean;
 }
 
+export interface TestimonialItem {
+  id: string;
+  name: string;
+  role: string;
+  text: string;
+}
+
 export interface LandingContent {
   hero: HeroContent;
   features: FeatureItem[];
@@ -52,6 +59,7 @@ export interface LandingContent {
   faq: FaqItem[];
   download: DownloadContent;
   pricing: PricingPlan[];
+  testimonials: TestimonialItem[];
 }
 
 export type LocalizedContent = Record<LocaleCode, LandingContent>;
