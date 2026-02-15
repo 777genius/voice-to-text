@@ -26,30 +26,36 @@ const navItems = computed(() => [
       </div>
       <div class="app-header__mobile-actions">
         <v-btn icon="mdi-menu" variant="text" @click="menuOpen = true" />
-        <v-dialog v-model="menuOpen" fullscreen scrim>
-          <v-card class="mobile-menu">
-            <div class="mobile-menu__header">
-              <AppLogo />
-              <v-spacer />
-              <v-btn icon="mdi-close" variant="text" @click="menuOpen = false" />
+        <Teleport to="body">
+          <Transition name="mobile-menu-fade">
+            <div v-if="menuOpen" class="mobile-menu-overlay" @click.self="menuOpen = false">
+              <div class="mobile-menu">
+                <div class="mobile-menu__header">
+                  <AppLogo />
+                  <div style="flex: 1" />
+                  <v-btn icon="mdi-close" variant="text" @click="menuOpen = false" />
+                </div>
+                <hr class="mobile-menu__divider" />
+                <nav class="mobile-menu__list">
+                  <a
+                    v-for="item in navItems"
+                    :key="item.id"
+                    :href="`#${item.id}`"
+                    class="mobile-menu__link"
+                    @click="trackNavClick(item.id); menuOpen = false"
+                  >
+                    {{ item.label }}
+                  </a>
+                </nav>
+                <hr class="mobile-menu__divider" />
+                <div class="mobile-menu__actions">
+                  <LanguageSwitcher icon-only />
+                  <ThemeToggle />
+                </div>
+              </div>
             </div>
-            <v-divider />
-            <v-list class="mobile-menu__list">
-              <v-list-item
-                v-for="item in navItems"
-                :key="item.id"
-                :title="item.label"
-                :href="`#${item.id}`"
-                @click="trackNavClick(item.id); menuOpen = false"
-              />
-            </v-list>
-            <v-divider />
-            <div class="mobile-menu__actions">
-              <LanguageSwitcher icon-only />
-              <ThemeToggle />
-            </div>
-          </v-card>
-        </v-dialog>
+          </Transition>
+        </Teleport>
       </div>
     </v-container>
   </header>
@@ -113,10 +119,6 @@ const navItems = computed(() => [
   display: none;
 }
 
-.app-header__mobile-actions :deep(.v-list-item) {
-  min-height: 40px;
-}
-
 @media (max-width: 959px) {
   .app-header__nav {
     display: none;
@@ -131,8 +133,18 @@ const navItems = computed(() => [
   }
 }
 
+/* Fullscreen мобильное меню — заменяет v-dialog для экономии ~37KB CSS */
+.mobile-menu-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgb(var(--v-theme-surface));
+}
+
 .mobile-menu {
   padding: 16px 16px 24px;
+  height: 100%;
+  overflow-y: auto;
 }
 
 .mobile-menu__header {
@@ -142,8 +154,30 @@ const navItems = computed(() => [
   padding-bottom: 12px;
 }
 
+.mobile-menu__divider {
+  border: none;
+  border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+
 .mobile-menu__list {
+  display: flex;
+  flex-direction: column;
   padding: 8px 0;
+}
+
+.mobile-menu__link {
+  display: flex;
+  align-items: center;
+  padding: 12px 16px;
+  font-size: 1rem;
+  color: rgb(var(--v-theme-on-surface));
+  text-decoration: none;
+  border-radius: 8px;
+  transition: background-color 0.15s;
+}
+
+.mobile-menu__link:hover {
+  background: rgba(var(--v-theme-on-surface), 0.06);
 }
 
 .mobile-menu__actions {
@@ -153,5 +187,16 @@ const navItems = computed(() => [
   align-items: center;
   justify-content: center;
   padding-top: 16px;
+}
+
+/* Анимация появления/скрытия */
+.mobile-menu-fade-enter-active,
+.mobile-menu-fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.mobile-menu-fade-enter-from,
+.mobile-menu-fade-leave-to {
+  opacity: 0;
 }
 </style>
