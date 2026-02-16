@@ -19,14 +19,6 @@ const releaseDate = computed(() => {
 
 <template>
   <section id="hero" class="hero-section section anchor-offset">
-    <!-- Background decoration -->
-    <div class="hero-section__bg">
-      <div class="hero-section__orb hero-section__orb--1" />
-      <div class="hero-section__orb hero-section__orb--2" />
-      <div class="hero-section__orb hero-section__orb--3" />
-      <div class="hero-section__grid-pattern" />
-    </div>
-
     <v-container class="hero-section__container">
       <v-row align="center" justify="space-between">
         <!-- Left: Text content -->
@@ -103,75 +95,6 @@ const releaseDate = computed(() => {
   min-height: 85vh;
   display: flex;
   align-items: center;
-}
-
-/* ─── Background ─── */
-.hero-section__bg {
-  position: absolute;
-  inset: 0 0 -80px;
-  pointer-events: none;
-}
-
-.hero-section__orb {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(120px);
-  opacity: 0.08;
-}
-
-.hero-section__orb--1 {
-  width: 900px;
-  height: 900px;
-  background: #6366f1;
-  top: -300px;
-  right: -150px;
-  animation: orbFloat1 20s ease-in-out infinite;
-}
-
-.hero-section__orb--2 {
-  width: 650px;
-  height: 650px;
-  background: #ec4899;
-  bottom: -200px;
-  left: -100px;
-  animation: orbFloat2 25s ease-in-out infinite;
-}
-
-.hero-section__orb--3 {
-  width: 520px;
-  height: 520px;
-  background: #8b5cf6;
-  top: 30%;
-  left: 40%;
-  opacity: 0.05;
-  animation: orbFloat3 18s ease-in-out infinite;
-}
-
-.hero-section__grid-pattern {
-  position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(rgba(99, 102, 241, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(99, 102, 241, 0.03) 1px, transparent 1px);
-  background-size: 48px 48px;
-  mask-image: radial-gradient(ellipse 80% 70% at 50% 30%, black, transparent);
-}
-
-@keyframes orbFloat1 {
-  0%, 100% { transform: translate(0, 0); }
-  33% { transform: translate(30px, 20px); }
-  66% { transform: translate(-20px, 10px); }
-}
-
-@keyframes orbFloat2 {
-  0%, 100% { transform: translate(0, 0); }
-  33% { transform: translate(-25px, -15px); }
-  66% { transform: translate(15px, -25px); }
-}
-
-@keyframes orbFloat3 {
-  0%, 100% { transform: translate(0, 0) scale(1); }
-  50% { transform: translate(20px, -30px) scale(1.1); }
 }
 
 /* ─── Content ─── */
@@ -363,29 +286,6 @@ const releaseDate = computed(() => {
 }
 
 /* ─── Dark Theme ─── */
-.v-theme--dark .hero-section__orb {
-  opacity: 0.14;
-}
-
-.v-theme--dark .hero-section__orb--1 {
-  background: #818cf8;
-}
-
-.v-theme--dark .hero-section__orb--2 {
-  background: #f472b6;
-}
-
-.v-theme--dark .hero-section__orb--3 {
-  background: #a78bfa;
-  opacity: 0.08;
-}
-
-.v-theme--dark .hero-section__grid-pattern {
-  background-image:
-    linear-gradient(rgba(129, 140, 248, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(129, 140, 248, 0.04) 1px, transparent 1px);
-}
-
 .v-theme--dark .hero-section__badge {
   background: linear-gradient(135deg, rgba(129, 140, 248, 0.15), rgba(244, 114, 182, 0.15));
   color: #a5b4fc;
@@ -427,10 +327,6 @@ const releaseDate = computed(() => {
 }
 
 /* ─── Light Theme ─── */
-.v-theme--light .hero-section__orb {
-  opacity: 0.06;
-}
-
 .v-theme--light .hero-section__badge {
   color: #4f46e5;
 }

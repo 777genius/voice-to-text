@@ -20,10 +20,6 @@ const items = computed(() =>
 
 <template>  
   <section id="features" class="features-section section anchor-offset">
-    <div class="features-section__bg">
-      <div class="features-section__orb features-section__orb--1" />
-      <div class="features-section__orb features-section__orb--2" />
-    </div>
     <v-container>
       <div class="features-section__header">
         <h2 class="features-section__title">
@@ -62,35 +58,6 @@ const items = computed(() =>
 <style scoped>
 .features-section {
   position: relative;
-}
-
-.features-section__bg {
-  position: absolute;
-  inset: -80px 0;
-  pointer-events: none;
-}
-
-.features-section__orb {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(100px);
-  opacity: 0.08;
-}
-
-.features-section__orb--1 {
-  width: 780px;
-  height: 780px;
-  background: #6366f1;
-  top: -200px;
-  right: -100px;
-}
-
-.features-section__orb--2 {
-  width: 650px;
-  height: 650px;
-  background: #ec4899;
-  bottom: -150px;
-  left: -100px;
 }
 
 .features-section__header {
@@ -151,18 +118,6 @@ const items = computed(() =>
 }
 
 /* Dark theme adjustments */
-.v-theme--dark .features-section__orb {
-  opacity: 0.12;
-}
-
-.v-theme--dark .features-section__orb--1 {
-  background: #818cf8;
-}
-
-.v-theme--dark .features-section__orb--2 {
-  background: #f472b6;
-}
-
 .v-theme--dark .features-section__badge {
   background: linear-gradient(135deg, rgba(129, 140, 248, 0.15), rgba(244, 114, 182, 0.15));
   color: #a5b4fc;
@@ -182,10 +137,6 @@ const items = computed(() =>
 }
 
 /* Light theme adjustments */
-.v-theme--light .features-section__orb {
-  opacity: 0.06;
-}
-
 .v-theme--light .features-section__badge {
   color: #4f46e5;
 }

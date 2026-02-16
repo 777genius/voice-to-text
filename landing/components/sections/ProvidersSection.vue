@@ -18,13 +18,6 @@ const NOVA3_URL = "https://deepgram.com/learn/introducing-nova-3-speech-to-text-
 
 <template>
   <section id="providers" class="providers-section section anchor-offset">
-    <!-- Background decoration -->
-    <div class="providers-section__bg">
-      <div class="providers-section__orb providers-section__orb--1" />
-      <div class="providers-section__orb providers-section__orb--2" />
-      <div class="providers-section__mesh" />
-    </div>
-
     <v-container>
       <!-- Section header -->
       <div class="providers-section__header">
@@ -83,46 +76,6 @@ const NOVA3_URL = "https://deepgram.com/learn/introducing-nova-3-speech-to-text-
 <style scoped>
 .providers-section {
   position: relative;
-}
-
-/* ─── Background ─── */
-.providers-section__bg {
-  position: absolute;
-  inset: -80px 0;
-  pointer-events: none;
-}
-
-.providers-section__orb {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(120px);
-  opacity: 0.07;
-}
-
-.providers-section__orb--1 {
-  width: 780px;
-  height: 780px;
-  background: #8b5cf6;
-  top: -200px;
-  left: 50%;
-  transform: translateX(-50%);
-}
-
-.providers-section__orb--2 {
-  width: 650px;
-  height: 650px;
-  background: #06b6d4;
-  bottom: -180px;
-  right: -100px;
-}
-
-.providers-section__mesh {
-  position: absolute;
-  inset: 0;
-  background-image:
-    radial-gradient(circle at 25% 25%, rgba(139, 92, 246, 0.03) 0%, transparent 50%),
-    radial-gradient(circle at 75% 75%, rgba(6, 182, 212, 0.03) 0%, transparent 50%);
-  mask-image: radial-gradient(ellipse 70% 60% at 50% 50%, black, transparent);
 }
 
 /* ─── Header ─── */
@@ -356,18 +309,6 @@ const NOVA3_URL = "https://deepgram.com/learn/introducing-nova-3-speech-to-text-
 }
 
 /* ─── Dark Theme ─── */
-.v-theme--dark .providers-section__orb {
-  opacity: 0.12;
-}
-
-.v-theme--dark .providers-section__orb--1 {
-  background: #a78bfa;
-}
-
-.v-theme--dark .providers-section__orb--2 {
-  background: #22d3ee;
-}
-
 .v-theme--dark .providers-section__badge {
   background: linear-gradient(135deg, rgba(167, 139, 250, 0.15), rgba(34, 211, 238, 0.15));
   color: #c4b5fd;
@@ -422,10 +363,6 @@ const NOVA3_URL = "https://deepgram.com/learn/introducing-nova-3-speech-to-text-
 }
 
 /* ─── Light Theme ─── */
-.v-theme--light .providers-section__orb {
-  opacity: 0.05;
-}
-
 .v-theme--light .providers-section__badge {
   color: #7c3aed;
 }

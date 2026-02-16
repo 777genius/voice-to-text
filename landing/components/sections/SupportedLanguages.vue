@@ -9,11 +9,6 @@ const { t } = useI18n();
     id="languages"
     class="languages-section section"
   >
-    <!-- Background decoration -->
-    <div class="languages-section__bg">
-      <div class="languages-section__orb languages-section__orb--1" />
-      <div class="languages-section__orb languages-section__orb--2" />
-    </div>
 
     <v-container fluid class="languages-section__container">
       <div class="languages-section__header">
@@ -62,35 +57,6 @@ const { t } = useI18n();
 .languages-section__container {
   max-width: 1400px;
   padding: 0 48px;
-}
-
-.languages-section__bg {
-  position: absolute;
-  inset: -80px 0;
-  pointer-events: none;
-}
-
-.languages-section__orb {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(120px);
-  opacity: 0.06;
-}
-
-.languages-section__orb--1 {
-  width: 650px;
-  height: 650px;
-  background: #6366f1;
-  top: -200px;
-  left: -100px;
-}
-
-.languages-section__orb--2 {
-  width: 520px;
-  height: 520px;
-  background: #ec4899;
-  bottom: -150px;
-  right: -100px;
 }
 
 /* ─── Header ─── */
@@ -168,16 +134,6 @@ const { t } = useI18n();
 }
 
 /* ─── Dark Theme ─── */
-.v-theme--dark .languages-section__orb--1 {
-  background: #818cf8;
-  opacity: 0.1;
-}
-
-.v-theme--dark .languages-section__orb--2 {
-  background: #f472b6;
-  opacity: 0.08;
-}
-
 .v-theme--dark .languages-section__badge {
   background: linear-gradient(135deg, rgba(129, 140, 248, 0.15), rgba(244, 114, 182, 0.15));
   color: #a5b4fc;

@@ -90,13 +90,6 @@ onUnmounted(() => {
 
 <template>
   <section id="screenshots" class="screenshots-section section anchor-offset">
-    <!-- Background decoration -->
-    <div class="screenshots-section__bg">
-      <div class="screenshots-section__orb screenshots-section__orb--1" />
-      <div class="screenshots-section__orb screenshots-section__orb--2" />
-      <div class="screenshots-section__grid-pattern" />
-    </div>
-
     <div class="screenshots-section__container">
       <!-- Header area -->
       <div class="screenshots-section__header">
@@ -296,46 +289,6 @@ onUnmounted(() => {
   position: relative;
   padding-top: 32px !important;
   padding-bottom: 24px !important;
-}
-
-/* ─── Background ─── */
-.screenshots-section__bg {
-  position: absolute;
-  inset: -80px 0;
-  pointer-events: none;
-}
-
-.screenshots-section__orb {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(120px);
-  opacity: 0.07;
-}
-
-.screenshots-section__orb--1 {
-  width: 720px;
-  height: 720px;
-  background: #f97316;
-  top: -200px;
-  left: -80px;
-}
-
-.screenshots-section__orb--2 {
-  width: 590px;
-  height: 590px;
-  background: #06b6d4;
-  bottom: -120px;
-  right: -100px;
-}
-
-.screenshots-section__grid-pattern {
-  position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(rgba(249, 115, 22, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(249, 115, 22, 0.03) 1px, transparent 1px);
-  background-size: 48px 48px;
-  mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, black, transparent);
 }
 
 /* ─── Container ─── */
@@ -606,24 +559,6 @@ onUnmounted(() => {
 }
 
 /* ─── Dark Theme (site theme) ─── */
-.v-theme--dark .screenshots-section__orb {
-  opacity: 0.12;
-}
-
-.v-theme--dark .screenshots-section__orb--1 {
-  background: #fb923c;
-}
-
-.v-theme--dark .screenshots-section__orb--2 {
-  background: #22d3ee;
-}
-
-.v-theme--dark .screenshots-section__grid-pattern {
-  background-image:
-    linear-gradient(rgba(251, 146, 60, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(251, 146, 60, 0.04) 1px, transparent 1px);
-}
-
 .v-theme--dark .screenshots-section__badge {
   background: linear-gradient(135deg, rgba(251, 146, 60, 0.15), rgba(34, 211, 238, 0.15));
   color: #fdba74;
@@ -683,10 +618,6 @@ onUnmounted(() => {
 }
 
 /* ─── Light Theme ─── */
-.v-theme--light .screenshots-section__orb {
-  opacity: 0.05;
-}
-
 .v-theme--light .screenshots-section__badge {
   color: #ea580c;
 }

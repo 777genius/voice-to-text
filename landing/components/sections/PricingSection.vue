@@ -120,11 +120,6 @@ function openCheckout() {
 
 <template>
   <section id="pricing" class="pricing-section section anchor-offset">
-    <div class="pricing-section__bg">
-      <div class="pricing-section__orb pricing-section__orb--1" />
-      <div class="pricing-section__orb pricing-section__orb--2" />
-      <div class="pricing-section__orb pricing-section__orb--3" />
-    </div>
 
     <v-container>
       <div class="pricing-section__header">
@@ -225,44 +220,6 @@ function openCheckout() {
 <style scoped>
 .pricing-section {
   position: relative;
-}
-
-.pricing-section__bg {
-  position: absolute;
-  inset: -80px 0;
-  pointer-events: none;
-}
-
-.pricing-section__orb {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(120px);
-  opacity: 0.07;
-}
-
-.pricing-section__orb--1 {
-  width: 650px;
-  height: 650px;
-  background: #8b5cf6;
-  top: -150px;
-  left: -100px;
-}
-
-.pricing-section__orb--2 {
-  width: 520px;
-  height: 520px;
-  background: #06b6d4;
-  bottom: -100px;
-  right: -80px;
-}
-
-.pricing-section__orb--3 {
-  width: 400px;
-  height: 400px;
-  background: #f43f5e;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
 }
 
 /* Header */
@@ -518,10 +475,6 @@ function openCheckout() {
 }
 
 /* Dark theme */
-.v-theme--dark .pricing-section__orb {
-  opacity: 0.1;
-}
-
 .v-theme--dark .pricing-section__badge {
   background: linear-gradient(135deg, rgba(167, 139, 250, 0.15), rgba(34, 211, 238, 0.15));
   color: #a78bfa;
@@ -555,10 +508,6 @@ function openCheckout() {
 }
 
 /* Light theme */
-.v-theme--light .pricing-section__orb {
-  opacity: 0.05;
-}
-
 .v-theme--light .pricing-section__badge {
   color: #7c3aed;
 }

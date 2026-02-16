@@ -29,13 +29,6 @@ const faqIcons = [
 
 <template>
   <section id="faq" class="faq-section section anchor-offset">
-    <!-- Background decoration -->
-    <div class="faq-section__bg">
-      <div class="faq-section__orb faq-section__orb--1" />
-      <div class="faq-section__orb faq-section__orb--2" />
-      <div class="faq-section__grid-pattern" />
-    </div>
-
     <v-container>
       <!-- Header -->
       <div class="faq-section__header">
@@ -94,46 +87,6 @@ const faqIcons = [
 <style scoped>
 .faq-section {
   position: relative;
-}
-
-/* ─── Background ─── */
-.faq-section__bg {
-  position: absolute;
-  inset: -80px 0;
-  pointer-events: none;
-}
-
-.faq-section__orb {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(120px);
-  opacity: 0.07;
-}
-
-.faq-section__orb--1 {
-  width: 650px;
-  height: 650px;
-  background: #f59e0b;
-  top: -150px;
-  right: -80px;
-}
-
-.faq-section__orb--2 {
-  width: 590px;
-  height: 590px;
-  background: #8b5cf6;
-  bottom: -120px;
-  left: -100px;
-}
-
-.faq-section__grid-pattern {
-  position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(rgba(245, 158, 11, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(245, 158, 11, 0.03) 1px, transparent 1px);
-  background-size: 48px 48px;
-  mask-image: radial-gradient(ellipse 60% 60% at 50% 50%, black, transparent);
 }
 
 /* ─── Header ─── */
@@ -398,24 +351,6 @@ const faqIcons = [
 }
 
 /* ─── Dark Theme ─── */
-.v-theme--dark .faq-section__orb {
-  opacity: 0.12;
-}
-
-.v-theme--dark .faq-section__orb--1 {
-  background: #fbbf24;
-}
-
-.v-theme--dark .faq-section__orb--2 {
-  background: #a78bfa;
-}
-
-.v-theme--dark .faq-section__grid-pattern {
-  background-image:
-    linear-gradient(rgba(251, 191, 36, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(251, 191, 36, 0.04) 1px, transparent 1px);
-}
-
 .v-theme--dark .faq-section__badge {
   background: linear-gradient(135deg, rgba(251, 191, 36, 0.15), rgba(167, 139, 250, 0.15));
   color: #fbbf24;
@@ -486,10 +421,6 @@ const faqIcons = [
 }
 
 /* ─── Light Theme ─── */
-.v-theme--light .faq-section__orb {
-  opacity: 0.05;
-}
-
 .v-theme--light .faq-section__badge {
   color: #d97706;
 }

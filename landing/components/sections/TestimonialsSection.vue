@@ -35,10 +35,6 @@ const getInitial = (name: string) => name.charAt(0).toUpperCase();
 
 <template>
   <section id="testimonials" class="testimonials-section section anchor-offset">
-    <div class="testimonials-section__bg">
-      <div class="testimonials-section__orb testimonials-section__orb--1" />
-      <div class="testimonials-section__orb testimonials-section__orb--2" />
-    </div>
     <v-container>
       <div class="testimonials-section__header">
         <h2 class="testimonials-section__title">
@@ -95,35 +91,6 @@ const getInitial = (name: string) => name.charAt(0).toUpperCase();
 <style scoped>
 .testimonials-section {
   position: relative;
-}
-
-.testimonials-section__bg {
-  position: absolute;
-  inset: -80px 0;
-  pointer-events: none;
-}
-
-.testimonials-section__orb {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(100px);
-  opacity: 0.08;
-}
-
-.testimonials-section__orb--1 {
-  width: 720px;
-  height: 720px;
-  background: #14b8a6;
-  top: -180px;
-  left: -80px;
-}
-
-.testimonials-section__orb--2 {
-  width: 590px;
-  height: 590px;
-  background: #8b5cf6;
-  bottom: -120px;
-  right: -60px;
 }
 
 .testimonials-section__header {
@@ -282,18 +249,6 @@ const getInitial = (name: string) => name.charAt(0).toUpperCase();
 }
 
 /* Dark theme */
-.v-theme--dark .testimonials-section__orb {
-  opacity: 0.12;
-}
-
-.v-theme--dark .testimonials-section__orb--1 {
-  background: #2dd4bf;
-}
-
-.v-theme--dark .testimonials-section__orb--2 {
-  background: #a78bfa;
-}
-
 .v-theme--dark .testimonials-section__title {
   background: linear-gradient(135deg, #e2e8f0 0%, #a5b4fc 100%);
   -webkit-background-clip: text;
@@ -325,11 +280,6 @@ const getInitial = (name: string) => name.charAt(0).toUpperCase();
 
 .v-theme--dark .testimonial-card__role {
   color: #64748b;
-}
-
-/* Light theme */
-.v-theme--light .testimonials-section__orb {
-  opacity: 0.06;
 }
 
 @media (max-width: 960px) {

@@ -24,13 +24,6 @@ const openSourceIcons = [
 
 <template>
   <section id="opensource" class="opensource-section section anchor-offset">
-    <!-- Background decoration -->
-    <div class="opensource-section__bg">
-      <div class="opensource-section__orb opensource-section__orb--1" />
-      <div class="opensource-section__orb opensource-section__orb--2" />
-      <div class="opensource-section__grid-pattern" />
-    </div>
-
     <v-container>
       <div class="opensource-section__layout">
         <!-- Left: Header content -->
@@ -90,46 +83,6 @@ const openSourceIcons = [
 <style scoped>
 .opensource-section {
   position: relative;
-}
-
-/* --- Background --- */
-.opensource-section__bg {
-  position: absolute;
-  inset: -80px 0;
-  pointer-events: none;
-}
-
-.opensource-section__orb {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(120px);
-  opacity: 0.07;
-}
-
-.opensource-section__orb--1 {
-  width: 720px;
-  height: 720px;
-  background: #8b5cf6;
-  top: -180px;
-  left: -120px;
-}
-
-.opensource-section__orb--2 {
-  width: 590px;
-  height: 590px;
-  background: #6366f1;
-  bottom: -120px;
-  right: -80px;
-}
-
-.opensource-section__grid-pattern {
-  position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(rgba(139, 92, 246, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(139, 92, 246, 0.03) 1px, transparent 1px);
-  background-size: 48px 48px;
-  mask-image: radial-gradient(ellipse 60% 60% at 50% 50%, black, transparent);
 }
 
 /* --- Layout --- */
@@ -344,24 +297,6 @@ const openSourceIcons = [
 }
 
 /* --- Dark Theme --- */
-.v-theme--dark .opensource-section__orb {
-  opacity: 0.12;
-}
-
-.v-theme--dark .opensource-section__orb--1 {
-  background: #a78bfa;
-}
-
-.v-theme--dark .opensource-section__orb--2 {
-  background: #818cf8;
-}
-
-.v-theme--dark .opensource-section__grid-pattern {
-  background-image:
-    linear-gradient(rgba(167, 139, 250, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(167, 139, 250, 0.04) 1px, transparent 1px);
-}
-
 .v-theme--dark .opensource-section__title {
   background: linear-gradient(135deg, #e2e8f0 0%, #c4b5fd 100%);
   -webkit-background-clip: text;
@@ -425,10 +360,6 @@ const openSourceIcons = [
 }
 
 /* --- Light Theme --- */
-.v-theme--light .opensource-section__orb {
-  opacity: 0.05;
-}
-
 .v-theme--light .opensource-section__card {
   background: rgba(255, 255, 255, 0.75);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 4px 16px rgba(0, 0, 0, 0.02);

@@ -61,14 +61,6 @@ const sortedAssets = computed(() => {
 
 <template>
   <section id="download" class="download-section section anchor-offset">
-    <!-- Background decoration -->
-    <div class="download-section__bg">
-      <div class="download-section__orb download-section__orb--1" />
-      <div class="download-section__orb download-section__orb--2" />
-      <div class="download-section__orb download-section__orb--3" />
-      <div class="download-section__grid-pattern" />
-    </div>
-
     <v-container>
       <!-- Header -->
       <div class="download-section__header">
@@ -137,55 +129,6 @@ const sortedAssets = computed(() => {
 <style scoped>
 .download-section {
   position: relative;
-}
-
-/* ─── Background ─── */
-.download-section__bg {
-  position: absolute;
-  inset: -80px 0;
-  pointer-events: none;
-}
-
-.download-section__orb {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(120px);
-  opacity: 0.07;
-}
-
-.download-section__orb--1 {
-  width: 650px;
-  height: 650px;
-  background: #8b5cf6;
-  top: -180px;
-  right: -60px;
-}
-
-.download-section__orb--2 {
-  width: 520px;
-  height: 520px;
-  background: #3b82f6;
-  bottom: -100px;
-  left: -80px;
-}
-
-.download-section__orb--3 {
-  width: 400px;
-  height: 400px;
-  background: #f59e0b;
-  bottom: -80px;
-  right: 30%;
-  opacity: 0.04;
-}
-
-.download-section__grid-pattern {
-  position: absolute;
-  inset: 0;
-  background-image:
-    linear-gradient(rgba(139, 92, 246, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(139, 92, 246, 0.03) 1px, transparent 1px);
-  background-size: 48px 48px;
-  mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, black, transparent);
 }
 
 /* ─── Header ─── */
@@ -447,29 +390,6 @@ const sortedAssets = computed(() => {
 }
 
 /* ─── Dark Theme ─── */
-.v-theme--dark .download-section__orb {
-  opacity: 0.12;
-}
-
-.v-theme--dark .download-section__orb--1 {
-  background: #a78bfa;
-}
-
-.v-theme--dark .download-section__orb--2 {
-  background: #60a5fa;
-}
-
-.v-theme--dark .download-section__orb--3 {
-  background: #fbbf24;
-  opacity: 0.06;
-}
-
-.v-theme--dark .download-section__grid-pattern {
-  background-image:
-    linear-gradient(rgba(167, 139, 250, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(167, 139, 250, 0.04) 1px, transparent 1px);
-}
-
 .v-theme--dark .download-section__badge {
   background: linear-gradient(135deg, rgba(167, 139, 250, 0.15), rgba(96, 165, 250, 0.15));
   color: #c4b5fd;
@@ -543,10 +463,6 @@ const sortedAssets = computed(() => {
 }
 
 /* ─── Light Theme ─── */
-.v-theme--light .download-section__orb {
-  opacity: 0.05;
-}
-
 .v-theme--light .download-section__badge {
   color: #7c3aed;
 }
