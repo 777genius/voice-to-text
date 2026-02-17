@@ -117,6 +117,7 @@ impl SttConfig {
 
 /// Application-wide configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppConfig {
     /// STT configuration
     pub stt: SttConfig,

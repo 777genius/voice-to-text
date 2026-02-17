@@ -14,6 +14,7 @@ export function useProfile() {
   const license = ref<LicenseInfo | null>(null);
   const licenseLoading = ref(false);
   const linkedProviders = ref<LinkedProvider[]>([]);
+  const bonusSecondsBalance = ref(0);
 
   const licenseKeyInput = ref('');
   const isClaiming = ref(false);
@@ -53,7 +54,8 @@ export function useProfile() {
 
   const usageInfo = computed(() => {
     if (!license.value) return null;
-    const totalMin = Math.round(license.value.seconds_limit / 60);
+    const totalSeconds = license.value.seconds_limit + bonusSecondsBalance.value;
+    const totalMin = Math.round(totalSeconds / 60);
     const usedMin = Math.round(license.value.seconds_used / 60);
     const remainMin = Math.max(0, totalMin - usedMin);
     const percent = totalMin > 0 ? Math.round((usedMin / totalMin) * 100) : 0;
@@ -89,6 +91,16 @@ export function useProfile() {
       linkedProviders.value = data.linked_providers ?? [];
     } catch (err) {
       console.error('Не удалось загрузить привязанные аккаунты:', err);
+    }
+  }
+
+  async function fetchBonus() {
+    try {
+      const data = await api.get<{ bonus_seconds_balance: number }>('/api/v1/account/bonus');
+      bonusSecondsBalance.value = Math.max(0, data.bonus_seconds_balance ?? 0);
+    } catch (err) {
+      console.error('Не удалось загрузить бонусный баланс:', err);
+      bonusSecondsBalance.value = 0;
     }
   }
 
@@ -139,6 +151,7 @@ export function useProfile() {
       const data = await api.post<GiftRedeemResult>('/api/v1/gifts/redeem', { code });
       const minutes = Math.round(data.seconds_added / 60);
       giftSuccessMessage.value = t('profile.gift.success', { minutes });
+      bonusSecondsBalance.value = Math.max(0, data.bonus_seconds_balance ?? 0);
       giftCodeInput.value = '';
       await fetchLicense();
     } catch (err: any) {
@@ -159,9 +172,12 @@ export function useProfile() {
   }
 
   // Загрузка всех данных и установка начальной секции
-  function fetchProfile(initialSection: ProfileSection = 'none') {
-    fetchLicense();
-    fetchLinkedProviders();
+  async function fetchProfile(initialSection: ProfileSection = 'none') {
+    await Promise.all([
+      fetchLicense(),
+      fetchBonus(),
+      fetchLinkedProviders(),
+    ]);
 
     if (initialSection !== 'none') {
       activeSection.value = initialSection;

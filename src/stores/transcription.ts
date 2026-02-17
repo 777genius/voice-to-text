@@ -1170,6 +1170,16 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   function detectErrorTypeFromRaw(raw: string): TranscriptionErrorPayload['error_type'] | null {
     const lower = raw.toLowerCase();
+    // Ошибки захвата аудио/микрофона часто прилетают как raw строка из invoke('start_recording'),
+    // в т.ч. с суффиксом "(type: processing)".
+    if (
+      lower.includes('(type: processing)') ||
+      lower.includes('type: processing') ||
+      lower.includes('failed to start audio capture') ||
+      lower.includes('capture error')
+    ) {
+      return 'processing';
+    }
     if (
       lower.includes('authentication error') ||
       lower.includes('401') ||
@@ -1339,7 +1349,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       case 'limit_exceeded':
         return i18n.global.t('errors.limitExceeded');
       case 'processing':
-        return i18n.global.t('errors.processing');
+        return mapProcessingErrorMessage(raw);
       case 'authentication':
         // По идее мы сюда не попадаем (auth ошибка приводит к auto-logout),
         // но оставляем адекватный текст на всякий случай.
@@ -1349,6 +1359,26 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       default:
         return i18n.global.t('errors.generic', { error: raw });
     }
+  }
+
+  function isAudioDeviceUnavailableFromRaw(raw: string): boolean {
+    const lower = String(raw ?? '').toLowerCase();
+    return (
+      // Пример (cpal/rodio): "The requested device is no longer available. For example, it has been unplugged."
+      lower.includes('device is no longer available') ||
+      lower.includes('requested device is no longer available') ||
+      lower.includes('has been unplugged') ||
+      // Частые обёртки вокруг этой причины
+      (lower.includes('failed to build audio stream') && (lower.includes('device') || lower.includes('stream'))) ||
+      (lower.includes('failed to start audio capture') && lower.includes('device'))
+    );
+  }
+
+  function mapProcessingErrorMessage(raw: string): string {
+    if (isAudioDeviceUnavailableFromRaw(raw)) {
+      return i18n.global.t('errors.audioDeviceUnavailable');
+    }
+    return i18n.global.t('errors.processing');
   }
 
   function sleep(ms: number): Promise<void> {

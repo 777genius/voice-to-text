@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, SampleFormat, Stream, StreamConfig, SupportedStreamConfig};
+use cpal::{Device, Host, SampleFormat, Stream, StreamConfig, SupportedStreamConfig};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
@@ -29,6 +29,7 @@ const RESAMPLER_CHUNK_SIZE: usize = 1024; // Fixed chunk size for rubato
 
 /// System audio capture with automatic resampling
 pub struct SystemAudioCapture {
+    requested_device_name: Option<String>,
     device: Device,
     stream: Option<Stream>,
     native_config: SupportedStreamConfig,
@@ -46,78 +47,121 @@ impl SystemAudioCapture {
     /// If device_name is None, uses default input device
     pub fn with_device(device_name: Option<String>) -> AudioResult<Self> {
         let host = cpal::default_host();
+        let (device, native_config) = Self::select_device_and_config(&host, device_name.as_deref())?;
 
+        Ok(Self {
+            requested_device_name: device_name,
+            device,
+            stream: None,
+            native_config,
+            audio_config: AudioConfig::default(),
+            is_capturing: false,
+        })
+    }
+
+    fn select_device_and_config(host: &Host, device_name: Option<&str>) -> AudioResult<(Device, SupportedStreamConfig)> {
         // Логируем все доступные устройства для отладки
         let all_devices: Vec<String> = host
             .input_devices()
             .ok()
-            .map(|devices| {
-                devices
-                    .filter_map(|d| d.name().ok())
-                    .collect()
-            })
+            .map(|devices| devices.filter_map(|d| d.name().ok()).collect())
             .unwrap_or_default();
         log::debug!("Available input devices: {:?}", all_devices);
 
         // Выбираем устройство: либо указанное, либо дефолтное
-        let device = if let Some(ref name) = device_name {
+        let device = if let Some(name) = device_name {
             log::info!("Looking for audio input device: {}", name);
 
             host
                 .input_devices()
                 .map_err(|e| AudioError::DeviceNotFound(format!("Failed to enumerate devices: {}", e)))?
-                .find(|d| {
-                    d.name().ok().as_ref() == Some(name)
-                })
-                .ok_or_else(|| AudioError::DeviceNotFound(format!("Device '{}' not found. Available devices: {:?}", name, all_devices)))?
+                .find(|d| d.name().ok().as_deref() == Some(name))
+                .ok_or_else(|| {
+                    AudioError::DeviceNotFound(format!(
+                        "Device '{}' not found. Available devices: {:?}",
+                        name, all_devices
+                    ))
+                })?
         } else {
             log::info!("Using default audio input device");
-
-            host
-                .default_input_device()
+            host.default_input_device()
                 .ok_or_else(|| AudioError::DeviceNotFound("No input device available".to_string()))?
         };
 
         let selected_device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
         log::info!("Using audio input device: {}", selected_device_name);
 
-        // Check supported configs and choose best one
-        let supported_configs = device
-            .supported_input_configs()
-            .map_err(|e| AudioError::Configuration(format!("Failed to get supported configs: {}", e)))?;
-
-        let native_config = supported_configs
-            .filter(|config| {
-                // Prefer f32 format if available
-                config.sample_format() == SampleFormat::F32
-            })
-            .min_by_key(|config| {
-                // Choose config closest to 16kHz
-                (config.min_sample_rate().0 as i32 - TARGET_SAMPLE_RATE as i32).abs()
-            })
-            .or_else(|| {
-                // Fallback: any f32 config
-                device
+        // В первую очередь используем default_input_config() — обычно самый стабильный вариант на macOS.
+        // Если не получилось (редко) — берём первый поддерживаемый конфиг.
+        let native_config = match device.default_input_config() {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                log::warn!("Failed to get default input config: {}. Falling back to supported_input_configs()", e);
+                let cfg_range = device
                     .supported_input_configs()
-                    .ok()?
-                    .find(|c| c.sample_format() == SampleFormat::F32)
-            })
-            .ok_or_else(|| AudioError::Configuration("No suitable f32 audio config found".to_string()))?;
+                    .map_err(|e| AudioError::Configuration(format!("Failed to get supported configs: {}", e)))?
+                    .next()
+                    .ok_or_else(|| AudioError::Configuration("No supported input configs found".to_string()))?;
+                cfg_range.with_max_sample_rate()
+            }
+        };
 
         log::info!(
             "Selected audio config: {} Hz, {} channels, {:?} format",
-            native_config.max_sample_rate().0,
+            native_config.sample_rate().0,
             native_config.channels(),
             native_config.sample_format()
         );
 
-        Ok(Self {
-            device,
-            stream: None,
-            native_config: native_config.with_max_sample_rate(),
-            audio_config: AudioConfig::default(),
-            is_capturing: false,
-        })
+        Ok((device, native_config))
+    }
+
+    fn refresh_device_and_config(&mut self) -> AudioResult<()> {
+        let host = cpal::default_host();
+
+        // Сначала пробуем запрошенное устройство (если было), иначе дефолт.
+        match Self::select_device_and_config(&host, self.requested_device_name.as_deref()) {
+            Ok((device, cfg)) => {
+                self.device = device;
+                self.native_config = cfg;
+                Ok(())
+            }
+            Err(e) => {
+                // Если запрошенное устройство не поднялось — пробуем дефолтный микрофон как фоллбек.
+                if self.requested_device_name.is_some() {
+                    log::warn!(
+                        "Failed to refresh requested device/config ({}). Falling back to default input device.",
+                        e
+                    );
+                    let (device, cfg) = Self::select_device_and_config(&host, None)?;
+                    self.device = device;
+                    self.native_config = cfg;
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    fn force_default_device_and_config(&mut self) -> AudioResult<()> {
+        let host = cpal::default_host();
+        let (device, cfg) = Self::select_device_and_config(&host, None)?;
+        self.device = device;
+        self.native_config = cfg;
+        Ok(())
+    }
+
+    fn is_device_unavailable_error(err: &AudioError) -> bool {
+        let msg = match err {
+            AudioError::Capture(s) => s,
+            AudioError::Internal(s) => s,
+            AudioError::Configuration(s) => s,
+            _ => return false,
+        };
+
+        let m = msg.to_lowercase();
+        m.contains("no longer available") || m.contains("unplugged")
     }
 
     /// Create resampler for converting native sample rate to 16kHz
@@ -149,18 +193,35 @@ impl SystemAudioCapture {
         samples
             .iter()
             .map(|&sample| {
-                let clamped = sample.clamp(-1.0, 1.0);
+                let safe = if sample.is_finite() { sample } else { 0.0 };
+                let clamped = safe.clamp(-1.0, 1.0);
                 (clamped * 32767.0) as i16
             })
             .collect()
     }
 
-    /// Convert stereo to mono by averaging channels
+    /// Convert unsigned i16 PCM (u16) to signed i16 PCM
     #[inline]
-    fn stereo_to_mono(samples: &[i16]) -> Vec<i16> {
+    fn u16_to_i16(samples: &[u16]) -> Vec<i16> {
         samples
-            .chunks_exact(2)
-            .map(|chunk| ((chunk[0] as i32 + chunk[1] as i32) / 2) as i16)
+            .iter()
+            .map(|&s| (s as i32 - 32768) as i16)
+            .collect()
+    }
+
+    /// Downmix N-channel PCM to mono by averaging channels
+    #[inline]
+    fn downmix_to_mono(samples: &[i16], channels: usize) -> Vec<i16> {
+        if channels <= 1 {
+            return samples.to_vec();
+        }
+
+        samples
+            .chunks_exact(channels)
+            .map(|frame| {
+                let sum: i32 = frame.iter().map(|&v| v as i32).sum();
+                (sum / channels as i32) as i16
+            })
             .collect()
     }
 }
@@ -188,129 +249,180 @@ impl AudioCapture for SystemAudioCapture {
             ));
         }
 
-        let native_sample_rate = self.native_config.sample_rate().0;
-        let native_channels = self.native_config.channels() as usize;
+        // На некоторых устройствах (особенно на macOS) stream может не собраться с первого раза,
+        // если конфиг/девайс изменился "под ногами". Делаем 1 безопасный ретрай с рефрешем.
+        for attempt in 0..=1 {
+            let native_sample_rate = self.native_config.sample_rate().0;
+            let native_channels = self.native_config.channels() as usize;
 
-        log::info!(
-            "Starting audio capture: {} Hz → {} Hz, {} channels → {} channel",
-            native_sample_rate,
-            TARGET_SAMPLE_RATE,
-            native_channels,
-            TARGET_CHANNELS
-        );
-
-        // Create resampler if needed (wrapped in Arc<Mutex<>> for thread safety)
-        let needs_resampling = native_sample_rate != TARGET_SAMPLE_RATE;
-        let resampler: Option<Arc<Mutex<SincFixedIn<f32>>>> = if needs_resampling {
-            Some(Arc::new(Mutex::new(Self::create_resampler(
+            log::info!(
+                "Starting audio capture: {} Hz → {} Hz, {} channels → {} channel",
                 native_sample_rate,
-                1, // mono after conversion
-            )?)))
-        } else {
-            None
-        };
+                TARGET_SAMPLE_RATE,
+                native_channels,
+                TARGET_CHANNELS
+            );
 
-        // Input buffer for accumulating samples before resampling
-        // Shared between callback invocations via Arc<Mutex<>>
-        let input_buffer: Arc<Mutex<Vec<i16>>> = Arc::new(Mutex::new(Vec::with_capacity(RESAMPLER_CHUNK_SIZE * 2)));
+            // Create resampler if needed (wrapped in Arc<Mutex<>> for thread safety)
+            let needs_resampling = native_sample_rate != TARGET_SAMPLE_RATE;
+            let resampler: Option<Arc<Mutex<SincFixedIn<f32>>>> = if needs_resampling {
+                Some(Arc::new(Mutex::new(Self::create_resampler(
+                    native_sample_rate,
+                    1, // mono after conversion
+                )?)))
+            } else {
+                None
+            };
 
-        // Clone for move into callback
-        let resampler_clone = resampler.clone();
-        let input_buffer_clone = input_buffer.clone();
+            // Input buffer for accumulating samples before resampling
+            // Shared between callback invocations via Arc<Mutex<>>
+            let input_buffer: Arc<Mutex<Vec<i16>>> =
+                Arc::new(Mutex::new(Vec::with_capacity(RESAMPLER_CHUNK_SIZE * 4)));
 
-        // Build audio stream with the selected config
-        let stream_config: StreamConfig = self.native_config.clone().into();
+            let resampler_clone = resampler.clone();
+            let input_buffer_clone = input_buffer.clone();
 
-        let stream = self
-            .device
-            .build_input_stream(
-                &stream_config,
-                move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    // 1. Convert f32 to i16
-                    let mut pcm_samples = Self::f32_to_i16(data);
+            let stream_config: StreamConfig = self.native_config.clone().into();
+            let sample_format = self.native_config.sample_format();
 
-                    // 2. Convert stereo to mono if needed
-                    if native_channels > 1 {
-                        pcm_samples = Self::stereo_to_mono(&pcm_samples);
+            let on_chunk_cb = on_chunk.clone();
+            let process_pcm = move |mut pcm_samples: Vec<i16>| {
+                // Downmix to mono if needed
+                if native_channels > 1 {
+                    pcm_samples = Self::downmix_to_mono(&pcm_samples, native_channels);
+                }
+
+                let mut buffer = match input_buffer_clone.lock() {
+                    Ok(b) => b,
+                    Err(e) => {
+                        log::error!("Audio input buffer poisoned (panic in other thread): {}", e);
+                        log::error!("Audio capture stopping due to unrecoverable error");
+                        return;
                     }
+                };
 
-                    // 3. Add to input buffer (защита от poisoned mutex)
-                    let mut buffer = match input_buffer_clone.lock() {
-                        Ok(b) => b,
-                        Err(e) => {
-                            log::error!("Audio input buffer poisoned (panic in other thread): {}", e);
-                            log::error!("Audio capture stopping due to unrecoverable error");
-                            return;
-                        }
-                    };
-                    buffer.extend_from_slice(&pcm_samples);
+                buffer.extend_from_slice(&pcm_samples);
 
-                    // 4. Process chunks of fixed size for resampler
-                    while buffer.len() >= RESAMPLER_CHUNK_SIZE {
-                        let chunk: Vec<i16> = buffer.drain(..RESAMPLER_CHUNK_SIZE).collect();
+                while buffer.len() >= RESAMPLER_CHUNK_SIZE {
+                    let chunk: Vec<i16> = buffer.drain(..RESAMPLER_CHUNK_SIZE).collect();
 
-                        // 5. Resample if needed
-                        let final_samples = if let Some(ref rs) = resampler_clone {
-                            // Convert i16 to f32 for rubato
-                            let float_chunk: Vec<f32> = chunk
-                                .iter()
-                                .map(|&s| s as f32 / 32767.0)
-                                .collect();
+                    let final_samples = if let Some(ref rs) = resampler_clone {
+                        let float_chunk: Vec<f32> = chunk.iter().map(|&s| s as f32 / 32767.0).collect();
+                        let resampler_input = vec![float_chunk];
 
-                            // Prepare input for resampler (channels x samples)
-                            let resampler_input = vec![float_chunk];
-
-                            // Resample (защита от poisoned mutex)
-                            let mut resampler_guard = match rs.lock() {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    log::error!("Resampler mutex poisoned: {}", e);
-                                    log::error!("Skipping audio chunk due to resampler error");
-                                    continue; // пропускаем этот чанк
-                                }
-                            };
-
-                            match resampler_guard.process(&resampler_input, None) {
-                                Ok(output) => {
-                                    // Convert back to i16
-                                    Self::f32_to_i16(&output[0])
-                                }
-                                Err(e) => {
-                                    log::error!("Resampling error: {}", e);
-                                    continue; // пропускаем этот чанк
-                                }
+                        let mut resampler_guard = match rs.lock() {
+                            Ok(r) => r,
+                            Err(e) => {
+                                log::error!("Resampler mutex poisoned: {}", e);
+                                log::error!("Skipping audio chunk due to resampler error");
+                                continue;
                             }
-                        } else {
-                            chunk
                         };
 
-                        // 6. Send chunk via callback
-                        let audio_chunk = AudioChunk::new(
-                            final_samples,
-                            TARGET_SAMPLE_RATE,
-                            TARGET_CHANNELS,
-                        );
+                        match resampler_guard.process(&resampler_input, None) {
+                            Ok(output) => Self::f32_to_i16(&output[0]),
+                            Err(e) => {
+                                log::error!("Resampling error: {}", e);
+                                continue;
+                            }
+                        }
+                    } else {
+                        chunk
+                    };
 
-                        on_chunk(audio_chunk);
+                    let audio_chunk = AudioChunk::new(final_samples, TARGET_SAMPLE_RATE, TARGET_CHANNELS);
+                    on_chunk_cb(audio_chunk);
+                }
+            };
+
+            let err_fn = |err| {
+                log::error!("Audio stream error: {}", err);
+            };
+
+            let stream_result: AudioResult<Stream> = match sample_format {
+                SampleFormat::F32 => self
+                    .device
+                    .build_input_stream(
+                        &stream_config,
+                        move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                            process_pcm(Self::f32_to_i16(data));
+                        },
+                        err_fn,
+                        None,
+                    )
+                    .map_err(|e| AudioError::Capture(format!("Failed to build audio stream: {}", e))),
+                SampleFormat::I16 => self
+                    .device
+                    .build_input_stream(
+                        &stream_config,
+                        move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                            process_pcm(data.to_vec());
+                        },
+                        err_fn,
+                        None,
+                    )
+                    .map_err(|e| AudioError::Capture(format!("Failed to build audio stream: {}", e))),
+                SampleFormat::U16 => self
+                    .device
+                    .build_input_stream(
+                        &stream_config,
+                        move |data: &[u16], _: &cpal::InputCallbackInfo| {
+                            process_pcm(Self::u16_to_i16(data));
+                        },
+                        err_fn,
+                        None,
+                    )
+                    .map_err(|e| AudioError::Capture(format!("Failed to build audio stream: {}", e))),
+                other => Err(AudioError::Configuration(format!(
+                    "Unsupported input sample format: {:?}",
+                    other
+                ))),
+            };
+
+            let stream = match stream_result {
+                Ok(s) => s,
+                Err(e) => {
+                    if attempt == 0 {
+                        log::warn!("Failed to build audio stream (attempt 1): {}. Refreshing device/config and retrying...", e);
+                        if self.requested_device_name.is_some()
+                            && Self::is_device_unavailable_error(&e)
+                        {
+                            // Типичный кейс на macOS: девайс всё ещё виден в списке, но уже не открывается.
+                            // В этом случае лучше сразу сделать фоллбек на системный default input device.
+                            self.force_default_device_and_config()?;
+                        } else {
+                            self.refresh_device_and_config()?;
+                        }
+                        continue;
                     }
-                },
-                |err| {
-                    log::error!("Audio stream error: {}", err);
-                },
-                None,
-            )
-            .map_err(|e| AudioError::Capture(format!("Failed to build audio stream: {}", e)))?;
+                    return Err(e);
+                }
+            };
 
-        // Start the stream
-        stream
-            .play()
-            .map_err(|e| AudioError::Capture(format!("Failed to start audio stream: {}", e)))?;
+            // Start the stream
+            if let Err(e) = stream.play() {
+                let err = AudioError::Capture(format!("Failed to start audio stream: {}", e));
+                if attempt == 0 {
+                    log::warn!("Failed to start audio stream (attempt 1): {}. Refreshing device/config and retrying...", err);
+                    if self.requested_device_name.is_some()
+                        && Self::is_device_unavailable_error(&err)
+                    {
+                        self.force_default_device_and_config()?;
+                    } else {
+                        self.refresh_device_and_config()?;
+                    }
+                    continue;
+                }
+                return Err(err);
+            }
 
-        self.stream = Some(stream);
-        self.is_capturing = true;
+            self.stream = Some(stream);
+            self.is_capturing = true;
+            log::info!("Audio capture started successfully");
+            return Ok(());
+        }
 
-        log::info!("Audio capture started successfully");
-        Ok(())
+        Err(AudioError::Capture("Failed to start audio capture after retry".to_string()))
     }
 
     async fn stop_capture(&mut self) -> AudioResult<()> {
@@ -357,7 +469,7 @@ mod tests {
     #[test]
     fn test_stereo_to_mono() {
         let stereo = vec![1000, 2000, 3000, 4000, 5000, 6000];
-        let mono = SystemAudioCapture::stereo_to_mono(&stereo);
+        let mono = SystemAudioCapture::downmix_to_mono(&stereo, 2);
 
         assert_eq!(mono.len(), 3);
         assert_eq!(mono[0], 1500); // (1000 + 2000) / 2
@@ -396,7 +508,7 @@ mod tests {
     #[test]
     fn test_stereo_to_mono_empty() {
         let empty: Vec<i16> = vec![];
-        let result = SystemAudioCapture::stereo_to_mono(&empty);
+        let result = SystemAudioCapture::downmix_to_mono(&empty, 2);
         assert_eq!(result.len(), 0);
     }
 
@@ -404,7 +516,7 @@ mod tests {
     fn test_stereo_to_mono_overflow_protection() {
         // Проверяем что нет overflow при усреднении больших значений
         let stereo = vec![i16::MAX, i16::MAX, i16::MIN, i16::MIN];
-        let mono = SystemAudioCapture::stereo_to_mono(&stereo);
+        let mono = SystemAudioCapture::downmix_to_mono(&stereo, 2);
 
         // (MAX + MAX) / 2 = MAX, (MIN + MIN) / 2 = MIN
         assert_eq!(mono.len(), 2);

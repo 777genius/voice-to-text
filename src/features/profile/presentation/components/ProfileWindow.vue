@@ -30,7 +30,7 @@ function onKeyDown(e: KeyboardEvent) {
 onMounted(async () => {
   document.addEventListener('keydown', onKeyDown);
 
-  unlistenOpened = await listen<ProfileWindowOpenedPayload>('profile-window-opened', (event) => {
+  unlistenOpened = await listen<ProfileWindowOpenedPayload>('profile-window-opened', async (event) => {
     const section = (event.payload?.initialSection ?? 'none') as ProfileSection;
     // Сбрасываем состояние и подтягиваем свежие данные
     profile.activeSection.value = 'none';
@@ -39,11 +39,11 @@ onMounted(async () => {
     profile.giftSuccessMessage.value = null;
     profile.licenseKeyInput.value = '';
     profile.giftCodeInput.value = '';
-    profile.fetchProfile(section);
+    await profile.fetchProfile(section);
   });
 
   // Первоначальная загрузка данных
-  profile.fetchProfile();
+  await profile.fetchProfile();
 });
 
 onUnmounted(() => {

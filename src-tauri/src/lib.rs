@@ -355,11 +355,20 @@ pub fn run() {
                             *state.auth_store.write().await = store.clone();
                             *state.is_authenticated.write().await = store.is_authenticated();
 
-                            // Держим STT token синхронизированным с access token из сессии
+                            // Держим STT token синхронизированным с access token из сессии,
+                            // и сразу применяем backend keep-alive настройки (чтобы первые hotkey-сессии
+                            // не закрывали WS и не показывали "Подключение..." при повторном старте).
                             let mut stt = crate::infrastructure::ConfigStore::load_config()
                                 .await
                                 .unwrap_or_default();
                             stt.backend_auth_token = store.session.as_ref().map(|s| s.access_token.clone());
+                            if stt.provider == crate::domain::SttProviderType::Backend {
+                                stt.keep_connection_alive = true;
+                                const MIN_BACKEND_KEEPALIVE_TTL_SECS: u64 = 300;
+                                if stt.keep_alive_ttl_secs < MIN_BACKEND_KEEPALIVE_TTL_SECS {
+                                    stt.keep_alive_ttl_secs = MIN_BACKEND_KEEPALIVE_TTL_SECS;
+                                }
+                            }
                             let _ = crate::infrastructure::ConfigStore::save_config(&stt).await;
                             let _ = state.transcription_service.update_config(stt).await;
 

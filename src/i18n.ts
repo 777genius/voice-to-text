@@ -207,6 +207,8 @@ const messages = {
       limitExceededDetailed: 'Usage limit reached ({used}/{total} min, {plan}). Activate a license to continue.',
       authentication: 'Authentication error. Sign in again or check the keys in Settings.',
       processing: 'Audio processing error. Try restarting the recording.',
+      audioDeviceUnavailable:
+        'Microphone is unavailable. Reconnect it and select it in your system sound settings, then try again.',
       generic: 'Error: {error}',
       actions: {
         signInAgain: 'Sign in again',
@@ -525,6 +527,8 @@ const messages = {
       limitExceededDetailed: 'Лимит исчерпан ({used}/{total} мин, {plan}). Активируйте лицензию для продолжения.',
       authentication: 'Ошибка авторизации. Войдите заново или проверьте ключи в настройках.',
       processing: 'Ошибка обработки аудио. Попробуйте перезапустить запись.',
+      audioDeviceUnavailable:
+        'Микрофон недоступен. Подключите/переподключите его и выберите в настройках звука системы, затем попробуйте снова.',
       generic: 'Ошибка: {error}',
       actions: {
         signInAgain: 'Войти заново',
@@ -843,6 +847,8 @@ const messages = {
       limitExceededDetailed: 'Límite alcanzado ({used}/{total} min, {plan}). Active una licencia para continuar.',
       authentication: 'Error de autenticación. Inicie sesión de nuevo o compruebe las claves en ajustes.',
       processing: 'Error de procesamiento de audio. Reinicie la grabación.',
+      audioDeviceUnavailable:
+        'El micrófono no está disponible. Vuelva a conectarlo y selecciónelo en la configuración de sonido del sistema, luego inténtelo de nuevo.',
       generic: 'Error: {error}',
       actions: {
         signInAgain: 'Iniciar sesión de nuevo',
@@ -1161,6 +1167,8 @@ const messages = {
       limitExceededDetailed: 'Limite atteinte ({used}/{total} min, {plan}). Activez une licence pour continuer.',
       authentication: "Erreur d'authentification. Reconnectez-vous ou vérifiez les clés dans les paramètres.",
       processing: "Erreur de traitement audio. Redémarrez l'enregistrement.",
+      audioDeviceUnavailable:
+        'Le microphone est indisponible. Reconnectez-le et sélectionnez-le dans les réglages audio du système, puis réessayez.',
       generic: 'Erreur : {error}',
       actions: {
         signInAgain: 'Se reconnecter',
@@ -1479,6 +1487,8 @@ const messages = {
       limitExceededDetailed: 'Limit erreicht ({used}/{total} Min, {plan}). Aktivieren Sie eine Lizenz, um fortzufahren.',
       authentication: 'Authentifizierungsfehler. Bitte erneut anmelden oder die Schlüssel in den Einstellungen prüfen.',
       processing: 'Audioverarbeitungsfehler. Aufnahme neu starten.',
+      audioDeviceUnavailable:
+        'Mikrofon nicht verfügbar. Bitte neu verbinden und in den Sound-Einstellungen des Systems auswählen, dann erneut versuchen.',
       generic: 'Fehler: {error}',
       actions: {
         signInAgain: 'Erneut anmelden',
@@ -1797,6 +1807,8 @@ const messages = {
       limitExceededDetailed: 'Ліміт вичерпано ({used}/{total} хв, {plan}). Активуйте ліцензію для продовження.',
       authentication: 'Помилка автентифікації. Увійдіть знову або перевірте ключі в налаштуваннях.',
       processing: 'Помилка обробки аудіо. Спробуйте перезапустити запис.',
+      audioDeviceUnavailable:
+        'Мікрофон недоступний. Під’єднайте/перепід’єднайте його та виберіть у налаштуваннях звуку системи, потім спробуйте ще раз.',
       generic: 'Помилка: {error}',
       actions: {
         signInAgain: 'Увійти знову',

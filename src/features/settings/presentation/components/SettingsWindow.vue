@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { isTauriAvailable } from '@/utils/tauri';
 import { useAppConfigStore } from '@/stores/appConfig';
 import { useSttConfigStore } from '@/stores/sttConfig';
@@ -107,8 +108,16 @@ async function handleClose(opts?: { discard?: boolean }): Promise<void> {
   } else {
     captureBaseline();
   }
+  if (!isTauriAvailable()) return;
+
   try {
     await invoke('show_recording_window');
+  } catch {}
+
+  // Дополнительная страховка: даже если invoke по какой-то причине не сработал,
+  // скрываем текущее окно настроек напрямую.
+  try {
+    await getCurrentWindow().hide();
   } catch {}
 }
 

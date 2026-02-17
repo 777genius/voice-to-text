@@ -30,8 +30,8 @@ async function handleLogout() {
   emit('close');
 }
 
-onMounted(() => {
-  profile.fetchProfile(props.initialSection);
+onMounted(async () => {
+  await profile.fetchProfile(props.initialSection);
 });
 </script>
 

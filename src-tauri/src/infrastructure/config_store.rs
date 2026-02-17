@@ -20,8 +20,15 @@ impl ConfigStore {
     async fn write_file_atomic(path: &Path, contents: &str) -> Result<()> {
         // Пишем во временный файл и только потом атомарно подменяем.
         // На Windows rename может падать, если цель уже существует, поэтому делаем best-effort remove.
-        let mut tmp = path.to_path_buf();
-        tmp.set_extension("tmp");
+        // Важно: tmp-файл должен быть уникальным, иначе параллельные save() будут конфликтовать.
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Invalid config path (no parent)"))?;
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow::anyhow!("Invalid config path (bad filename)"))?;
+        let tmp = parent.join(format!("{}.tmp.{}", file_name, uuid::Uuid::new_v4()));
 
         tokio::fs::write(&tmp, contents).await?;
 
@@ -72,7 +79,7 @@ impl ConfigStore {
         let path = Self::config_path()?;
 
         let json = serde_json::to_string_pretty(config)?;
-        tokio::fs::write(path, json).await?;
+        Self::write_file_atomic(&path, &json).await?;
 
         log::debug!("STT config saved to disk");
         Ok(())
@@ -111,7 +118,7 @@ impl ConfigStore {
         let path = Self::app_config_path()?;
 
         let json = serde_json::to_string_pretty(config)?;
-        tokio::fs::write(path, json).await?;
+        Self::write_file_atomic(&path, &json).await?;
 
         log::info!("App config saved to disk");
         Ok(())

@@ -89,6 +89,11 @@ pub struct AppState {
     /// Фоновая задача refresh токенов (если есть refresh_token).
     pub auth_refresh_task: Arc<RwLock<Option<tauri::async_runtime::JoinHandle<()>>>>,
 
+    /// Гарантия, что одновременно существует только одна refresh-задача.
+    /// Нужна, потому что `restart_auth_refresh_task` может вызываться конкурентно (несколько окон/событий),
+    /// и без сериализации легко получить 2+ задач, которые спамят refresh/лог/диск.
+    pub auth_refresh_task_guard: Arc<tokio::sync::Mutex<()>>,
+
     /// Дебаунс для глобального hotkey записи.
     /// Нужен из‑за key repeat / случайных двойных срабатываний, которые выглядят как "мигание" окна.
     pub last_recording_hotkey_ms: AtomicU64,
@@ -138,6 +143,7 @@ impl AppState {
                     })),
                     auth_session_revision: Arc::new(RwLock::new(0)),
                     auth_refresh_task: Arc::new(RwLock::new(None)),
+                    auth_refresh_task_guard: Arc::new(tokio::sync::Mutex::new(())),
                     last_recording_hotkey_ms: AtomicU64::new(0),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
@@ -180,6 +186,7 @@ impl AppState {
                     })),
                     auth_session_revision: Arc::new(RwLock::new(0)),
                     auth_refresh_task: Arc::new(RwLock::new(None)),
+                    auth_refresh_task_guard: Arc::new(tokio::sync::Mutex::new(())),
                     last_recording_hotkey_ms: AtomicU64::new(0),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
@@ -229,6 +236,7 @@ impl AppState {
             })),
             auth_session_revision: Arc::new(RwLock::new(0)),
             auth_refresh_task: Arc::new(RwLock::new(None)),
+            auth_refresh_task_guard: Arc::new(tokio::sync::Mutex::new(())),
             last_recording_hotkey_ms: AtomicU64::new(0),
             transcription_session_seq: AtomicU64::new(0),
             active_transcription_session_id: AtomicU64::new(0),
@@ -255,7 +263,12 @@ impl AppState {
 
     async fn apply_backend_auth_token_to_stt(&self, token: Option<String>) {
         // Best-effort: ошибки не должны блокировать UX, но они важны для диагностики.
-        let mut config = ConfigStore::load_config().await.unwrap_or_default();
+        // Важно: берём текущий in-memory config, чтобы не "сбрасывать" keep-alive и другие поля
+        // при конкурирующих disk-write сценариях.
+        let mut config = self.transcription_service.get_config().await;
+        if config.backend_auth_token == token {
+            return;
+        }
         config.backend_auth_token = token;
         if let Err(e) = ConfigStore::save_config(&config).await {
             log::warn!("Failed to persist STT config token: {}", e);
@@ -283,6 +296,9 @@ impl AppState {
     /// - после загрузки auth_store на старте приложения
     /// - после любых изменений сессии (login/logout/refresh) через `set_auth_session`
     pub async fn restart_auth_refresh_task(&self, app_handle: AppHandle) {
+        // Сериализуем рестарт, чтобы не плодить конкурентные refresh-loop задачи.
+        let _guard = self.auth_refresh_task_guard.lock().await;
+
         // Abort previous task
         if let Some(handle) = self.auth_refresh_task.write().await.take() {
             handle.abort();
@@ -455,11 +471,13 @@ impl AppState {
                     };
 
                     if became_stale {
-                        log::info!(
+                        log::debug!(
                             "[auth-refresh] 401 on stale session — store already changed (device_id={}, code={:?})",
                             device_id2,
                             server_code
                         );
+                        // Без паузы можно уйти в tight-loop, если refresh_at_ms == now и store постоянно "дёргается".
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                         continue;
                     }
 

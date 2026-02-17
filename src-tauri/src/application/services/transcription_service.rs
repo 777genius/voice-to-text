@@ -5,7 +5,7 @@ use tokio::sync::RwLock;
 use crate::domain::{
     AudioCapture, AudioConfig, AudioLevelCallback, AudioSpectrumCallback, ConnectionQualityCallback,
     ErrorCallback, RecordingStatus, SttConfig, SttError, SttProvider,
-    SttProviderFactory, TranscriptionCallback,
+    SttProviderFactory, SttProviderType, TranscriptionCallback,
 };
 
 use crate::application::AudioSpectrumAnalyzer;
@@ -91,7 +91,8 @@ impl TranscriptionService {
             if let Some(provider) = provider_opt.as_ref() {
                 provider.supports_keep_alive()
                     && provider.is_connection_alive()
-                    && config.keep_connection_alive
+                    // Backend-only режим: keep-alive обязателен для UX (частые hotkey-сессии).
+                    && (config.keep_connection_alive || config.provider == SttProviderType::Backend)
             } else {
                 false
             }
@@ -518,7 +519,9 @@ impl TranscriptionService {
         let should_keep_alive = {
             let provider_opt = self.stt_provider.read().await;
             if let Some(provider) = provider_opt.as_ref() {
-                provider.supports_keep_alive() && config.keep_connection_alive
+                provider.supports_keep_alive()
+                    // Backend-only режим: keep-alive обязателен (иначе пользователь видит "Подключение..." каждый раз).
+                    && (config.keep_connection_alive || config.provider == SttProviderType::Backend)
             } else {
                 false
             }
@@ -678,6 +681,17 @@ impl TranscriptionService {
 
     /// Update STT configuration
     pub async fn update_config(&self, config: SttConfig) -> Result<()> {
+        // Backend-only режим: keep-alive должен быть всегда включён.
+        // Иначе даже при кратком "стоп/старт" по hotkey мы будем пересоздавать WS и UI будет показывать "Подключение...".
+        let mut config = config;
+        if config.provider == SttProviderType::Backend {
+            config.keep_connection_alive = true;
+            const MIN_BACKEND_KEEPALIVE_TTL_SECS: u64 = 300;
+            if config.keep_alive_ttl_secs < MIN_BACKEND_KEEPALIVE_TTL_SECS {
+                config.keep_alive_ttl_secs = MIN_BACKEND_KEEPALIVE_TTL_SECS;
+            }
+        }
+
         *self.config.write().await = config;
         Ok(())
     }

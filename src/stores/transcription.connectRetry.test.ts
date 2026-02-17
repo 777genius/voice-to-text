@@ -148,5 +148,24 @@ describe('transcription connect-retry reliability', () => {
     await statusHandler({ payload: { session_id: 32, status: 'Recording', stopped_via_hotkey: false } });
     expect(store.status).toBe('Recording');
   });
+
+  it('показывает понятную причину когда микрофон недоступен', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'start_recording') {
+        return Promise.reject(
+          'Internal error: Failed to start audio capture: Capture error: Failed to build audio stream: The requested device is no longer available. For example, it has been unplugged. (type: processing)'
+        );
+      }
+      return Promise.resolve(null);
+    });
+
+    const store = useTranscriptionStore();
+    await store.startRecording();
+
+    expect(store.isConnecting).toBe(false);
+    expect(store.status).toBe('Error');
+    expect(store.errorType).toBe('processing');
+    expect(store.error).toContain('Микрофон недоступен');
+  });
 });
 
