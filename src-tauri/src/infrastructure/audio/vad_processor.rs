@@ -11,7 +11,12 @@ use crate::domain::{SttError, SttResult};
 /// - Sample rate: 16kHz mono PCM i16
 const FRAME_SIZE_MS: usize = 30;
 const FRAME_SIZE_SAMPLES: usize = 480; // 16kHz * 30ms / 1000
-const DEFAULT_SILENCE_TIMEOUT_MS: u64 = 3000; // По умолчанию 3 секунды
+const DEFAULT_SILENCE_TIMEOUT_MS: u64 = 5000; // По умолчанию 5 секунд
+
+// Эвристика для защиты от ложного "silence" (особенно на тихих/нестабильных устройствах):
+// если в фрейме есть заметная активность по амплитуде/энергии, считаем это "speech" для целей авто-стопа.
+const FALLBACK_ACTIVITY_MAX_ABS_I16: u32 = 900;
+const FALLBACK_ACTIVITY_RMS_I16: u32 = 180;
 
 /// Result of VAD processing
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,7 +99,26 @@ impl VadProcessor {
         let is_speech = self.vad.is_voice_segment(&frame)
             .map_err(|_| SttError::Processing("VAD error".to_string()))?;
 
-        if is_speech {
+        // Fallback: если VAD дал silence, но в аудио явно есть активность — не авто-стопаем.
+        let mut max_abs: u32 = 0;
+        let mut sum_sq: u64 = 0;
+        for &s in &frame {
+            let a = i32::from(s).abs() as u32;
+            if a > max_abs {
+                max_abs = a;
+            }
+            let au = a as u64;
+            sum_sq = sum_sq.saturating_add(au.saturating_mul(au));
+        }
+        let mean_sq = if frame.is_empty() {
+            0
+        } else {
+            sum_sq / frame.len() as u64
+        };
+        let rms_sq_threshold = (FALLBACK_ACTIVITY_RMS_I16 as u64) * (FALLBACK_ACTIVITY_RMS_I16 as u64);
+        let has_activity = max_abs >= FALLBACK_ACTIVITY_MAX_ABS_I16 || mean_sq >= rms_sq_threshold;
+
+        if is_speech || has_activity {
             // Speech detected - reset silence counter
             self.silence_duration = Duration::from_millis(0);
             Ok(VadResult::Speech)

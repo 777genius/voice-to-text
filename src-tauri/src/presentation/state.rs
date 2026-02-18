@@ -65,6 +65,7 @@ pub struct AppState {
 
     /// Receiver для VAD silence timeout событий
     /// Используется в setup для установки обработчика
+    pub vad_timeout_tx: tokio::sync::mpsc::UnboundedSender<()>,
     pub vad_timeout_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<()>>>,
 
     /// VAD timeout handler task (для перезапуска при смене устройства)
@@ -119,7 +120,7 @@ impl AppState {
                 let service = Arc::new(TranscriptionService::new(Box::new(mock), stt_factory));
 
                 // Создаем dummy channel для VAD (не будет использоваться с mock)
-                let (_vad_tx, vad_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (vad_tx, vad_rx) = tokio::sync::mpsc::unbounded_channel();
 
                 return Self {
                     transcription_service: service,
@@ -133,6 +134,7 @@ impl AppState {
                     partial_transcription: Arc::new(RwLock::new(None)),
                     final_transcription: Arc::new(RwLock::new(None)),
                     microphone_test: Arc::new(RwLock::new(MicrophoneTestState::default())),
+                    vad_timeout_tx: vad_tx,
                     vad_timeout_rx: Arc::new(tokio::sync::Mutex::new(vad_rx)),
                     vad_handler_task: Arc::new(RwLock::new(None)),
                     last_focused_app_bundle_id: Arc::new(RwLock::new(None)),
@@ -162,7 +164,7 @@ impl AppState {
                 let service = Arc::new(TranscriptionService::new(Box::new(system_audio), stt_factory));
 
                 // Создаем dummy channel для VAD (не будет использоваться без VAD)
-                let (_vad_tx, vad_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (vad_tx, vad_rx) = tokio::sync::mpsc::unbounded_channel();
 
                 return Self {
                     transcription_service: service,
@@ -176,6 +178,7 @@ impl AppState {
                     partial_transcription: Arc::new(RwLock::new(None)),
                     final_transcription: Arc::new(RwLock::new(None)),
                     microphone_test: Arc::new(RwLock::new(MicrophoneTestState::default())),
+                    vad_timeout_tx: vad_tx,
                     vad_timeout_rx: Arc::new(tokio::sync::Mutex::new(vad_rx)),
                     vad_handler_task: Arc::new(RwLock::new(None)),
                     last_focused_app_bundle_id: Arc::new(RwLock::new(None)),
@@ -201,9 +204,10 @@ impl AppState {
         let mut vad_wrapper = VadCaptureWrapper::new(Box::new(system_audio), vad);
 
         // Устанавливаем callback который отправляет событие в channel
+        let vad_tx_for_cb = vad_tx.clone();
         vad_wrapper.set_silence_timeout_callback(Arc::new(move || {
             log::info!("VAD silence timeout triggered - sending notification");
-            let _ = vad_tx.send(());
+            let _ = vad_tx_for_cb.send(());
         }));
 
         let audio_capture = Box::new(vad_wrapper);
@@ -226,6 +230,7 @@ impl AppState {
             partial_transcription: Arc::new(RwLock::new(None)),
             final_transcription: Arc::new(RwLock::new(None)),
             microphone_test: Arc::new(RwLock::new(MicrophoneTestState::default())),
+            vad_timeout_tx: vad_tx,
             vad_timeout_rx: Arc::new(tokio::sync::Mutex::new(vad_rx)),
             vad_handler_task: Arc::new(RwLock::new(None)),
             last_focused_app_bundle_id: Arc::new(RwLock::new(None)),
@@ -687,15 +692,13 @@ impl AppState {
         // Wrap system audio with VAD
         let mut vad_wrapper = VadCaptureWrapper::new(Box::new(system_audio), vad);
 
-        // Копируем callback из текущего vad_timeout_rx (создаем новый channel)
-        let (vad_tx, vad_rx) = tokio::sync::mpsc::unbounded_channel();
+        // Используем общий VAD timeout sender, чтобы избежать гонок/дедлоков при смене устройства.
+        // Receiver слушается единственным обработчиком, а при смене устройства меняется только callback.
+        let vad_tx = self.vad_timeout_tx.clone();
         vad_wrapper.set_silence_timeout_callback(Arc::new(move || {
             log::info!("VAD silence timeout triggered - sending notification");
             let _ = vad_tx.send(());
         }));
-
-        // Заменяем vad_timeout_rx на новый
-        *self.vad_timeout_rx.lock().await = vad_rx;
 
         // Заменяем audio capture в TranscriptionService
         self.transcription_service
@@ -703,8 +706,8 @@ impl AppState {
             .await
             .map_err(|e| format!("Failed to replace audio capture: {}", e))?;
 
-        // Перезапускаем VAD timeout handler чтобы он слушал новый channel
-        self.restart_vad_timeout_handler(app_handle).await;
+        // Handler перезапускать не нужно: receiver остаётся тем же.
+        let _ = app_handle;
 
         log::info!("Audio capture recreated successfully with device: {:?}", device_name);
         Ok(())

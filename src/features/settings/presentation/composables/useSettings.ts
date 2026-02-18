@@ -20,6 +20,7 @@ import { tauriSettingsService } from '../../infrastructure/adapters/TauriSetting
 import { useAppConfigStore } from '@/stores/appConfig';
 import { useSttConfigStore } from '@/stores/sttConfig';
 import type { SttConfigData } from '../../domain/types';
+import { withTimeout } from '@/utils/async';
 
 // Кэшируем определение macOS - это не меняется во время работы
 const IS_MACOS = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
@@ -229,15 +230,31 @@ export function useSettings() {
         model: null,
       };
 
-      await tauriSettingsService.updateSttConfig(sttConfigData);
+      await withTimeout(
+        tauriSettingsService.updateSttConfig(sttConfigData),
+        12_000,
+        'Не удалось сохранить STT настройки: таймаут',
+      );
 
       // Проверяем, что язык реально применился в Rust SoT.
       // Иначе UI может переключиться (syncLocale), но запись останется на старом языке.
       try {
-        const stt1 = await tauriSettingsService.getSttConfig();
+        const stt1 = await withTimeout(
+          tauriSettingsService.getSttConfig(),
+          10_000,
+          'Не удалось проверить STT настройки: таймаут',
+        );
         if (stt1.language !== store.language) {
-          await tauriSettingsService.updateSttConfig(sttConfigData);
-          const stt2 = await tauriSettingsService.getSttConfig();
+          await withTimeout(
+            tauriSettingsService.updateSttConfig(sttConfigData),
+            12_000,
+            'Не удалось повторно сохранить STT настройки: таймаут',
+          );
+          const stt2 = await withTimeout(
+            tauriSettingsService.getSttConfig(),
+            10_000,
+            'Не удалось повторно проверить STT настройки: таймаут',
+          );
           if (stt2.language !== store.language) {
             throw new Error(
               `Язык распознавания не сохранился: ожидали ${store.language}, получили ${stt2.language}`,
@@ -251,28 +268,48 @@ export function useSettings() {
       // Сохраняем App конфиг
       // Отдельно сохраняем чувствительность: это критично для UX, и так мы избегаем
       // любых странностей сериализации/комбинации полей в одном invoke.
-      await tauriSettingsService.updateAppConfig({
-        microphone_sensitivity: store.microphoneSensitivity,
-      });
+      await withTimeout(
+        tauriSettingsService.updateAppConfig({
+          microphone_sensitivity: store.microphoneSensitivity,
+        }),
+        12_000,
+        'Не удалось сохранить чувствительность микрофона: таймаут',
+      );
 
       // Остальные поля можно сохранить вторым вызовом.
-      await tauriSettingsService.updateAppConfig({
-        recording_hotkey: store.recordingHotkey,
-        auto_copy_to_clipboard: store.autoCopyToClipboard,
-        auto_paste_text: store.autoPasteText,
-        selected_audio_device: store.selectedAudioDevice,
-      });
+      await withTimeout(
+        tauriSettingsService.updateAppConfig({
+          recording_hotkey: store.recordingHotkey,
+          auto_copy_to_clipboard: store.autoCopyToClipboard,
+          auto_paste_text: store.autoPasteText,
+          selected_audio_device: store.selectedAudioDevice,
+        }),
+        12_000,
+        'Не удалось сохранить настройки приложения: таймаут',
+      );
 
       // Жёсткая проверка: иногда UI может думать что сохранили, но по факту snapshot остался старым.
       // Такое лучше ловить сразу, иначе пользователь видит "сохранилось", а при следующем открытии снова 95.
       try {
-        const snap1 = await tauriSettingsService.getAppConfig();
+        const snap1 = await withTimeout(
+          tauriSettingsService.getAppConfig(),
+          10_000,
+          'Не удалось проверить настройки приложения: таймаут',
+        );
         if (snap1.microphone_sensitivity !== store.microphoneSensitivity) {
           // Повторяем только sensitivity — минимальный безопасный ретрай.
-          await tauriSettingsService.updateAppConfig({
-            microphone_sensitivity: store.microphoneSensitivity,
-          });
-          const snap2 = await tauriSettingsService.getAppConfig();
+          await withTimeout(
+            tauriSettingsService.updateAppConfig({
+              microphone_sensitivity: store.microphoneSensitivity,
+            }),
+            12_000,
+            'Не удалось повторно сохранить чувствительность микрофона: таймаут',
+          );
+          const snap2 = await withTimeout(
+            tauriSettingsService.getAppConfig(),
+            10_000,
+            'Не удалось повторно проверить настройки приложения: таймаут',
+          );
           if (snap2.microphone_sensitivity !== store.microphoneSensitivity) {
             throw new Error(
               `Чувствительность не сохранилась: ожидали ${store.microphoneSensitivity}, получили ${snap2.microphone_sensitivity}`,

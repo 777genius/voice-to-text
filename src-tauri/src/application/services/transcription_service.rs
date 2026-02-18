@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::RwLock;
+use tokio::time::{Duration, Instant};
 
 use crate::domain::{
     AudioCapture, AudioConfig, AudioLevelCallback, AudioSpectrumCallback, ConnectionQualityCallback,
@@ -208,6 +209,7 @@ impl TranscriptionService {
         let on_error_for_processor = on_error.clone();
         let audio_capture = self.audio_capture.clone();
         let on_connection_quality_for_processor = on_connection_quality.clone();
+        let on_chunk_for_restart = on_chunk.clone();
 
         let processor_task = tokio::spawn(async move {
             let mut chunk_count = 0;
@@ -217,9 +219,89 @@ impl TranscriptionService {
             let mut last_quality: Option<&'static str> = None;
             let mut good_streak: u32 = 0;
             let mut last_dropped_seen: usize = 0;
+            let mut last_audio_at = Instant::now();
+            let mut stall_restarts: u32 = 0;
 
-            while let Some(chunk) = rx.recv().await {
+            const AUDIO_STALL_TIMEOUT: Duration = Duration::from_millis(2200);
+            const AUDIO_STALL_CHECK_INTERVAL: Duration = Duration::from_millis(650);
+            const MAX_AUDIO_STALL_RESTARTS: u32 = 3;
+
+            loop {
+                let maybe_chunk = tokio::select! {
+                    v = rx.recv() => v,
+                    _ = tokio::time::sleep(AUDIO_STALL_CHECK_INTERVAL) => {
+                        // Если долго не приходят чанки — захват аудио мог "отвалиться"
+                        // (например, микрофон был отключён/переключён на уровне ОС).
+                        let status = status_arc.read().await;
+                        if *status != RecordingStatus::Recording {
+                            continue;
+                        }
+                        drop(status);
+
+                        if last_audio_at.elapsed() < AUDIO_STALL_TIMEOUT {
+                            continue;
+                        }
+
+                        stall_restarts = stall_restarts.saturating_add(1);
+                        log::warn!(
+                            "Audio capture stalled (no chunks for {:?}). Restart attempt {}/{}",
+                            AUDIO_STALL_TIMEOUT,
+                            stall_restarts,
+                            MAX_AUDIO_STALL_RESTARTS
+                        );
+
+                        on_connection_quality_for_processor(
+                            "Poor".to_string(),
+                            Some("Потерян аудиопоток (микрофон недоступен?). Пробую восстановить...".to_string()),
+                        );
+                        last_quality = Some("Poor");
+                        good_streak = 0;
+
+                        // Пытаемся мягко перезапустить захват аудио.
+                        let restart_result = {
+                            let mut cap = audio_capture.write().await;
+                            let _ = cap.stop_capture().await;
+                            cap.start_capture(on_chunk_for_restart.clone()).await
+                        };
+
+                        match restart_result {
+                            Ok(_) => {
+                                log::info!("Audio capture restarted successfully after stall");
+                                last_audio_at = Instant::now();
+                                stall_restarts = 0;
+                                on_connection_quality_for_processor(
+                                    "Recovering".to_string(),
+                                    Some("Аудио восстановлено".to_string()),
+                                );
+                                last_quality = Some("Recovering");
+                                continue;
+                            }
+                            Err(e) => {
+                                log::error!("Failed to restart audio capture after stall: {}", e);
+                                if stall_restarts < MAX_AUDIO_STALL_RESTARTS {
+                                    // Дадим шанс восстановиться (например, устройство вот-вот появится).
+                                    continue;
+                                }
+
+                                // Фатально: возвращаем сервис в Idle, чтобы UI/хоткей не залипали,
+                                // и отправляем ошибку в UI.
+                                let raw = format!("Audio device is no longer available: {}", e);
+                                on_error_for_processor(SttError::Processing(raw));
+                                *status_arc.write().await = RecordingStatus::Idle;
+                                let _ = audio_capture.write().await.stop_capture().await;
+                                break;
+                            }
+                        }
+                    }
+                };
+
+                let Some(chunk) = maybe_chunk else {
+                    break;
+                };
+
                 chunk_count += 1;
+                last_audio_at = Instant::now();
+                stall_restarts = 0;
 
                 let status = status_arc.read().await;
                 if *status != RecordingStatus::Recording {

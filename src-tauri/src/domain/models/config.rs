@@ -163,7 +163,7 @@ impl Default for AppConfig {
             auto_copy_to_clipboard: true,
             auto_paste_text: false, // По умолчанию выключено (может раздражать)
             auto_close_window: true,
-            vad_silence_timeout_ms: 3000, // 3 секунды тишины перед авто-остановкой
+            vad_silence_timeout_ms: 5000, // 5 секунд тишины перед авто-остановкой
             microphone_sensitivity: 95, // Очень высокая чувствительность по умолчанию (порог ~1638)
             selected_audio_device: None, // По умолчанию используем системное устройство
             keep_history: true,
@@ -255,7 +255,7 @@ mod tests {
         assert_eq!(config.recording_hotkey, "CmdOrCtrl+Shift+X");
         assert!(config.auto_copy_to_clipboard);
         assert!(config.auto_close_window);
-        assert_eq!(config.vad_silence_timeout_ms, 3000);
+        assert_eq!(config.vad_silence_timeout_ms, 5000);
         assert_eq!(config.microphone_sensitivity, 95);
         assert!(config.keep_history);
         assert_eq!(config.max_history_items, 20);

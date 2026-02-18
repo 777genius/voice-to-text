@@ -63,6 +63,13 @@ impl AudioCapture for VadCaptureWrapper {
             *flag = false;
         }
 
+        // Сбрасываем состояние VAD при старте новой записи.
+        // stop_capture обычно вызывает reset(), но в некоторых error/restart сценариях
+        // start_capture может быть вызван на "грязном" состоянии.
+        if let Ok(mut vad) = self.vad.lock() {
+            vad.reset();
+        }
+
         let vad = self.vad.clone();
         let silence_callback = self.on_silence_timeout.clone();
         let timeout_flag = self.silence_timeout_triggered.clone();

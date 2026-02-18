@@ -492,6 +492,18 @@ pub fn run() {
                             }
                         }
 
+                        // Миграция VAD таймаута: 3 секунды слишком агрессивны и часто приводят
+                        // к преждевременному авто-стопу на естественных паузах речи.
+                        // Обновляем только дефолтное значение старых версий.
+                        if saved_app_config.vad_silence_timeout_ms == 3000 {
+                            saved_app_config.vad_silence_timeout_ms = 5000;
+                            if let Err(e) = ConfigStore::save_app_config(&saved_app_config).await {
+                                log::warn!("Failed to persist migrated VAD timeout: {}", e);
+                            } else {
+                                log::info!("Migrated VAD silence timeout: 3000ms -> 5000ms");
+                            }
+                        }
+
                         *state.config.write().await = saved_app_config.clone();
 
                         state.transcription_service
