@@ -10,6 +10,11 @@ defineProps<{
   statusColor: string;
   statusLabel: string;
   usageInfo: { used: number; total: number; remaining: number; percent: number } | null;
+  loadError: string | null;
+}>();
+
+defineEmits<{
+  retry: [];
 }>();
 
 const { t } = useI18n();
@@ -17,6 +22,26 @@ const { t } = useI18n();
 
 <template>
   <v-list>
+    <!-- Ошибка загрузки -->
+    <v-alert
+      v-if="loadError"
+      type="warning"
+      variant="tonal"
+      density="compact"
+      class="mx-2 my-2"
+    >
+      <div class="d-flex align-center justify-space-between">
+        <span class="text-body-2">{{ loadError }}</span>
+        <v-btn
+          size="small"
+          variant="text"
+          @click="$emit('retry')"
+        >
+          {{ t('profile.retry') }}
+        </v-btn>
+      </div>
+    </v-alert>
+
     <!-- Email -->
     <v-list-item>
       <template #prepend>

@@ -321,6 +321,8 @@ const messages = {
         past_due: 'Past due',
       },
       noPlan: 'No active plan',
+      loadError: 'Could not load profile data. Check your internet connection.',
+      retry: 'Retry',
       linkedAccounts: 'Linked accounts',
       linked: 'Linked',
       providers: {
@@ -648,6 +650,8 @@ const messages = {
         past_due: 'Просрочена',
       },
       noPlan: 'Нет активного плана',
+      loadError: 'Не удалось загрузить данные профиля. Проверьте подключение к интернету.',
+      retry: 'Повторить',
       linkedAccounts: 'Привязанные аккаунты',
       linked: 'Привязан',
       providers: {
@@ -975,6 +979,8 @@ const messages = {
         past_due: 'Vencida',
       },
       noPlan: 'Sin plan activo',
+      loadError: 'No se pudieron cargar los datos del perfil. Comprueba tu conexión a internet.',
+      retry: 'Reintentar',
       linkedAccounts: 'Cuentas vinculadas',
       linked: 'Vinculada',
       providers: {
@@ -1302,6 +1308,8 @@ const messages = {
         past_due: 'En retard',
       },
       noPlan: 'Aucun forfait actif',
+      loadError: 'Impossible de charger les données du profil. Vérifiez votre connexion internet.',
+      retry: 'Réessayer',
       linkedAccounts: 'Comptes liés',
       linked: 'Lié',
       providers: {
@@ -1629,6 +1637,8 @@ const messages = {
         past_due: 'Überfällig',
       },
       noPlan: 'Kein aktiver Tarif',
+      loadError: 'Profildaten konnten nicht geladen werden. Überprüfe deine Internetverbindung.',
+      retry: 'Erneut versuchen',
       linkedAccounts: 'Verknüpfte Konten',
       linked: 'Verknüpft',
       providers: {
@@ -1956,6 +1966,8 @@ const messages = {
         past_due: 'Прострочена',
       },
       noPlan: 'Немає активного плану',
+      loadError: 'Не вдалося завантажити дані профілю. Перевірте підключення до інтернету.',
+      retry: 'Повторити',
       linkedAccounts: 'Привʼязані акаунти',
       linked: 'Привʼязано',
       providers: {

@@ -21,6 +21,7 @@ export function useProfile() {
   const claimError = ref<string | null>(null);
 
   const activeSection = ref<ProfileSection>('none');
+  const loadError = ref<string | null>(null);
 
   const giftCodeInput = ref('');
   const isRedeemingGift = ref(false);
@@ -80,6 +81,7 @@ export function useProfile() {
       license.value = data.licenses.find(l => l.status === 'active') ?? data.licenses[0] ?? null;
     } catch (err) {
       console.error('Не удалось загрузить лицензию:', err);
+      throw err;
     } finally {
       licenseLoading.value = false;
     }
@@ -91,6 +93,7 @@ export function useProfile() {
       linkedProviders.value = data.linked_providers ?? [];
     } catch (err) {
       console.error('Не удалось загрузить привязанные аккаунты:', err);
+      throw err;
     }
   }
 
@@ -101,6 +104,7 @@ export function useProfile() {
     } catch (err) {
       console.error('Не удалось загрузить бонусный баланс:', err);
       bonusSecondsBalance.value = 0;
+      throw err;
     }
   }
 
@@ -173,15 +177,22 @@ export function useProfile() {
 
   // Загрузка всех данных и установка начальной секции
   async function fetchProfile(initialSection: ProfileSection = 'none') {
-    await Promise.all([
+    loadError.value = null;
+
+    const results = await Promise.allSettled([
       fetchLicense(),
       fetchBonus(),
       fetchLinkedProviders(),
     ]);
 
+    // Если все три запроса упали — показываем ошибку
+    const allFailed = results.every(r => r.status === 'rejected');
+    if (allFailed && !license.value) {
+      loadError.value = t('profile.loadError');
+    }
+
     if (initialSection !== 'none') {
       activeSection.value = initialSection;
-      // Фокус обрабатывается самими section-компонентами через watch на expanded
     }
   }
 
@@ -195,6 +206,7 @@ export function useProfile() {
     isClaiming,
     claimError,
     activeSection,
+    loadError,
     giftCodeInput,
     isRedeemingGift,
     giftError,

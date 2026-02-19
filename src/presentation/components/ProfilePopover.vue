@@ -64,6 +64,8 @@ onMounted(async () => {
           :status-color="profile.statusColor.value"
           :status-label="profile.statusLabel.value"
           :usage-info="profile.usageInfo.value"
+          :load-error="profile.loadError.value"
+          @retry="profile.fetchProfile()"
         />
 
         <v-divider class="my-1" />
