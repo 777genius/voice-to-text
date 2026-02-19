@@ -102,7 +102,7 @@
     { "id": "user2", "name": "Sarah K.", "role": "Créatrice de contenu", "text": "Je rédige des articles de blog en marchant. Parfois un mot manque, mais globalement bien au-dessus de ce que j'attendais d'un outil gratuit." },
     { "id": "user3", "name": "Marco R.", "role": "Team lead", "text": "Je réponds aux messages Slack par la voix pendant les réunions maintenant. Mon équipe pense que je tape à une vitesse folle." },
     { "id": "user4", "name": "Yuki T.", "role": "Chef de produit", "text": "La voix-en-texte sur Linux, ça n'existe quasiment pas. Celui-ci fonctionne tout simplement. Installation en 2 minutes." },
-    { "id": "user5", "name": "Lisa W.", "role": "Freelance", "text": "La latence est dingue — le texte apparaît presque avant que je finisse ma phrase. J'ai essayé des alternatives, rien de comparable." },
+    { "id": "user5", "name": "Lisa W.", "role": "Freelance", "text": "Incroyablement rapide — le texte apparaît presque avant que je finisse ma phrase. J'ai essayé d'autres outils, rien de comparable." },
     { "id": "user6", "name": "Dan P.", "role": "Écrivain", "text": "Je dicte les premiers brouillons de tout — e-mails, documents, même les commentaires de code. Ça me fait gagner une heure par jour, sans exagérer." }
   ],
   "pricing": [

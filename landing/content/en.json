@@ -102,7 +102,7 @@
     { "id": "user2", "name": "Sarah K.", "role": "Content creator", "text": "I draft blog posts while on walks now. Occasionally misses a word, but overall way better than I expected for a free tool." },
     { "id": "user3", "name": "Marco R.", "role": "Team lead", "text": "Started using it to reply to Slack messages by voice during meetings. My team thinks I type insanely fast now." },
     { "id": "user4", "name": "Yuki T.", "role": "Product manager", "text": "Linux voice-to-text options are basically nonexistent. This just works. Setup took maybe 2 minutes." },
-    { "id": "user5", "name": "Lisa W.", "role": "Freelancer", "text": "The latency is wild — text shows up almost before I finish the sentence. Tried a few alternatives before and nothing came close." },
+    { "id": "user5", "name": "Lisa W.", "role": "Freelancer", "text": "Incredibly fast — text appears almost before I finish speaking. I've tried other tools, nothing comes close." },
     { "id": "user6", "name": "Dan P.", "role": "Writer", "text": "I dictate first drafts of everything now — emails, docs, even code comments. Probably saves me an hour a day, no joke." }
   ],
   "pricing": [

@@ -102,7 +102,7 @@
     { "id": "user2", "name": "Sarah K.", "role": "Content-Erstellerin", "text": "Ich entwerfe Blogbeiträge beim Spazierengehen. Ab und zu wird ein Wort überhört, aber insgesamt viel besser als erwartet für ein kostenloses Tool." },
     { "id": "user3", "name": "Marco R.", "role": "Teamleiter", "text": "Antworte jetzt per Sprache auf Slack-Nachrichten während Meetings. Mein Team denkt, ich tippe wahnsinnig schnell." },
     { "id": "user4", "name": "Yuki T.", "role": "Produktmanagerin", "text": "Sprache-zu-Text unter Linux gibt es quasi nicht. Das hier funktioniert einfach. Einrichtung hat vielleicht 2 Minuten gedauert." },
-    { "id": "user5", "name": "Lisa W.", "role": "Freiberuflerin", "text": "Die Latenz ist irre — Text erscheint fast, bevor ich den Satz beendet habe. Habe vorher einiges ausprobiert, nichts kam ran." },
+    { "id": "user5", "name": "Lisa W.", "role": "Freiberuflerin", "text": "Unglaublich schnell — Text erscheint fast, bevor ich den Satz beendet habe. Habe andere Tools ausprobiert, nichts kam auch nur annähernd ran." },
     { "id": "user6", "name": "Dan P.", "role": "Autor", "text": "Ich diktiere erste Entwürfe von allem — E-Mails, Dokumente, sogar Code-Kommentare. Spare locker eine Stunde am Tag, kein Witz." }
   ],
   "pricing": [

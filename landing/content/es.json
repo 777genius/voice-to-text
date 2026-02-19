@@ -102,7 +102,7 @@
     { "id": "user2", "name": "Sarah K.", "role": "Creadora de contenido", "text": "Redacto borradores de posts mientras paseo. A veces se le escapa una palabra, pero en general mucho mejor de lo que esperaba de una herramienta gratuita." },
     { "id": "user3", "name": "Marco R.", "role": "Team lead", "text": "Empecé a responder mensajes de Slack por voz durante las reuniones. Mi equipo cree que escribo increíblemente rápido." },
     { "id": "user4", "name": "Yuki T.", "role": "Product manager", "text": "Voz a texto en Linux prácticamente no existe. Esto simplemente funciona. La configuración tomó unos 2 minutos." },
-    { "id": "user5", "name": "Lisa W.", "role": "Freelancer", "text": "La latencia es una locura — el texto aparece casi antes de que termine la frase. Probé varias alternativas, nada se le acerca." },
+    { "id": "user5", "name": "Lisa W.", "role": "Freelancer", "text": "Increíblemente rápido — el texto aparece casi antes de que termine la frase. Probé otras herramientas, nada se le acerca." },
     { "id": "user6", "name": "Dan P.", "role": "Escritor", "text": "Dicto los primeros borradores de todo — correos, documentos, hasta comentarios de código. Me ahorro fácilmente una hora al día, sin exagerar." }
   ],
   "pricing": [
