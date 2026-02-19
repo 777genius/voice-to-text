@@ -27,7 +27,7 @@ export const useDownloadStore = defineStore("download", {
         this.arch = "x64";
       }
       const match = downloadAssets.find(
-        (asset) => asset.os === this.os && (asset.arch === this.arch || asset.arch === "universal")
+        (asset) => asset.os === this.os && asset.arch === this.arch
       );
       if (match) {
         this.selectedId = match.id;

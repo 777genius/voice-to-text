@@ -41,11 +41,11 @@
   },
   "features": {
     "sectionTitle": "Everything you need for voice input",
-    "sectionSubtitle": "Powerful features for seamless, lightning-fast voice-to-text."
+    "sectionSubtitle": "Everything that makes voice input actually work."
   },
   "providers": {
     "sectionTitle": "Powered by Deepgram Nova-3",
-    "sectionSubtitle": "The fastest and most accurate speech AI on the market. Used by NASA, Spotify, and thousands of companies.",
+    "sectionSubtitle": "Deepgram's speech AI — trusted by NASA, Spotify, and thousands of companies.",
     "learnMoreBtn": "Explore Deepgram Nova-3 Speech Recognition"
   },
   "pricing": {
@@ -70,7 +70,7 @@
   },
   "screenshots": {
     "sectionTitle": "See it in action",
-    "sectionSubtitle": "Explore the sleek interface designed for productivity and comfort.",
+    "sectionSubtitle": "A clean interface built for getting things done.",
     "main": "Main screen",
     "mainDark": "Main interface",
     "recordDark": "Recording",
@@ -95,8 +95,8 @@
     "checkoutSuccessDescription": "Thank you. We received your payment. Provisioning is handled via Paddle webhooks and may take a short moment.",
     "payTitle": "Secure checkout — VoicetextAI",
     "payDescription": "Secure checkout entry point used by Paddle payment links and payment method update flows.",
-    "homeTitle": "VoicetextAI — free, easy, fast, real-time voice-to-text",
-    "homeDescription": "Modern cross-platform desktop app using AI. 40 languages. Free.",
+    "homeTitle": "VoicetextAI — Real-time voice to text for Mac, Windows & Linux",
+    "homeDescription": "Free desktop app that turns your voice into text in real time. Supports 40+ languages on macOS, Windows, and Linux.",
     "downloadTitle": "Download VoicetextAI",
     "downloadDescription": "Get the latest builds for macOS, Windows, and Linux.",
     "privacyTitle": "Privacy at VoicetextAI",

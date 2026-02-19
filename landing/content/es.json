@@ -1,13 +1,13 @@
 {
   "hero": {
     "title": "VoicetextAI",
-    "subtitle": "Voz a texto rápida y precisa con Deepgram Nova-3."
+    "subtitle": "Escribe con tu voz — rápido, preciso, en tiempo real."
   },
   "features": [
     {
       "id": "realtime",
       "title": "Transcripción en tiempo real",
-      "description": "Resultados parciales y finales mientras hablas."
+      "description": "El texto aparece mientras hablas — sin esperar el resultado."
     },
     {
       "id": "multilingual",
@@ -17,12 +17,12 @@
     {
       "id": "crossPlatform",
       "title": "Multiplataforma",
-      "description": "Compatible con macOS, Windows y Linux."
+      "description": "Funciona de forma nativa en macOS, Windows y Linux."
     },
     {
       "id": "openSource",
       "title": "Código abierto",
-      "description": "Código fuente completo en GitHub. Transparente e impulsado por la comunidad."
+      "description": "Código fuente completo en GitHub. Mira exactamente qué se ejecuta en tu equipo."
     }
   ],
   "providers": [
@@ -39,7 +39,7 @@
     {
       "id": "nova3-customization",
       "name": "Se adapta a tu vocabulario",
-      "description": "Términos técnicos, nombres, jerga — reconoce tus palabras sin ninguna configuración."
+      "description": "Reconoce términos técnicos, nombres y jerga directamente, sin configuración."
     },
     {
       "id": "nova3-enterprise",
@@ -65,7 +65,7 @@
     {
       "id": "platforms",
       "question": "¿Qué plataformas son compatibles?",
-      "answer": "macOS, Windows y Linux."
+      "answer": "macOS (Apple Silicon e Intel), Windows y Linux."
     },
     {
       "id": "howItWorks",
@@ -85,7 +85,7 @@
     {
       "id": "hotkey",
       "question": "¿Cómo cambio el atajo?",
-      "answer": "En los ajustes de la app."
+      "answer": "Abre la app, ve a Ajustes → Atajos y elige cualquier combinación de teclas. Los cambios se aplican al instante."
     },
     {
       "id": "openSource",
@@ -98,12 +98,12 @@
     "note": "Elige tu plataforma e instálalo en minutos."
   },
   "testimonials": [
-    { "id": "user1", "name": "Alex M.", "role": "Desarrollador", "text": "Reemplazó mi costosa herramienta de transcripción. Funciona más rápido y es gratis." },
-    { "id": "user2", "name": "Sarah K.", "role": "Creadora de contenido", "text": "Dicto publicaciones de blog mientras camino. La precisión es impresionante." },
-    { "id": "user3", "name": "Marco R.", "role": "Team lead", "text": "Ahora respondo en Slack por voz. Mucho más rápido que escribir durante reuniones." },
-    { "id": "user4", "name": "Yuki T.", "role": "Product manager", "text": "Por fin un voz-a-texto que funciona en Linux. Simple y fiable." },
-    { "id": "user5", "name": "Lisa W.", "role": "Freelancer", "text": "La transcripción en tiempo real es increíblemente rápida. Sin retraso alguno." },
-    { "id": "user6", "name": "Dan P.", "role": "Escritor", "text": "Dicto correos y notas en vez de escribir. Me ahorro al menos una hora al día." }
+    { "id": "user1", "name": "Alex M.", "role": "Desarrollador", "text": "Pagaba $15/mes por una herramienta de transcripción más lenta. Cambié a esta — no me arrepiento." },
+    { "id": "user2", "name": "Sarah K.", "role": "Creadora de contenido", "text": "Redacto borradores de posts mientras paseo. A veces se le escapa una palabra, pero en general mucho mejor de lo que esperaba de una herramienta gratuita." },
+    { "id": "user3", "name": "Marco R.", "role": "Team lead", "text": "Empecé a responder mensajes de Slack por voz durante las reuniones. Mi equipo cree que escribo increíblemente rápido." },
+    { "id": "user4", "name": "Yuki T.", "role": "Product manager", "text": "Voz a texto en Linux prácticamente no existe. Esto simplemente funciona. La configuración tomó unos 2 minutos." },
+    { "id": "user5", "name": "Lisa W.", "role": "Freelancer", "text": "La latencia es una locura — el texto aparece casi antes de que termine la frase. Probé varias alternativas, nada se le acerca." },
+    { "id": "user6", "name": "Dan P.", "role": "Escritor", "text": "Dicto los primeros borradores de todo — correos, documentos, hasta comentarios de código. Me ahorro fácilmente una hora al día, sin exagerar." }
   ],
   "pricing": [
     {
@@ -111,7 +111,7 @@
       "name": "Gratis",
       "price": "$0",
       "period": "para siempre",
-      "description": "Prueba VoicetextAI con un generoso plan gratuito.",
+      "description": "Empieza con entrada de voz en tiempo real — sin tarjeta de crédito.",
       "features": [
         "Deepgram Nova-3",
         "Transcripción en tiempo real",
@@ -125,10 +125,10 @@
       "name": "Pro",
       "price": "$9",
       "period": "por mes",
-      "description": "Más minutos y soporte prioritario para usuarios avanzados.",
+      "description": "Límites de transcripción más altos y soporte prioritario para uso diario.",
       "features": [
         "Todo lo de Gratis",
-        "Límites de uso extendidos",
+        "Límites de transcripción más altos",
         "Soporte prioritario",
         "Acceso anticipado a funciones"
       ],

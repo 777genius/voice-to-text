@@ -1,13 +1,13 @@
 {
   "hero": {
     "title": "VoicetextAI",
-    "subtitle": "Fast, accurate voice-to-text powered by Deepgram Nova-3."
+    "subtitle": "Type with your voice — fast, accurate, real-time."
   },
   "features": [
     {
       "id": "realtime",
       "title": "Real-time transcription",
-      "description": "Live partial and final results while you speak."
+      "description": "Text appears as you speak — no waiting for the result."
     },
     {
       "id": "multilingual",
@@ -17,12 +17,12 @@
     {
       "id": "crossPlatform",
       "title": "Cross-platform",
-      "description": "macOS, Windows, and Linux supported."
+      "description": "Works natively on macOS, Windows, and Linux."
     },
     {
       "id": "openSource",
       "title": "Open source",
-      "description": "Full source code on GitHub. Transparent and community-driven."
+      "description": "Full source code on GitHub. See exactly what runs on your machine."
     }
   ],
   "providers": [
@@ -39,7 +39,7 @@
     {
       "id": "nova3-customization",
       "name": "Adapts to your vocabulary",
-      "description": "Technical terms, names, jargon — it learns your words without any setup."
+      "description": "Handles technical terms, names, and jargon out of the box."
     },
     {
       "id": "nova3-enterprise",
@@ -65,7 +65,7 @@
     {
       "id": "platforms",
       "question": "Which platforms are supported?",
-      "answer": "macOS, Windows, and Linux."
+      "answer": "macOS (Apple Silicon and Intel), Windows, and Linux."
     },
     {
       "id": "howItWorks",
@@ -85,7 +85,7 @@
     {
       "id": "hotkey",
       "question": "How do I change the hotkey?",
-      "answer": "In the app settings."
+      "answer": "Open the app, go to Settings → Hotkeys, and pick any key combination. Changes apply instantly."
     },
     {
       "id": "openSource",
@@ -98,12 +98,12 @@
     "note": "Choose your platform and install in minutes."
   },
   "testimonials": [
-    { "id": "user1", "name": "Alex M.", "role": "Developer", "text": "Replaced my expensive transcription tool. Works faster and it's free." },
-    { "id": "user2", "name": "Sarah K.", "role": "Content creator", "text": "I dictate blog posts while walking. The accuracy is impressive." },
-    { "id": "user3", "name": "Marco R.", "role": "Team lead", "text": "I reply to Slack messages by voice now. Way faster than typing during meetings." },
-    { "id": "user4", "name": "Yuki T.", "role": "Product manager", "text": "Finally a voice-to-text that works on Linux. Simple and reliable." },
-    { "id": "user5", "name": "Lisa W.", "role": "Freelancer", "text": "The real-time transcription is incredibly fast. No lag at all." },
-    { "id": "user6", "name": "Dan P.", "role": "Writer", "text": "Dictating emails and notes instead of typing. Saves me at least an hour every day." }
+    { "id": "user1", "name": "Alex M.", "role": "Developer", "text": "Was paying $15/mo for a transcription tool that was slower. Switched to this, haven't looked back." },
+    { "id": "user2", "name": "Sarah K.", "role": "Content creator", "text": "I draft blog posts while on walks now. Occasionally misses a word, but overall way better than I expected for a free tool." },
+    { "id": "user3", "name": "Marco R.", "role": "Team lead", "text": "Started using it to reply to Slack messages by voice during meetings. My team thinks I type insanely fast now." },
+    { "id": "user4", "name": "Yuki T.", "role": "Product manager", "text": "Linux voice-to-text options are basically nonexistent. This just works. Setup took maybe 2 minutes." },
+    { "id": "user5", "name": "Lisa W.", "role": "Freelancer", "text": "The latency is wild — text shows up almost before I finish the sentence. Tried a few alternatives before and nothing came close." },
+    { "id": "user6", "name": "Dan P.", "role": "Writer", "text": "I dictate first drafts of everything now — emails, docs, even code comments. Probably saves me an hour a day, no joke." }
   ],
   "pricing": [
     {
@@ -111,7 +111,7 @@
       "name": "Free",
       "price": "$0",
       "period": "forever",
-      "description": "Try VoicetextAI with a generous free tier.",
+      "description": "Get started with real-time voice-to-text — no credit card required.",
       "features": [
         "Deepgram Nova-3",
         "Real-time transcription",
@@ -125,10 +125,10 @@
       "name": "Pro",
       "price": "$9",
       "period": "per month",
-      "description": "More minutes and priority support for power users.",
+      "description": "Higher transcription limits and priority support for daily use.",
       "features": [
         "Everything in Free",
-        "Extended usage limits",
+        "Higher transcription limits",
         "Priority support",
         "Early access to features"
       ],

@@ -41,11 +41,11 @@
   },
   "features": {
     "sectionTitle": "Todo lo que necesitas para la entrada de voz",
-    "sectionSubtitle": "Funciones potentes para una transcripción fluida y ultrarrápida."
+    "sectionSubtitle": "Todo lo que hace que la entrada de voz realmente funcione."
   },
   "providers": {
     "sectionTitle": "Impulsado por Deepgram Nova-3",
-    "sectionSubtitle": "La IA de voz más rápida y precisa del mercado. Usada por NASA, Spotify y miles de empresas.",
+    "sectionSubtitle": "La IA de voz de Deepgram — confiada por NASA, Spotify y miles de empresas.",
     "learnMoreBtn": "Descubre Deepgram Nova-3"
   },
   "pricing": {
@@ -70,7 +70,7 @@
   },
   "screenshots": {
     "sectionTitle": "Míralo en acción",
-    "sectionSubtitle": "Explora la interfaz elegante diseñada para la productividad y la comodidad.",
+    "sectionSubtitle": "Una interfaz limpia, diseñada para que trabajes sin distracciones.",
     "main": "Pantalla principal",
     "mainDark": "Interfaz principal",
     "recordDark": "Grabación",
@@ -95,8 +95,8 @@
     "checkoutSuccessDescription": "Gracias. Hemos recibido tu pago. El acceso se aprovisiona mediante webhooks seguros de Paddle y puede tardar un momento.",
     "payTitle": "Checkout seguro — VoicetextAI",
     "payDescription": "Página de entrada al checkout seguro usada por enlaces de pago de Paddle y enlaces para actualizar el método de pago.",
-    "homeTitle": "VoicetextAI — voz a texto gratis, fácil, rápido y en tiempo real",
-    "homeDescription": "Aplicación de escritorio multiplataforma con IA. 40 idiomas. Gratis.",
+    "homeTitle": "VoicetextAI — Voz a texto en tiempo real para Mac, Windows y Linux",
+    "homeDescription": "Aplicación de escritorio gratuita que convierte tu voz en texto en tiempo real. Compatible con 40+ idiomas en macOS, Windows y Linux.",
     "downloadTitle": "Descargar VoicetextAI",
     "downloadDescription": "Versiones para macOS, Windows y Linux.",
     "privacyTitle": "Privacidad en VoicetextAI",

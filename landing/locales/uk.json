@@ -41,11 +41,11 @@
   },
   "features": {
     "sectionTitle": "Все, що потрібно для голосового введення",
-    "sectionSubtitle": "Потужні функції для швидкої та зручної транскрипції голосу в текст."
+    "sectionSubtitle": "Все, що робить голосове введення справді зручним."
   },
   "providers": {
     "sectionTitle": "На базі Deepgram Nova-3",
-    "sectionSubtitle": "Найшвидший і найточніший мовленнєвий ШІ на ринку. Використовується NASA, Spotify та тисячами компаній.",
+    "sectionSubtitle": "Мовленнєвий ШІ від Deepgram — йому довіряють NASA, Spotify та тисячі компаній.",
     "learnMoreBtn": "Дізнатися про Deepgram Nova-3"
   },
   "pricing": {
@@ -70,7 +70,7 @@
   },
   "screenshots": {
     "sectionTitle": "Подивіться в дії",
-    "sectionSubtitle": "Ознайомтеся з елегантним інтерфейсом, створеним для продуктивності та зручності.",
+    "sectionSubtitle": "Чистий інтерфейс, в якому зручно працювати.",
     "main": "Головний екран",
     "mainDark": "Головний інтерфейс",
     "recordDark": "Запис",
@@ -95,8 +95,8 @@
     "checkoutSuccessDescription": "Дякуємо! Ми отримали оплату. Доступ надається через захищені Paddle webhooks і може зайняти трохи часу.",
     "payTitle": "Безпечна оплата — VoicetextAI",
     "payDescription": "Сторінка входу в secure checkout, яку використовують Paddle payment links та посилання для оновлення платіжного методу.",
-    "homeTitle": "VoicetextAI — безкоштовний, простий, швидкий голос-у-текст у реальному часі",
-    "homeDescription": "Сучасний кросплатформний десктопний застосунок на базі ШІ. 40 мов. Безкоштовно.",
+    "homeTitle": "VoicetextAI — голос у текст у реальному часі для Mac, Windows та Linux",
+    "homeDescription": "Безкоштовний десктопний застосунок, що перетворює голос на текст у реальному часі. Підтримка 40+ мов на macOS, Windows та Linux.",
     "downloadTitle": "Завантажити VoicetextAI",
     "downloadDescription": "Збірки для macOS, Windows та Linux.",
     "privacyTitle": "Приватність VoicetextAI",

@@ -41,11 +41,11 @@
   },
   "features": {
     "sectionTitle": "Tout ce qu'il faut pour la saisie vocale",
-    "sectionSubtitle": "Des fonctionnalités puissantes pour une transcription fluide et ultra-rapide."
+    "sectionSubtitle": "Tout ce qui rend la saisie vocale vraiment utilisable."
   },
   "providers": {
     "sectionTitle": "Propulsé par Deepgram Nova-3",
-    "sectionSubtitle": "L'IA vocale la plus rapide et la plus précise du marché. Utilisée par NASA, Spotify et des milliers d'entreprises.",
+    "sectionSubtitle": "L'IA vocale de Deepgram — utilisée par NASA, Spotify et des milliers d'entreprises.",
     "learnMoreBtn": "Découvrir Deepgram Nova-3"
   },
   "pricing": {
@@ -70,7 +70,7 @@
   },
   "screenshots": {
     "sectionTitle": "Voyez-le en action",
-    "sectionSubtitle": "Découvrez l'interface élégante conçue pour la productivité et le confort.",
+    "sectionSubtitle": "Une interface claire, conçue pour être efficace.",
     "main": "Écran principal",
     "mainDark": "Interface principale",
     "recordDark": "Enregistrement",
@@ -95,8 +95,8 @@
     "checkoutSuccessDescription": "Merci. Nous avons reçu votre paiement. L’accès est provisionné via des webhooks Paddle sécurisés et peut prendre un moment.",
     "payTitle": "Paiement sécurisé — VoicetextAI",
     "payDescription": "Page d’entrée du checkout sécurisé utilisée par les liens de paiement Paddle et les liens de mise à jour du moyen de paiement.",
-    "homeTitle": "VoicetextAI — voix en texte gratuit, simple, rapide et en temps réel",
-    "homeDescription": "Application de bureau multiplateforme avec IA. 40 langues. Gratuit.",
+    "homeTitle": "VoicetextAI — Voix en texte en temps réel pour Mac, Windows et Linux",
+    "homeDescription": "Application de bureau gratuite qui transforme votre voix en texte en temps réel. Prend en charge 40+ langues sur macOS, Windows et Linux.",
     "downloadTitle": "Télécharger VoicetextAI",
     "downloadDescription": "Versions pour macOS, Windows et Linux.",
     "privacyTitle": "Confidentialité VoicetextAI",

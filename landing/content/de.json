@@ -1,13 +1,13 @@
 {
   "hero": {
     "title": "VoicetextAI",
-    "subtitle": "Schnelle, präzise Sprache-zu-Text mit Deepgram Nova-3."
+    "subtitle": "Tippe mit deiner Stimme — schnell, präzise, in Echtzeit."
   },
   "features": [
     {
       "id": "realtime",
       "title": "Echtzeit-Transkription",
-      "description": "Teil- und Endergebnisse während des Sprechens."
+      "description": "Text erscheint, während du sprichst — kein Warten auf das Ergebnis."
     },
     {
       "id": "multilingual",
@@ -17,12 +17,12 @@
     {
       "id": "crossPlatform",
       "title": "Plattformübergreifend",
-      "description": "Unterstützt macOS, Windows und Linux."
+      "description": "Läuft nativ auf macOS, Windows und Linux."
     },
     {
       "id": "openSource",
       "title": "Open Source",
-      "description": "Vollständiger Quellcode auf GitHub. Transparent und community-getrieben."
+      "description": "Vollständiger Quellcode auf GitHub. Sieh genau, was auf deinem Rechner läuft."
     }
   ],
   "providers": [
@@ -39,7 +39,7 @@
     {
       "id": "nova3-customization",
       "name": "Passt sich deinem Vokabular an",
-      "description": "Fachbegriffe, Namen, Jargon — erkennt deine Wörter ohne jede Einrichtung."
+      "description": "Erkennt Fachbegriffe, Namen und Jargon direkt ohne Einrichtung."
     },
     {
       "id": "nova3-enterprise",
@@ -65,7 +65,7 @@
     {
       "id": "platforms",
       "question": "Welche Plattformen werden unterstützt?",
-      "answer": "macOS, Windows und Linux."
+      "answer": "macOS (Apple Silicon und Intel), Windows und Linux."
     },
     {
       "id": "howItWorks",
@@ -85,7 +85,7 @@
     {
       "id": "hotkey",
       "question": "Wie ändere ich den Hotkey?",
-      "answer": "In den App-Einstellungen."
+      "answer": "Öffne die App, gehe zu Einstellungen → Hotkeys und wähle eine beliebige Tastenkombination. Änderungen gelten sofort."
     },
     {
       "id": "openSource",
@@ -98,12 +98,12 @@
     "note": "Wähle deine Plattform und installiere in wenigen Minuten."
   },
   "testimonials": [
-    { "id": "user1", "name": "Alex M.", "role": "Entwickler", "text": "Hat mein teures Transkriptionstool ersetzt. Schneller und kostenlos." },
-    { "id": "user2", "name": "Sarah K.", "role": "Content-Erstellerin", "text": "Ich diktiere Blogbeiträge beim Spazierengehen. Die Genauigkeit beeindruckt." },
-    { "id": "user3", "name": "Marco R.", "role": "Teamleiter", "text": "Ich antworte jetzt per Sprache in Slack. Viel schneller als Tippen während Meetings." },
-    { "id": "user4", "name": "Yuki T.", "role": "Produktmanagerin", "text": "Endlich ein Sprache-zu-Text, das unter Linux funktioniert. Einfach und zuverlässig." },
-    { "id": "user5", "name": "Lisa W.", "role": "Freiberuflerin", "text": "Die Echtzeit-Transkription ist unglaublich schnell. Keinerlei Verzögerung." },
-    { "id": "user6", "name": "Dan P.", "role": "Autor", "text": "E-Mails und Notizen diktieren statt tippen. Spart mir mindestens eine Stunde pro Tag." }
+    { "id": "user1", "name": "Alex M.", "role": "Entwickler", "text": "Habe $15/Monat für ein langsameres Transkriptionstool bezahlt. Hierher gewechselt — bereue nichts." },
+    { "id": "user2", "name": "Sarah K.", "role": "Content-Erstellerin", "text": "Ich entwerfe Blogbeiträge beim Spazierengehen. Ab und zu wird ein Wort überhört, aber insgesamt viel besser als erwartet für ein kostenloses Tool." },
+    { "id": "user3", "name": "Marco R.", "role": "Teamleiter", "text": "Antworte jetzt per Sprache auf Slack-Nachrichten während Meetings. Mein Team denkt, ich tippe wahnsinnig schnell." },
+    { "id": "user4", "name": "Yuki T.", "role": "Produktmanagerin", "text": "Sprache-zu-Text unter Linux gibt es quasi nicht. Das hier funktioniert einfach. Einrichtung hat vielleicht 2 Minuten gedauert." },
+    { "id": "user5", "name": "Lisa W.", "role": "Freiberuflerin", "text": "Die Latenz ist irre — Text erscheint fast, bevor ich den Satz beendet habe. Habe vorher einiges ausprobiert, nichts kam ran." },
+    { "id": "user6", "name": "Dan P.", "role": "Autor", "text": "Ich diktiere erste Entwürfe von allem — E-Mails, Dokumente, sogar Code-Kommentare. Spare locker eine Stunde am Tag, kein Witz." }
   ],
   "pricing": [
     {
@@ -111,7 +111,7 @@
       "name": "Kostenlos",
       "price": "$0",
       "period": "für immer",
-      "description": "Probiere VoicetextAI mit einem großzügigen kostenlosen Tarif.",
+      "description": "Starte mit Echtzeit-Spracheingabe — ohne Kreditkarte.",
       "features": [
         "Deepgram Nova-3",
         "Echtzeit-Transkription",
@@ -125,10 +125,10 @@
       "name": "Pro",
       "price": "$9",
       "period": "pro Monat",
-      "description": "Mehr Minuten und Prioritäts-Support für Vielnutzer.",
+      "description": "Höhere Transkriptionslimits und Prioritäts-Support für den täglichen Einsatz.",
       "features": [
         "Alles aus dem kostenlosen Tarif",
-        "Erweiterte Nutzungslimits",
+        "Höhere Transkriptionslimits",
         "Prioritäts-Support",
         "Früher Zugang zu Features"
       ],

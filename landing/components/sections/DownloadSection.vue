@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { mdiApple, mdiMicrosoftWindows, mdiPenguin, mdiDownload, mdiCheckCircle } from '@mdi/js';
 import { downloadAssets } from "~/data/downloads";
-import type { DownloadArch } from "~/data/downloads";
 
 const { content } = useLandingContent();
 const { t, locale } = useI18n();
@@ -24,18 +23,10 @@ const platformColors: Record<string, string> = {
 };
 
 const getDownloadUrl = (asset: (typeof downloadAssets)[number]) => {
-  if (asset.os === "macos") {
-    const arch = (downloadStore.arch === "unknown" ? "x64" : downloadStore.arch) as DownloadArch;
-    return resolve("macos", arch)?.url || asset.url;
-  }
   return resolve(asset.os, asset.arch)?.url || asset.url;
 };
 
 const getDownloadVersion = (asset: (typeof downloadAssets)[number]) => {
-  if (asset.os === "macos") {
-    const arch = (downloadStore.arch === "unknown" ? "x64" : downloadStore.arch) as DownloadArch;
-    return resolve("macos", arch)?.version || null;
-  }
   return resolve(asset.os, asset.arch)?.version || null;
 };
 
@@ -49,14 +40,6 @@ const releaseDate = computed(() => {
   });
 });
 
-// Сортируем так, чтобы выбранная платформа всегда была по центру (index 1)
-const sortedAssets = computed(() => {
-  const activeIdx = downloadAssets.findIndex(a => a.id === downloadStore.selectedId);
-  if (activeIdx === -1 || activeIdx === 1) return [...downloadAssets];
-  const result = [...downloadAssets];
-  [result[1], result[activeIdx]] = [result[activeIdx], result[1]];
-  return result;
-});
 </script>
 
 <template>
@@ -71,7 +54,7 @@ const sortedAssets = computed(() => {
       <!-- Platform cards -->
       <div class="download-section__cards">
         <div
-          v-for="(asset, index) in sortedAssets"
+          v-for="(asset, index) in downloadAssets"
           :key="asset.id"
           class="download-section__card"
           :class="{ 'download-section__card--active': downloadStore.selectedId === asset.id }"
@@ -92,7 +75,7 @@ const sortedAssets = computed(() => {
           <!-- Platform info -->
           <div class="download-section__card-info">
             <h3 class="download-section__card-label">{{ asset.label }}</h3>
-            <span class="download-section__card-arch">{{ asset.arch }}</span>
+            <span class="download-section__card-arch">{{ asset.archLabel }}</span>
             <span v-if="getDownloadVersion(asset)" class="download-section__card-version">
               v{{ getDownloadVersion(asset) }}
             </span>
@@ -175,11 +158,11 @@ const sortedAssets = computed(() => {
 /* ─── Cards Grid ─── */
 .download-section__cards {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 18px;
   position: relative;
   z-index: 1;
-  max-width: 840px;
+  max-width: 1100px;
   margin: 0 auto;
   /* Чтобы scale не обрезался */
   overflow: visible;
@@ -313,8 +296,8 @@ const sortedAssets = computed(() => {
 }
 
 .download-section__card-version {
-  display: inline-block;
-  margin-top: 6px;
+  display: block;
+  margin-top: 4px;
   font-size: 0.78rem;
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -506,6 +489,13 @@ const sortedAssets = computed(() => {
 }
 
 /* ─── Responsive ─── */
+@media (max-width: 1100px) {
+  .download-section__cards {
+    grid-template-columns: repeat(2, 1fr);
+    max-width: 560px;
+  }
+}
+
 @media (max-width: 960px) {
   .download-section__cards {
     grid-template-columns: 1fr;

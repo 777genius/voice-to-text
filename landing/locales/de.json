@@ -41,11 +41,11 @@
   },
   "features": {
     "sectionTitle": "Alles, was du für Spracheingabe brauchst",
-    "sectionSubtitle": "Leistungsstarke Funktionen für nahtlose, blitzschnelle Transkription."
+    "sectionSubtitle": "Alles, was Spracheingabe wirklich nutzbar macht."
   },
   "providers": {
     "sectionTitle": "Angetrieben von Deepgram Nova-3",
-    "sectionSubtitle": "Die schnellste und genaueste Sprach-KI auf dem Markt. Genutzt von NASA, Spotify und tausenden Unternehmen.",
+    "sectionSubtitle": "Deepgrams Sprach-KI — vertraut von NASA, Spotify und tausenden Unternehmen.",
     "learnMoreBtn": "Deepgram Nova-3 Spracherkennung entdecken"
   },
   "pricing": {
@@ -70,7 +70,7 @@
   },
   "screenshots": {
     "sectionTitle": "Erlebe es in Aktion",
-    "sectionSubtitle": "Entdecke die elegante Oberfläche für Produktivität und Komfort.",
+    "sectionSubtitle": "Ein klares Interface, das aufs Arbeiten ausgelegt ist.",
     "main": "Hauptbildschirm",
     "mainDark": "Hauptoberfläche",
     "recordDark": "Aufnahme",
@@ -95,8 +95,8 @@
     "checkoutSuccessDescription": "Danke! Wir haben deine Zahlung erhalten. Die Freischaltung erfolgt über sichere Paddle-Webhooks und kann einen Moment dauern.",
     "payTitle": "Sicherer Checkout — VoicetextAI",
     "payDescription": "Einstiegsseite für sicheren Checkout, genutzt von Paddle-Zahlungslinks und Links zur Aktualisierung der Zahlungsmethode.",
-    "homeTitle": "VoicetextAI — kostenlose, einfache, schnelle Sprache-zu-Text in Echtzeit",
-    "homeDescription": "Moderne plattformübergreifende Desktop-App mit KI. 40 Sprachen. Kostenlos.",
+    "homeTitle": "VoicetextAI — Echtzeit-Sprache-zu-Text für Mac, Windows & Linux",
+    "homeDescription": "Kostenlose Desktop-App, die deine Stimme in Echtzeit in Text verwandelt. Unterstützt 40+ Sprachen auf macOS, Windows und Linux.",
     "downloadTitle": "VoicetextAI herunterladen",
     "downloadDescription": "Builds für macOS, Windows und Linux.",
     "privacyTitle": "Datenschutz bei VoicetextAI",
