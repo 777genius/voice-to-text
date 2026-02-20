@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, onMounted, onUnmounted, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
@@ -12,6 +12,7 @@ import { useSettings } from '../composables/useSettings';
 import { useSettingsTheme } from '../composables/useSettingsTheme';
 import { useSettingsStore } from '../../store/settingsStore';
 import type { SettingsState } from '../../domain/types';
+import { invokeUpdateAppConfig } from '@/windowing/stateSync';
 
 // Секции
 import LanguageSection from './sections/LanguageSection.vue';
@@ -39,6 +40,10 @@ let unlistenOpened: UnlistenFn | null = null;
 const baselineState = ref<SettingsState | null>(null);
 const baselineUiLocale = ref<string>('');
 
+const liveApplyAudioDeviceArmed = ref(false);
+let lastAppliedAudioDevice = '';
+let liveApplySeq = 0;
+
 function snapshotSettingsState(): SettingsState {
   return {
     provider: settingsStore.provider,
@@ -60,6 +65,37 @@ function snapshotSettingsState(): SettingsState {
 function captureBaseline(): void {
   baselineState.value = snapshotSettingsState();
   baselineUiLocale.value = String(locale.value ?? '');
+}
+
+function armLiveApplyAudioDevice(): void {
+  if (!isTauriAvailable()) {
+    liveApplyAudioDeviceArmed.value = false;
+    return;
+  }
+  lastAppliedAudioDevice = settingsStore.selectedAudioDevice;
+  liveApplyAudioDeviceArmed.value = true;
+}
+
+function disarmLiveApplyAudioDevice(): void {
+  liveApplyAudioDeviceArmed.value = false;
+}
+
+async function applySelectedAudioDevice(deviceName: string): Promise<void> {
+  if (!isTauriAvailable()) return;
+
+  const seq = ++liveApplySeq;
+  try {
+    await invokeUpdateAppConfig({ selectedAudioDevice: deviceName });
+    // Если за время invoke пользователь уже выбрал другое устройство — игнорируем этот результат.
+    if (seq !== liveApplySeq) return;
+
+    lastAppliedAudioDevice = deviceName;
+    if (baselineState.value) {
+      baselineState.value.selectedAudioDevice = deviceName;
+    }
+  } catch (err) {
+    console.error('Не удалось применить устройство записи:', err);
+  }
 }
 
 function discardDraftChanges(): void {
@@ -86,14 +122,17 @@ onMounted(async () => {
 
   unlistenOpened = await listen<boolean>('settings-window-opened', async () => {
     if (isLoading.value) return;
+    disarmLiveApplyAudioDevice();
     // Подтягиваем свежий конфиг через per-topic handles, дожидаемся завершения
     await Promise.all([appConfigStore.refresh(), sttConfigStore.refresh()]);
     await loadConfig();
     captureBaseline();
+    armLiveApplyAudioDevice();
   });
 
   await loadConfig();
   captureBaseline();
+  armLiveApplyAudioDevice();
 });
 
 onUnmounted(() => {
@@ -129,6 +168,17 @@ async function handleSave(): Promise<void> {
 
   await handleClose({ discard: false });
 }
+
+watch(
+  () => settingsStore.selectedAudioDevice,
+  (next, prev) => {
+    if (!isTauriAvailable()) return;
+    if (!liveApplyAudioDeviceArmed.value) return;
+    if (next === prev) return;
+    if (next === lastAppliedAudioDevice) return;
+    void applySelectedAudioDevice(next);
+  }
+);
 </script>
 
 <template>

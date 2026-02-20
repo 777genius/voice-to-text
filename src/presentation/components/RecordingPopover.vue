@@ -157,6 +157,8 @@ onMounted(async () => {
     // Подтягиваем актуальную auth session из Rust SoT (important when WebView was "frozen").
     // Best-effort: не блокируем UI на сетевых/IPC проблемах.
     void auth.initialize({ silent: true });
+    // Подтягиваем свежий app-config (например, если настройки были в отдельном окне).
+    void appConfigStore.refresh();
 
     // Если UI рассинхронизировался (например окно было скрыто и JS "заморозили"),
     // сначала сверяемся с backend: он источник правды по статусу записи.

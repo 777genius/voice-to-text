@@ -205,6 +205,15 @@ pub async fn start_recording(
         },
     );
 
+    // Если в настройках выбран "Default" (selected_audio_device=None), то при подключении/смене микрофона
+    // системное устройство по умолчанию может измениться, а захват останется привязанным к старому девайсу.
+    // Поэтому перед стартом записи пересоздаём audio capture по текущему конфигу.
+    let selected_device = state.config.read().await.selected_audio_device.clone();
+    state
+        .recreate_audio_capture_with_device(selected_device, app_handle.clone())
+        .await
+        .map_err(|e| format!("Не удалось инициализировать устройство записи: {}", e))?;
+
     // Start recording (async - WebSocket connect, audio capture start)
     let start_result = state
         .transcription_service
