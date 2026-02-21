@@ -116,7 +116,7 @@ usePageSeo("meta.privacyPolicyTitle", "meta.privacyPolicyDescription");
         </ul>
         <p>
           To exercise any of these rights, please contact us at
-          <a href="mailto:iliyazelenkog@gmail.com">iliyazelenkog@gmail.com</a>.
+          <a href="mailto:quantjumppro@gmail.com">quantjumppro@gmail.com</a>.
         </p>
       </section>
 
@@ -156,7 +156,7 @@ usePageSeo("meta.privacyPolicyTitle", "meta.privacyPolicyDescription");
         </p>
         <p>
           <strong>Email:</strong>
-          <a href="mailto:iliyazelenkog@gmail.com">iliyazelenkog@gmail.com</a>
+          <a href="mailto:quantjumppro@gmail.com">quantjumppro@gmail.com</a>
         </p>
       </section>
     </div>

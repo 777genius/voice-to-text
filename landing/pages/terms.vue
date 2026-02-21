@@ -223,7 +223,7 @@ usePageSeo("meta.termsTitle", "meta.termsDescription");
         </p>
         <p>
           <strong>Email:</strong>
-          <a href="mailto:iliyazelenkog@gmail.com">iliyazelenkog@gmail.com</a>
+          <a href="mailto:quantjumppro@gmail.com">quantjumppro@gmail.com</a>
         </p>
       </section>
     </div>

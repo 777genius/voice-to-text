@@ -52,7 +52,7 @@ usePageSeo("meta.refundPolicyTitle", "meta.refundPolicyDescription");
           </li>
           <li>
             By contacting us at
-            <a href="mailto:iliyazelenkog@gmail.com">iliyazelenkog@gmail.com</a>
+            <a href="mailto:quantjumppro@gmail.com">quantjumppro@gmail.com</a>
           </li>
         </ul>
         <p>
