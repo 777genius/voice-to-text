@@ -85,6 +85,48 @@ describe('useSttConfigStore sync', () => {
     expect(store.isLoaded).toBe(true);
   });
 
+  it('applySnapshot: если deepgram_keyterms не пришёл — не затирает текущее значение', () => {
+    const store = useSttConfigStore();
+
+    store.applySnapshot(
+      {
+        provider: SttProviderType.Backend,
+        language: 'ru',
+        auto_detect_language: false,
+        enable_punctuation: true,
+        filter_profanity: false,
+        deepgram_api_key: null,
+        assemblyai_api_key: null,
+        model: null,
+        keep_connection_alive: false,
+        deepgram_keyterms: 'Kubernetes, VoicetextAI',
+      },
+      '1',
+    );
+
+    expect(store.deepgramKeyterms).toBe('Kubernetes, VoicetextAI');
+
+    // Мокаем "partial snapshot" без deepgram_keyterms (как в scenario тестах)
+    store.applySnapshot(
+      {
+        provider: SttProviderType.Backend,
+        language: 'en',
+        auto_detect_language: false,
+        enable_punctuation: true,
+        filter_profanity: false,
+        deepgram_api_key: null,
+        assemblyai_api_key: null,
+        model: null,
+        keep_connection_alive: false,
+        // deepgram_keyterms отсутствует намеренно
+      } as any,
+      '2',
+    );
+
+    expect(store.language).toBe('en');
+    expect(store.deepgramKeyterms).toBe('Kubernetes, VoicetextAI');
+  });
+
   it('startSync: при ошибке start() — handle обнуляется и retry работает', async () => {
     listenMock.mockResolvedValue(vi.fn());
     invokeMock.mockRejectedValueOnce(new Error('network error'));

@@ -43,7 +43,7 @@ describe('scenario: app-config sync across windows (mocked tauri)', () => {
       recording_hotkey: 'CmdOrCtrl+Shift+X',
       auto_copy_to_clipboard: false,
       auto_paste_text: false,
-      microphone_sensitivity: 95,
+      microphone_sensitivity: 100,
       selected_audio_device: null,
     };
 

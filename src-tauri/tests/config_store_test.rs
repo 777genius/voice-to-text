@@ -3,28 +3,39 @@ use app_lib::domain::{SttConfig, SttProviderType, AppConfig};
 use std::fs;
 use std::path::PathBuf;
 use serial_test::serial;
+use uuid::Uuid;
 
-/// Хелпер для получения временной директории для тестов
-fn get_test_config_dir() -> PathBuf {
-    let temp_dir = std::env::temp_dir();
-    temp_dir.join(format!("voice-to-text-test-{}", std::process::id()))
+const CONFIG_DIR_ENV: &str = "VOICE_TO_TEXT_CONFIG_DIR";
+
+struct TestConfigDir {
+    dir: PathBuf,
 }
 
-/// Очистка тестовой директории после теста
-fn cleanup_test_dir(dir: &PathBuf) {
-    if dir.exists() {
-        let _ = fs::remove_dir_all(dir);
+impl TestConfigDir {
+    fn new() -> Self {
+        let temp_dir = std::env::temp_dir();
+        let dir = temp_dir.join(format!("voice-to-text-test-{}", Uuid::new_v4()));
+        let _ = fs::create_dir_all(&dir);
+        std::env::set_var(CONFIG_DIR_ENV, dir.to_string_lossy().to_string());
+        Self { dir }
+    }
+}
+
+impl Drop for TestConfigDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+        // Не трогаем предыдущее значение env — тесты у нас serial.
+        std::env::remove_var(CONFIG_DIR_ENV);
     }
 }
 
 #[tokio::test]
 #[serial]
 async fn test_save_and_load_stt_config() {
+    let _guard = TestConfigDir::new();
     // Очистка перед тестом
     let _ = ConfigStore::delete_config().await;
     let _ = ConfigStore::delete_app_config().await;
-
-    let test_dir = get_test_config_dir();
 
     // Создаем тестовую конфигурацию
     let mut config = SttConfig::new(SttProviderType::Deepgram)
@@ -48,12 +59,12 @@ async fn test_save_and_load_stt_config() {
 
     // Очистка
     let _ = ConfigStore::delete_config().await;
-    cleanup_test_dir(&test_dir);
 }
 
 #[tokio::test]
 #[serial]
 async fn test_load_config_when_not_exists() {
+    let _guard = TestConfigDir::new();
     // Удаляем конфиг если существует
     let _ = ConfigStore::delete_config().await;
 
@@ -68,6 +79,7 @@ async fn test_load_config_when_not_exists() {
 #[tokio::test]
 #[serial]
 async fn test_delete_stt_config() {
+    let _guard = TestConfigDir::new();
     // Создаем и сохраняем конфиг
     let mut config = SttConfig::new(SttProviderType::AssemblyAI);
     config.assemblyai_api_key = Some("delete-test-key".to_string());
@@ -86,11 +98,10 @@ async fn test_delete_stt_config() {
 #[tokio::test]
 #[serial]
 async fn test_save_and_load_app_config() {
+    let _guard = TestConfigDir::new();
     // Очистка перед тестом
     let _ = ConfigStore::delete_config().await;
     let _ = ConfigStore::delete_app_config().await;
-
-    let test_dir = get_test_config_dir();
 
     // Создаем конфигурацию приложения
     let mut app_config = AppConfig::default();
@@ -113,12 +124,12 @@ async fn test_save_and_load_app_config() {
 
     // Очистка
     let _ = ConfigStore::delete_app_config().await;
-    cleanup_test_dir(&test_dir);
 }
 
 #[tokio::test]
 #[serial]
 async fn test_load_app_config_when_not_exists() {
+    let _guard = TestConfigDir::new();
     // Удаляем конфиг если существует
     let _ = ConfigStore::delete_app_config().await;
 
@@ -135,6 +146,7 @@ async fn test_load_app_config_when_not_exists() {
 #[tokio::test]
 #[serial]
 async fn test_delete_app_config() {
+    let _guard = TestConfigDir::new();
     // Создаем и сохраняем app конфиг
     let app_config = AppConfig::default();
     ConfigStore::save_app_config(&app_config).await.unwrap();
@@ -151,6 +163,7 @@ async fn test_delete_app_config() {
 #[tokio::test]
 #[serial]
 async fn test_save_multiple_configs_sequentially() {
+    let _guard = TestConfigDir::new();
     // Очистка перед тестом
     let _ = ConfigStore::delete_config().await;
 
@@ -179,6 +192,7 @@ async fn test_save_multiple_configs_sequentially() {
 #[tokio::test]
 #[serial]
 async fn test_config_persistence_across_operations() {
+    let _guard = TestConfigDir::new();
     // Очистка перед тестом
     let _ = ConfigStore::delete_config().await;
     let _ = ConfigStore::delete_app_config().await;
@@ -208,6 +222,7 @@ async fn test_config_persistence_across_operations() {
 #[tokio::test]
 #[serial]
 async fn test_config_with_empty_optional_fields() {
+    let _guard = TestConfigDir::new();
     // Очистка перед тестом
     let _ = ConfigStore::delete_config().await;
     let _ = ConfigStore::delete_app_config().await;
@@ -231,6 +246,7 @@ async fn test_config_with_empty_optional_fields() {
 #[tokio::test]
 #[serial]
 async fn test_concurrent_config_operations() {
+    let _guard = TestConfigDir::new();
     // Очистка перед тестом
     let _ = ConfigStore::delete_config().await;
     let _ = ConfigStore::delete_app_config().await;

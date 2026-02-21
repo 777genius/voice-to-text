@@ -35,11 +35,13 @@ export const useSttConfigStore = defineStore('sttConfig', () => {
     autoDetectLanguage.value = data.auto_detect_language ?? autoDetectLanguage.value;
     enablePunctuation.value = data.enable_punctuation ?? enablePunctuation.value;
     filterProfanity.value = data.filter_profanity ?? filterProfanity.value;
-    deepgramApiKey.value = data.deepgram_api_key ?? null;
-    assemblyaiApiKey.value = data.assemblyai_api_key ?? null;
-    model.value = data.model ?? null;
+    // Эти поля могут отсутствовать в partial snapshot'ах (например, в моках/старых версиях),
+    // поэтому обновляем их только если ключ реально пришёл.
+    if ('deepgram_api_key' in data) deepgramApiKey.value = data.deepgram_api_key ?? null;
+    if ('assemblyai_api_key' in data) assemblyaiApiKey.value = data.assemblyai_api_key ?? null;
+    if ('model' in data) model.value = data.model ?? null;
     keepConnectionAlive.value = data.keep_connection_alive ?? keepConnectionAlive.value;
-    deepgramKeyterms.value = data.deepgram_keyterms ?? null;
+    if ('deepgram_keyterms' in data) deepgramKeyterms.value = data.deepgram_keyterms ?? null;
     isLoaded.value = true;
   }
 

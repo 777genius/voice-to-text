@@ -62,7 +62,8 @@ export function useSettings() {
 
   const microphoneSensitivity = computed({
     get: () => store.microphoneSensitivity,
-    set: (value: number) => store.setMicrophoneSensitivity(value, { persist: false }),
+    // Чувствительность критична для UX — сохраняем сразу (debounce внутри store).
+    set: (value: number) => store.setMicrophoneSensitivity(value),
   });
 
   const selectedAudioDevice = computed({
@@ -179,7 +180,7 @@ export function useSettings() {
       } else {
         try {
           const appConfig = await tauriSettingsService.getAppConfig();
-          store.setMicrophoneSensitivity(appConfig.microphone_sensitivity ?? 95, { persist: false });
+          store.setMicrophoneSensitivity(appConfig.microphone_sensitivity ?? 100, { persist: false });
           store.setRecordingHotkey(appConfig.recording_hotkey ?? 'CmdOrCtrl+Shift+X');
           store.setAutoCopyToClipboard(appConfig.auto_copy_to_clipboard ?? true);
           store.setAutoPasteText(appConfig.auto_paste_text ?? false);

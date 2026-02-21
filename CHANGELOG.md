@@ -12,11 +12,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 - Live audio device selection with real-time configuration updates in settings
 - Error message display in profile when data fails to load
-- Smart macOS download card with automatic Apple Silicon / Intel detection via WebGL
-
-### Fixed
-- Apple Silicon detection now uses WebGL renderer instead of unreliable User-Agent
-- Testimonial roles and punctuation across all languages
 
 ---
 

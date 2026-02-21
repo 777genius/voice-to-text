@@ -17,6 +17,20 @@ pub struct PostUpdateMarker {
 pub struct ConfigStore;
 
 impl ConfigStore {
+    fn backup_path(path: &Path) -> PathBuf {
+        PathBuf::from(format!("{}.bak", path.display()))
+    }
+
+    async fn write_backup_best_effort(path: &Path) {
+        if !path.exists() {
+            return;
+        }
+        let bak = Self::backup_path(path);
+        if let Err(e) = tokio::fs::copy(path, &bak).await {
+            log::warn!("Failed to write config backup {:?}: {}", bak, e);
+        }
+    }
+
     async fn write_file_atomic(path: &Path, contents: &str) -> Result<()> {
         // Пишем во временный файл и только потом атомарно подменяем.
         // На Windows rename может падать, если цель уже существует, поэтому делаем best-effort remove.
@@ -53,6 +67,17 @@ impl ConfigStore {
 
     /// Получить директорию конфигурации приложения
     fn config_dir() -> Result<PathBuf> {
+        // Для тестов и отладки даём возможность переопределить директорию хранения конфигов.
+        // В проде переменная окружения обычно не задана → используем стандартный OS config dir.
+        if let Ok(custom) = std::env::var("VOICE_TO_TEXT_CONFIG_DIR") {
+            let custom = custom.trim();
+            if !custom.is_empty() {
+                let dir = PathBuf::from(custom);
+                std::fs::create_dir_all(&dir)?;
+                return Ok(dir);
+            }
+        }
+
         let config_dir = dirs::config_dir()
             .ok_or_else(|| anyhow::anyhow!("Failed to get config directory"))?;
 
@@ -79,6 +104,7 @@ impl ConfigStore {
         let path = Self::config_path()?;
 
         let json = serde_json::to_string_pretty(config)?;
+        Self::write_backup_best_effort(&path).await;
         Self::write_file_atomic(&path, &json).await?;
 
         log::debug!("STT config saved to disk");
@@ -94,8 +120,39 @@ impl ConfigStore {
             return Ok(SttConfig::default());
         }
 
-        let json = tokio::fs::read_to_string(path).await?;
-        let config: SttConfig = serde_json::from_str(&json)?;
+        let json = match tokio::fs::read_to_string(&path).await {
+            Ok(v) => v,
+            Err(e) => {
+                let bak = Self::backup_path(&path);
+                log::warn!("Failed to read STT config {:?}: {}. Trying backup {:?}.", path, e, bak);
+                let json_bak = tokio::fs::read_to_string(&bak).await?;
+                let cfg_bak: SttConfig = serde_json::from_str(&json_bak)?;
+                // Best-effort: восстанавливаем основной файл, чтобы следующий старт был стабильным.
+                if let Ok(pretty) = serde_json::to_string_pretty(&cfg_bak) {
+                    let _ = Self::write_file_atomic(&path, &pretty).await;
+                }
+                return Ok(cfg_bak);
+            }
+        };
+
+        let config: SttConfig = match serde_json::from_str(&json) {
+            Ok(v) => v,
+            Err(e) => {
+                let bak = Self::backup_path(&path);
+                log::warn!(
+                    "Failed to parse STT config {:?}: {}. Trying backup {:?}.",
+                    path,
+                    e,
+                    bak
+                );
+                let json_bak = tokio::fs::read_to_string(&bak).await?;
+                let cfg_bak: SttConfig = serde_json::from_str(&json_bak)?;
+                if let Ok(pretty) = serde_json::to_string_pretty(&cfg_bak) {
+                    let _ = Self::write_file_atomic(&path, &pretty).await;
+                }
+                cfg_bak
+            }
+        };
 
         log::debug!("STT config loaded from disk");
         Ok(config)
@@ -118,6 +175,7 @@ impl ConfigStore {
         let path = Self::app_config_path()?;
 
         let json = serde_json::to_string_pretty(config)?;
+        Self::write_backup_best_effort(&path).await;
         Self::write_file_atomic(&path, &json).await?;
 
         log::info!("App config saved to disk");
@@ -133,8 +191,38 @@ impl ConfigStore {
             return Ok(AppConfig::default());
         }
 
-        let json = tokio::fs::read_to_string(path).await?;
-        let config: AppConfig = serde_json::from_str(&json)?;
+        let json = match tokio::fs::read_to_string(&path).await {
+            Ok(v) => v,
+            Err(e) => {
+                let bak = Self::backup_path(&path);
+                log::warn!("Failed to read app config {:?}: {}. Trying backup {:?}.", path, e, bak);
+                let json_bak = tokio::fs::read_to_string(&bak).await?;
+                let cfg_bak: AppConfig = serde_json::from_str(&json_bak)?;
+                if let Ok(pretty) = serde_json::to_string_pretty(&cfg_bak) {
+                    let _ = Self::write_file_atomic(&path, &pretty).await;
+                }
+                return Ok(cfg_bak);
+            }
+        };
+
+        let config: AppConfig = match serde_json::from_str(&json) {
+            Ok(v) => v,
+            Err(e) => {
+                let bak = Self::backup_path(&path);
+                log::warn!(
+                    "Failed to parse app config {:?}: {}. Trying backup {:?}.",
+                    path,
+                    e,
+                    bak
+                );
+                let json_bak = tokio::fs::read_to_string(&bak).await?;
+                let cfg_bak: AppConfig = serde_json::from_str(&json_bak)?;
+                if let Ok(pretty) = serde_json::to_string_pretty(&cfg_bak) {
+                    let _ = Self::write_file_atomic(&path, &pretty).await;
+                }
+                cfg_bak
+            }
+        };
 
         log::info!("App config loaded from disk");
         Ok(config)
@@ -191,7 +279,8 @@ impl ConfigStore {
     pub async fn save_ui_preferences(prefs: &UiPreferences) -> Result<()> {
         let path = Self::ui_preferences_path()?;
         let json = serde_json::to_string_pretty(prefs)?;
-        tokio::fs::write(path, json).await?;
+        Self::write_backup_best_effort(&path).await;
+        Self::write_file_atomic(&path, &json).await?;
         log::info!("UI preferences saved to disk");
         Ok(())
     }
@@ -203,8 +292,39 @@ impl ConfigStore {
             log::info!("No saved UI preferences found, using defaults");
             return Ok(UiPreferences::default());
         }
-        let json = tokio::fs::read_to_string(path).await?;
-        let prefs: UiPreferences = serde_json::from_str(&json)?;
+
+        let json = match tokio::fs::read_to_string(&path).await {
+            Ok(v) => v,
+            Err(e) => {
+                let bak = Self::backup_path(&path);
+                log::warn!("Failed to read UI preferences {:?}: {}. Trying backup {:?}.", path, e, bak);
+                let json_bak = tokio::fs::read_to_string(&bak).await?;
+                let prefs_bak: UiPreferences = serde_json::from_str(&json_bak)?;
+                if let Ok(pretty) = serde_json::to_string_pretty(&prefs_bak) {
+                    let _ = Self::write_file_atomic(&path, &pretty).await;
+                }
+                return Ok(prefs_bak);
+            }
+        };
+
+        let prefs: UiPreferences = match serde_json::from_str(&json) {
+            Ok(v) => v,
+            Err(e) => {
+                let bak = Self::backup_path(&path);
+                log::warn!(
+                    "Failed to parse UI preferences {:?}: {}. Trying backup {:?}.",
+                    path,
+                    e,
+                    bak
+                );
+                let json_bak = tokio::fs::read_to_string(&bak).await?;
+                let prefs_bak: UiPreferences = serde_json::from_str(&json_bak)?;
+                if let Ok(pretty) = serde_json::to_string_pretty(&prefs_bak) {
+                    let _ = Self::write_file_atomic(&path, &pretty).await;
+                }
+                prefs_bak
+            }
+        };
         log::info!("UI preferences loaded from disk");
         Ok(prefs)
     }
@@ -227,10 +347,34 @@ mod tests {
     use super::*;
     use crate::domain::SttProviderType;
     use serial_test::serial;
+    use uuid::Uuid;
+
+    const CONFIG_DIR_ENV: &str = "VOICE_TO_TEXT_CONFIG_DIR";
+
+    struct TestConfigDir {
+        dir: PathBuf,
+    }
+
+    impl TestConfigDir {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("voice-to-text-test-{}", Uuid::new_v4()));
+            let _ = std::fs::create_dir_all(&dir);
+            std::env::set_var(CONFIG_DIR_ENV, dir.to_string_lossy().to_string());
+            Self { dir }
+        }
+    }
+
+    impl Drop for TestConfigDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+            std::env::remove_var(CONFIG_DIR_ENV);
+        }
+    }
 
     #[tokio::test]
     #[serial]
     async fn test_save_and_load_stt_config() {
+        let _guard = TestConfigDir::new();
         let _ = ConfigStore::delete_config().await;
 
         let mut config = SttConfig::default();
@@ -249,6 +393,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_load_nonexistent_config_returns_default() {
+        let _guard = TestConfigDir::new();
         let _ = ConfigStore::delete_config().await;
 
         let loaded = ConfigStore::load_config().await.unwrap();
@@ -258,6 +403,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_save_and_load_app_config() {
+        let _guard = TestConfigDir::new();
         let _ = ConfigStore::delete_app_config().await;
 
         let mut config = AppConfig::default();
@@ -276,6 +422,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_delete_config_is_safe() {
+        let _guard = TestConfigDir::new();
         // Удаление несуществующего конфига должно быть безопасным
         let result = ConfigStore::delete_config().await;
         assert!(result.is_ok());
@@ -284,6 +431,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_config_paths() {
+        let _guard = TestConfigDir::new();
         let stt_path = ConfigStore::config_path().unwrap();
         let app_path = ConfigStore::app_config_path().unwrap();
 
@@ -294,6 +442,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn post_update_marker_is_one_shot() {
+        let _guard = TestConfigDir::new();
         // Убедимся, что маркер можно поставить и снять.
         ConfigStore::save_post_update_marker("9.9.9").await.unwrap();
         let marker = ConfigStore::take_post_update_marker().await.unwrap();

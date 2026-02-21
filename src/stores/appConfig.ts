@@ -17,7 +17,7 @@ export const useAppConfigStore = defineStore('appConfig', () => {
   const recordingHotkey = ref('CmdOrCtrl+Shift+X');
   const autoCopyToClipboard = ref(true);
   const autoPasteText = ref(false);
-  const microphoneSensitivity = ref(95);
+  const microphoneSensitivity = ref(100);
   const selectedAudioDevice = ref('');
 
   let syncHandle: RevisionSyncHandle | null = null;

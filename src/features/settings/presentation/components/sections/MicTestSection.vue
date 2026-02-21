@@ -13,9 +13,10 @@ const micTestSource = new MicTestAudioSource();
 
 const { t } = useI18n();
 const { microphoneSensitivity, selectedAudioDevice } = useSettings();
-const { isTesting, audioLevel, error, start, stop, playAudio } = useMicrophoneTest();
+const { isTesting, audioLevel, error, start, stop, preparePlayback, playAudio } = useMicrophoneTest();
 
 async function handleStart() {
+  preparePlayback();
   await start(
     microphoneSensitivity.value,
     selectedAudioDevice.value || null
@@ -23,6 +24,7 @@ async function handleStart() {
 }
 
 async function handleStop() {
+  preparePlayback();
   const samples = await stop();
   if (samples.length > 0) {
     playAudio(samples);

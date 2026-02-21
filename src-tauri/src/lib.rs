@@ -358,9 +358,13 @@ pub fn run() {
                             // Держим STT token синхронизированным с access token из сессии,
                             // и сразу применяем backend keep-alive настройки (чтобы первые hotkey-сессии
                             // не закрывали WS и не показывали "Подключение..." при повторном старте).
-                            let mut stt = crate::infrastructure::ConfigStore::load_config()
-                                .await
-                                .unwrap_or_default();
+                            let (mut stt, loaded_from_disk) = match crate::infrastructure::ConfigStore::load_config().await {
+                                Ok(c) => (c, true),
+                                Err(e) => {
+                                    log::warn!("Failed to load STT config on startup: {}. Using defaults for this session.", e);
+                                    (crate::domain::SttConfig::default(), false)
+                                }
+                            };
                             stt.backend_auth_token = store.session.as_ref().map(|s| s.access_token.clone());
                             if stt.provider == crate::domain::SttProviderType::Backend {
                                 stt.keep_connection_alive = true;
@@ -369,7 +373,10 @@ pub fn run() {
                                     stt.keep_alive_ttl_secs = MIN_BACKEND_KEEPALIVE_TTL_SECS;
                                 }
                             }
-                            let _ = crate::infrastructure::ConfigStore::save_config(&stt).await;
+                            // Если не смогли прочитать с диска — не перезаписываем файл дефолтами.
+                            if loaded_from_disk {
+                                let _ = crate::infrastructure::ConfigStore::save_config(&stt).await;
+                            }
                             let _ = state.transcription_service.update_config(stt).await;
 
                             // Запускаем фоновый refresh (если возможен).

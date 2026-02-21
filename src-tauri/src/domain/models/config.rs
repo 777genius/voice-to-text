@@ -143,7 +143,7 @@ pub struct AppConfig {
     /// VAD silence timeout in milliseconds
     pub vad_silence_timeout_ms: u64,
 
-    /// Microphone sensitivity / gain (0-200, default 95)
+    /// Microphone sensitivity / gain (0-200, default 100)
     /// Controls audio amplification level:
     /// - 0%:   gain 0.0x (complete silence)
     /// - 100%: gain 1.0x (no change, as recorded by microphone)
@@ -170,7 +170,7 @@ impl Default for AppConfig {
             auto_paste_text: false, // По умолчанию выключено (может раздражать)
             auto_close_window: true,
             vad_silence_timeout_ms: 5000, // 5 секунд тишины перед авто-остановкой
-            microphone_sensitivity: 95, // Очень высокая чувствительность по умолчанию (порог ~1638)
+            microphone_sensitivity: 100, // Нейтральный уровень: как записывает микрофон
             selected_audio_device: None, // По умолчанию используем системное устройство
             keep_history: true,
             max_history_items: 20,
@@ -262,7 +262,7 @@ mod tests {
         assert!(config.auto_copy_to_clipboard);
         assert!(config.auto_close_window);
         assert_eq!(config.vad_silence_timeout_ms, 5000);
-        assert_eq!(config.microphone_sensitivity, 95);
+        assert_eq!(config.microphone_sensitivity, 100);
         assert!(config.keep_history);
         assert_eq!(config.max_history_items, 20);
     }

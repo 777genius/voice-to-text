@@ -23,7 +23,7 @@ pub struct TranscriptionService {
     stt_provider: Arc<RwLock<Option<Box<dyn SttProvider>>>>,
     status: Arc<RwLock<RecordingStatus>>,
     config: Arc<RwLock<SttConfig>>,
-    microphone_sensitivity: Arc<RwLock<u8>>, // 0-200, default 95
+    microphone_sensitivity: Arc<RwLock<u8>>, // 0-200, default 100
     inactivity_timer_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>, // таймер для автоочистки соединения
     audio_processor_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>, // обработчик аудио-чанков → STT
 }
@@ -39,7 +39,7 @@ impl TranscriptionService {
             stt_provider: Arc::new(RwLock::new(None)),
             status: Arc::new(RwLock::new(RecordingStatus::Idle)),
             config: Arc::new(RwLock::new(SttConfig::default())),
-            microphone_sensitivity: Arc::new(RwLock::new(95)), // Default 95% (порог ~1638, более чувствительный)
+            microphone_sensitivity: Arc::new(RwLock::new(100)), // Default 100% (без усиления)
             inactivity_timer_task: Arc::new(RwLock::new(None)),
             audio_processor_task: Arc::new(RwLock::new(None)),
         }
@@ -312,7 +312,12 @@ impl TranscriptionService {
                 // Вычисляем уровень громкости для визуализации
                 // Используем перцептивную нормализацию (корень квадратный) как в VU-метрах
                 // Это делает индикатор более естественным: нормальная речь ~30-50% вместо ~9-24%
-                let max_amplitude = chunk.data.iter().map(|&s| s.abs()).max().unwrap_or(0);
+                let max_amplitude: i32 = chunk
+                    .data
+                    .iter()
+                    .map(|&s| (s as i32).abs())
+                    .max()
+                    .unwrap_or(0);
                 let normalized_level = (max_amplitude as f32 / 32767.0).sqrt().min(1.0);
 
                 // Вызываем callback для UI (не чаще чем каждые 50ms = ~каждый второй чанк)
@@ -328,7 +333,7 @@ impl TranscriptionService {
                 let sensitivity = *sensitivity_arc.read().await;
 
                 // Простая линейная формула усиления
-                let gain = if sensitivity <= 100 {
+                let requested_gain = if sensitivity <= 100 {
                     // 0-100% → 0.0x-1.0x (приглушение/нормальный уровень)
                     sensitivity as f32 / 100.0
                 } else {
@@ -336,14 +341,40 @@ impl TranscriptionService {
                     1.0 + (sensitivity - 100) as f32 / 100.0 * 4.0
                 };
 
+                // Простой limiter: если requested_gain приводит к клиппингу — уменьшаем gain для этого чанка.
+                // Это сохраняет "помощь" тихим микрофонам и не ухудшает распознавание на нормальных уровнях.
+                let effective_gain = if max_amplitude <= 0 {
+                    requested_gain
+                } else {
+                    let headroom = 0.98_f32;
+                    let limiter_gain = (32767.0 * headroom) / (max_amplitude as f32);
+                    requested_gain.min(limiter_gain)
+                };
+
                 if chunk_count == 1 {
-                    log::debug!("Microphone sensitivity: {}%, gain: {:.2}x", sensitivity, gain);
+                    if effective_gain < requested_gain {
+                        log::debug!(
+                            "Microphone sensitivity: {}%, requested_gain: {:.2}x, effective_gain: {:.2}x (limited, peak={})",
+                            sensitivity,
+                            requested_gain,
+                            effective_gain,
+                            max_amplitude
+                        );
+                    } else {
+                        log::debug!(
+                            "Microphone sensitivity: {}%, gain: {:.2}x",
+                            sensitivity,
+                            requested_gain
+                        );
+                    }
                 }
 
                 // Применяем gain к каждому сэмплу с защитой от clipping
-                let amplified_data: Vec<i16> = chunk.data.iter()
+                let amplified_data: Vec<i16> = chunk
+                    .data
+                    .iter()
                     .map(|&sample| {
-                        let amplified = (sample as f32 * gain).clamp(-32767.0, 32767.0);
+                        let amplified = (sample as f32 * effective_gain).clamp(-32767.0, 32767.0);
                         amplified as i16
                     })
                     .collect();
@@ -364,9 +395,14 @@ impl TranscriptionService {
 
                 // Логируем каждый 20-й чанк для отладки
                 if chunk_count % 20 == 0 {
-                    let amplified_max = amplified_chunk.data.iter().map(|&s| s.abs()).max().unwrap_or(0);
+                    let amplified_max: i32 = amplified_chunk
+                        .data
+                        .iter()
+                        .map(|&s| (s as i32).abs())
+                        .max()
+                        .unwrap_or(0);
                     log::debug!("Audio processing: chunk #{}, original_max={}, amplified_max={}, gain={:.2}x",
-                        chunk_count, max_amplitude, amplified_max, gain);
+                        chunk_count, max_amplitude, amplified_max, effective_gain);
                 }
 
                 // Если начали дропать аудио из-за backpressure — это почти всегда признак "плохой сети"

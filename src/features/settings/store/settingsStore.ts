@@ -31,7 +31,7 @@ export const useSettingsStore = defineStore('settings', () => {
   );
   const useSystemTheme = ref<boolean>(readUiPreferencesFromStorage().useSystemTheme);
   const recordingHotkey = ref('CmdOrCtrl+Shift+X');
-  const microphoneSensitivity = ref(95);
+  const microphoneSensitivity = ref(100);
   const selectedAudioDevice = ref('');
   const autoCopyToClipboard = ref(true);
   const autoPasteText = ref(false);

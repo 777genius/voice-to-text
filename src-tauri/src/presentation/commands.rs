@@ -399,7 +399,7 @@ mod snapshot_contract_tests {
         let env = SnapshotEnvelope {
             revision: "1".to_string(),
             data: AppConfigSnapshotData {
-                microphone_sensitivity: 95,
+                microphone_sensitivity: 100,
                 recording_hotkey: "CmdOrCtrl+Shift+X".to_string(),
                 auto_copy_to_clipboard: true,
                 auto_paste_text: false,
@@ -681,7 +681,10 @@ pub async fn update_stt_config(
     deepgram_api_key: Option<String>,
     assemblyai_api_key: Option<String>,
     model: Option<String>,
-    deepgram_keyterms: Option<String>,
+    // Важно: двойной Option позволяет отличить "поле не прислали" (None)
+    // от "поле прислали как null" (Some(None)). Это нужно, чтобы
+    // частичные обновления (например, только language) не затирали keyterms.
+    deepgram_keyterms: Option<Option<String>>,
 ) -> Result<(), String> {
     log::info!("Command: update_stt_config - provider: {}, language: {}, model: {:?}", provider, language, model);
 
@@ -725,7 +728,12 @@ pub async fn update_stt_config(
     config.assemblyai_api_key = None;
 
     // Keyterms для улучшения распознавания Deepgram
-    config.deepgram_keyterms = deepgram_keyterms;
+    // - None: не меняем существующее значение
+    // - Some(None): очищаем
+    // - Some(Some(v)): устанавливаем v
+    if let Some(next) = deepgram_keyterms {
+        config.deepgram_keyterms = next;
+    }
 
     // Обновляем конфигурацию в сервисе
     state
@@ -1203,7 +1211,7 @@ pub async fn start_microphone_test(
 
     tokio::spawn(async move {
         // Вычисляем коэффициент усиления (та же логика что в TranscriptionService)
-        let gain = if sensitivity <= 100 {
+        let requested_gain = if sensitivity <= 100 {
             // 0-100% → 0.0x-1.0x (приглушение/нормальный уровень)
             sensitivity as f32 / 100.0
         } else {
@@ -1211,11 +1219,20 @@ pub async fn start_microphone_test(
             1.0 + (sensitivity - 100) as f32 / 100.0 * 4.0
         };
 
-        log::info!("Microphone test: sensitivity={}%, gain={:.2}x", sensitivity, gain);
+        log::info!(
+            "Microphone test: sensitivity={}%, requested_gain={:.2}x",
+            sensitivity,
+            requested_gain
+        );
 
         while let Some(chunk) = rx.recv().await {
             // Вычисляем уровень громкости ДО усиления
-            let max_amplitude = chunk.data.iter().map(|&s| s.abs()).max().unwrap_or(0);
+            let max_amplitude: i32 = chunk
+                .data
+                .iter()
+                .map(|&s| (s as i32).abs())
+                .max()
+                .unwrap_or(0);
             let normalized_level = (max_amplitude as f32 / 32767.0).sqrt().min(1.0);
 
             // Отправляем событие в UI (показываем уровень ДО усиления для честной индикации)
@@ -1226,10 +1243,21 @@ pub async fn start_microphone_test(
                 },
             );
 
+            // Простой limiter: если requested_gain приводит к клиппингу — уменьшаем gain для этого чанка.
+            let effective_gain = if max_amplitude <= 0 {
+                requested_gain
+            } else {
+                let headroom = 0.98_f32;
+                let limiter_gain = (32767.0 * headroom) / (max_amplitude as f32);
+                requested_gain.min(limiter_gain)
+            };
+
             // Применяем gain к каждому сэмплу с защитой от clipping
-            let amplified_data: Vec<i16> = chunk.data.iter()
+            let amplified_data: Vec<i16> = chunk
+                .data
+                .iter()
                 .map(|&sample| {
-                    let amplified = (sample as f32 * gain).clamp(-32767.0, 32767.0);
+                    let amplified = (sample as f32 * effective_gain).clamp(-32767.0, 32767.0);
                     amplified as i16
                 })
                 .collect();
@@ -1847,6 +1875,38 @@ pub async fn show_settings_window(
         return Err("Not authenticated".to_string());
     }
 
+    // Перед показом окна подтягиваем конфиги с диска (best-effort).
+    // Это снижает шанс увидеть дефолты, если окно открыли очень рано после старта приложения,
+    // когда фоновые load_* задачи ещё не завершились.
+    //
+    // Важно: не делаем это фатальным — если чтение упало, показываем окно с текущим in-memory состоянием.
+    {
+        if let Ok(saved_app) = ConfigStore::load_app_config().await {
+            *state.config.write().await = saved_app.clone();
+            state.transcription_service
+                .set_microphone_sensitivity(saved_app.microphone_sensitivity)
+                .await;
+        }
+
+        if let Ok(mut saved_stt) = ConfigStore::load_config().await {
+            // Держим auth token консистентным с AuthStore (Rust SoT).
+            let token = state
+                .auth_store
+                .read()
+                .await
+                .session
+                .as_ref()
+                .map(|s| s.access_token.clone());
+            saved_stt.backend_auth_token = token;
+            let _ = state.transcription_service.update_config(saved_stt.clone()).await;
+            state.config.write().await.stt = saved_stt;
+        }
+
+        if let Ok(prefs) = ConfigStore::load_ui_preferences().await {
+            *state.ui_preferences.write().await = prefs;
+        }
+    }
+
     // Скрываем recording окно (main)
     if let Some(main) = app_handle.get_webview_window("main") {
         // На macOS main может быть NSPanel с высоким уровнем; перед hide сбрасываем always-on-top
@@ -2021,10 +2081,23 @@ pub async fn set_auth_session(
 
     // 3) Обновляем токен для STT (чтобы hotkey start_recording всегда имел актуальный access)
     let stt_token = next.session.as_ref().map(|s| s.access_token.clone());
-    let mut stt = ConfigStore::load_config().await.unwrap_or_default();
+    let (mut stt, loaded_from_disk) = match ConfigStore::load_config().await {
+        Ok(c) => (c, true),
+        Err(e) => {
+            log::warn!(
+                "Failed to load STT config for token update: {}. Using current in-memory config.",
+                e
+            );
+            (state.transcription_service.get_config().await, false)
+        }
+    };
     stt.backend_auth_token = stt_token;
-    if let Err(e) = ConfigStore::save_config(&stt).await {
-        log::warn!("Failed to persist STT config token: {}", e);
+    // Важно: если чтение с диска упало, не перезаписываем файл дефолтами из-за побочного эффекта.
+    // Токен всё равно надёжно хранится в AuthStore, а STT сервис обновим в памяти.
+    if loaded_from_disk {
+        if let Err(e) = ConfigStore::save_config(&stt).await {
+            log::warn!("Failed to persist STT config token: {}", e);
+        }
     }
     if let Err(e) = state.transcription_service.update_config(stt).await {
         log::warn!("Failed to update transcription service config token: {}", e);
@@ -2075,10 +2148,22 @@ pub async fn set_authenticated(
         // Токен мог обновиться — проверяем и обновляем тихо (без bump revision)
         if authenticated {
             if let Some(ref t) = token {
-                let mut config = ConfigStore::load_config().await.unwrap_or_default();
+                let (mut config, loaded_from_disk) = match ConfigStore::load_config().await {
+                    Ok(c) => (c, true),
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to load STT config for token refresh: {}. Using current in-memory config.",
+                            e
+                        );
+                        (state.transcription_service.get_config().await, false)
+                    }
+                };
                 if config.backend_auth_token.as_deref() != Some(t.as_str()) {
                     config.backend_auth_token = Some(t.clone());
-                    let _ = ConfigStore::save_config(&config).await;
+                    // Не перезаписываем файл, если чтение не удалось.
+                    if loaded_from_disk {
+                        let _ = ConfigStore::save_config(&config).await;
+                    }
                     let _ = state.transcription_service.update_config(config).await;
                 }
             }
@@ -2089,7 +2174,13 @@ pub async fn set_authenticated(
     *state.is_authenticated.write().await = authenticated;
 
     // Сохраняем или очищаем backend auth token в конфиге
-    let mut config = ConfigStore::load_config().await.unwrap_or_default();
+    let mut config = match ConfigStore::load_config().await {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("Failed to load STT config for auth change: {}. Using current in-memory config.", e);
+            state.transcription_service.get_config().await
+        }
+    };
     if authenticated {
         if let Some(ref t) = token {
             log::info!("set_authenticated: received token with len: {}", t.len());
@@ -2105,9 +2196,11 @@ pub async fn set_authenticated(
     }
 
     // Сохраняем конфиг и обновляем сервис
-    ConfigStore::save_config(&config)
-        .await
-        .map_err(|e| format!("Failed to save config: {}", e))?;
+    // Если конфиг не удаётся сохранить — не считаем это фаталом для UX:
+    // токен уже сохранён в AuthStore, а STT сервис обновим в памяти.
+    if let Err(e) = ConfigStore::save_config(&config).await {
+        log::warn!("Failed to save STT config during auth change: {}", e);
+    }
     let _ = state.transcription_service.update_config(config).await;
 
     // Синхронизация между окнами через state-sync
