@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.9.8] — 2026-02-21
+
+### Changed
+- Default microphone sensitivity set to 100 with enhanced audio processing
+- Updated developer name and contact email across landing pages
+
+---
+
 ## [0.9.7] — 2026-02-21
 
 ### Added
