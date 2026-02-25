@@ -222,6 +222,12 @@ impl TranscriptionService {
             let mut last_audio_at = Instant::now();
             let mut stall_restarts: u32 = 0;
 
+            // На macOS/некоторых девайсах при отсутствии разрешения на микрофон или при "пустом" input
+            // CoreAudio может отдавать строго нулевые семплы. Это выглядит как "всё работает", но речи нет.
+            let mut consecutive_all_zero_chunks: u32 = 0;
+            const ALL_ZERO_WARN_THRESHOLD: u32 = 60; // ~1-2 секунды (зависит от размера чанка)
+            const ALL_ZERO_FATAL_THRESHOLD: u32 = 240; // ~6-8 секунд
+
             const AUDIO_STALL_TIMEOUT: Duration = Duration::from_millis(2200);
             const AUDIO_STALL_CHECK_INTERVAL: Duration = Duration::from_millis(650);
             const MAX_AUDIO_STALL_RESTARTS: u32 = 3;
@@ -319,6 +325,34 @@ impl TranscriptionService {
                     .max()
                     .unwrap_or(0);
                 let normalized_level = (max_amplitude as f32 / 32767.0).sqrt().min(1.0);
+
+                if max_amplitude == 0 {
+                    consecutive_all_zero_chunks = consecutive_all_zero_chunks.saturating_add(1);
+                } else {
+                    consecutive_all_zero_chunks = 0;
+                }
+
+                if consecutive_all_zero_chunks == ALL_ZERO_WARN_THRESHOLD {
+                    on_connection_quality_for_processor(
+                        "Poor".to_string(),
+                        Some(
+                            "Не поступает сигнал с микрофона (все семплы = 0). Проверьте выбранное устройство и разрешение на микрофон в macOS."
+                                .to_string(),
+                        ),
+                    );
+                    last_quality = Some("Poor");
+                    good_streak = 0;
+                }
+
+                if consecutive_all_zero_chunks >= ALL_ZERO_FATAL_THRESHOLD {
+                    on_error_for_processor(SttError::Processing(
+                        "Нет аудиосигнала с микрофона (все семплы = 0). Проверьте разрешение на микрофон в macOS и выбранное устройство записи."
+                            .to_string(),
+                    ));
+                    *status_arc.write().await = RecordingStatus::Idle;
+                    let _ = audio_capture.write().await.stop_capture().await;
+                    break;
+                }
 
                 // Вызываем callback для UI (не чаще чем каждые 50ms = ~каждый второй чанк)
                 if chunk_count % 2 == 0 {

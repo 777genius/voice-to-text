@@ -43,6 +43,26 @@ pub async fn start_recording(
 ) -> Result<String, String> {
     log::info!("Command: start_recording");
 
+    // На macOS при отсутствии разрешения на микрофон CoreAudio может отдавать "тишину" (все нули),
+    // и UI будет выглядеть как "не записывает".
+    // Поэтому проверяем статус и даём явную ошибку.
+    #[cfg(target_os = "macos")]
+    {
+        use crate::infrastructure::microphone_permission::{
+            microphone_permission_status, MicrophonePermissionStatus,
+        };
+
+        match microphone_permission_status() {
+            MicrophonePermissionStatus::Authorized | MicrophonePermissionStatus::NotDetermined => {}
+            _ => {
+                return Err(
+                    "Нет доступа к микрофону. Откройте macOS System Settings → Privacy & Security → Microphone и включите доступ для приложения."
+                        .to_string(),
+                );
+            }
+        }
+    }
+
     // Новый идентификатор сессии записи. Маркируем им все события transcription:* и recording:status,
     // чтобы frontend мог игнорировать "поздние" сообщения от предыдущей сессии.
     let session_id = state.transcription_session_seq.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1165,6 +1185,23 @@ pub async fn start_microphone_test(
     device_name: Option<String>,
 ) -> Result<(), String> {
     log::info!("Command: start_microphone_test - device: {:?}", device_name);
+
+    #[cfg(target_os = "macos")]
+    {
+        use crate::infrastructure::microphone_permission::{
+            microphone_permission_status, MicrophonePermissionStatus,
+        };
+
+        match microphone_permission_status() {
+            MicrophonePermissionStatus::Authorized | MicrophonePermissionStatus::NotDetermined => {}
+            _ => {
+                return Err(
+                    "Нет доступа к микрофону. Откройте macOS System Settings → Privacy & Security → Microphone и включите доступ для приложения."
+                        .to_string(),
+                );
+            }
+        }
+    }
 
     let mut test_state = state.microphone_test.write().await;
 
