@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.9.10] — 2026-02-26
+
+### Added
+- Settings navigation: scroll to specific settings sections when opening the settings window, with visual highlight feedback
+- Error messages for unavailable audio devices in multiple languages
+
+### Changed
+- Enhanced settings store to manage pending scroll actions
+- Improved keyterms normalization and persistence in Deepgram settings
+- Added tests for Deepgram keyterms persistence
+
+---
+
+## [0.9.9] — 2026-02-25
+
+### Added
+- Microphone permission checks on macOS — the app now validates microphone access before starting audio capture
+- Audio silence detection: monitors for consecutive zero audio samples and notifies users of potential microphone access issues
+- Clear error messages when microphone access is denied by the system
+
+---
+
 ## [0.9.8] — 2026-02-21
 
 ### Changed
@@ -285,6 +307,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+[0.9.10]: https://github.com/777genius/voice-to-text/compare/v0.9.9...v0.9.10
+[0.9.9]: https://github.com/777genius/voice-to-text/compare/v0.9.8...v0.9.9
+[0.9.8]: https://github.com/777genius/voice-to-text/compare/v0.9.7...v0.9.8
+[0.9.7]: https://github.com/777genius/voice-to-text/compare/v0.9.6...v0.9.7
 [0.9.6]: https://github.com/777genius/voice-to-text/compare/v0.9.5...v0.9.6
 [0.9.5]: https://github.com/777genius/voice-to-text/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/777genius/voice-to-text/compare/v0.9.3...v0.9.4
