@@ -8,6 +8,7 @@ import { LogicalSize } from '@tauri-apps/api/dpi';
 import { getVersion } from '@tauri-apps/api/app';
 import { useTranscriptionStore } from '../../stores/transcription';
 import { useAppConfigStore } from '../../stores/appConfig';
+import { useSettingsStore } from '../../features/settings';
 import { useSttConfigStore } from '../../stores/sttConfig';
 import { useAuthStore } from '../../features/auth/store/authStore';
 import { useAuth } from '../../features/auth';
@@ -39,6 +40,7 @@ async function onDragMouseDown(e: MouseEvent) {
 
 const store = useTranscriptionStore();
 const appConfigStore = useAppConfigStore();
+const settingsStore = useSettingsStore();
 const sttConfigStore = useSttConfigStore();
 const authStore = useAuthStore();
 const auth = useAuth();
@@ -291,9 +293,18 @@ const handleHotkeyToggle = async () => {
 
 const openSettings = () => {
   if (isTauriAvailable()) {
-    invoke('show_settings_window');
+    invoke('show_settings_window', {});
     return;
   }
+  showSettings.value = true;
+};
+
+const openSettingsForDevice = () => {
+  if (isTauriAvailable()) {
+    invoke('show_settings_window', { scrollToSection: 'audio-device' });
+    return;
+  }
+  settingsStore.pendingScrollToSection = 'audio-device';
   showSettings.value = true;
 };
 
@@ -430,6 +441,14 @@ const minimizeWindow = async () => {
             @click="openProfileWithLicense"
           >
             {{ t('errors.actions.activateLicense') }}
+          </button>
+
+          <button
+            v-if="store.canOpenSettingsForDevice"
+            class="error-action-button no-drag"
+            @click="openSettingsForDevice"
+          >
+            {{ t('errors.actions.openSettingsForDevice') }}
           </button>
         </div>
       </div>

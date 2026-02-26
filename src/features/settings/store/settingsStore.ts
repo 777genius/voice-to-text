@@ -45,6 +45,10 @@ export const useSettingsStore = defineStore('settings', () => {
   let sttLanguagePersistTimer: ReturnType<typeof setTimeout> | null = null;
   let lastPersistedSttLanguage: string | null = null;
 
+  // Debounce для автосохранения keyterms (иначе будем спамить invoke при вводе)
+  let deepgramKeytermsPersistTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastPersistedDeepgramKeyterms: string | null = null;
+
   // Список доступных устройств
   const availableAudioDevices = ref<string[]>([]);
 
@@ -57,6 +61,8 @@ export const useSettingsStore = defineStore('settings', () => {
 
   // Флаг загрузки
   const isLoading = ref(false);
+
+  const pendingScrollToSection = ref<string | null>(null);
 
   // Computed
   const isWhisperProvider = computed(
@@ -122,6 +128,11 @@ export const useSettingsStore = defineStore('settings', () => {
         lastPersistedSttLanguage = language.value;
       } catch {}
     }, 150);
+  }
+
+  function normalizeKeytermsForPersist(raw: string): string | null {
+    const v = String(raw ?? '').trim();
+    return v ? v : null;
   }
 
   async function flushSttLanguagePersist(): Promise<void> {
@@ -286,8 +297,44 @@ export const useSettingsStore = defineStore('settings', () => {
     autoPasteText.value = value;
   }
 
-  function setDeepgramKeyterms(value: string) {
-    deepgramKeyterms.value = value;
+  function setDeepgramKeyterms(value: string, opts?: { persist?: boolean }) {
+    const nextRaw = String(value ?? '');
+    deepgramKeyterms.value = nextRaw;
+
+    const shouldPersist = opts?.persist ?? true;
+    const normalized = normalizeKeytermsForPersist(nextRaw);
+
+    if (!shouldPersist) {
+      // Значение пришло из backend/sync или откатили черновик — считаем "уже сохранённым",
+      // чтобы debounce/flush не делали лишние вызовы.
+      lastPersistedDeepgramKeyterms = normalized;
+      return;
+    }
+    if (!isTauriAvailable()) return;
+
+    if (deepgramKeytermsPersistTimer) {
+      clearTimeout(deepgramKeytermsPersistTimer);
+      deepgramKeytermsPersistTimer = null;
+    }
+
+    deepgramKeytermsPersistTimer = setTimeout(() => {
+      const current = normalizeKeytermsForPersist(deepgramKeyterms.value);
+      if (lastPersistedDeepgramKeyterms === current) return;
+
+      try {
+        // update_stt_config требует обязательный language. Берём "последний сохранённый" из localStorage,
+        // чтобы автосохранение keyterms не тащило за собой черновик языка (язык сохраняется только по Save).
+        const persistedLang = String(localStorage.getItem('sttLanguage') ?? '').trim();
+        const languageForPersist = persistedLang || language.value;
+
+        void invokeUpdateSttConfig({
+          provider: SttProviderType.Backend,
+          language: languageForPersist,
+          deepgramKeyterms: current,
+        });
+        lastPersistedDeepgramKeyterms = current;
+      } catch {}
+    }, 450);
   }
 
   function setAvailableAudioDevices(devices: string[]) {
@@ -342,7 +389,7 @@ export const useSettingsStore = defineStore('settings', () => {
     if (state.autoPasteText !== undefined)
       autoPasteText.value = state.autoPasteText;
     if (state.deepgramKeyterms !== undefined)
-      deepgramKeyterms.value = state.deepgramKeyterms;
+      setDeepgramKeyterms(state.deepgramKeyterms, { persist: false });
   }
 
   return {
@@ -365,6 +412,7 @@ export const useSettingsStore = defineStore('settings', () => {
     saveStatus,
     errorMessage,
     isLoading,
+    pendingScrollToSection,
 
     // Computed
     isWhisperProvider,

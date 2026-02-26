@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from 'vue';
+import { ref, nextTick, onMounted, onUnmounted, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
@@ -34,6 +34,7 @@ const sttConfigStore = useSttConfigStore();
 const settingsStore = useSettingsStore();
 
 const showUpdateDialog = ref(false);
+const settingsBodyRef = ref<HTMLElement | null>(null);
 
 let unlistenOpened: UnlistenFn | null = null;
 
@@ -120,15 +121,34 @@ onMounted(async () => {
   await appConfigStore.startSync();
   await sttConfigStore.startSync();
 
-  unlistenOpened = await listen<boolean>('settings-window-opened', async () => {
-    if (isLoading.value) return;
-    disarmLiveApplyAudioDevice();
-    // Подтягиваем свежий конфиг через per-topic handles, дожидаемся завершения
-    await Promise.all([appConfigStore.refresh(), sttConfigStore.refresh()]);
-    await loadConfig();
-    captureBaseline();
-    armLiveApplyAudioDevice();
-  });
+  unlistenOpened = await listen<{ scrollToSection?: string | null } | boolean>(
+    'settings-window-opened',
+    async (event) => {
+      if (isLoading.value) return;
+      disarmLiveApplyAudioDevice();
+      await Promise.all([appConfigStore.refresh(), sttConfigStore.refresh()]);
+      await loadConfig();
+      captureBaseline();
+      armLiveApplyAudioDevice();
+
+      const payload = event.payload;
+      const scrollToSection =
+        payload && typeof payload === 'object' && 'scrollToSection' in payload
+          ? (payload as { scrollToSection?: string | null }).scrollToSection
+          : null;
+      if (scrollToSection && settingsBodyRef.value) {
+        const el = settingsBodyRef.value.querySelector<HTMLElement>(
+          `[data-settings-section="${scrollToSection}"]`
+        );
+        if (el) {
+          await nextTick();
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          el.classList.add('settings-section-flash');
+          setTimeout(() => el.classList.remove('settings-section-flash'), 2200);
+        }
+      }
+    }
+  );
 
   await loadConfig();
   captureBaseline();
@@ -196,7 +216,7 @@ watch(
       />
     </div>
 
-    <div class="settings-body">
+    <div ref="settingsBodyRef" class="settings-body">
       <div v-if="isLoading" class="loading">
         <v-progress-circular indeterminate color="primary" />
       </div>
@@ -320,6 +340,23 @@ watch(
 @media (min-width: 600px) {
   .settings-two-cols {
     grid-template-columns: 1fr 1fr;
+  }
+}
+
+:deep(.settings-section-flash) {
+  border-radius: var(--radius-md, 8px);
+  animation: settings-section-flash 2.2s ease-out;
+}
+
+@keyframes settings-section-flash {
+  0% {
+    box-shadow: 0 0 0 0 rgba(var(--v-theme-primary), 0.45);
+  }
+  25% {
+    box-shadow: 0 0 0 6px rgba(var(--v-theme-primary), 0.3);
+  }
+  100% {
+    box-shadow: 0 0 0 6px transparent;
   }
 }
 </style>

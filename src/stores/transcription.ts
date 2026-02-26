@@ -93,6 +93,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     if (status.value === RecordingStatus.Error) status.value = RecordingStatus.Idle;
     error.value = null;
     errorType.value = null;
+    isDeviceNotFoundError.value = false;
 
     // И сбрасываем контекст последней неудачной попытки подключения,
     // чтобы новые попытки стартовали "с чистого листа".
@@ -317,6 +318,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     if (status.value !== RecordingStatus.Error) return false;
     return errorType.value === 'limit_exceeded';
   });
+
+  const isDeviceNotFoundError = ref(false);
+
+  const canOpenSettingsForDevice = computed(
+    () => status.value === RecordingStatus.Error && isDeviceNotFoundError.value
+  );
 
   // Флаг: RecordingPopover подхватит и откроет ProfilePopover с секцией лицензии
   const wantsLicenseActivation = ref(false);
@@ -826,6 +833,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             currentUtteranceStart.value = -1;
             error.value = null;
             errorType.value = null;
+            isDeviceNotFoundError.value = false;
 
             // Сбрасываем флаг auto-paste
             lastPastedFinalText.value = '';
@@ -1138,6 +1146,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
           error.value = mapErrorMessage(normalizedType, event.payload.error, event.payload.error_details);
           errorType.value = normalizedType;
+          isDeviceNotFoundError.value =
+            normalizedType === 'configuration' && isDeviceNotFoundInRaw(event.payload.error);
           status.value = RecordingStatus.Error;
         }
       );
@@ -1168,6 +1178,16 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
+  function isDeviceNotFoundInRaw(raw: string): boolean {
+    const lower = String(raw ?? '').toLowerCase();
+    return (
+      lower.includes('device not found') ||
+      lower.includes("device '") ||
+      lower.includes('не удалось инициализировать устройство') ||
+      lower.includes('failed to create audio capture with device')
+    );
+  }
+
   function detectErrorTypeFromRaw(raw: string): TranscriptionErrorPayload['error_type'] | null {
     const lower = raw.toLowerCase();
     // Ошибки захвата аудио/микрофона часто прилетают как raw строка из invoke('start_recording'),
@@ -1179,6 +1199,14 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       lower.includes('capture error')
     ) {
       return 'processing';
+    }
+    // Устройство отключено/отсоединено во время записи
+    if (isAudioDeviceUnavailableFromRaw(raw)) {
+      return 'processing';
+    }
+    // Выбранное устройство недоступно (не найдено в списке) — нужно сменить в настройках
+    if (isDeviceNotFoundInRaw(raw)) {
+      return 'configuration';
     }
     if (
       lower.includes('authentication error') ||
@@ -1355,6 +1383,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         // но оставляем адекватный текст на всякий случай.
         return i18n.global.t('errors.authentication');
       case 'configuration':
+        if (
+          raw.toLowerCase().includes('device not found') ||
+          raw.toLowerCase().includes('не удалось инициализировать устройство') ||
+          raw.toLowerCase().includes('failed to create audio capture with device')
+        ) {
+          return i18n.global.t('errors.audioDeviceNotFound');
+        }
         return i18n.global.t('errors.generic', { error: raw });
       default:
         return i18n.global.t('errors.generic', { error: raw });
@@ -1471,6 +1506,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       status.value = RecordingStatus.Idle;
       error.value = null;
       errorType.value = null;
+      isDeviceNotFoundError.value = false;
       isForcingLogout = false;
     }
   }
@@ -1515,6 +1551,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     // Очищаем весь предыдущий текст перед новой записью
     error.value = null;
     errorType.value = null;
+    isDeviceNotFoundError.value = false;
     partialText.value = '';
     accumulatedText.value = '';
     finalText.value = '';
@@ -1672,7 +1709,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           if (!isRetriable || isLastAttempt) {
             errorType.value = detected;
             error.value = mapErrorMessage(detected, raw, details);
-      status.value = RecordingStatus.Error;
+            isDeviceNotFoundError.value = detected === 'configuration' && isDeviceNotFoundInRaw(raw);
+            status.value = RecordingStatus.Error;
             return;
           }
 
@@ -1701,6 +1739,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       const fallbackRaw = lastConnectFailureRaw.value || 'Unknown connection error';
       errorType.value = fallbackType;
       error.value = mapErrorMessage(fallbackType, fallbackRaw, lastConnectFailureDetails.value);
+      isDeviceNotFoundError.value =
+        fallbackType === 'configuration' && isDeviceNotFoundInRaw(fallbackRaw);
       status.value = RecordingStatus.Error;
     } finally {
       isConnecting.value = false;
@@ -1805,6 +1845,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     hasConnectionIssue,
     canReconnect,
     canActivateLicense,
+    canOpenSettingsForDevice,
     wantsLicenseActivation,
     isConnecting,
     connectAttempt,

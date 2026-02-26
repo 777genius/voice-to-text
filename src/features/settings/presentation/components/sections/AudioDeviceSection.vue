@@ -26,6 +26,7 @@ const deviceOptions = computed<AudioDeviceOption[]>(() => {
 
 <template>
   <SettingGroup
+    section-id="audio-device"
     :title="t('settings.device.label')"
     :hint="t('settings.device.hint')"
   >

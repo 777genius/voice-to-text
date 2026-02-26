@@ -229,10 +229,33 @@ pub async fn start_recording(
     // системное устройство по умолчанию может измениться, а захват останется привязанным к старому девайсу.
     // Поэтому перед стартом записи пересоздаём audio capture по текущему конфигу.
     let selected_device = state.config.read().await.selected_audio_device.clone();
-    state
+    if let Err(e) = state
         .recreate_audio_capture_with_device(selected_device, app_handle.clone())
         .await
-        .map_err(|e| format!("Не удалось инициализировать устройство записи: {}", e))?;
+    {
+        let error_msg = format!("Не удалось инициализировать устройство записи: {}", e);
+        let stt_err = SttError::Configuration(e.to_string());
+        let error_type = classify_transcription_error_type_from_stt(&stt_err);
+
+        let payload = TranscriptionErrorPayload {
+            session_id,
+            error: error_msg.clone(),
+            error_type,
+            error_details: error_details_from_stt(&stt_err),
+        };
+        if let Err(emit_err) = app_handle.emit(EVENT_TRANSCRIPTION_ERROR, payload) {
+            log::error!("Failed to emit transcription error event: {}", emit_err);
+        }
+        let _ = app_handle.emit(
+            EVENT_RECORDING_STATUS,
+            RecordingStatusPayload {
+                session_id,
+                status: RecordingStatus::Error,
+                stopped_via_hotkey: false,
+            },
+        );
+        return Err(error_msg);
+    }
 
     // Start recording (async - WebSocket connect, audio capture start)
     let start_result = state
@@ -1896,13 +1919,21 @@ pub async fn show_recording_window(app_handle: AppHandle) -> Result<(), String> 
     Ok(())
 }
 
+#[derive(Debug, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct ShowSettingsWindowArgs {
+    scroll_to_section: Option<String>,
+}
+
 /// Показывает settings окно и скрывает recording (main)
 #[tauri::command]
 pub async fn show_settings_window(
     state: State<'_, AppState>,
     app_handle: AppHandle,
+    args: Option<ShowSettingsWindowArgs>,
 ) -> Result<(), String> {
-    log::info!("Command: show_settings_window");
+    let scroll_to_section = args.and_then(|a| a.scroll_to_section);
+    log::info!("Command: show_settings_window (scroll_to_section: {:?})", scroll_to_section);
 
     // Настройки доступны только авторизованному пользователю.
     // Если не авторизован — открываем auth окно, а settings держим скрытым.
@@ -1973,7 +2004,10 @@ pub async fn show_settings_window(
     if let Some(settings) = app_handle.get_webview_window("settings") {
         show_webview_window_on_active_monitor(&settings)?;
         settings.set_focus().map_err(|e| e.to_string())?;
-        let _ = settings.emit("settings-window-opened", true);
+        let payload = serde_json::json!({
+            "scrollToSection": scroll_to_section
+        });
+        let _ = settings.emit("settings-window-opened", payload);
     }
 
     Ok(())

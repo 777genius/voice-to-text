@@ -7,11 +7,12 @@
 defineProps<{
   title?: string;
   hint?: string;
+  sectionId?: string;
 }>();
 </script>
 
 <template>
-  <div class="setting-group">
+  <div class="setting-group" :data-settings-section="sectionId">
     <div v-if="title" class="setting-group__label text-body-1 font-weight-medium mb-2">
       {{ title }}
     </div>

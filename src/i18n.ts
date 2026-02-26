@@ -216,10 +216,13 @@ const messages = {
       processing: 'Audio processing error. Try restarting the recording.',
       audioDeviceUnavailable:
         'Microphone is unavailable. Reconnect it and select it in your system sound settings, then try again.',
+      audioDeviceNotFound:
+        'Selected microphone is unavailable. Open settings and choose a different recording device.',
       generic: 'Error: {error}',
       actions: {
         signInAgain: 'Sign in again',
         openSettings: 'Open settings',
+        openSettingsForDevice: 'Open settings',
         reconnect: 'Reconnect',
         activateLicense: 'Activate license',
       },
@@ -545,10 +548,13 @@ const messages = {
       processing: 'Ошибка обработки аудио. Попробуйте перезапустить запись.',
       audioDeviceUnavailable:
         'Микрофон недоступен. Подключите/переподключите его и выберите в настройках звука системы, затем попробуйте снова.',
+      audioDeviceNotFound:
+        'Выбранный микрофон недоступен. Откройте настройки и выберите другое устройство записи.',
       generic: 'Ошибка: {error}',
       actions: {
         signInAgain: 'Войти заново',
         openSettings: 'Открыть настройки',
+        openSettingsForDevice: 'Перейти в настройки',
         reconnect: 'Переподключиться',
         activateLicense: 'Активировать лицензию',
       },
@@ -874,10 +880,13 @@ const messages = {
       processing: 'Error de procesamiento de audio. Reinicie la grabación.',
       audioDeviceUnavailable:
         'El micrófono no está disponible. Vuelva a conectarlo y selecciónelo en la configuración de sonido del sistema, luego inténtelo de nuevo.',
+      audioDeviceNotFound:
+        'El micrófono seleccionado no está disponible. Abra la configuración y elija otro dispositivo de grabación.',
       generic: 'Error: {error}',
       actions: {
         signInAgain: 'Iniciar sesión de nuevo',
         openSettings: 'Abrir ajustes',
+        openSettingsForDevice: 'Abrir ajustes',
         reconnect: 'Reconectar',
         activateLicense: 'Activar licencia',
       },
@@ -1203,10 +1212,13 @@ const messages = {
       processing: "Erreur de traitement audio. Redémarrez l'enregistrement.",
       audioDeviceUnavailable:
         'Le microphone est indisponible. Reconnectez-le et sélectionnez-le dans les réglages audio du système, puis réessayez.',
+      audioDeviceNotFound:
+        'Le microphone sélectionné est indisponible. Ouvrez les paramètres et choisissez un autre appareil d\'enregistrement.',
       generic: 'Erreur : {error}',
       actions: {
         signInAgain: 'Se reconnecter',
         openSettings: 'Ouvrir les paramètres',
+        openSettingsForDevice: 'Ouvrir les paramètres',
         reconnect: 'Reconnexion',
         activateLicense: 'Activer la licence',
       },
@@ -1532,10 +1544,13 @@ const messages = {
       processing: 'Audioverarbeitungsfehler. Aufnahme neu starten.',
       audioDeviceUnavailable:
         'Mikrofon nicht verfügbar. Bitte neu verbinden und in den Sound-Einstellungen des Systems auswählen, dann erneut versuchen.',
+      audioDeviceNotFound:
+        'Das ausgewählte Mikrofon ist nicht verfügbar. Öffnen Sie die Einstellungen und wählen Sie ein anderes Aufnahmegerät.',
       generic: 'Fehler: {error}',
       actions: {
         signInAgain: 'Erneut anmelden',
         openSettings: 'Einstellungen öffnen',
+        openSettingsForDevice: 'Einstellungen öffnen',
         reconnect: 'Erneut verbinden',
         activateLicense: 'Lizenz aktivieren',
       },
@@ -1865,6 +1880,7 @@ const messages = {
       actions: {
         signInAgain: 'Увійти знову',
         openSettings: 'Відкрити налаштування',
+        openSettingsForDevice: 'Перейти в налаштування',
         reconnect: 'Перепідключитись',
         activateLicense: 'Активувати ліцензію',
       },

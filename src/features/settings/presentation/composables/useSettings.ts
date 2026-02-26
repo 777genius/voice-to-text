@@ -150,12 +150,12 @@ export function useSettings() {
       if (sttConfigStoreInstance.isLoaded) {
         store.setProvider(SttProviderType.Backend);
         store.setLanguage(sttConfigStoreInstance.language, { persist: false });
-        store.setDeepgramKeyterms(sttConfigStoreInstance.deepgramKeyterms ?? '');
+        store.setDeepgramKeyterms(sttConfigStoreInstance.deepgramKeyterms ?? '', { persist: false });
       } else {
         const sttConfig = await tauriSettingsService.getSttConfig();
         store.setProvider(SttProviderType.Backend);
         store.setLanguage(sttConfig.language, { persist: false });
-        store.setDeepgramKeyterms(sttConfig.deepgram_keyterms ?? '');
+        store.setDeepgramKeyterms(sttConfig.deepgram_keyterms ?? '', { persist: false });
       }
       // API ключи и whisper-модель больше не используются в настройках (backend-only).
       store.setDeepgramApiKey('');
@@ -236,7 +236,7 @@ export function useSettings() {
         deepgramApiKey: null,
         assemblyaiApiKey: null,
         model: null,
-        deepgramKeyterms: store.deepgramKeyterms || null,
+        deepgramKeyterms: store.deepgramKeyterms.trim() || null,
       };
 
       await withTimeout(
@@ -248,12 +248,21 @@ export function useSettings() {
       // Проверяем, что язык реально применился в Rust SoT.
       // Иначе UI может переключиться (syncLocale), но запись останется на старом языке.
       try {
+        const normalizeKeyterms = (v: string | null | undefined): string | null => {
+          const s = String(v ?? '').trim();
+          return s ? s : null;
+        };
+        const expectedKeyterms = normalizeKeyterms(store.deepgramKeyterms);
+        const isSttApplied = (stt: Awaited<ReturnType<typeof tauriSettingsService.getSttConfig>>) => {
+          return stt.language === store.language && normalizeKeyterms(stt.deepgram_keyterms) === expectedKeyterms;
+        };
+
         const stt1 = await withTimeout(
           tauriSettingsService.getSttConfig(),
           10_000,
           'Не удалось проверить STT настройки: таймаут',
         );
-        if (stt1.language !== store.language) {
+        if (!isSttApplied(stt1)) {
           await withTimeout(
             tauriSettingsService.updateSttConfig(sttConfigData),
             12_000,
@@ -264,9 +273,9 @@ export function useSettings() {
             10_000,
             'Не удалось повторно проверить STT настройки: таймаут',
           );
-          if (stt2.language !== store.language) {
+          if (!isSttApplied(stt2)) {
             throw new Error(
-              `Язык распознавания не сохранился: ожидали ${store.language}, получили ${stt2.language}`,
+              `STT настройки не сохранились: ожидали language=${store.language}, deepgram_keyterms=${expectedKeyterms ?? 'null'}, получили language=${stt2.language}, deepgram_keyterms=${normalizeKeyterms(stt2.deepgram_keyterms) ?? 'null'}`,
             );
           }
         }

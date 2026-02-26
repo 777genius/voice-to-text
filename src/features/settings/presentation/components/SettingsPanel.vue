@@ -4,7 +4,7 @@
  * Объединяет все секции и управляет загрузкой/сохранением
  */
 
-import { ref, onMounted, watch } from 'vue';
+import { ref, nextTick, onMounted, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import UpdateDialog from '@/presentation/components/UpdateDialog.vue';
 import { useSettings } from '../composables/useSettings';
@@ -44,6 +44,7 @@ const { initializeTheme } = useSettingsTheme();
 // Диалог обновления
 const showUpdateDialog = ref(false);
 const settingsStore = useSettingsStore();
+const settingsContentRef = ref<HTMLElement | null>(null);
 
 // Загрузка конфигурации при монтировании
 onMounted(async () => {
@@ -52,6 +53,29 @@ onMounted(async () => {
   captureBaseline();
   armLiveApplyAudioDevice();
 });
+
+async function scrollToPendingSection(): Promise<void> {
+  const sectionId = settingsStore.pendingScrollToSection;
+  if (!sectionId || !settingsContentRef.value) return;
+  settingsStore.pendingScrollToSection = null;
+  await nextTick();
+  const el = settingsContentRef.value.querySelector<HTMLElement>(
+    `[data-settings-section="${sectionId}"]`
+  );
+  if (el) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.add('settings-section-flash');
+    setTimeout(() => el.classList.remove('settings-section-flash'), 2200);
+  }
+}
+
+watch(
+  () => isLoading.value,
+  async (loading) => {
+    if (!loading) await scrollToPendingSection();
+  },
+  { immediate: true }
+);
 
 const baselineState = ref<SettingsState | null>(null);
 const baselineUiLocale = ref<string>('');
@@ -171,7 +195,7 @@ watch(
       <v-divider />
 
       <!-- Контент -->
-      <v-card-text class="settings-content pa-4">
+      <v-card-text ref="settingsContentRef" class="settings-content pa-4">
         <!-- Индикатор загрузки -->
         <div v-if="isLoading" class="d-flex justify-center py-8">
           <v-progress-circular indeterminate color="primary" />
@@ -297,6 +321,23 @@ watch(
 @media (min-width: 600px) {
   .settings-two-cols {
     grid-template-columns: 1fr 1fr;
+  }
+}
+
+:deep(.settings-section-flash) {
+  border-radius: var(--radius-md, 8px);
+  animation: settings-section-flash 2.2s ease-out;
+}
+
+@keyframes settings-section-flash {
+  0% {
+    box-shadow: 0 0 0 0 rgba(var(--v-theme-primary), 0.45);
+  }
+  25% {
+    box-shadow: 0 0 0 6px rgba(var(--v-theme-primary), 0.3);
+  }
+  100% {
+    box-shadow: 0 0 0 6px transparent;
   }
 }
 </style>
