@@ -98,9 +98,9 @@
     "note": "Elige tu plataforma e instálalo en minutos."
   },
   "testimonials": [
-    { "id": "user1", "name": "Alex M.", "role": "Desarrollador", "text": "Pagaba $15/mes por una herramienta de transcripción más lenta. Cambié a esta - no me arrepiento." },
+    { "id": "user1", "name": "Bob M.", "role": "Desarrollador", "text": "Pagaba $15/mes por una herramienta de transcripción más lenta. Cambié a esta - no me arrepiento." },
     { "id": "user2", "name": "Sarah K.", "role": "Creadora de contenido", "text": "Redacto borradores de posts mientras paseo. A veces se le escapa una palabra, pero en general mucho mejor de lo que esperaba de una herramienta gratuita." },
-    { "id": "user3", "name": "Marco R.", "role": "Team lead", "text": "Empecé a responder mensajes de Slack por voz durante las reuniones. Mi equipo cree que escribo increíblemente rápido." },
+    { "id": "user3", "name": "Alex Z.", "role": "Programador", "text": "Empecé a dictar mis prompts de IA en vez de escribirlos. Los escribo muchísimo más rápido y mi productividad ha crecido enormemente. Un cambio total en mi flujo de trabajo." },
     { "id": "user4", "name": "Yuki T.", "role": "Product manager", "text": "Voz a texto en Linux prácticamente no existe. Esto simplemente funciona. La configuración tomó unos 2 minutos." },
     { "id": "user5", "name": "Lisa W.", "role": "Freelancer", "text": "Increíblemente rápido - el texto aparece casi antes de que termine la frase. Probé otras herramientas, nada se le acerca." },
     { "id": "user6", "name": "Dan P.", "role": "Ingeniero", "text": "Dicto los primeros borradores de todo - correos, documentos, hasta comentarios de código. Me ahorro fácilmente una hora al día, sin exagerar." }

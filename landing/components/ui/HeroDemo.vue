@@ -385,7 +385,7 @@ onUnmounted(() => {
       <!-- Record button (styles from RecordingPopover.vue) -->
       <div class="hero-demo__controls">
         <div class="hero-demo__btn" :class="buttonClass">
-          <v-icon :icon="buttonIcon" />
+          <v-icon :icon="buttonIcon" size="28" />
         </div>
       </div>
 

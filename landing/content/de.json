@@ -98,9 +98,9 @@
     "note": "Wähle deine Plattform und installiere in wenigen Minuten."
   },
   "testimonials": [
-    { "id": "user1", "name": "Alex M.", "role": "Entwickler", "text": "Habe $15/Monat für ein langsameres Transkriptionstool bezahlt. Hierher gewechselt - bereue nichts." },
+    { "id": "user1", "name": "Bob M.", "role": "Entwickler", "text": "Habe $15/Monat für ein langsameres Transkriptionstool bezahlt. Hierher gewechselt - bereue nichts." },
     { "id": "user2", "name": "Sarah K.", "role": "Content-Erstellerin", "text": "Ich entwerfe Blogbeiträge beim Spazierengehen. Ab und zu wird ein Wort überhört, aber insgesamt viel besser als erwartet für ein kostenloses Tool." },
-    { "id": "user3", "name": "Marco R.", "role": "Teamleiter", "text": "Antworte jetzt per Sprache auf Slack-Nachrichten während Meetings. Mein Team denkt, ich tippe wahnsinnig schnell." },
+    { "id": "user3", "name": "Alex Z.", "role": "Programmierer", "text": "Habe angefangen, meine KI-Prompts zu diktieren statt zu tippen. Schreibe sie jetzt um ein Vielfaches schneller und meine Produktivität ist enorm gestiegen. Ein absoluter Game-Changer." },
     { "id": "user4", "name": "Yuki T.", "role": "Produktmanagerin", "text": "Sprache-zu-Text unter Linux gibt es quasi nicht. Das hier funktioniert einfach. Einrichtung hat vielleicht 2 Minuten gedauert." },
     { "id": "user5", "name": "Lisa W.", "role": "Freiberuflerin", "text": "Unglaublich schnell - Text erscheint fast, bevor ich den Satz beendet habe. Habe andere Tools ausprobiert, nichts kam auch nur annähernd ran." },
     { "id": "user6", "name": "Dan P.", "role": "Ingenieur", "text": "Ich diktiere erste Entwürfe von allem - E-Mails, Dokumente, sogar Code-Kommentare. Spare locker eine Stunde am Tag, kein Witz." }

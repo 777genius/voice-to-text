@@ -84,6 +84,11 @@ const getInitial = (name: string) => name.charAt(0).toUpperCase();
           {{ expanded ? t('testimonials.showLess') : t('testimonials.showMore') }}
         </button>
       </div>
+
+      <p class="testimonials-section__feedback-cta">
+        {{ t('testimonials.feedbackCta') }}
+        <a href="mailto:quantjumppro@gmail.com" class="testimonials-section__email">quantjumppro@gmail.com</a>
+      </p>
     </v-container>
   </section>
 </template>
@@ -235,6 +240,29 @@ const getInitial = (name: string) => name.charAt(0).toUpperCase();
 .v-theme--dark .testimonials-section__toggle-btn:hover {
   background: rgba(30, 41, 59, 0.8);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+}
+
+.testimonials-section__feedback-cta {
+  text-align: center;
+  margin-top: 32px;
+  font-size: 0.9rem;
+  opacity: 0.5;
+  position: relative;
+  z-index: 1;
+}
+
+.testimonials-section__email {
+  color: #6366f1;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.testimonials-section__email:hover {
+  text-decoration: underline;
+}
+
+.v-theme--dark .testimonials-section__email {
+  color: #a5b4fc;
 }
 
 @keyframes fadeInUp {
