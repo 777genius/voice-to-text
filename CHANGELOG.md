@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.0] — 2026-03-11
+
+### Added
+- Registration flow now returns the next required step (`verify_email` or `password_setup`) so the app can guide users more clearly.
+
+### Changed
+- Improved auth provider error handling during registration, password reset, and email verification flows.
+- Updated auth copy for clearer verification code and account recovery messaging.
+
+---
+
+## [0.9.11] — 2026-03-11
+
+### Changed
+- Updated landing page testimonials and added the feedback email contact.
+
+---
+
 ## [0.9.10] — 2026-02-26
 
 ### Added
@@ -307,6 +325,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+[0.10.0]: https://github.com/777genius/voice-to-text/compare/v0.9.11...v0.10.0
+[0.9.11]: https://github.com/777genius/voice-to-text/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/777genius/voice-to-text/compare/v0.9.9...v0.9.10
 [0.9.9]: https://github.com/777genius/voice-to-text/compare/v0.9.8...v0.9.9
 [0.9.8]: https://github.com/777genius/voice-to-text/compare/v0.9.7...v0.9.8
