@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.1] — 2026-03-11
+
+### Fixed
+- Increased the auth window height on Windows so the bottom part of the login screen, including the registration action, fits without clipping.
+
+---
+
 ## [0.10.0] — 2026-03-11
 
 ### Added
@@ -325,6 +332,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+[0.10.1]: https://github.com/777genius/voice-to-text/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/777genius/voice-to-text/compare/v0.9.11...v0.10.0
 [0.9.11]: https://github.com/777genius/voice-to-text/compare/v0.9.10...v0.9.11
 [0.9.10]: https://github.com/777genius/voice-to-text/compare/v0.9.9...v0.9.10
