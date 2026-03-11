@@ -12,6 +12,7 @@ export function useAuthState() {
     // State
     status: computed(() => store.status),
     error: computed(() => store.error),
+    errorCode: computed(() => store.errorCode),
     pendingEmail: computed(() => store.pendingEmail),
     accessToken: computed(() => store.accessToken),
 

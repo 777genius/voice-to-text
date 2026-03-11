@@ -37,7 +37,7 @@
                 "label": "auth",
                 "title": "VoicetextAI",
                 "width": 460,
-                "height": 580,
+                "height": 630,
                 "visible": false,
                 "decorations": false,
                 "transparent": true,

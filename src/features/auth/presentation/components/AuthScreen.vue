@@ -2,6 +2,7 @@
 import { ref, computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useAuthState } from '../composables/useAuthState';
+import { useAuthStore } from '../../store/authStore';
 import LoginForm from './LoginForm.vue';
 import VerifyEmailForm from './VerifyEmailForm.vue';
 import PasswordResetForm from './PasswordResetForm.vue';
@@ -12,6 +13,7 @@ import type { PasswordResetStep } from '../composables/usePasswordReset';
 
 const { t, locale } = useI18n();
 const authState = useAuthState();
+const authStore = useAuthStore();
 
 const currentLocale = computed(() =>
   UI_LOCALES.includes(locale.value as UiLocale) ? (locale.value as UiLocale) : 'en'
@@ -51,16 +53,19 @@ const subtitle = computed(() => {
 });
 
 function switchToRegister() {
+  authStore.clearError();
   currentView.value = 'register';
 }
 
 function switchToLogin() {
+  authStore.clearError();
   currentView.value = 'login';
   resetInitialEmail.value = '';
   resetInitialStep.value = 'email';
 }
 
 function switchToReset(initialEmail = '', initialStep: PasswordResetStep = 'email') {
+  authStore.clearError();
   resetInitialEmail.value = initialEmail;
   resetInitialStep.value = initialStep;
   currentView.value = 'reset';
@@ -130,7 +135,7 @@ function switchToReset(initialEmail = '', initialStep: PasswordResetStep = 'emai
           :mode="currentView"
           @switch-to-register="switchToRegister"
           @switch-to-login="switchToLogin"
-          @forgot-password="switchToReset()"
+          @forgot-password="switchToReset($event)"
           @start-password-setup="switchToReset($event, 'code')"
         />
 

@@ -12,6 +12,7 @@ export enum AuthErrorCode {
   ValidationError = 'VALIDATION_ERROR',
   OAuthError = 'OAUTH_ERROR',
   OAuthAccountLinked = 'OAUTH_ACCOUNT_ALREADY_LINKED',
+  AccountAlreadyExists = 'ACCOUNT_ALREADY_EXISTS',
   ProviderError = 'PROVIDER_ERROR',
   Unknown = 'UNKNOWN',
 }

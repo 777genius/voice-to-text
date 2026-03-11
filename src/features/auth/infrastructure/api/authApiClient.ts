@@ -99,6 +99,8 @@ export class AuthApiClient {
         return new AuthError(AuthErrorCode.OAuthError, message);
       case 'OAUTH_ACCOUNT_ALREADY_LINKED':
         return new AuthError(AuthErrorCode.OAuthAccountLinked, message);
+      case 'ACCOUNT_ALREADY_EXISTS':
+        return new AuthError(AuthErrorCode.AccountAlreadyExists, message);
       case 'PROVIDER_ERROR':
         return new AuthError(AuthErrorCode.ProviderError, message);
       default:

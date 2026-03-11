@@ -118,7 +118,7 @@ describe('RegisterUseCase', () => {
 
   it('пробрасывает ошибки от репозитория', async () => {
     vi.mocked(mockAuthRepository.register).mockRejectedValue(
-      new AuthError(AuthErrorCode.Unknown, 'Email already exists')
+      new AuthError(AuthErrorCode.AccountAlreadyExists, 'Email already exists')
     );
 
     await expect(

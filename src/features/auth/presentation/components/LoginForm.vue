@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, watch, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useAuth } from '../composables/useAuth';
 import { useOAuth } from '../composables/useOAuth';
+import { AuthErrorCode } from '../../domain/errors';
 
 const props = defineProps<{
   mode: 'login' | 'register';
@@ -11,7 +12,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   'switch-to-register': [];
   'switch-to-login': [];
-  'forgot-password': [];
+  'forgot-password': [email?: string];
   'start-password-setup': [email: string];
 }>();
 
@@ -25,6 +26,11 @@ const password = ref(import.meta.env.DEV ? (import.meta.env.VITE_DEV_PASSWORD ??
 const confirmPassword = ref('');
 const showPassword = ref(false);
 const formValid = ref(false);
+const shouldFocusPasswordOnLogin = ref(false);
+const passwordField = ref<{
+  focus?: () => void;
+  $el?: HTMLElement;
+} | null>(null);
 
 // Раздельные флаги загрузки для email и Google кнопок
 const isEmailLoading = ref(false);
@@ -46,6 +52,40 @@ const confirmPasswordRules = computed(() => [
 ]);
 
 const isRegister = computed(() => props.mode === 'register');
+const showExistingAccountActions = computed(
+  () => isRegister.value && auth.errorCode.value === AuthErrorCode.AccountAlreadyExists
+);
+
+function focusPasswordInput() {
+  nextTick(() => {
+    const field = passwordField.value;
+    if (field?.focus) {
+      field.focus();
+      return;
+    }
+
+    const input = field?.$el?.querySelector('input');
+    if (input instanceof HTMLInputElement) {
+      input.focus();
+      input.select();
+    }
+  });
+}
+
+function switchToLoginAndFocusPassword() {
+  shouldFocusPasswordOnLogin.value = true;
+  emit('switch-to-login');
+}
+
+watch(
+  () => props.mode,
+  (mode, previousMode) => {
+    if (previousMode === 'register' && mode === 'login' && shouldFocusPasswordOnLogin.value) {
+      shouldFocusPasswordOnLogin.value = false;
+      focusPasswordInput();
+    }
+  }
+);
 
 async function submit() {
   if (!formValid.value) return;
@@ -88,6 +128,15 @@ async function loginWithGoogle() {
       {{ auth.error.value }}
     </v-alert>
 
+    <div v-if="showExistingAccountActions" class="d-flex flex-column ga-2 mb-4">
+      <v-btn variant="outlined" color="primary" @click="switchToLoginAndFocusPassword">
+        {{ t('auth.login') }}
+      </v-btn>
+      <v-btn variant="text" color="primary" @click="emit('forgot-password', email)">
+        {{ t('auth.forgotPassword') }}
+      </v-btn>
+    </div>
+
     <v-text-field
       v-model="email"
       :label="t('auth.email')"
@@ -101,6 +150,7 @@ async function loginWithGoogle() {
     />
 
     <v-text-field
+      ref="passwordField"
       v-model="password"
       :label="t('auth.password')"
       :type="showPassword ? 'text' : 'password'"
@@ -130,7 +180,7 @@ async function loginWithGoogle() {
         variant="text"
         size="small"
         color="primary"
-        @click="emit('forgot-password')"
+        @click="emit('forgot-password', email)"
       >
         {{ t('auth.forgotPassword') }}
       </v-btn>

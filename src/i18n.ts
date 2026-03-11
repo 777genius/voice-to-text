@@ -287,6 +287,7 @@ const messages = {
         oauthAccountLinked: 'This Google account is already linked to another account',
         sessionExpired: 'Session expired. Please sign in again.',
         userNotFound: 'User not found',
+        accountAlreadyExists: 'This email is already registered. Sign in or reset your password.',
       },
     },
     profile: {
@@ -626,6 +627,7 @@ const messages = {
         oauthAccountLinked: 'Этот аккаунт Google уже связан с другой учётной записью',
         sessionExpired: 'Сессия истекла. Войдите снова.',
         userNotFound: 'Пользователь не найден',
+        accountAlreadyExists: 'Этот email уже зарегистрирован. Войдите или восстановите пароль.',
       },
     },
     profile: {
@@ -965,6 +967,7 @@ const messages = {
         oauthAccountLinked: 'Esta cuenta de Google ya está vinculada a otra cuenta',
         sessionExpired: 'Sesión expirada. Inicia sesión de nuevo.',
         userNotFound: 'Usuario no encontrado',
+        accountAlreadyExists: 'Este email ya está registrado. Inicia sesión o restablece tu contraseña.',
       },
     },
     profile: {
@@ -1304,6 +1307,7 @@ const messages = {
         oauthAccountLinked: 'Ce compte Google est déjà associé à un autre compte',
         sessionExpired: 'Session expirée. Veuillez vous reconnecter.',
         userNotFound: 'Utilisateur non trouvé',
+        accountAlreadyExists: 'Cet email est déjà enregistré. Connectez-vous ou réinitialisez votre mot de passe.',
       },
     },
     profile: {
@@ -1643,6 +1647,7 @@ const messages = {
         oauthAccountLinked: 'Dieses Google-Konto ist bereits mit einem anderen Konto verknüpft',
         sessionExpired: 'Sitzung abgelaufen. Bitte erneut anmelden.',
         userNotFound: 'Benutzer nicht gefunden',
+        accountAlreadyExists: 'Diese E-Mail ist bereits registriert. Melde dich an oder setze dein Passwort zurück.',
       },
     },
     profile: {
@@ -1980,6 +1985,7 @@ const messages = {
         oauthAccountLinked: 'Цей акаунт Google вже пов\'язаний з іншим обліковим записом',
         sessionExpired: 'Сесія закінчилася. Увійдіть знову.',
         userNotFound: 'Користувача не знайдено',
+        accountAlreadyExists: 'Цей email уже зареєстрований. Увійдіть або відновіть пароль.',
       },
     },
     profile: {

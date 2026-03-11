@@ -61,20 +61,23 @@ export function useAuth() {
           store.setError(t('auth.errors.oauthError'));
           break;
         case AuthErrorCode.OAuthAccountLinked:
-          store.setError(t('auth.errors.oauthAccountLinked'));
+          store.setError(t('auth.errors.oauthAccountLinked'), e.code);
+          break;
+        case AuthErrorCode.AccountAlreadyExists:
+          store.setError(t('auth.errors.accountAlreadyExists'), e.code);
           break;
         case AuthErrorCode.ProviderError:
-          store.setError(e.message);
+          store.setError(e.message, e.code);
           break;
         case AuthErrorCode.ValidationError:
-          store.setError(e.message);
+          store.setError(e.message, e.code);
           break;
         case AuthErrorCode.SessionExpired:
-          store.setError(t('auth.errors.sessionExpired'));
+          store.setError(t('auth.errors.sessionExpired'), e.code);
           store.setSessionExpired();
           return;
         default:
-          store.setError(e.message);
+          store.setError(e.message, e.code);
       }
     } else {
       store.setError(t('auth.errors.generic'));

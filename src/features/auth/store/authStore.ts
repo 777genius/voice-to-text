@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
+import type { AuthErrorCode } from '../domain/errors';
 import type { AuthStatus } from '../domain/types';
 import type { Session } from '../domain/entities/Session';
 
@@ -12,6 +13,7 @@ export const useAuthStore = defineStore('auth', () => {
   const status = ref<AuthStatus>('idle');
   const session = ref<Session | null>(null);
   const error = ref<string | null>(null);
+  const errorCode = ref<AuthErrorCode | null>(null);
   const pendingEmail = ref<string | null>(null);
   const userEmail = ref<string | null>(null); // Email текущего пользователя
 
@@ -25,6 +27,7 @@ export const useAuthStore = defineStore('auth', () => {
   function setLoading(): void {
     status.value = 'loading';
     error.value = null;
+    errorCode.value = null;
   }
 
   function setAuthenticated(newSession: Session, email?: string): void {
@@ -33,6 +36,7 @@ export const useAuthStore = defineStore('auth', () => {
     userEmail.value = email ?? newSession.user?.email ?? pendingEmail.value;
     pendingEmail.value = null;
     error.value = null;
+    errorCode.value = null;
     status.value = 'authenticated';
   }
 
@@ -42,11 +46,13 @@ export const useAuthStore = defineStore('auth', () => {
 
   function setNeedsVerification(email: string): void {
     pendingEmail.value = email;
+    errorCode.value = null;
     status.value = 'needs_verification';
   }
 
-  function setError(message: string): void {
+  function setError(message: string, code: AuthErrorCode | null = null): void {
     error.value = message;
+    errorCode.value = code;
   }
 
   function setStatusError(): void {
@@ -55,11 +61,13 @@ export const useAuthStore = defineStore('auth', () => {
 
   function setSessionExpired(): void {
     session.value = null;
+    errorCode.value = null;
     status.value = 'unauthenticated';
   }
 
   function clearError(): void {
     error.value = null;
+    errorCode.value = null;
     if (status.value === 'error') {
       status.value = 'unauthenticated';
     }
@@ -72,6 +80,7 @@ export const useAuthStore = defineStore('auth', () => {
   function reset(): void {
     session.value = null;
     error.value = null;
+    errorCode.value = null;
     pendingEmail.value = null;
     userEmail.value = null;
     status.value = 'unauthenticated';
@@ -82,6 +91,7 @@ export const useAuthStore = defineStore('auth', () => {
     status,
     session,
     error,
+    errorCode,
     pendingEmail,
     userEmail,
 
