@@ -9,7 +9,8 @@ defineProps<{
   planLabel: string | null;
   statusColor: string;
   statusLabel: string;
-  usageInfo: { used: number; total: number; remaining: number; percent: number } | null;
+  usageInfo: { used: number; total: number; remaining: number; percent: number; plan: number; bonus: number } | null;
+  bonusMinutes: number;
   loadError: string | null;
 }>();
 
@@ -79,6 +80,18 @@ const { t } = useI18n();
       </v-list-item-subtitle>
     </v-list-item>
 
+    <v-list-item v-if="bonusMinutes > 0">
+      <template #prepend>
+        <v-icon>mdi-gift-outline</v-icon>
+      </template>
+      <v-list-item-title class="text-body-2 text-medium-emphasis">
+        {{ t('profile.bonus') }}
+      </v-list-item-title>
+      <v-list-item-subtitle class="text-body-1">
+        {{ t('profile.bonusDetail', { minutes: bonusMinutes }) }}
+      </v-list-item-subtitle>
+    </v-list-item>
+
     <!-- Использование -->
     <v-list-item v-if="license && usageInfo">
       <template #prepend>
@@ -90,6 +103,12 @@ const { t } = useI18n();
       <v-list-item-subtitle class="text-body-1">
         {{ t('profile.usageDetail', { used: usageInfo.used, total: usageInfo.total }) }}
       </v-list-item-subtitle>
+      <div
+        v-if="usageInfo.bonus > 0"
+        class="text-caption text-medium-emphasis mt-1"
+      >
+        {{ t('profile.usageBreakdown', { plan: usageInfo.plan, bonus: usageInfo.bonus }) }}
+      </div>
       <v-progress-linear
         class="mt-2 rounded"
         :model-value="usageInfo.percent"

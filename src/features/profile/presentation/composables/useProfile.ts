@@ -56,12 +56,16 @@ export function useProfile() {
   const usageInfo = computed(() => {
     if (!license.value) return null;
     const totalSeconds = license.value.seconds_limit + bonusSecondsBalance.value;
+    const planMin = Math.round(license.value.seconds_limit / 60);
+    const bonusMin = Math.round(bonusSecondsBalance.value / 60);
     const totalMin = Math.round(totalSeconds / 60);
     const usedMin = Math.round(license.value.seconds_used / 60);
     const remainMin = Math.max(0, totalMin - usedMin);
     const percent = totalMin > 0 ? Math.round((usedMin / totalMin) * 100) : 0;
-    return { used: usedMin, total: totalMin, remaining: remainMin, percent };
+    return { used: usedMin, total: totalMin, remaining: remainMin, percent, plan: planMin, bonus: bonusMin };
   });
+
+  const bonusMinutes = computed(() => Math.max(0, Math.round(bonusSecondsBalance.value / 60)));
 
   function providerIcon(provider: string): string {
     const icons: Record<string, string> = { google: 'mdi-google' };
@@ -218,6 +222,7 @@ export function useProfile() {
     statusColor,
     statusLabel,
     usageInfo,
+    bonusMinutes,
 
     // Methods
     providerIcon,

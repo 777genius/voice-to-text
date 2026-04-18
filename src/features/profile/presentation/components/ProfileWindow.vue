@@ -81,6 +81,7 @@ onUnmounted(() => {
         :status-color="profile.statusColor.value"
         :status-label="profile.statusLabel.value"
         :usage-info="profile.usageInfo.value"
+        :bonus-minutes="profile.bonusMinutes.value"
         :load-error="profile.loadError.value"
         @retry="profile.fetchProfile()"
       />

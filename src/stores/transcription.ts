@@ -1188,6 +1188,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     );
   }
 
+  function isLicenseInactiveFromRaw(raw: string): boolean {
+    const lower = String(raw ?? '').toLowerCase();
+    return (
+      lower.includes('license_inactive') ||
+      lower.includes('license inactive') ||
+      lower.includes('лицензия не активна')
+    );
+  }
+
   function detectErrorTypeFromRaw(raw: string): TranscriptionErrorPayload['error_type'] | null {
     const lower = raw.toLowerCase();
     // Ошибки захвата аудио/микрофона часто прилетают как raw строка из invoke('start_recording'),
@@ -1207,6 +1216,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     // Выбранное устройство недоступно (не найдено в списке) — нужно сменить в настройках
     if (isDeviceNotFoundInRaw(raw)) {
       return 'configuration';
+    }
+    if (isLicenseInactiveFromRaw(raw)) {
+      return 'limit_exceeded';
     }
     if (
       lower.includes('authentication error') ||
@@ -1652,7 +1664,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           const httpStatus = details?.httpStatus ?? extractHttpStatusFromRaw(raw);
           const serverCode = details?.serverCode;
           const isLimitExceeded =
-            details?.category === 'limit_exceeded' || serverCode === 'LIMIT_EXCEEDED';
+            details?.category === 'limit_exceeded' ||
+            serverCode === 'LIMIT_EXCEEDED' ||
+            serverCode === 'LICENSE_INACTIVE' ||
+            isLicenseInactiveFromRaw(raw);
 
           // Auth ошибка: обычно это протухший access token.
           // Пробуем один раз обновить сессию и продолжить retry-цикл.
