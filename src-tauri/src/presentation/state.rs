@@ -95,6 +95,11 @@ pub struct AppState {
     /// и без сериализации легко получить 2+ задач, которые спамят refresh/лог/диск.
     pub auth_refresh_task_guard: Arc<tokio::sync::Mutex<()>>,
 
+    /// Сериализует read-modify-write операции над STT конфигом.
+    /// Иначе concurrent save путями (settings/auth/startup) можно перетереть `deepgram_keyterms`
+    /// stale-снапшотом даже если каждое место по отдельности "правильное".
+    pub stt_config_guard: Arc<tokio::sync::Mutex<()>>,
+
     /// Дебаунс для глобального hotkey записи.
     /// Нужен из‑за key repeat / случайных двойных срабатываний, которые выглядят как "мигание" окна.
     pub last_recording_hotkey_ms: AtomicU64,
@@ -146,6 +151,7 @@ impl AppState {
                     auth_session_revision: Arc::new(RwLock::new(0)),
                     auth_refresh_task: Arc::new(RwLock::new(None)),
                     auth_refresh_task_guard: Arc::new(tokio::sync::Mutex::new(())),
+                    stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
                     last_recording_hotkey_ms: AtomicU64::new(0),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
@@ -190,6 +196,7 @@ impl AppState {
                     auth_session_revision: Arc::new(RwLock::new(0)),
                     auth_refresh_task: Arc::new(RwLock::new(None)),
                     auth_refresh_task_guard: Arc::new(tokio::sync::Mutex::new(())),
+                    stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
                     last_recording_hotkey_ms: AtomicU64::new(0),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
@@ -242,6 +249,7 @@ impl AppState {
             auth_session_revision: Arc::new(RwLock::new(0)),
             auth_refresh_task: Arc::new(RwLock::new(None)),
             auth_refresh_task_guard: Arc::new(tokio::sync::Mutex::new(())),
+            stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
             last_recording_hotkey_ms: AtomicU64::new(0),
             transcription_session_seq: AtomicU64::new(0),
             active_transcription_session_id: AtomicU64::new(0),
@@ -267,6 +275,8 @@ impl AppState {
     }
 
     pub(crate) async fn apply_backend_auth_token_to_stt(&self, token: Option<String>) {
+        let _guard = self.stt_config_guard.lock().await;
+
         // Best-effort: ошибки не должны блокировать UX, но они важны для диагностики.
         // Важно: берём текущий in-memory config, чтобы не "сбрасывать" keep-alive и другие поля
         // при конкурирующих disk-write сценариях.

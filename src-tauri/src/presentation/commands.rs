@@ -777,6 +777,8 @@ pub async fn update_stt_config(
         model
     );
 
+    let _guard = state.stt_config_guard.lock().await;
+
     // Выбор провайдера отключён — всегда используем Backend.
     // Параметр provider оставлен, чтобы не ломать совместимость API.
     let _ = provider;
@@ -2102,6 +2104,7 @@ pub async fn show_settings_window(
         }
 
         if let Ok(mut saved_stt) = ConfigStore::load_config().await {
+            let _guard = state.stt_config_guard.lock().await;
             // Держим auth token консистентным с AuthStore (Rust SoT).
             let token = state
                 .auth_store

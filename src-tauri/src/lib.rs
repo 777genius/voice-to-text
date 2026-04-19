@@ -397,6 +397,8 @@ pub fn run() {
                     // Приоритет: пользовательские ключи (deepgram_api_key/assemblyai_api_key) → встроенные ключи
 
                     if let Some(state) = app_handle.try_state::<AppState>() {
+                        let _guard = state.stt_config_guard.lock().await;
+
                         // Backend-only режим: по умолчанию держим соединение живым между сессиями записи.
                         // TTL синхронизируем с backend idle timeout, чтобы reconnect не происходил раньше времени
                         // только из-за локального Tauri таймера.
@@ -510,6 +512,7 @@ pub fn run() {
                             }
                         }
 
+                        saved_app_config.stt = state.transcription_service.get_config().await;
                         *state.config.write().await = saved_app_config.clone();
 
                         state.transcription_service
