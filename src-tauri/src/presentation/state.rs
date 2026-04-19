@@ -4,7 +4,7 @@ use tokio::sync::RwLock;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::application::TranscriptionService;
-use crate::domain::{AppConfig, Transcription, AudioCapture, UiPreferences};
+use crate::domain::{AppConfig, AudioCapture, AudioError, Transcription, UiPreferences};
 use crate::infrastructure::{
     audio::{SystemAudioCapture, VadCaptureWrapper, VadProcessor},
     AuthSession, AuthStore, AuthStoreData, AuthUser, ConfigStore,
@@ -266,7 +266,7 @@ impl AppState {
             .ok()
     }
 
-    async fn apply_backend_auth_token_to_stt(&self, token: Option<String>) {
+    pub(crate) async fn apply_backend_auth_token_to_stt(&self, token: Option<String>) {
         // Best-effort: ошибки не должны блокировать UX, но они важны для диагностики.
         // Важно: берём текущий in-memory config, чтобы не "сбрасывать" keep-alive и другие поля
         // при конкурирующих disk-write сценариях.
@@ -275,12 +275,47 @@ impl AppState {
             return;
         }
         config.backend_auth_token = token;
+        self.config.write().await.stt.backend_auth_token = config.backend_auth_token.clone();
         if let Err(e) = ConfigStore::save_config(&config).await {
             log::warn!("Failed to persist STT config token: {}", e);
         }
         if let Err(e) = self.transcription_service.update_config(config).await {
             log::warn!("Failed to update transcription service config token: {}", e);
         }
+    }
+
+    pub(crate) async fn clear_invalid_selected_audio_device(
+        &self,
+        app_handle: &AppHandle,
+        invalid_device_name: Option<&str>,
+    ) {
+        let next_config = {
+            let mut config = self.config.write().await;
+            let selected = config.selected_audio_device.as_deref();
+            let should_clear = match (selected, invalid_device_name) {
+                (Some(current), Some(invalid)) => current.trim() == invalid.trim(),
+                (Some(_), None) => true,
+                _ => false,
+            };
+
+            if !should_clear {
+                return;
+            }
+
+            log::warn!(
+                "Clearing unavailable audio input device from config: {:?}",
+                config.selected_audio_device
+            );
+            config.selected_audio_device = None;
+            config.clone()
+        };
+
+        if let Err(e) = ConfigStore::save_app_config(&next_config).await {
+            log::warn!("Failed to persist cleared audio device selection: {}", e);
+        }
+
+        let revision = AppState::bump_revision(&self.app_config_revision).await;
+        AppState::emit_invalidation(app_handle, "app-config", revision, None).await;
     }
 
     async fn emit_invalidation(app_handle: &AppHandle, topic: &str, revision: String, source_id: Option<String>) {
@@ -676,11 +711,46 @@ impl AppState {
         device_name: Option<String>,
         app_handle: tauri::AppHandle,
     ) -> Result<(), String> {
-        log::info!("Recreating audio capture with device: {:?}", device_name);
+        let normalized_device_name = device_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(ToOwned::to_owned);
 
-        // Создаем новый SystemAudioCapture с выбранным устройством
-        let system_audio = SystemAudioCapture::with_device(device_name.clone())
-            .map_err(|e| format!("Failed to create audio capture with device {:?}: {}", device_name, e))?;
+        log::info!(
+            "Recreating audio capture with device: {:?}",
+            normalized_device_name
+        );
+
+        // Создаем новый SystemAudioCapture с выбранным устройством.
+        // Если сохранённое имя устройства устарело или было записано криво, автоматически
+        // откатываемся на системный input по умолчанию и очищаем битую привязку в конфиге.
+        let system_audio = match SystemAudioCapture::with_device(normalized_device_name.clone()) {
+            Ok(capture) => capture,
+            Err(AudioError::DeviceNotFound(e)) if normalized_device_name.is_some() => {
+                log::warn!(
+                    "Requested audio device is unavailable ({}). Falling back to default input device.",
+                    e
+                );
+                self.clear_invalid_selected_audio_device(
+                    &app_handle,
+                    normalized_device_name.as_deref(),
+                )
+                .await;
+                SystemAudioCapture::new().map_err(|fallback_err| {
+                    format!(
+                        "Failed to create audio capture with fallback to default input device: {}",
+                        fallback_err
+                    )
+                })?
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Failed to create audio capture with device {:?}: {}",
+                    normalized_device_name, e
+                ));
+            }
+        };
 
         // Получаем текущий VAD timeout из конфига
         let vad_timeout_ms = self.config.read().await.vad_silence_timeout_ms;
@@ -709,7 +779,10 @@ impl AppState {
         // Handler перезапускать не нужно: receiver остаётся тем же.
         let _ = app_handle;
 
-        log::info!("Audio capture recreated successfully with device: {:?}", device_name);
+        log::info!(
+            "Audio capture recreated successfully with device: {:?}",
+            normalized_device_name
+        );
         Ok(())
     }
 }

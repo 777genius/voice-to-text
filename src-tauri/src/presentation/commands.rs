@@ -1191,10 +1191,11 @@ pub async fn update_app_config(
 
     let mut device_changed = false;
     if let Some(device) = selected_audio_device {
-        let device_opt = if device.is_empty() {
+        let normalized = device.trim().to_string();
+        let device_opt = if normalized.is_empty() {
             None
         } else {
-            Some(device.clone())
+            Some(normalized)
         };
 
         // Проверяем изменилось ли устройство
@@ -1319,10 +1320,27 @@ pub async fn start_microphone_test(
     }
 
     // Создаем новый audio capture для теста с выбранным устройством
-    let device_to_use = device_name.filter(|s| !s.is_empty()); // None если пустая строка
+    let device_to_use = device_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned);
     let mut capture = Box::new(
-        SystemAudioCapture::with_device(device_to_use.clone())
-            .map_err(|e| format!("Failed to create audio capture: {}", e))?,
+        match SystemAudioCapture::with_device(device_to_use.clone()) {
+            Ok(capture) => capture,
+            Err(crate::domain::AudioError::DeviceNotFound(e)) if device_to_use.is_some() => {
+                log::warn!(
+                    "Microphone test requested unavailable device ({}). Falling back to default input device.",
+                    e
+                );
+                state
+                    .clear_invalid_selected_audio_device(&app_handle, device_to_use.as_deref())
+                    .await;
+                SystemAudioCapture::new()
+                    .map_err(|fallback_err| format!("Failed to create audio capture: {}", fallback_err))?
+            }
+            Err(e) => return Err(format!("Failed to create audio capture: {}", e)),
+        },
     );
 
     // Инициализируем захват
@@ -2285,27 +2303,7 @@ pub async fn set_auth_session(
 
     // 3) Обновляем токен для STT (чтобы hotkey start_recording всегда имел актуальный access)
     let stt_token = next.session.as_ref().map(|s| s.access_token.clone());
-    let (mut stt, loaded_from_disk) = match ConfigStore::load_config().await {
-        Ok(c) => (c, true),
-        Err(e) => {
-            log::warn!(
-                "Failed to load STT config for token update: {}. Using current in-memory config.",
-                e
-            );
-            (state.transcription_service.get_config().await, false)
-        }
-    };
-    stt.backend_auth_token = stt_token;
-    // Важно: если чтение с диска упало, не перезаписываем файл дефолтами из-за побочного эффекта.
-    // Токен всё равно надёжно хранится в AuthStore, а STT сервис обновим в памяти.
-    if loaded_from_disk {
-        if let Err(e) = ConfigStore::save_config(&stt).await {
-            log::warn!("Failed to persist STT config token: {}", e);
-        }
-    }
-    if let Err(e) = state.transcription_service.update_config(stt).await {
-        log::warn!("Failed to update transcription service config token: {}", e);
-    }
+    state.apply_backend_auth_token_to_stt(stt_token).await;
 
     // 4) Bump revisions + invalidations
     // auth-state только если поменялся флаг
@@ -2355,23 +2353,11 @@ pub async fn set_authenticated(
         // Токен мог обновиться — проверяем и обновляем тихо (без bump revision)
         if authenticated {
             if let Some(ref t) = token {
-                let (mut config, loaded_from_disk) = match ConfigStore::load_config().await {
-                    Ok(c) => (c, true),
-                    Err(e) => {
-                        log::warn!(
-                            "Failed to load STT config for token refresh: {}. Using current in-memory config.",
-                            e
-                        );
-                        (state.transcription_service.get_config().await, false)
-                    }
-                };
-                if config.backend_auth_token.as_deref() != Some(t.as_str()) {
-                    config.backend_auth_token = Some(t.clone());
-                    // Не перезаписываем файл, если чтение не удалось.
-                    if loaded_from_disk {
-                        let _ = ConfigStore::save_config(&config).await;
-                    }
-                    let _ = state.transcription_service.update_config(config).await;
+                let current_token = state.transcription_service.get_config().await.backend_auth_token;
+                if current_token.as_deref() != Some(t.as_str()) {
+                    state
+                        .apply_backend_auth_token_to_stt(Some(t.clone()))
+                        .await;
                 }
             }
         }
@@ -2380,38 +2366,23 @@ pub async fn set_authenticated(
 
     *state.is_authenticated.write().await = authenticated;
 
-    // Сохраняем или очищаем backend auth token в конфиге
-    let mut config = match ConfigStore::load_config().await {
-        Ok(c) => c,
-        Err(e) => {
-            log::warn!(
-                "Failed to load STT config for auth change: {}. Using current in-memory config.",
-                e
-            );
-            state.transcription_service.get_config().await
-        }
-    };
+    // Обновляем только токен в текущем in-memory STT конфиге, чтобы не перетирать keyterms
+    // и другие поля конкурентным чтением старой disk-версии.
     if authenticated {
         if let Some(ref t) = token {
             log::info!("set_authenticated: received token with len: {}", t.len());
-            config.backend_auth_token = Some(t.clone());
+            state
+                .apply_backend_auth_token_to_stt(Some(t.clone()))
+                .await;
             log::info!("Backend auth token saved to config");
         } else {
             log::warn!("set_authenticated: authenticated=true but token is None!");
+            state.apply_backend_auth_token_to_stt(None).await;
         }
     } else {
-        // При логауте очищаем токен
-        config.backend_auth_token = None;
+        state.apply_backend_auth_token_to_stt(None).await;
         log::info!("Backend auth token cleared from config");
     }
-
-    // Сохраняем конфиг и обновляем сервис
-    // Если конфиг не удаётся сохранить — не считаем это фаталом для UX:
-    // токен уже сохранён в AuthStore, а STT сервис обновим в памяти.
-    if let Err(e) = ConfigStore::save_config(&config).await {
-        log::warn!("Failed to save STT config during auth change: {}", e);
-    }
-    let _ = state.transcription_service.update_config(config).await;
 
     // Синхронизация между окнами через state-sync
     let revision = AppState::bump_revision(&state.auth_state_revision).await;
