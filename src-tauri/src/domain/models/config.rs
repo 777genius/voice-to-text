@@ -68,7 +68,8 @@ pub struct SttConfig {
     /// Сколько держать соединение живым после остановки записи (если keep_connection_alive=true).
     ///
     /// Важно: keep-alive удерживает streaming соединение на стороне провайдера (Deepgram) и занимает слот
-    /// по лимиту параллельных соединений. Поэтому TTL должен быть коротким (по умолчанию 2 минуты).
+    /// по лимиту параллельных соединений. Для backend-only режима держим разумный баланс UX/ресурсов:
+    /// по умолчанию 1 час, чтобы повторные запуски записи не пересоздавали WS слишком часто.
     #[serde(default = "default_keep_alive_ttl_secs")]
     pub keep_alive_ttl_secs: u64,
 
@@ -79,7 +80,7 @@ pub struct SttConfig {
 }
 
 fn default_keep_alive_ttl_secs() -> u64 {
-    300
+    3600
 }
 
 impl Default for SttConfig {
@@ -170,8 +171,8 @@ impl Default for AppConfig {
             auto_paste_text: false, // По умолчанию выключено (может раздражать)
             auto_close_window: true,
             vad_silence_timeout_ms: 5000, // 5 секунд тишины перед авто-остановкой
-            microphone_sensitivity: 100, // Нейтральный уровень: как записывает микрофон
-            selected_audio_device: None, // По умолчанию используем системное устройство
+            microphone_sensitivity: 100,  // Нейтральный уровень: как записывает микрофон
+            selected_audio_device: None,  // По умолчанию используем системное устройство
             keep_history: true,
             max_history_items: 20,
         }
@@ -220,7 +221,7 @@ mod tests {
         assert!(config.backend_auth_token.is_none());
         assert!(config.backend_url.is_none());
         assert!(!config.keep_connection_alive);
-        assert_eq!(config.keep_alive_ttl_secs, 300);
+        assert_eq!(config.keep_alive_ttl_secs, 3600);
     }
 
     #[test]
@@ -232,15 +233,13 @@ mod tests {
 
     #[test]
     fn test_stt_config_with_language() {
-        let config = SttConfig::new(SttProviderType::Deepgram)
-            .with_language("en");
+        let config = SttConfig::new(SttProviderType::Deepgram).with_language("en");
         assert_eq!(config.language, "en");
     }
 
     #[test]
     fn test_stt_config_with_model() {
-        let config = SttConfig::new(SttProviderType::WhisperLocal)
-            .with_model("base");
+        let config = SttConfig::new(SttProviderType::WhisperLocal).with_model("base");
         assert_eq!(config.model, Some("base".to_string()));
     }
 
@@ -275,8 +274,7 @@ mod tests {
 
     #[test]
     fn test_stt_config_clone() {
-        let config1 = SttConfig::new(SttProviderType::Deepgram)
-            .with_language("en");
+        let config1 = SttConfig::new(SttProviderType::Deepgram).with_language("en");
         let config2 = config1.clone();
         assert_eq!(config1.provider, config2.provider);
         assert_eq!(config1.language, config2.language);
@@ -287,6 +285,9 @@ mod tests {
         let config1 = AppConfig::default();
         let config2 = config1.clone();
         assert_eq!(config1.recording_hotkey, config2.recording_hotkey);
-        assert_eq!(config1.microphone_sensitivity, config2.microphone_sensitivity);
+        assert_eq!(
+            config1.microphone_sensitivity,
+            config2.microphone_sensitivity
+        );
     }
 }

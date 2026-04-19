@@ -1,17 +1,17 @@
 // Clean Architecture layers
-pub mod domain;
 pub mod application;
+pub mod domain;
 pub mod infrastructure;
 mod presentation;
 
 mod demo;
 
+use infrastructure::ConfigStore;
 use presentation::commands;
 use presentation::state::AppState;
-use tauri::{Emitter, Manager};
-use infrastructure::ConfigStore;
 #[cfg(target_os = "windows")]
 use std::time::Duration;
+use tauri::{Emitter, Manager};
 
 // Определяем базовый NSPanel класс для macOS (появление поверх fullscreen приложений)
 #[cfg(target_os = "macos")]
@@ -42,8 +42,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_shell::init())
-        ;
+        .plugin(tauri_plugin_shell::init());
 
     // Добавляем NSPanel плагин на macOS для появления поверх fullscreen приложений
     #[cfg(target_os = "macos")]
@@ -368,7 +367,7 @@ pub fn run() {
                             stt.backend_auth_token = store.session.as_ref().map(|s| s.access_token.clone());
                             if stt.provider == crate::domain::SttProviderType::Backend {
                                 stt.keep_connection_alive = true;
-                                const MIN_BACKEND_KEEPALIVE_TTL_SECS: u64 = 300;
+                                const MIN_BACKEND_KEEPALIVE_TTL_SECS: u64 = 3600;
                                 if stt.keep_alive_ttl_secs < MIN_BACKEND_KEEPALIVE_TTL_SECS {
                                     stt.keep_alive_ttl_secs = MIN_BACKEND_KEEPALIVE_TTL_SECS;
                                 }
@@ -399,8 +398,8 @@ pub fn run() {
 
                     if let Some(state) = app_handle.try_state::<AppState>() {
                         // Backend-only режим: по умолчанию держим соединение живым между сессиями записи.
-                        // TTL короткий (см. stt_config.keep_alive_ttl_secs), чтобы не держать "висящие" коннекты в фоне
-                        // и не упереться в лимиты параллельных соединений провайдера (например Deepgram).
+                        // TTL синхронизируем с backend idle timeout, чтобы reconnect не происходил раньше времени
+                        // только из-за локального Tauri таймера.
                         let mut config_migrated = false;
                         if saved_config.provider == crate::domain::SttProviderType::Backend
                             && !saved_config.keep_connection_alive
@@ -414,9 +413,9 @@ pub fn run() {
                         }
 
                         // UX: keep-alive должен быть заметно полезным для частых hotkey-сессий.
-                        // Если TTL слишком маленький, пользователь снова увидит "Подключение..." уже через минуту-две.
-                        // Поэтому для backend провайдера держим минимум 5 минут.
-                        const MIN_BACKEND_KEEPALIVE_TTL_SECS: u64 = 300;
+                        // Если TTL слишком маленький, пользователь снова увидит "Подключение..." раньше,
+                        // чем backend успеет закрыть idle streaming session.
+                        const MIN_BACKEND_KEEPALIVE_TTL_SECS: u64 = 3600;
                         if saved_config.provider == crate::domain::SttProviderType::Backend
                             && saved_config.keep_alive_ttl_secs < MIN_BACKEND_KEEPALIVE_TTL_SECS
                         {

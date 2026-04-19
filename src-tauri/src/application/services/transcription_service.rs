@@ -1,11 +1,11 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, Instant};
 
 use crate::domain::{
-    AudioCapture, AudioConfig, AudioLevelCallback, AudioSpectrumCallback, ConnectionQualityCallback,
-    ErrorCallback, RecordingStatus, SttConfig, SttError, SttProvider,
+    AudioCapture, AudioConfig, AudioLevelCallback, AudioSpectrumCallback,
+    ConnectionQualityCallback, ErrorCallback, RecordingStatus, SttConfig, SttError, SttProvider,
     SttProviderFactory, SttProviderType, TranscriptionCallback,
 };
 
@@ -105,12 +105,14 @@ impl TranscriptionService {
             let resume_result = {
                 let mut provider_opt = self.stt_provider.write().await;
                 if let Some(provider) = provider_opt.as_mut() {
-                    provider.resume_stream(
-                        on_partial.clone(),
-                        on_final.clone(),
-                        on_error.clone(),
-                        on_connection_quality.clone()
-                    ).await
+                    provider
+                        .resume_stream(
+                            on_partial.clone(),
+                            on_final.clone(),
+                            on_error.clone(),
+                            on_connection_quality.clone(),
+                        )
+                        .await
                 } else {
                     Err(SttError::Processing("Provider not available".to_string()))
                 }
@@ -121,7 +123,10 @@ impl TranscriptionService {
                     log::info!("Successfully resumed keep-alive connection (instant start)");
                 }
                 Err(e) => {
-                    log::warn!("Failed to resume connection: {} - creating new connection as fallback", e);
+                    log::warn!(
+                        "Failed to resume connection: {} - creating new connection as fallback",
+                        e
+                    );
 
                     // Важно: перед тем как выкинуть провайдер, аккуратно закрываем его.
                     // Иначе есть риск оставить "висящий" WebSocket/таски в фоне.
@@ -148,7 +153,7 @@ impl TranscriptionService {
             };
 
             if let Err(e) = provider.initialize(&config).await {
-                    log::error!("Failed to initialize STT provider: {}", e);
+                log::error!("Failed to initialize STT provider: {}", e);
                 *self.status.write().await = RecordingStatus::Idle;
                 let _ = provider.abort().await;
                 return Err(anyhow::Error::new(e).context("Failed to initialize STT provider"));
@@ -490,8 +495,8 @@ impl TranscriptionService {
                     .await;
 
                 match send_result {
-                        Ok(_) => {
-                            // Успешная отправка — сбрасываем счётчик ошибок
+                    Ok(_) => {
+                        // Успешная отправка — сбрасываем счётчик ошибок
                         if consecutive_errors > 0 {
                             // Мы только что восстановились после ошибок отправки.
                             on_connection_quality_for_processor(
@@ -501,7 +506,7 @@ impl TranscriptionService {
                             last_quality = Some("Recovering");
                             good_streak = 0;
                         }
-                            consecutive_errors = 0;
+                        consecutive_errors = 0;
                         if last_quality == Some("Recovering") {
                             good_streak += 1;
                             if good_streak >= 20 {
@@ -510,28 +515,34 @@ impl TranscriptionService {
                                 good_streak = 0;
                             }
                         }
-                        }
-                        Err(e) => {
-                            // Определяем тип ошибки и критичность по ТИПУ, а не по парсингу строки.
-                            let (error_type, is_critical) = match &e {
-                                SttError::Authentication(_) => ("authentication", true),
-                                SttError::Configuration(_) => ("configuration", true),
-                                SttError::Connection(conn) => {
-                                    if conn.details.category == Some(crate::domain::SttConnectionCategory::LimitExceeded) {
-                                        ("limit_exceeded", true)
-                                    } else if conn.details.category == Some(crate::domain::SttConnectionCategory::Timeout) {
-                                        ("timeout", false)
-                                    } else {
-                                        ("connection", false)
-                                    }
+                    }
+                    Err(e) => {
+                        // Определяем тип ошибки и критичность по ТИПУ, а не по парсингу строки.
+                        let (error_type, is_critical) = match &e {
+                            SttError::Authentication(_) => ("authentication", true),
+                            SttError::Configuration(_) => ("configuration", true),
+                            SttError::Connection(conn) => {
+                                if conn.details.category
+                                    == Some(crate::domain::SttConnectionCategory::LimitExceeded)
+                                {
+                                    ("limit_exceeded", true)
+                                } else if conn.details.category
+                                    == Some(crate::domain::SttConnectionCategory::Timeout)
+                                {
+                                    ("timeout", false)
+                                } else {
+                                    ("connection", false)
                                 }
-                                SttError::Processing(_) | SttError::Internal(_) => ("processing", false),
-                                SttError::Unsupported(_) => ("processing", true),
-                            };
+                            }
+                            SttError::Processing(_) | SttError::Internal(_) => {
+                                ("processing", false)
+                            }
+                            SttError::Unsupported(_) => ("processing", true),
+                        };
 
-                            if is_critical {
-                                log::error!("STT critical error ({}): {}", error_type, e);
-                                on_error_for_processor(e.clone());
+                        if is_critical {
+                            log::error!("STT critical error ({}): {}", error_type, e);
+                            on_error_for_processor(e.clone());
                             on_connection_quality_for_processor(
                                 "Poor".to_string(),
                                 Some("Критическая ошибка соединения".to_string()),
@@ -548,14 +559,14 @@ impl TranscriptionService {
                                 let _ = old.abort().await;
                             }
 
-                                break;
+                            break;
                         }
 
-                                consecutive_errors += 1;
+                        consecutive_errors += 1;
                         good_streak = 0;
 
-                                // Логируем не слишком часто чтобы не спамить
-                                if consecutive_errors <= 3 {
+                        // Логируем не слишком часто чтобы не спамить
+                        if consecutive_errors <= 3 {
                             log::warn!(
                                 "STT temporary error ({}): {} - continuing ({}/{})",
                                 error_type,
@@ -566,7 +577,7 @@ impl TranscriptionService {
                         }
 
                         // Если слишком много ошибок подряд — останавливаем запись, иначе UI может "залипнуть".
-                                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
                             log::error!(
                                 "Too many consecutive errors ({}), stopping recording to avoid stuck state",
                                 consecutive_errors
@@ -600,12 +611,21 @@ impl TranscriptionService {
                     }
                 }
             }
-            log::info!("Audio chunk processor finished, total chunks: {}", chunk_count);
+            log::info!(
+                "Audio chunk processor finished, total chunks: {}",
+                chunk_count
+            );
         });
 
         *self.audio_processor_task.write().await = Some(processor_task);
 
-        if let Err(e) = self.audio_capture.write().await.start_capture(on_chunk).await {
+        if let Err(e) = self
+            .audio_capture
+            .write()
+            .await
+            .start_capture(on_chunk)
+            .await
+        {
             log::error!("Failed to start audio capture: {}", e);
 
             // Возвращаем статус в Idle, чтобы UI мог восстановиться.
@@ -726,7 +746,10 @@ impl TranscriptionService {
                 // Проверяем что статус все еще Idle (не началась новая запись)
                 let current_status = *status_arc.read().await;
                 if current_status == RecordingStatus::Idle {
-                    log::info!("Inactivity timeout reached ({}s) - closing persistent connection", ttl_secs);
+                    log::info!(
+                        "Inactivity timeout reached ({}s) - closing persistent connection",
+                        ttl_secs
+                    );
 
                     if let Some(mut provider) = stt_provider.write().await.take() {
                         let _ = provider.stop_stream().await;
@@ -840,7 +863,7 @@ impl TranscriptionService {
         let mut config = config;
         if config.provider == SttProviderType::Backend {
             config.keep_connection_alive = true;
-            const MIN_BACKEND_KEEPALIVE_TTL_SECS: u64 = 300;
+            const MIN_BACKEND_KEEPALIVE_TTL_SECS: u64 = 3600;
             if config.keep_alive_ttl_secs < MIN_BACKEND_KEEPALIVE_TTL_SECS {
                 config.keep_alive_ttl_secs = MIN_BACKEND_KEEPALIVE_TTL_SECS;
             }
@@ -850,10 +873,9 @@ impl TranscriptionService {
         // смена критичных параметров (язык/кейтермы/провайдер) должна сбросить это соединение.
         // Иначе следующий старт записи может сделать resume_stream() и фактически продолжить старую сессию,
         // где язык уже "залип" на предыдущем Config message.
-        let config_requires_new_connection =
-            prev_config.provider != config.provider
-                || prev_config.language != config.language
-                || prev_config.deepgram_keyterms != config.deepgram_keyterms;
+        let config_requires_new_connection = prev_config.provider != config.provider
+            || prev_config.language != config.language
+            || prev_config.deepgram_keyterms != config.deepgram_keyterms;
 
         if config_requires_new_connection {
             let status = *self.status.read().await;
@@ -877,7 +899,10 @@ impl TranscriptionService {
                     // и отправит новый Config message (с новым языком и т.д.).
                     if let Some(mut provider) = self.stt_provider.write().await.take() {
                         if let Err(e) = provider.stop_stream().await {
-                            log::warn!("Failed to stop keep-alive stream on config change, aborting: {}", e);
+                            log::warn!(
+                                "Failed to stop keep-alive stream on config change, aborting: {}",
+                                e
+                            );
                             let _ = provider.abort().await;
                         }
                     }
@@ -917,7 +942,10 @@ impl TranscriptionService {
 
         // Нельзя менять устройство во время записи
         if *status != RecordingStatus::Idle {
-            anyhow::bail!("Cannot replace audio capture while recording (current status: {:?})", *status);
+            anyhow::bail!(
+                "Cannot replace audio capture while recording (current status: {:?})",
+                *status
+            );
         }
 
         drop(status); // освобождаем read lock
@@ -937,8 +965,8 @@ unsafe impl Sync for TranscriptionService {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use crate::domain::{AudioResult, SttResult};
+    use async_trait::async_trait;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::time::Duration;
 
@@ -967,7 +995,10 @@ mod tests {
             Ok(())
         }
 
-        async fn start_capture(&mut self, on_chunk: crate::domain::AudioChunkCallback) -> AudioResult<()> {
+        async fn start_capture(
+            &mut self,
+            on_chunk: crate::domain::AudioChunkCallback,
+        ) -> AudioResult<()> {
             self.is_capturing.store(true, Ordering::SeqCst);
 
             let is_capturing = self.is_capturing.clone();
@@ -1027,8 +1058,13 @@ mod tests {
             Ok(())
         }
 
-        async fn start_capture(&mut self, _on_chunk: crate::domain::AudioChunkCallback) -> AudioResult<()> {
-            Err(crate::domain::AudioError::Capture("simulated start_capture failure".to_string()))
+        async fn start_capture(
+            &mut self,
+            _on_chunk: crate::domain::AudioChunkCallback,
+        ) -> AudioResult<()> {
+            Err(crate::domain::AudioError::Capture(
+                "simulated start_capture failure".to_string(),
+            ))
         }
 
         async fn stop_capture(&mut self) -> AudioResult<()> {
@@ -1065,9 +1101,9 @@ mod tests {
         }
 
         async fn send_audio(&mut self, _chunk: &crate::domain::AudioChunk) -> SttResult<()> {
-            Err(SttError::Connection(crate::domain::SttConnectionError::simple(
-                "simulated connection drop",
-            )))
+            Err(SttError::Connection(
+                crate::domain::SttConnectionError::simple("simulated connection drop"),
+            ))
         }
 
         async fn stop_stream(&mut self) -> SttResult<()> {
@@ -1116,7 +1152,8 @@ mod tests {
         let on_error: ErrorCallback = Arc::new(move |err: SttError| {
             let typ = match &err {
                 SttError::Connection(conn) => {
-                    if conn.details.category == Some(crate::domain::SttConnectionCategory::Timeout) {
+                    if conn.details.category == Some(crate::domain::SttConnectionCategory::Timeout)
+                    {
                         "timeout"
                     } else {
                         "connection"
@@ -1124,7 +1161,9 @@ mod tests {
                 }
                 SttError::Authentication(_) => "authentication",
                 SttError::Configuration(_) => "configuration",
-                SttError::Processing(_) | SttError::Internal(_) | SttError::Unsupported(_) => "processing",
+                SttError::Processing(_) | SttError::Internal(_) | SttError::Unsupported(_) => {
+                    "processing"
+                }
             }
             .to_string();
             let _ = err_tx.send((err.to_string(), typ));
@@ -1233,7 +1272,10 @@ mod tests {
             Ok(())
         }
 
-        async fn start_capture(&mut self, _on_chunk: crate::domain::AudioChunkCallback) -> AudioResult<()> {
+        async fn start_capture(
+            &mut self,
+            _on_chunk: crate::domain::AudioChunkCallback,
+        ) -> AudioResult<()> {
             self.is_capturing.store(true, Ordering::SeqCst);
             Ok(())
         }
