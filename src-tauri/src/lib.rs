@@ -353,6 +353,7 @@ pub fn run() {
                         Ok(store) => {
                             *state.auth_store.write().await = store.clone();
                             *state.is_authenticated.write().await = store.is_authenticated();
+                            let _guard = state.stt_config_guard.lock().await;
 
                             // Держим STT token синхронизированным с access token из сессии,
                             // и сразу применяем backend keep-alive настройки (чтобы первые hotkey-сессии
@@ -377,6 +378,8 @@ pub fn run() {
                                 let _ = crate::infrastructure::ConfigStore::save_config(&stt).await;
                             }
                             let _ = state.transcription_service.update_config(stt).await;
+                            state.config.write().await.stt =
+                                state.transcription_service.get_config().await;
 
                             // Запускаем фоновый refresh (если возможен).
                             state.restart_auth_refresh_task(app_handle.clone()).await;
