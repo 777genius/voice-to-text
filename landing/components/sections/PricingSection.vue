@@ -3,24 +3,59 @@ import { mdiCheckCircle, mdiShieldCheckOutline } from '@mdi/js'
 import { useI18n } from 'vue-i18n'
 import { useLandingContent } from '~/composables/useLandingContent'
 
+type PaddleRuntimeConfig = {
+  paddle?: {
+    clientToken?: string
+    priceIds?: {
+      pro?: string
+      business?: string
+    }
+  }
+}
+
+type PaddleCheckoutOptions = {
+  settings: {
+    displayMode: "overlay"
+    variant: "multi-page"
+    allowLogout: boolean
+    locale?: string
+    successUrl: string
+  }
+  items: Array<{ priceId: string; quantity: number }>
+  customer: { email: string }
+  customData: {
+    voicetext_customer_email: string
+  }
+}
+
+type PaddleApi = {
+  Checkout: {
+    open(options: PaddleCheckoutOptions): void
+  }
+}
+
 const { content } = useLandingContent()
 const { t, locale } = useI18n()
 const cfg = useRuntimeConfig()
-const { $paddle } = useNuxtApp()
+const publicConfig = cfg.public as unknown as PaddleRuntimeConfig
+const { $paddle } = useNuxtApp() as { $paddle?: PaddleApi }
 
 const isCheckoutDialogOpen = ref(false)
 const checkoutEmail = ref("")
 const selectedPlanId = ref<string | null>(null)
 
+// Temporarily show only the free plan until paid pricing is ready.
+const visiblePricingPlans = computed(() => content.value.pricing.filter((plan) => plan.id === "free"))
+
 const priceIdByPlan = computed<Record<string, string>>(() => {
-  const p = (cfg.public as any)?.paddle?.priceIds || {}
+  const p = publicConfig.paddle?.priceIds || {}
   return {
     pro: p.pro || "",
     business: p.business || ""
   }
 })
 
-const canUsePaddle = computed(() => Boolean(($paddle as any) && (cfg.public as any)?.paddle?.clientToken))
+const canUsePaddle = computed(() => Boolean($paddle && publicConfig.paddle?.clientToken))
 
 function onGetStarted(plan: { id: string }) {
   // Free tier → просто ведём на скачивание как раньше.
@@ -51,7 +86,8 @@ function openCheckout() {
   if (!planId) return
 
   const priceId = priceIdByPlan.value[planId]
-  if (!priceId || !canUsePaddle.value) return
+  const paddle = $paddle
+  if (!priceId || !paddle || !publicConfig.paddle?.clientToken) return
 
   const email = checkoutEmail.value.trim()
   if (!email) return
@@ -61,7 +97,7 @@ function openCheckout() {
   // Paddle recommends passing chosen locale if you have a language selector.
   // We pass only locales Paddle Checkout lists as supported; otherwise it falls back to browser locale.
   // Source: Paddle.Checkout.open() docs → settings.locale allowed values.
-  const paddleLocale = ([
+  const paddleLocales: readonly string[] = [
     "ar",
     "zh-Hans",
     "zh-TW",
@@ -81,11 +117,10 @@ function openCheckout() {
     "ru",
     "es",
     "sv"
-  ] as const).includes(locale.value as any)
-    ? (locale.value as string)
-    : undefined
+  ]
+  const paddleLocale = paddleLocales.includes(locale.value) ? locale.value : undefined
 
-  ;($paddle as any).Checkout.open({
+  paddle.Checkout.open({
     // В доке рекомендуют открывать overlay через settings.displayMode
     settings: {
       displayMode: "overlay",
@@ -133,7 +168,7 @@ function openCheckout() {
 
       <v-row justify="center" class="pricing-section__grid">
         <v-col
-          v-for="(plan, index) in content.pricing"
+          v-for="(plan, index) in visiblePricingPlans"
           :key="plan.id"
           cols="12"
           sm="6"
