@@ -75,7 +75,7 @@
     {
       "id": "isFree",
       "question": "¿Es gratis?",
-      "answer": "Sí. El plan gratuito no tiene límite de tiempo. Los planes de pago ofrecen más minutos y soporte prioritario."
+      "answer": "Sí. El plan gratuito incluye 60 minutos de transcripción. Los planes de pago aún no están disponibles."
     },
     {
       "id": "privacy",
