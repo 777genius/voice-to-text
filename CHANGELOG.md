@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.2] - 2026-04-27
+
+### Added
+- Account profile now shows the user bonus balance directly in the UI.
+
+### Fixed
+- Free plan messaging on the landing page was corrected and consistently highlighted in header and hero sections.
+- Startup STT config sync now avoids race and stale-device issues by guarding sync flow and serializing writes.
+- Keep-alive TTL handling in Tauri was aligned with backend behavior.
+
+---
+
 ## [0.10.1] — 2026-03-11
 
 ### Fixed
