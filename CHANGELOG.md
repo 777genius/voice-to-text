@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.3] - 2026-05-03
+
+### Fixed
+- macOS app activation for auto-paste now uses the system `open -b` command and reports clearer activation errors.
+
+---
+
 ## [0.10.2] - 2026-04-27
 
 ### Added

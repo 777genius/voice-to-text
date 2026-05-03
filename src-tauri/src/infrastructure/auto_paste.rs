@@ -106,43 +106,35 @@ pub fn get_active_app_bundle_id() -> Option<String> {
 /// Переключает фокус на указанное приложение
 #[cfg(target_os = "macos")]
 pub fn activate_app_by_bundle_id(bundle_id: &str) -> Result<()> {
-    use cocoa::base::{id, nil};
-    use cocoa::foundation::NSString;
-    use objc::{class, msg_send, sel, sel_impl};
+    use std::process::Command;
 
     log::info!("Activating app with bundle ID: {}", bundle_id);
 
-    unsafe {
-        let _workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
-
-        // Создаем NSString из bundle_id
-        let ns_bundle_id = NSString::alloc(nil);
-        let ns_bundle_id: id = msg_send![ns_bundle_id, initWithUTF8String: bundle_id.as_ptr()];
-
-        // Получаем массив запущенных приложений с данным bundle ID
-        let running_apps: id = msg_send![class!(NSRunningApplication),
-            runningApplicationsWithBundleIdentifier: ns_bundle_id];
-
-        // Проверяем что есть хотя бы одно приложение
-        let count: usize = msg_send![running_apps, count];
-
-        if count == 0 {
-            anyhow::bail!("No running application found with bundle ID: {}", bundle_id);
-        }
-
-        // Берем первое приложение из массива
-        let app: id = msg_send![running_apps, objectAtIndex: 0];
-
-        // Активируем приложение (приводим на передний план)
-        let activated: bool = msg_send![app, activateWithOptions: 0];
-
-        if !activated {
-            anyhow::bail!("Failed to activate application with bundle ID: {}", bundle_id);
-        }
-
-        log::info!("App activated successfully: {}", bundle_id);
+    if bundle_id.trim().is_empty() {
+        anyhow::bail!("Bundle ID is empty");
     }
 
+    let output = Command::new("/usr/bin/open")
+        .arg("-b")
+        .arg(bundle_id)
+        .output()
+        .context("Failed to run /usr/bin/open")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if stderr.is_empty() {
+            format!("exit status {}", output.status)
+        } else {
+            stderr
+        };
+        anyhow::bail!(
+            "Failed to activate application with bundle ID '{}': {}",
+            bundle_id,
+            detail
+        );
+    }
+
+    log::info!("App activated successfully: {}", bundle_id);
     Ok(())
 }
 
@@ -160,14 +152,24 @@ pub fn activate_app_by_bundle_id(_bundle_id: &str) -> Result<()> {
 ///
 /// Требует разрешения Accessibility на macOS
 pub fn paste_text(text: &str) -> Result<()> {
-    log::info!("🔧 paste_text called with {} chars: '{}'", text.len(),
-        if text.len() > 50 { format!("{}...", text.chars().take(50).collect::<String>()) } else { text.to_string() });
+    log::info!(
+        "🔧 paste_text called with {} chars: '{}'",
+        text.len(),
+        if text.len() > 50 {
+            format!("{}...", text.chars().take(50).collect::<String>())
+        } else {
+            text.to_string()
+        }
+    );
 
     // Проверяем разрешение Accessibility на macOS
     #[cfg(target_os = "macos")]
     {
         let has_permission = check_accessibility_permission();
-        log::info!("🔐 Accessibility permission check result: {}", has_permission);
+        log::info!(
+            "🔐 Accessibility permission check result: {}",
+            has_permission
+        );
 
         if !has_permission {
             let error_msg = "Accessibility permission not granted. Please enable it in System Settings > Privacy & Security > Accessibility";
@@ -182,9 +184,15 @@ pub fn paste_text(text: &str) -> Result<()> {
     log::info!("✅ Enigo initialized successfully");
 
     // Вводим текст в текущую позицию курсора (как человек)
-    log::info!("⌨️ Typing text at cursor position ({} chars): '{}'...",
+    log::info!(
+        "⌨️ Typing text at cursor position ({} chars): '{}'...",
         text.len(),
-        if text.len() > 30 { format!("{}...", text.chars().take(30).collect::<String>()) } else { text.to_string() });
+        if text.len() > 30 {
+            format!("{}...", text.chars().take(30).collect::<String>())
+        } else {
+            text.to_string()
+        }
+    );
 
     log::debug!("   Starting text input...");
     enigo.text(text).context("Failed to type text")?;
