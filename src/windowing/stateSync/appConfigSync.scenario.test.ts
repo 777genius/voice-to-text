@@ -44,6 +44,7 @@ describe('scenario: app-config sync across windows (mocked tauri)', () => {
       auto_copy_to_clipboard: false,
       auto_paste_text: false,
       play_completion_sound: false,
+      hide_recording_window_on_hotkey: false,
       microphone_sensitivity: 100,
       selected_audio_device: null,
     };
@@ -57,6 +58,12 @@ describe('scenario: app-config sync across windows (mocked tauri)', () => {
         // "Rust" applies change and emits invalidation
         if (typeof args?.autoCopyToClipboard === 'boolean') {
           currentData = { ...currentData, auto_copy_to_clipboard: args.autoCopyToClipboard };
+        }
+        if (typeof args?.hideRecordingWindowOnHotkey === 'boolean') {
+          currentData = {
+            ...currentData,
+            hide_recording_window_on_hotkey: args.hideRecordingWindowOnHotkey,
+          };
         }
         currentRevision = String(BigInt(currentRevision) + BigInt(1));
 
@@ -88,6 +95,12 @@ describe('scenario: app-config sync across windows (mocked tauri)', () => {
 
     await vi.waitFor(() => {
       expect(appConfigMain.autoCopyToClipboard).toBe(true);
+    });
+
+    await invokeMock(CMD_UPDATE_APP_CONFIG, { hideRecordingWindowOnHotkey: true });
+
+    await vi.waitFor(() => {
+      expect(appConfigMain.hideRecordingWindowOnHotkey).toBe(true);
     });
   });
 });

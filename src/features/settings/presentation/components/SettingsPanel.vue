@@ -102,6 +102,7 @@ function snapshotSettingsState(): SettingsState {
     autoCopyToClipboard: settingsStore.autoCopyToClipboard,
     autoPasteText: settingsStore.autoPasteText,
     playCompletionSound: settingsStore.playCompletionSound,
+    hideRecordingWindowOnHotkey: settingsStore.hideRecordingWindowOnHotkey,
     deepgramKeyterms: settingsStore.deepgramKeyterms,
   };
 }

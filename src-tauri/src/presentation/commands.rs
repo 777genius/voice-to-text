@@ -46,6 +46,17 @@ pub async fn start_recording(
 ) -> Result<String, String> {
     log::info!("Command: start_recording");
 
+    // Новый идентификатор сессии записи. Маркируем им все события transcription:* и recording:status,
+    // чтобы frontend мог игнорировать "поздние" сообщения от предыдущей сессии.
+    let session_id = state
+        .transcription_session_seq
+        .fetch_add(1, Ordering::Relaxed)
+        + 1;
+    state
+        .active_transcription_session_id
+        .store(session_id, Ordering::Relaxed);
+    log::info!("Recording session started: session_id={}", session_id);
+
     // На macOS при отсутствии разрешения на микрофон CoreAudio может отдавать "тишину" (все нули),
     // и UI будет выглядеть как "не записывает".
     // Поэтому проверяем статус и даём явную ошибку.
@@ -58,24 +69,32 @@ pub async fn start_recording(
         match microphone_permission_status() {
             MicrophonePermissionStatus::Authorized | MicrophonePermissionStatus::NotDetermined => {}
             _ => {
-                return Err(
+                let error_msg =
                     "Нет доступа к микрофону. Откройте macOS System Settings → Privacy & Security → Microphone и включите доступ для приложения."
-                        .to_string(),
+                        .to_string();
+                let stt_err = SttError::Configuration(error_msg.clone());
+                let error_type = classify_transcription_error_type_from_stt(&stt_err);
+                let payload = TranscriptionErrorPayload {
+                    session_id,
+                    error: error_msg.clone(),
+                    error_type,
+                    error_details: error_details_from_stt(&stt_err),
+                };
+                if let Err(emit_err) = app_handle.emit(EVENT_TRANSCRIPTION_ERROR, payload) {
+                    log::error!("Failed to emit transcription error event: {}", emit_err);
+                }
+                let _ = app_handle.emit(
+                    EVENT_RECORDING_STATUS,
+                    RecordingStatusPayload {
+                        session_id,
+                        status: RecordingStatus::Error,
+                        stopped_via_hotkey: false,
+                    },
                 );
+                return Err(error_msg);
             }
         }
     }
-
-    // Новый идентификатор сессии записи. Маркируем им все события transcription:* и recording:status,
-    // чтобы frontend мог игнорировать "поздние" сообщения от предыдущей сессии.
-    let session_id = state
-        .transcription_session_seq
-        .fetch_add(1, Ordering::Relaxed)
-        + 1;
-    state
-        .active_transcription_session_id
-        .store(session_id, Ordering::Relaxed);
-    log::info!("Recording session started: session_id={}", session_id);
 
     let app_handle_clone = app_handle.clone();
     let state_partial = state.partial_transcription.clone();
@@ -361,6 +380,16 @@ pub async fn get_recording_status(state: State<'_, AppState>) -> Result<Recordin
 
 use tauri::{PhysicalPosition, Position};
 
+async fn save_active_app_bundle_id_for_auto_paste(_state: &AppState) {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(bundle_id) = crate::infrastructure::auto_paste::get_active_app_bundle_id() {
+            *_state.last_focused_app_bundle_id.write().await = Some(bundle_id.clone());
+            log::info!("Saved last focused app bundle ID: {}", bundle_id);
+        }
+    }
+}
+
 /// Показывает окно на активном мониторе (где находится курсор мыши) - для Window
 pub fn show_window_on_active_monitor(window: &Window) -> Result<(), String> {
     show_window_on_active_monitor_impl(
@@ -470,6 +499,7 @@ mod snapshot_contract_tests {
                 auto_copy_to_clipboard: true,
                 auto_paste_text: false,
                 play_completion_sound: false,
+                hide_recording_window_on_hotkey: false,
                 selected_audio_device: None,
             },
         };
@@ -499,6 +529,7 @@ mod snapshot_contract_tests {
         assert!(data.contains_key("auto_copy_to_clipboard"));
         assert!(data.contains_key("auto_paste_text"));
         assert!(data.contains_key("play_completion_sound"));
+        assert!(data.contains_key("hide_recording_window_on_hotkey"));
         assert!(data.contains_key("selected_audio_device"));
     }
 
@@ -595,18 +626,18 @@ pub async fn toggle_recording_with_window(
 
     match current_status {
         RecordingStatus::Idle => {
-            // Показываем окно если оно скрыто (не забираем фокус)
-            if !window.is_visible().map_err(|e| e.to_string())? {
-                // Перед показом окна сохраняем bundle ID текущего активного приложения
-                #[cfg(target_os = "macos")]
-                {
-                    if let Some(bundle_id) =
-                        crate::infrastructure::auto_paste::get_active_app_bundle_id()
-                    {
-                        *state.last_focused_app_bundle_id.write().await = Some(bundle_id.clone());
-                        log::info!("Saved last focused app bundle ID: {}", bundle_id);
-                    }
+            let hide_window_on_hotkey = state.config.read().await.hide_recording_window_on_hotkey;
+            let window_visible = window.is_visible().map_err(|e| e.to_string())?;
+
+            if hide_window_on_hotkey {
+                if !window_visible {
+                    save_active_app_bundle_id_for_auto_paste(state.inner()).await;
+                } else {
+                    window.hide().map_err(|e| e.to_string())?;
                 }
+            } else if !window_visible {
+                // Перед показом окна сохраняем bundle ID текущего активного приложения.
+                save_active_app_bundle_id_for_auto_paste(state.inner()).await;
 
                 show_window_on_active_monitor(&window)?;
 
@@ -615,7 +646,19 @@ pub async fn toggle_recording_with_window(
             }
 
             // Запускаем запись
-            start_recording(state.clone(), app_handle).await?;
+            if let Err(err) = start_recording(state.clone(), app_handle).await {
+                if hide_window_on_hotkey {
+                    if let Err(show_err) = show_window_on_active_monitor(&window) {
+                        log::warn!(
+                            "Failed to show recording window after hotkey start error: {}",
+                            show_err
+                        );
+                    } else {
+                        let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
+                    }
+                }
+                return Err(err);
+            }
             log::info!("Recording started via hotkey");
         }
         RecordingStatus::Starting => {
@@ -682,17 +725,17 @@ pub async fn toggle_recording_with_window_internal(
 
     match current_status {
         RecordingStatus::Idle => {
-            // Показываем окно если оно скрыто
-            if !window.is_visible().map_err(|e| e.to_string())? {
-                #[cfg(target_os = "macos")]
-                {
-                    if let Some(bundle_id) =
-                        crate::infrastructure::auto_paste::get_active_app_bundle_id()
-                    {
-                        *state.last_focused_app_bundle_id.write().await = Some(bundle_id.clone());
-                        log::info!("Saved last focused app bundle ID: {}", bundle_id);
-                    }
+            let hide_window_on_hotkey = state.config.read().await.hide_recording_window_on_hotkey;
+            let window_visible = window.is_visible().map_err(|e| e.to_string())?;
+
+            if hide_window_on_hotkey {
+                if !window_visible {
+                    save_active_app_bundle_id_for_auto_paste(state).await;
+                } else {
+                    window.hide().map_err(|e| e.to_string())?;
                 }
+            } else if !window_visible {
+                save_active_app_bundle_id_for_auto_paste(state).await;
                 show_webview_window_on_active_monitor(&window)?;
 
                 // Сообщаем фронту, что окно показано (для надёжного reset UI).
@@ -705,7 +748,19 @@ pub async fn toggle_recording_with_window_internal(
             let state_handle = app_handle
                 .try_state::<AppState>()
                 .ok_or_else(|| "AppState не доступен".to_string())?;
-            start_recording(state_handle, app_handle.clone()).await?;
+            if let Err(err) = start_recording(state_handle, app_handle.clone()).await {
+                if hide_window_on_hotkey {
+                    if let Err(show_err) = show_webview_window_on_active_monitor(&window) {
+                        log::warn!(
+                            "Failed to show recording window after hotkey start error: {}",
+                            show_err
+                        );
+                    } else {
+                        let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
+                    }
+                }
+                return Err(err);
+            }
             log::info!("Recording started via hotkey (internal)");
         }
         RecordingStatus::Starting => {
@@ -892,6 +947,7 @@ pub struct AppConfigSnapshotData {
     pub auto_copy_to_clipboard: bool,
     pub auto_paste_text: bool,
     pub play_completion_sound: bool,
+    pub hide_recording_window_on_hotkey: bool,
     pub selected_audio_device: Option<String>,
 }
 
@@ -908,6 +964,7 @@ pub async fn get_app_config_snapshot(
         auto_copy_to_clipboard: config.auto_copy_to_clipboard,
         auto_paste_text: config.auto_paste_text,
         play_completion_sound: config.play_completion_sound,
+        hide_recording_window_on_hotkey: config.hide_recording_window_on_hotkey,
         selected_audio_device: config.selected_audio_device,
     };
     let revision = state.app_config_revision.read().await.to_string();
@@ -1113,10 +1170,11 @@ pub async fn update_app_config(
     auto_copy_to_clipboard: Option<bool>,
     auto_paste_text: Option<bool>,
     play_completion_sound: Option<bool>,
+    hide_recording_window_on_hotkey: Option<bool>,
     selected_audio_device: Option<String>,
 ) -> Result<(), String> {
-    log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}, auto_copy: {:?}, auto_paste: {:?}, completion_sound: {:?}, device: {:?}",
-        microphone_sensitivity, recording_hotkey, auto_copy_to_clipboard, auto_paste_text, play_completion_sound, selected_audio_device);
+    log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}, auto_copy: {:?}, auto_paste: {:?}, completion_sound: {:?}, hide_window_on_hotkey: {:?}, device: {:?}",
+        microphone_sensitivity, recording_hotkey, auto_copy_to_clipboard, auto_paste_text, play_completion_sound, hide_recording_window_on_hotkey, selected_audio_device);
 
     // Защита от "тихих" провалов: если фронт случайно отправил snake_case ключи,
     // Tauri не сматчит аргументы, и сюда придут одни None.
@@ -1126,9 +1184,10 @@ pub async fn update_app_config(
         && auto_copy_to_clipboard.is_none()
         && auto_paste_text.is_none()
         && play_completion_sound.is_none()
+        && hide_recording_window_on_hotkey.is_none()
         && selected_audio_device.is_none()
     {
-        return Err("update_app_config: не получены поля для обновления. Проверьте, что фронтенд отправляет args в camelCase (например microphoneSensitivity, recordingHotkey, autoCopyToClipboard, autoPasteText, playCompletionSound, selectedAudioDevice).".to_string());
+        return Err("update_app_config: не получены поля для обновления. Проверьте, что фронтенд отправляет args в camelCase (например microphoneSensitivity, recordingHotkey, autoCopyToClipboard, autoPasteText, playCompletionSound, hideRecordingWindowOnHotkey, selectedAudioDevice).".to_string());
     }
 
     let mut config = state.config.write().await;
@@ -1205,6 +1264,18 @@ pub async fn update_app_config(
                 completion_sound
             );
             config.play_completion_sound = completion_sound;
+            any_changed = true;
+        }
+    }
+
+    if let Some(hide_window_on_hotkey) = hide_recording_window_on_hotkey {
+        if config.hide_recording_window_on_hotkey != hide_window_on_hotkey {
+            log::info!(
+                "Updating hide_recording_window_on_hotkey: {} -> {}",
+                config.hide_recording_window_on_hotkey,
+                hide_window_on_hotkey
+            );
+            config.hide_recording_window_on_hotkey = hide_window_on_hotkey;
             any_changed = true;
         }
     }
@@ -1356,8 +1427,9 @@ pub async fn start_microphone_test(
                 state
                     .clear_invalid_selected_audio_device(&app_handle, device_to_use.as_deref())
                     .await;
-                SystemAudioCapture::new()
-                    .map_err(|fallback_err| format!("Failed to create audio capture: {}", fallback_err))?
+                SystemAudioCapture::new().map_err(|fallback_err| {
+                    format!("Failed to create audio capture: {}", fallback_err)
+                })?
             }
             Err(e) => return Err(format!("Failed to create audio capture: {}", e)),
         },
@@ -2374,11 +2446,13 @@ pub async fn set_authenticated(
         // Токен мог обновиться — проверяем и обновляем тихо (без bump revision)
         if authenticated {
             if let Some(ref t) = token {
-                let current_token = state.transcription_service.get_config().await.backend_auth_token;
+                let current_token = state
+                    .transcription_service
+                    .get_config()
+                    .await
+                    .backend_auth_token;
                 if current_token.as_deref() != Some(t.as_str()) {
-                    state
-                        .apply_backend_auth_token_to_stt(Some(t.clone()))
-                        .await;
+                    state.apply_backend_auth_token_to_stt(Some(t.clone())).await;
                 }
             }
         }
@@ -2392,9 +2466,7 @@ pub async fn set_authenticated(
     if authenticated {
         if let Some(ref t) = token {
             log::info!("set_authenticated: received token with len: {}", t.len());
-            state
-                .apply_backend_auth_token_to_stt(Some(t.clone()))
-                .await;
+            state.apply_backend_auth_token_to_stt(Some(t.clone())).await;
             log::info!("Backend auth token saved to config");
         } else {
             log::warn!("set_authenticated: authenticated=true but token is None!");

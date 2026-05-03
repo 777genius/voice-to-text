@@ -12,6 +12,7 @@ const {
   autoCopyToClipboard,
   autoPasteText,
   playCompletionSound,
+  hideRecordingWindowOnHotkey,
   hasAccessibilityPermission,
   isMacOS,
   requestAccessibilityPermission,
@@ -40,6 +41,15 @@ const {
     <v-checkbox
       v-model="playCompletionSound"
       :label="t('settings.autoActions.completionSound')"
+      density="comfortable"
+      hide-details
+      color="primary"
+      class="mt-1"
+    />
+
+    <v-checkbox
+      v-model="hideRecordingWindowOnHotkey"
+      :label="t('settings.autoActions.hideWindowOnHotkey')"
       density="comfortable"
       hide-details
       color="primary"
@@ -86,6 +96,10 @@ const {
         <p class="mb-0 mt-1">
           <strong>{{ t('settings.autoActions.hintSoundTitle') }}</strong>
           {{ t('settings.autoActions.hintSoundBody') }}
+        </p>
+        <p class="mb-0 mt-1">
+          <strong>{{ t('settings.autoActions.hintHotkeyWindowTitle') }}</strong>
+          {{ t('settings.autoActions.hintHotkeyWindowBody') }}
         </p>
       </div>
     </template>

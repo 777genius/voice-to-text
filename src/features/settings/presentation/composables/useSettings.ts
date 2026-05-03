@@ -86,6 +86,11 @@ export function useSettings() {
     set: (value: boolean) => store.setPlayCompletionSound(value),
   });
 
+  const hideRecordingWindowOnHotkey = computed({
+    get: () => store.hideRecordingWindowOnHotkey,
+    set: (value: boolean) => store.setHideRecordingWindowOnHotkey(value),
+  });
+
   const deepgramKeyterms = computed({
     get: () => store.deepgramKeyterms,
     set: (value: string) => store.setDeepgramKeyterms(value),
@@ -121,6 +126,7 @@ export function useSettings() {
           store.setAutoCopyToClipboard(appConfigStoreInstance.autoCopyToClipboard);
           store.setAutoPasteText(appConfigStoreInstance.autoPasteText);
           store.setPlayCompletionSound(appConfigStoreInstance.playCompletionSound);
+          store.setHideRecordingWindowOnHotkey(appConfigStoreInstance.hideRecordingWindowOnHotkey);
           store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
         } else {
           store.setMicrophoneSensitivity(95, { persist: false });
@@ -128,6 +134,7 @@ export function useSettings() {
           store.setAutoCopyToClipboard(true);
           store.setAutoPasteText(false);
           store.setPlayCompletionSound(false);
+          store.setHideRecordingWindowOnHotkey(false);
           store.setSelectedAudioDevice('');
         }
 
@@ -186,6 +193,7 @@ export function useSettings() {
         store.setAutoCopyToClipboard(appConfigStoreInstance.autoCopyToClipboard);
         store.setAutoPasteText(appConfigStoreInstance.autoPasteText);
         store.setPlayCompletionSound(appConfigStoreInstance.playCompletionSound);
+        store.setHideRecordingWindowOnHotkey(appConfigStoreInstance.hideRecordingWindowOnHotkey);
         store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
       } else {
         try {
@@ -195,6 +203,7 @@ export function useSettings() {
           store.setAutoCopyToClipboard(appConfig.auto_copy_to_clipboard ?? true);
           store.setAutoPasteText(appConfig.auto_paste_text ?? false);
           store.setPlayCompletionSound(appConfig.play_completion_sound ?? false);
+          store.setHideRecordingWindowOnHotkey(appConfig.hide_recording_window_on_hotkey ?? false);
           store.setSelectedAudioDevice(appConfig.selected_audio_device ?? '');
         } catch (err) {
           console.log('App config не загружен, используем значения по умолчанию');
@@ -357,6 +366,16 @@ export function useSettings() {
         appUpdatePayload.play_completion_sound = store.playCompletionSound;
       }
 
+      const hasHideWindowOnHotkeyChange = persistedState
+        ? persistedState.hideRecordingWindowOnHotkey !== store.hideRecordingWindowOnHotkey
+        : latestApp.hide_recording_window_on_hotkey !== store.hideRecordingWindowOnHotkey;
+      if (
+        hasHideWindowOnHotkeyChange &&
+        latestApp.hide_recording_window_on_hotkey !== store.hideRecordingWindowOnHotkey
+      ) {
+        appUpdatePayload.hide_recording_window_on_hotkey = store.hideRecordingWindowOnHotkey;
+      }
+
       const selectedDevice = normalizeAudioDevice(store.selectedAudioDevice);
       const persistedDevice = normalizeAudioDevice(persistedState?.selectedAudioDevice);
       const latestDevice = normalizeAudioDevice(latestApp.selected_audio_device);
@@ -514,6 +533,7 @@ export function useSettings() {
     autoCopyToClipboard,
     autoPasteText,
     playCompletionSound,
+    hideRecordingWindowOnHotkey,
     deepgramKeyterms,
 
     // Store state (через computed для корректной реактивности)

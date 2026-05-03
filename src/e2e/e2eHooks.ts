@@ -19,6 +19,7 @@ type E2eApi = {
     autoCopyToClipboard: boolean;
     autoPasteText: boolean;
     playCompletionSound: boolean;
+    hideRecordingWindowOnHotkey: boolean;
     microphoneSensitivity: number;
     selectedAudioDevice: string;
   };
@@ -96,6 +97,7 @@ export function installE2eHooks(pinia: Pinia): void {
       autoCopyToClipboard: appConfig.autoCopyToClipboard,
       autoPasteText: appConfig.autoPasteText,
       playCompletionSound: appConfig.playCompletionSound,
+      hideRecordingWindowOnHotkey: appConfig.hideRecordingWindowOnHotkey,
       microphoneSensitivity: appConfig.microphoneSensitivity,
       selectedAudioDevice: appConfig.selectedAudioDevice,
     }),

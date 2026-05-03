@@ -77,6 +77,9 @@ class TauriSettingsService {
     if (typeof config.play_completion_sound === 'boolean') {
       args.playCompletionSound = config.play_completion_sound;
     }
+    if (typeof config.hide_recording_window_on_hotkey === 'boolean') {
+      args.hideRecordingWindowOnHotkey = config.hide_recording_window_on_hotkey;
+    }
     if (typeof config.selected_audio_device === 'string' || config.selected_audio_device === null) {
       args.selectedAudioDevice = config.selected_audio_device;
     }

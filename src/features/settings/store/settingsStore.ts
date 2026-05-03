@@ -35,6 +35,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const autoCopyToClipboard = ref(true);
   const autoPasteText = ref(false);
   const playCompletionSound = ref(false);
+  const hideRecordingWindowOnHotkey = ref(false);
   const deepgramKeyterms = ref('');
   const persistedState = ref<SettingsState | null>(null);
 
@@ -85,6 +86,7 @@ export const useSettingsStore = defineStore('settings', () => {
     autoCopyToClipboard: autoCopyToClipboard.value,
     autoPasteText: autoPasteText.value,
     playCompletionSound: playCompletionSound.value,
+    hideRecordingWindowOnHotkey: hideRecordingWindowOnHotkey.value,
     deepgramKeyterms: deepgramKeyterms.value,
   }));
 
@@ -244,6 +246,10 @@ export const useSettingsStore = defineStore('settings', () => {
     playCompletionSound.value = value;
   }
 
+  function setHideRecordingWindowOnHotkey(value: boolean) {
+    hideRecordingWindowOnHotkey.value = value;
+  }
+
   function setDeepgramKeyterms(value: string, _opts?: { persist?: boolean }) {
     const nextRaw = String(value ?? '');
     deepgramKeyterms.value = nextRaw;
@@ -302,6 +308,8 @@ export const useSettingsStore = defineStore('settings', () => {
       autoPasteText.value = state.autoPasteText;
     if (state.playCompletionSound !== undefined)
       playCompletionSound.value = state.playCompletionSound;
+    if (state.hideRecordingWindowOnHotkey !== undefined)
+      hideRecordingWindowOnHotkey.value = state.hideRecordingWindowOnHotkey;
     if (state.deepgramKeyterms !== undefined)
       setDeepgramKeyterms(state.deepgramKeyterms, { persist: false });
   }
@@ -334,6 +342,7 @@ export const useSettingsStore = defineStore('settings', () => {
     autoCopyToClipboard,
     autoPasteText,
     playCompletionSound,
+    hideRecordingWindowOnHotkey,
     deepgramKeyterms,
     persistedState,
     availableAudioDevices,
@@ -364,6 +373,7 @@ export const useSettingsStore = defineStore('settings', () => {
     setAutoCopyToClipboard,
     setAutoPasteText,
     setPlayCompletionSound,
+    setHideRecordingWindowOnHotkey,
     setDeepgramKeyterms,
     setAvailableAudioDevices,
     setAccessibilityPermission,

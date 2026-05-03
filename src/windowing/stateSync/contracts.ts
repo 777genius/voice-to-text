@@ -20,6 +20,7 @@ export type AppConfigSnapshotData = {
   auto_copy_to_clipboard: boolean;
   auto_paste_text: boolean;
   play_completion_sound: boolean;
+  hide_recording_window_on_hotkey: boolean;
   selected_audio_device: string | null;
 };
 

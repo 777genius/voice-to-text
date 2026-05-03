@@ -141,6 +141,9 @@ pub struct AppConfig {
     /// Play UI sound when transcription completes
     pub play_completion_sound: bool,
 
+    /// Start/stop recording from the global hotkey without showing the recording window
+    pub hide_recording_window_on_hotkey: bool,
+
     /// Auto-close window after transcription
     pub auto_close_window: bool,
 
@@ -173,6 +176,7 @@ impl Default for AppConfig {
             auto_copy_to_clipboard: true,
             auto_paste_text: false, // По умолчанию выключено (может раздражать)
             play_completion_sound: false,
+            hide_recording_window_on_hotkey: false,
             auto_close_window: true,
             vad_silence_timeout_ms: 5000, // 5 секунд тишины перед авто-остановкой
             microphone_sensitivity: 100,  // Нейтральный уровень: как записывает микрофон
@@ -265,6 +269,7 @@ mod tests {
         assert!(config.auto_copy_to_clipboard);
         assert!(!config.auto_paste_text);
         assert!(!config.play_completion_sound);
+        assert!(!config.hide_recording_window_on_hotkey);
         assert!(config.auto_close_window);
         assert_eq!(config.vad_silence_timeout_ms, 5000);
         assert_eq!(config.microphone_sensitivity, 100);

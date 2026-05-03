@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.5] - 2026-05-03
+
+### Added
+- Added an optional setting to start recording from the global hotkey without showing the recording window.
+
+### Fixed
+- Hidden hotkey recording now restores the recording window if starting the recording fails, so permission and device errors are still visible.
+
+---
+
 ## [0.10.4] - 2026-05-03
 
 ### Added

@@ -42,6 +42,7 @@ vi.mock('./appConfig', () => ({
     autoCopyToClipboard: false,
     autoPasteText: false,
     playCompletionSound: false,
+    hideRecordingWindowOnHotkey: false,
   }),
 }));
 

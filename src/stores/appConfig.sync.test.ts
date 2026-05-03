@@ -21,6 +21,7 @@ describe('useAppConfigStore sync', () => {
       auto_copy_to_clipboard: false,
       auto_paste_text: false,
       play_completion_sound: false,
+      hide_recording_window_on_hotkey: false,
       microphone_sensitivity: 100,
       selected_audio_device: null,
       ...overrides,
@@ -44,6 +45,7 @@ describe('useAppConfigStore sync', () => {
         recording_hotkey: 'CmdOrCtrl+Shift+P',
         auto_paste_text: true,
         play_completion_sound: true,
+        hide_recording_window_on_hotkey: true,
         microphone_sensitivity: 120,
         selected_audio_device: 'Mic A',
       }),
@@ -61,6 +63,7 @@ describe('useAppConfigStore sync', () => {
     expect(store.autoCopyToClipboard).toBe(false);
     expect(store.autoPasteText).toBe(true);
     expect(store.playCompletionSound).toBe(true);
+    expect(store.hideRecordingWindowOnHotkey).toBe(true);
     expect(store.microphoneSensitivity).toBe(120);
     expect(store.selectedAudioDevice).toBe('Mic A');
   });
@@ -74,6 +77,7 @@ describe('useAppConfigStore sync', () => {
         auto_copy_to_clipboard: true,
         auto_paste_text: false,
         play_completion_sound: true,
+        hide_recording_window_on_hotkey: true,
         microphone_sensitivity: 50,
         selected_audio_device: 'Mic B',
       },
@@ -85,6 +89,7 @@ describe('useAppConfigStore sync', () => {
     expect(store.autoCopyToClipboard).toBe(true);
     expect(store.autoPasteText).toBe(false);
     expect(store.playCompletionSound).toBe(true);
+    expect(store.hideRecordingWindowOnHotkey).toBe(true);
     expect(store.microphoneSensitivity).toBe(50);
     expect(store.selectedAudioDevice).toBe('Mic B');
     expect(store.isLoaded).toBe(true);
