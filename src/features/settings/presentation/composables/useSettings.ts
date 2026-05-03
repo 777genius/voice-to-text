@@ -81,6 +81,11 @@ export function useSettings() {
     set: (value: boolean) => store.setAutoPasteText(value),
   });
 
+  const playCompletionSound = computed({
+    get: () => store.playCompletionSound,
+    set: (value: boolean) => store.setPlayCompletionSound(value),
+  });
+
   const deepgramKeyterms = computed({
     get: () => store.deepgramKeyterms,
     set: (value: string) => store.setDeepgramKeyterms(value),
@@ -115,12 +120,14 @@ export function useSettings() {
           store.setRecordingHotkey(appConfigStoreInstance.recordingHotkey);
           store.setAutoCopyToClipboard(appConfigStoreInstance.autoCopyToClipboard);
           store.setAutoPasteText(appConfigStoreInstance.autoPasteText);
+          store.setPlayCompletionSound(appConfigStoreInstance.playCompletionSound);
           store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
         } else {
           store.setMicrophoneSensitivity(95, { persist: false });
           store.setRecordingHotkey('CmdOrCtrl+Shift+X');
           store.setAutoCopyToClipboard(true);
           store.setAutoPasteText(false);
+          store.setPlayCompletionSound(false);
           store.setSelectedAudioDevice('');
         }
 
@@ -178,6 +185,7 @@ export function useSettings() {
         store.setRecordingHotkey(appConfigStoreInstance.recordingHotkey);
         store.setAutoCopyToClipboard(appConfigStoreInstance.autoCopyToClipboard);
         store.setAutoPasteText(appConfigStoreInstance.autoPasteText);
+        store.setPlayCompletionSound(appConfigStoreInstance.playCompletionSound);
         store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
       } else {
         try {
@@ -186,6 +194,7 @@ export function useSettings() {
           store.setRecordingHotkey(appConfig.recording_hotkey ?? 'CmdOrCtrl+Shift+X');
           store.setAutoCopyToClipboard(appConfig.auto_copy_to_clipboard ?? true);
           store.setAutoPasteText(appConfig.auto_paste_text ?? false);
+          store.setPlayCompletionSound(appConfig.play_completion_sound ?? false);
           store.setSelectedAudioDevice(appConfig.selected_audio_device ?? '');
         } catch (err) {
           console.log('App config не загружен, используем значения по умолчанию');
@@ -339,6 +348,13 @@ export function useSettings() {
         : latestApp.auto_paste_text !== store.autoPasteText;
       if (hasAutoPasteChange && latestApp.auto_paste_text !== store.autoPasteText) {
         appUpdatePayload.auto_paste_text = store.autoPasteText;
+      }
+
+      const hasCompletionSoundChange = persistedState
+        ? persistedState.playCompletionSound !== store.playCompletionSound
+        : latestApp.play_completion_sound !== store.playCompletionSound;
+      if (hasCompletionSoundChange && latestApp.play_completion_sound !== store.playCompletionSound) {
+        appUpdatePayload.play_completion_sound = store.playCompletionSound;
       }
 
       const selectedDevice = normalizeAudioDevice(store.selectedAudioDevice);
@@ -497,6 +513,7 @@ export function useSettings() {
     selectedAudioDevice,
     autoCopyToClipboard,
     autoPasteText,
+    playCompletionSound,
     deepgramKeyterms,
 
     // Store state (через computed для корректной реактивности)

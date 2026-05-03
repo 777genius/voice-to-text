@@ -82,6 +82,15 @@ let unlistenAutoHide: UnlistenFn | null = null;
 let unlistenStartRequested: UnlistenFn | null = null;
 let unlistenWindowShown: UnlistenFn | null = null;
 
+watch(
+  () => appConfigStore.playCompletionSound,
+  (enabled) => {
+    if (enabled) {
+      void preloadUiSounds();
+    }
+  }
+);
+
 // Ref для элемента транскрипции (для автоскролла)
 const transcriptionTextRef = ref<HTMLElement | null>(null);
 
@@ -146,9 +155,6 @@ onMounted(async () => {
     appVersion.value = await getVersion();
   } catch {}
 
-  // Прогреваем звуки заранее, чтобы "done" был надёжным даже при быстром auto-hide окна.
-  void preloadUiSounds();
-
   await store.initialize();
   await appConfigStore.startSync();
   await sttConfigStore.startSync();
@@ -206,8 +212,10 @@ onMounted(async () => {
   unlistenAutoHide = await listen<{ status: string; stopped_via_hotkey?: boolean }>('recording:status', async (event) => {
     // Проигрываем звук при ЛЮБОЙ остановке записи (через hotkey, кнопку, или автоматически)
     if (event.payload.status === 'Idle') {
-      console.log('[Sound] Recording stopped, playing done sound');
-      playDoneSound();
+      if (appConfigStore.playCompletionSound) {
+        console.log('[Sound] Recording stopped, playing done sound');
+        playDoneSound();
+      }
 
       // Автоматически скрываем окно ТОЛЬКО когда запись остановлена через hotkey
       if (event.payload.stopped_via_hotkey) {

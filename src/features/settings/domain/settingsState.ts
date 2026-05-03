@@ -16,6 +16,7 @@ export function areSettingsStatesEqual(a: SettingsState | null, b: SettingsState
     a.selectedAudioDevice === b.selectedAudioDevice &&
     a.autoCopyToClipboard === b.autoCopyToClipboard &&
     a.autoPasteText === b.autoPasteText &&
+    a.playCompletionSound === b.playCompletionSound &&
     a.deepgramKeyterms === b.deepgramKeyterms
   );
 }

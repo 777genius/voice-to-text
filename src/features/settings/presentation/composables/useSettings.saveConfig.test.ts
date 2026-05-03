@@ -77,6 +77,7 @@ describe('useSettings saveConfig', () => {
       recording_hotkey: 'CmdOrCtrl+Shift+X',
       auto_copy_to_clipboard: true,
       auto_paste_text: false,
+      play_completion_sound: false,
       selected_audio_device: null,
     });
 
@@ -117,6 +118,7 @@ describe('useSettings saveConfig', () => {
         recording_hotkey: 'CmdOrCtrl+Shift+X',
         auto_copy_to_clipboard: true,
         auto_paste_text: false,
+        play_completion_sound: false,
         selected_audio_device: null,
       })
       .mockResolvedValueOnce({
@@ -124,6 +126,7 @@ describe('useSettings saveConfig', () => {
         recording_hotkey: 'CmdOrCtrl+Shift+X',
         auto_copy_to_clipboard: true,
         auto_paste_text: false,
+        play_completion_sound: false,
         selected_audio_device: null,
       });
 

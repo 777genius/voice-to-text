@@ -138,6 +138,9 @@ pub struct AppConfig {
     /// Auto-paste transcription text incrementally (copies displayText to clipboard during recognition)
     pub auto_paste_text: bool,
 
+    /// Play UI sound when transcription completes
+    pub play_completion_sound: bool,
+
     /// Auto-close window after transcription
     pub auto_close_window: bool,
 
@@ -169,6 +172,7 @@ impl Default for AppConfig {
             recording_hotkey: "CmdOrCtrl+Shift+X".to_string(), // Cmd на Mac, Ctrl на Win/Linux
             auto_copy_to_clipboard: true,
             auto_paste_text: false, // По умолчанию выключено (может раздражать)
+            play_completion_sound: false,
             auto_close_window: true,
             vad_silence_timeout_ms: 5000, // 5 секунд тишины перед авто-остановкой
             microphone_sensitivity: 100,  // Нейтральный уровень: как записывает микрофон
@@ -259,6 +263,8 @@ mod tests {
         let config = AppConfig::default();
         assert_eq!(config.recording_hotkey, "CmdOrCtrl+Shift+X");
         assert!(config.auto_copy_to_clipboard);
+        assert!(!config.auto_paste_text);
+        assert!(!config.play_completion_sound);
         assert!(config.auto_close_window);
         assert_eq!(config.vad_silence_timeout_ms, 5000);
         assert_eq!(config.microphone_sensitivity, 100);

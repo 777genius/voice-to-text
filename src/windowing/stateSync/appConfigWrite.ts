@@ -18,6 +18,7 @@ export type UpdateAppConfigInvokeArgs = Partial<{
   recordingHotkey: string;
   autoCopyToClipboard: boolean;
   autoPasteText: boolean;
+  playCompletionSound: boolean;
   selectedAudioDevice: string | null;
 }>;
 
@@ -26,6 +27,7 @@ const ALLOWED_KEYS = new Set([
   'recordingHotkey',
   'autoCopyToClipboard',
   'autoPasteText',
+  'playCompletionSound',
   'selectedAudioDevice',
 ]);
 
@@ -56,6 +58,7 @@ function assertValidUpdateAppConfigArgs(args: Record<string, unknown>): void {
         break;
       case 'autoCopyToClipboard':
       case 'autoPasteText':
+      case 'playCompletionSound':
         if (typeof v !== 'boolean') {
           throw new Error(`[update_app_config] "${k}" должен быть boolean, получили: ${String(v)}`);
         }
@@ -75,4 +78,3 @@ export async function invokeUpdateAppConfig(next: UpdateAppConfigInvokeArgs): Pr
   assertValidUpdateAppConfigArgs(args);
   await invoke(CMD_UPDATE_APP_CONFIG, args);
 }
-

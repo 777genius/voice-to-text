@@ -469,6 +469,7 @@ mod snapshot_contract_tests {
                 recording_hotkey: "CmdOrCtrl+Shift+X".to_string(),
                 auto_copy_to_clipboard: true,
                 auto_paste_text: false,
+                play_completion_sound: false,
                 selected_audio_device: None,
             },
         };
@@ -497,6 +498,7 @@ mod snapshot_contract_tests {
         assert!(data.contains_key("recording_hotkey"));
         assert!(data.contains_key("auto_copy_to_clipboard"));
         assert!(data.contains_key("auto_paste_text"));
+        assert!(data.contains_key("play_completion_sound"));
         assert!(data.contains_key("selected_audio_device"));
     }
 
@@ -889,6 +891,7 @@ pub struct AppConfigSnapshotData {
     pub recording_hotkey: String,
     pub auto_copy_to_clipboard: bool,
     pub auto_paste_text: bool,
+    pub play_completion_sound: bool,
     pub selected_audio_device: Option<String>,
 }
 
@@ -904,6 +907,7 @@ pub async fn get_app_config_snapshot(
         recording_hotkey: config.recording_hotkey,
         auto_copy_to_clipboard: config.auto_copy_to_clipboard,
         auto_paste_text: config.auto_paste_text,
+        play_completion_sound: config.play_completion_sound,
         selected_audio_device: config.selected_audio_device,
     };
     let revision = state.app_config_revision.read().await.to_string();
@@ -1108,10 +1112,11 @@ pub async fn update_app_config(
     recording_hotkey: Option<String>,
     auto_copy_to_clipboard: Option<bool>,
     auto_paste_text: Option<bool>,
+    play_completion_sound: Option<bool>,
     selected_audio_device: Option<String>,
 ) -> Result<(), String> {
-    log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}, auto_copy: {:?}, auto_paste: {:?}, device: {:?}",
-        microphone_sensitivity, recording_hotkey, auto_copy_to_clipboard, auto_paste_text, selected_audio_device);
+    log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}, auto_copy: {:?}, auto_paste: {:?}, completion_sound: {:?}, device: {:?}",
+        microphone_sensitivity, recording_hotkey, auto_copy_to_clipboard, auto_paste_text, play_completion_sound, selected_audio_device);
 
     // Защита от "тихих" провалов: если фронт случайно отправил snake_case ключи,
     // Tauri не сматчит аргументы, и сюда придут одни None.
@@ -1120,9 +1125,10 @@ pub async fn update_app_config(
         && recording_hotkey.is_none()
         && auto_copy_to_clipboard.is_none()
         && auto_paste_text.is_none()
+        && play_completion_sound.is_none()
         && selected_audio_device.is_none()
     {
-        return Err("update_app_config: не получены поля для обновления. Проверьте, что фронтенд отправляет args в camelCase (например microphoneSensitivity, recordingHotkey, autoCopyToClipboard, autoPasteText, selectedAudioDevice).".to_string());
+        return Err("update_app_config: не получены поля для обновления. Проверьте, что фронтенд отправляет args в camelCase (например microphoneSensitivity, recordingHotkey, autoCopyToClipboard, autoPasteText, playCompletionSound, selectedAudioDevice).".to_string());
     }
 
     let mut config = state.config.write().await;
@@ -1187,6 +1193,18 @@ pub async fn update_app_config(
                 auto_paste
             );
             config.auto_paste_text = auto_paste;
+            any_changed = true;
+        }
+    }
+
+    if let Some(completion_sound) = play_completion_sound {
+        if config.play_completion_sound != completion_sound {
+            log::info!(
+                "Updating play_completion_sound: {} -> {}",
+                config.play_completion_sound,
+                completion_sound
+            );
+            config.play_completion_sound = completion_sound;
             any_changed = true;
         }
     }

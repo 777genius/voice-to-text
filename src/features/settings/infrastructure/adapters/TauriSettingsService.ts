@@ -74,6 +74,9 @@ class TauriSettingsService {
     if (typeof config.auto_paste_text === 'boolean') {
       args.autoPasteText = config.auto_paste_text;
     }
+    if (typeof config.play_completion_sound === 'boolean') {
+      args.playCompletionSound = config.play_completion_sound;
+    }
     if (typeof config.selected_audio_device === 'string' || config.selected_audio_device === null) {
       args.selectedAudioDevice = config.selected_audio_device;
     }

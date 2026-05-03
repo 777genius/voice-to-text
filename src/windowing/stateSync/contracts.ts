@@ -19,6 +19,7 @@ export type AppConfigSnapshotData = {
   recording_hotkey: string;
   auto_copy_to_clipboard: boolean;
   auto_paste_text: boolean;
+  play_completion_sound: boolean;
   selected_audio_device: string | null;
 };
 
@@ -80,4 +81,3 @@ export type UiPreferencesSnapshotData = {
 
 // Переиспользуем envelope из state-sync, чтобы не плодить дубли.
 export type TauriSnapshotEnvelope<T> = SnapshotEnvelope<T>;
-

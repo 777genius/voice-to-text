@@ -47,6 +47,7 @@ export interface AppConfigData {
   recording_hotkey: string;
   auto_copy_to_clipboard: boolean;
   auto_paste_text: boolean;
+  play_completion_sound: boolean;
   selected_audio_device: string | null;
 }
 
@@ -77,6 +78,7 @@ export interface SettingsState {
   // Автоматические действия
   autoCopyToClipboard: boolean;
   autoPasteText: boolean;
+  playCompletionSound: boolean;
 
   // Deepgram keyterms
   deepgramKeyterms: string;

@@ -17,6 +17,7 @@ export const useAppConfigStore = defineStore('appConfig', () => {
   const recordingHotkey = ref('CmdOrCtrl+Shift+X');
   const autoCopyToClipboard = ref(true);
   const autoPasteText = ref(false);
+  const playCompletionSound = ref(false);
   const microphoneSensitivity = ref(100);
   const selectedAudioDevice = ref('');
 
@@ -27,6 +28,7 @@ export const useAppConfigStore = defineStore('appConfig', () => {
     recordingHotkey.value = data.recording_hotkey ?? recordingHotkey.value;
     autoCopyToClipboard.value = data.auto_copy_to_clipboard ?? autoCopyToClipboard.value;
     autoPasteText.value = data.auto_paste_text ?? autoPasteText.value;
+    playCompletionSound.value = data.play_completion_sound ?? playCompletionSound.value;
     microphoneSensitivity.value = data.microphone_sensitivity ?? microphoneSensitivity.value;
     selectedAudioDevice.value = data.selected_audio_device ?? '';
     isLoaded.value = true;
@@ -80,6 +82,7 @@ export const useAppConfigStore = defineStore('appConfig', () => {
     recordingHotkey,
     autoCopyToClipboard,
     autoPasteText,
+    playCompletionSound,
     microphoneSensitivity,
     selectedAudioDevice,
 

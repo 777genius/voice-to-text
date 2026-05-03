@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.4] - 2026-05-03
+
+### Added
+- Added a setting to enable the completion sound after transcription finishes.
+
+### Changed
+- The completion sound is now disabled by default.
+
+---
+
 ## [0.10.3] - 2026-05-03
 
 ### Fixed

@@ -11,6 +11,7 @@ const { t } = useI18n();
 const {
   autoCopyToClipboard,
   autoPasteText,
+  playCompletionSound,
   hasAccessibilityPermission,
   isMacOS,
   requestAccessibilityPermission,
@@ -30,6 +31,15 @@ const {
     <v-checkbox
       v-model="autoPasteText"
       :label="t('settings.autoActions.paste')"
+      density="comfortable"
+      hide-details
+      color="primary"
+      class="mt-1"
+    />
+
+    <v-checkbox
+      v-model="playCompletionSound"
+      :label="t('settings.autoActions.completionSound')"
       density="comfortable"
       hide-details
       color="primary"
@@ -72,6 +82,10 @@ const {
           <strong>{{ t('settings.autoActions.hintPasteTitle') }}</strong>
           {{ t('settings.autoActions.hintPasteBody') }}
           {{ isMacOS ? t('settings.autoActions.hintMacPermission') : '' }}
+        </p>
+        <p class="mb-0 mt-1">
+          <strong>{{ t('settings.autoActions.hintSoundTitle') }}</strong>
+          {{ t('settings.autoActions.hintSoundBody') }}
         </p>
       </div>
     </template>

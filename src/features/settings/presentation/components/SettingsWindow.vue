@@ -62,6 +62,7 @@ function snapshotSettingsState(): SettingsState {
     selectedAudioDevice: settingsStore.selectedAudioDevice,
     autoCopyToClipboard: settingsStore.autoCopyToClipboard,
     autoPasteText: settingsStore.autoPasteText,
+    playCompletionSound: settingsStore.playCompletionSound,
     deepgramKeyterms: settingsStore.deepgramKeyterms,
   };
 }

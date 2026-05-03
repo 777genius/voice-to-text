@@ -34,6 +34,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const selectedAudioDevice = ref('');
   const autoCopyToClipboard = ref(true);
   const autoPasteText = ref(false);
+  const playCompletionSound = ref(false);
   const deepgramKeyterms = ref('');
   const persistedState = ref<SettingsState | null>(null);
 
@@ -83,6 +84,7 @@ export const useSettingsStore = defineStore('settings', () => {
     selectedAudioDevice: selectedAudioDevice.value,
     autoCopyToClipboard: autoCopyToClipboard.value,
     autoPasteText: autoPasteText.value,
+    playCompletionSound: playCompletionSound.value,
     deepgramKeyterms: deepgramKeyterms.value,
   }));
 
@@ -238,6 +240,10 @@ export const useSettingsStore = defineStore('settings', () => {
     autoPasteText.value = value;
   }
 
+  function setPlayCompletionSound(value: boolean) {
+    playCompletionSound.value = value;
+  }
+
   function setDeepgramKeyterms(value: string, _opts?: { persist?: boolean }) {
     const nextRaw = String(value ?? '');
     deepgramKeyterms.value = nextRaw;
@@ -294,6 +300,8 @@ export const useSettingsStore = defineStore('settings', () => {
       autoCopyToClipboard.value = state.autoCopyToClipboard;
     if (state.autoPasteText !== undefined)
       autoPasteText.value = state.autoPasteText;
+    if (state.playCompletionSound !== undefined)
+      playCompletionSound.value = state.playCompletionSound;
     if (state.deepgramKeyterms !== undefined)
       setDeepgramKeyterms(state.deepgramKeyterms, { persist: false });
   }
@@ -325,6 +333,7 @@ export const useSettingsStore = defineStore('settings', () => {
     selectedAudioDevice,
     autoCopyToClipboard,
     autoPasteText,
+    playCompletionSound,
     deepgramKeyterms,
     persistedState,
     availableAudioDevices,
@@ -354,6 +363,7 @@ export const useSettingsStore = defineStore('settings', () => {
     setSelectedAudioDevice,
     setAutoCopyToClipboard,
     setAutoPasteText,
+    setPlayCompletionSound,
     setDeepgramKeyterms,
     setAvailableAudioDevices,
     setAccessibilityPermission,

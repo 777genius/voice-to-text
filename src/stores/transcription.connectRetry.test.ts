@@ -41,6 +41,7 @@ vi.mock('./appConfig', () => ({
   useAppConfigStore: () => ({
     autoCopyToClipboard: false,
     autoPasteText: false,
+    playCompletionSound: false,
   }),
 }));
 
@@ -168,4 +169,3 @@ describe('transcription connect-retry reliability', () => {
     expect(store.error).toContain('Микрофон недоступен');
   });
 });
-
