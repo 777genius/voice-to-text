@@ -220,7 +220,7 @@ export function useSettings() {
           store.setAutoPasteText(appConfig.auto_paste_text ?? false);
           store.setPlayCompletionSound(appConfig.play_completion_sound ?? false);
           store.setHideRecordingWindowOnHotkey(appConfig.hide_recording_window_on_hotkey ?? false);
-          store.setShowMiniRecordingWindow(appConfig.show_mini_recording_window ?? false);
+          store.setShowMiniRecordingWindow(appConfig.show_mini_recording_window ?? true);
           store.setKeepRecordingUntilManualStop(appConfig.keep_recording_until_manual_stop ?? false);
           store.setSelectedAudioDevice(appConfig.selected_audio_device ?? '');
         } catch (err) {

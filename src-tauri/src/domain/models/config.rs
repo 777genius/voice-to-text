@@ -194,7 +194,7 @@ impl Default for AppConfig {
             auto_paste_text: false, // По умолчанию выключено (может раздражать)
             play_completion_sound: false,
             hide_recording_window_on_hotkey: false,
-            show_mini_recording_window: false,
+            show_mini_recording_window: true,
             recording_window_position: None,
             keep_recording_until_manual_stop: false,
             auto_close_window: true,
@@ -290,7 +290,7 @@ mod tests {
         assert!(!config.auto_paste_text);
         assert!(!config.play_completion_sound);
         assert!(!config.hide_recording_window_on_hotkey);
-        assert!(!config.show_mini_recording_window);
+        assert!(config.show_mini_recording_window);
         assert!(config.recording_window_position.is_none());
         assert!(!config.keep_recording_until_manual_stop);
         assert!(config.auto_close_window);

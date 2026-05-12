@@ -19,7 +19,7 @@ export const useAppConfigStore = defineStore('appConfig', () => {
   const autoPasteText = ref(false);
   const playCompletionSound = ref(false);
   const hideRecordingWindowOnHotkey = ref(false);
-  const showMiniRecordingWindow = ref(false);
+  const showMiniRecordingWindow = ref(true);
   const keepRecordingUntilManualStop = ref(false);
   const microphoneSensitivity = ref(100);
   const selectedAudioDevice = ref('');
