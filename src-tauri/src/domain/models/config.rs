@@ -122,6 +122,13 @@ impl SttConfig {
     }
 }
 
+/// Last saved recording window position in physical screen coordinates.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecordingWindowPosition {
+    pub x: i32,
+    pub y: i32,
+}
+
 /// Application-wide configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -143,6 +150,16 @@ pub struct AppConfig {
 
     /// Start/stop recording from the global hotkey without showing the recording window
     pub hide_recording_window_on_hotkey: bool,
+
+    /// Show a compact recording window instead of the full recording controls
+    #[serde(alias = "recording_window_bottom_right")]
+    pub show_mini_recording_window: bool,
+
+    /// User-adjusted recording window position (only used when mini window mode is enabled)
+    pub recording_window_position: Option<RecordingWindowPosition>,
+
+    /// Keep listening until the user stops recording manually; disables VAD silence auto-stop
+    pub keep_recording_until_manual_stop: bool,
 
     /// Auto-close window after transcription
     pub auto_close_window: bool,
@@ -177,6 +194,9 @@ impl Default for AppConfig {
             auto_paste_text: false, // По умолчанию выключено (может раздражать)
             play_completion_sound: false,
             hide_recording_window_on_hotkey: false,
+            show_mini_recording_window: false,
+            recording_window_position: None,
+            keep_recording_until_manual_stop: false,
             auto_close_window: true,
             vad_silence_timeout_ms: 5000, // 5 секунд тишины перед авто-остановкой
             microphone_sensitivity: 100,  // Нейтральный уровень: как записывает микрофон
@@ -270,11 +290,22 @@ mod tests {
         assert!(!config.auto_paste_text);
         assert!(!config.play_completion_sound);
         assert!(!config.hide_recording_window_on_hotkey);
+        assert!(!config.show_mini_recording_window);
+        assert!(config.recording_window_position.is_none());
+        assert!(!config.keep_recording_until_manual_stop);
         assert!(config.auto_close_window);
         assert_eq!(config.vad_silence_timeout_ms, 5000);
         assert_eq!(config.microphone_sensitivity, 100);
         assert!(config.keep_history);
         assert_eq!(config.max_history_items, 20);
+    }
+
+    #[test]
+    fn test_app_config_accepts_legacy_bottom_right_window_key() {
+        let config: AppConfig =
+            serde_json::from_str(r#"{"recording_window_bottom_right": true}"#).unwrap();
+
+        assert!(config.show_mini_recording_window);
     }
 
     #[test]

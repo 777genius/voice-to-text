@@ -130,8 +130,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   );
 
-  // Флаг для защиты от дублирования auto-paste
-  // Хранит значение finalText на момент последней успешной вставки
+  // Baseline для защиты от дублирования auto-paste.
+  // Хранит полный текст, который уже был успешно отправлен в нативную печать.
   const lastPastedFinalText = ref<string>('');
 
   // Отслеживание utterances по start времени
@@ -144,6 +144,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   // Таймеры для анимации
   let partialAnimationTimer: ReturnType<typeof setInterval> | null = null;
   let accumulatedAnimationTimer: ReturnType<typeof setInterval> | null = null;
+  let autoPasteQueue: Promise<void> = Promise.resolve();
+  let autoPasteGeneration = 0;
 
   // Listeners
   type UnlistenFn = () => void;
@@ -482,6 +484,92 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }, 15);
   }
 
+  function buildCurrentTranscriptionText(): string {
+    return [finalText.value, accumulatedText.value, partialText.value]
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+  }
+
+  function getAutoPasteDelta(currentText: string): string {
+    const normalizedCurrent = currentText.trim();
+    const alreadyPasted = lastPastedFinalText.value.trim();
+
+    if (!normalizedCurrent) return '';
+    if (!alreadyPasted) return normalizedCurrent;
+    if (normalizedCurrent === alreadyPasted) return '';
+
+    if (normalizedCurrent.startsWith(alreadyPasted)) {
+      const nextText = normalizedCurrent.slice(alreadyPasted.length).trim();
+      return nextText ? ` ${nextText}` : '';
+    }
+
+    console.warn('[AutoPaste] Skipping paste because text baseline changed:', {
+      alreadyPasted,
+      currentText: normalizedCurrent,
+    });
+    return '';
+  }
+
+  async function runAutoPasteCurrentText(
+    reason: string,
+    currentText: string,
+    generation: number
+  ): Promise<boolean> {
+    const normalizedCurrent = currentText.trim();
+    const textToInsert = getAutoPasteDelta(normalizedCurrent);
+
+    if (!textToInsert.trim()) {
+      console.log('[AutoPaste] Nothing new to paste:', {
+        reason,
+        currentText: normalizedCurrent,
+        alreadyPasted: lastPastedFinalText.value,
+      });
+      return true;
+    }
+
+    try {
+      console.log('[AutoPaste] Pasting new text:', { reason, textToInsert });
+      await invoke('auto_paste_text', { text: textToInsert });
+      if (generation !== autoPasteGeneration) {
+        console.log('[AutoPaste] Paste completed after reset, keeping current session baseline:', { reason });
+        return true;
+      }
+      lastPastedFinalText.value = normalizedCurrent;
+      console.log('✅ Auto-pasted successfully');
+      return true;
+    } catch (err) {
+      console.error('❌ Failed to auto-paste:', err);
+      return false;
+    }
+  }
+
+  function autoPasteCurrentText(reason: string, currentText = buildCurrentTranscriptionText()): Promise<boolean> {
+    const textSnapshot = currentText.trim();
+    const generation = autoPasteGeneration;
+    const task = autoPasteQueue
+      .catch(() => undefined)
+      .then(() => {
+        if (generation !== autoPasteGeneration) {
+          console.log('[AutoPaste] Skipping stale paste task:', { reason });
+          return true;
+        }
+        return runAutoPasteCurrentText(reason, textSnapshot, generation);
+      });
+
+    autoPasteQueue = task.then(
+      () => undefined,
+      () => undefined
+    );
+
+    return task;
+  }
+
+  function resetAutoPasteProgress(): void {
+    lastPastedFinalText.value = '';
+    autoPasteGeneration++;
+  }
+
   // Actions
   async function initialize() {
     console.log('Initializing transcription store');
@@ -562,6 +650,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             if (partialAnimationTimer) {
               clearInterval(partialAnimationTimer);
               partialAnimationTimer = null;
+            }
+
+            // is_segment_final уже достаточно стабилен для автопечати.
+            // Не ждём speech_final/Idle, иначе пользователь видит текст в UI раньше,
+            // чем он появляется в активном поле ввода.
+            if (autoPasteEnabled.value && newText.trim()) {
+              await autoPasteCurrentText('segment_final');
             }
           } else {
             // Промежуточный результат (is_final=false)
@@ -709,31 +804,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
             // Auto-paste финальной фразы (вся utterance целиком)
             if (autoPasteEnabled.value && currentUtteranceText.trim()) {
-              // Защита от дубликатов: проверяем что мы еще не вставляли эту версию finalText
-              if (finalText.value !== lastPastedFinalText.value) {
+              const pasted = await autoPasteCurrentText('speech_final');
+              if (!pasted) {
+                // Fallback: копируем в clipboard
                 try {
-                  // Добавляем пробел перед фразой если это не первая фраза
-                  const needsSpace = oldFinalText.length > 0;
-                  const textToInsert = needsSpace ? ` ${currentUtteranceText}` : currentUtteranceText;
-                  console.log('📝 Auto-pasting final utterance:', textToInsert);
-                  await invoke('auto_paste_text', { text: textToInsert });
-                  console.log('✅ Auto-pasted successfully');
-
-                  // ВАЖНО: Обновляем флаг ПОСЛЕ успешной вставки
-                  lastPastedFinalText.value = finalText.value;
-                } catch (err) {
-                  console.error('❌ Failed to auto-paste:', err);
-
-                  // Fallback: копируем в clipboard
-                  try {
-                    await invoke('copy_to_clipboard_native', { text: currentUtteranceText });
-                    console.log('📋 Fallback: copied to clipboard');
-                  } catch (copyErr) {
-                    console.error('❌ Failed to copy to clipboard:', copyErr);
-                  }
+                  await invoke('copy_to_clipboard_native', { text: currentUtteranceText });
+                  console.log('📋 Fallback: copied to clipboard');
+                } catch (copyErr) {
+                  console.error('❌ Failed to copy to clipboard:', copyErr);
                 }
-              } else {
-                console.log('⏭️ Skipping auto-paste: already pasted this version of finalText');
               }
             }
 
@@ -835,8 +914,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             errorType.value = null;
             isDeviceNotFoundError.value = false;
 
-            // Сбрасываем флаг auto-paste
-            lastPastedFinalText.value = '';
+            // Сбрасываем прогресс auto-paste для новой записи
+            resetAutoPasteProgress();
 
             // Очищаем анимированный текст
             animatedPartialText.value = '';
@@ -891,35 +970,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
               // Auto-paste: вставляем только НОВУЮ часть
               if (autoPasteEnabled.value) {
-                // Определяем что нужно вставить (только новое)
-                let textToInsert = currentText;
-
-                if (lastPastedFinalText.value) {
-                  // Если уже что-то вставляли, вставляем только новую часть
-                  if (currentText.startsWith(lastPastedFinalText.value)) {
-                    textToInsert = currentText.slice(lastPastedFinalText.value.length).trim();
-
-                    // Добавляем пробел если нужно
-                    if (textToInsert && lastPastedFinalText.value) {
-                      textToInsert = ' ' + textToInsert;
-                    }
-                  }
-                }
-
-                if (textToInsert.trim()) {
-                  try {
-                    console.log('📝 Auto-paste: вставляем новую часть:', textToInsert);
-                    await invoke('auto_paste_text', { text: textToInsert });
-                    console.log('✅ Новая часть вставлена через auto-paste');
-
-                    // Обновляем lastPastedFinalText
-                    lastPastedFinalText.value = currentText;
-                  } catch (err) {
-                    console.error('❌ Ошибка auto-paste:', err);
-                  }
-                } else {
-                  console.log('⏭️ Нечего вставлять - весь текст уже был вставлен');
-                }
+                await autoPasteCurrentText('idle', currentText);
               }
             }
 
@@ -1570,8 +1621,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     lastFinalizedText.value = '';
     currentUtteranceStart.value = -1;
 
-    // Сбрасываем флаг auto-paste
-    lastPastedFinalText.value = '';
+    // Сбрасываем прогресс auto-paste
+    resetAutoPasteProgress();
 
     // Очищаем анимированный текст
     animatedPartialText.value = '';

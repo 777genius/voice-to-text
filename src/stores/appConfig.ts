@@ -19,6 +19,8 @@ export const useAppConfigStore = defineStore('appConfig', () => {
   const autoPasteText = ref(false);
   const playCompletionSound = ref(false);
   const hideRecordingWindowOnHotkey = ref(false);
+  const showMiniRecordingWindow = ref(false);
+  const keepRecordingUntilManualStop = ref(false);
   const microphoneSensitivity = ref(100);
   const selectedAudioDevice = ref('');
 
@@ -32,6 +34,10 @@ export const useAppConfigStore = defineStore('appConfig', () => {
     playCompletionSound.value = data.play_completion_sound ?? playCompletionSound.value;
     hideRecordingWindowOnHotkey.value =
       data.hide_recording_window_on_hotkey ?? hideRecordingWindowOnHotkey.value;
+    showMiniRecordingWindow.value =
+      data.show_mini_recording_window ?? showMiniRecordingWindow.value;
+    keepRecordingUntilManualStop.value =
+      data.keep_recording_until_manual_stop ?? keepRecordingUntilManualStop.value;
     microphoneSensitivity.value = data.microphone_sensitivity ?? microphoneSensitivity.value;
     selectedAudioDevice.value = data.selected_audio_device ?? '';
     isLoaded.value = true;
@@ -87,6 +93,8 @@ export const useAppConfigStore = defineStore('appConfig', () => {
     autoPasteText,
     playCompletionSound,
     hideRecordingWindowOnHotkey,
+    showMiniRecordingWindow,
+    keepRecordingUntilManualStop,
     microphoneSensitivity,
     selectedAudioDevice,
 

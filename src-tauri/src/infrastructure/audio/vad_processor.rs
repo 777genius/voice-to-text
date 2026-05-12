@@ -1,5 +1,5 @@
 use std::time::Duration;
-use webrtc_vad::{Vad, VadMode, SampleRate};
+use webrtc_vad::{SampleRate, Vad, VadMode};
 
 use crate::domain::{SttError, SttResult};
 
@@ -15,8 +15,10 @@ const DEFAULT_SILENCE_TIMEOUT_MS: u64 = 5000; // По умолчанию 5 се�
 
 // Эвристика для защиты от ложного "silence" (особенно на тихих/нестабильных устройствах):
 // если в фрейме есть заметная активность по амплитуде/энергии, считаем это "speech" для целей авто-стопа.
-const FALLBACK_ACTIVITY_MAX_ABS_I16: u32 = 220;
-const FALLBACK_ACTIVITY_RMS_I16: u32 = 65;
+const FALLBACK_ACTIVITY_MAX_ABS_I16: u32 = 900;
+const FALLBACK_ACTIVITY_RMS_I16: u32 = 180;
+const NOISE_FLOOR_MAX_ABS_I16: u32 = 120;
+const NOISE_FLOOR_RMS_I16: u32 = 90;
 const NO_ACTIVITY_TIMEOUT_MS: u64 = 15_000;
 
 /// Result of VAD processing
@@ -115,13 +117,17 @@ impl VadProcessor {
         } else {
             sum_sq / frame.len() as u64
         };
-        let rms_sq_threshold = (FALLBACK_ACTIVITY_RMS_I16 as u64) * (FALLBACK_ACTIVITY_RMS_I16 as u64);
-        let has_activity = max_abs >= FALLBACK_ACTIVITY_MAX_ABS_I16 || mean_sq >= rms_sq_threshold;
+        let rms_sq_threshold =
+            (FALLBACK_ACTIVITY_RMS_I16 as u64) * (FALLBACK_ACTIVITY_RMS_I16 as u64);
+        let has_activity = max_abs >= FALLBACK_ACTIVITY_MAX_ABS_I16 && mean_sq >= rms_sq_threshold;
 
         // Run VAD detection.
-        // Защита: нулевые/почти нулевые фреймы считаем тишиной всегда, иначе webrtc_vad иногда даёт ложный Speech.
-        let is_trivial_silence = max_abs <= 12 && mean_sq <= 12;
-        let is_speech = if is_trivial_silence {
+        // Защита: низкоэнергетический фон считаем тишиной всегда,
+        // иначе webrtc_vad иногда даёт ложный Speech на ровном шуме микрофона.
+        let noise_floor_sq_threshold = (NOISE_FLOOR_RMS_I16 as u64) * (NOISE_FLOOR_RMS_I16 as u64);
+        let is_noise_floor_silence =
+            max_abs <= NOISE_FLOOR_MAX_ABS_I16 && mean_sq <= noise_floor_sq_threshold;
+        let is_speech = if is_noise_floor_silence {
             false
         } else {
             self.vad
@@ -141,7 +147,9 @@ impl VadProcessor {
             let effective_timeout = if self.saw_activity {
                 self.timeout
             } else {
-                Duration::from_millis(self.timeout.as_millis().max(NO_ACTIVITY_TIMEOUT_MS as u128) as u64)
+                Duration::from_millis(
+                    self.timeout.as_millis().max(NO_ACTIVITY_TIMEOUT_MS as u128) as u64
+                )
             };
 
             if self.silence_duration >= effective_timeout {
@@ -225,7 +233,7 @@ mod tests {
 
         // Сначала подаём "активный" фрейм, чтобы включить режим авто-стопа по тишине.
         // Иначе (без активности) действует более длинный таймаут NO_ACTIVITY_TIMEOUT_MS.
-        let active_frame = vec![300i16; 480];
+        let active_frame = vec![1200i16; 480];
         let _ = vad.process_samples(&active_frame).unwrap();
 
         let silence_frame = vec![0i16; 480];
@@ -275,7 +283,7 @@ mod tests {
 
         // "Активность" (не обязательно Speech по webrtc_vad) — важно лишь пометить,
         // что запись не пустая и можно авто-стопать по тишине.
-        let active_frame = vec![300i16; 480];
+        let active_frame = vec![1200i16; 480];
         let _ = vad.process_samples(&active_frame).unwrap();
 
         let silence_frame = vec![0i16; 480];
@@ -324,12 +332,30 @@ mod tests {
     }
 
     #[test]
+    fn test_low_level_background_noise_does_not_reset_silence_timeout() {
+        let mut vad = VadProcessor::new(Some(90), None).unwrap();
+
+        let active_frame = vec![1200i16; 480];
+        let _ = vad.process_samples(&active_frame).unwrap();
+
+        let background_noise = vec![80i16; 480];
+
+        let r1 = vad.process_samples(&background_noise).unwrap();
+        assert_eq!(r1, VadResult::Silence);
+        let r2 = vad.process_samples(&background_noise).unwrap();
+        assert_eq!(r2, VadResult::Silence);
+        let r3 = vad.process_samples(&background_noise).unwrap();
+        assert_eq!(r3, VadResult::SilenceTimeout);
+    }
+
+    #[test]
     fn test_vad_modes() {
         // Тестируем разные режимы VAD
         let vad_quality = VadProcessor::new(Some(800), Some(VadMode::Quality)).unwrap();
         let vad_low_bitrate = VadProcessor::new(Some(800), Some(VadMode::LowBitrate)).unwrap();
         let vad_aggressive = VadProcessor::new(Some(800), Some(VadMode::Aggressive)).unwrap();
-        let vad_very_aggressive = VadProcessor::new(Some(800), Some(VadMode::VeryAggressive)).unwrap();
+        let vad_very_aggressive =
+            VadProcessor::new(Some(800), Some(VadMode::VeryAggressive)).unwrap();
 
         // Проверяем что все режимы создались успешно
         assert_eq!(vad_quality.timeout(), Duration::from_millis(800));

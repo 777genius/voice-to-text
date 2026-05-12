@@ -17,6 +17,9 @@ pub const EVENT_CONNECTION_QUALITY: &str = "connection:quality";
 // UI lifecycle events
 // Важно: это не "focus", потому что main окно на macOS может быть nonactivating NSPanel и не получать фокус.
 pub const EVENT_RECORDING_WINDOW_SHOWN: &str = "recording:window-shown";
+pub const EVENT_SETTINGS_WINDOW_OPENED: &str = "settings-window-opened";
+pub const EVENT_SETTINGS_FOCUS_UPDATES: &str = "settings:focus-updates";
+pub const EVENT_UPDATE_AVAILABLE: &str = "update:available";
 
 // State-sync протокол: invalidation event для синхронизации между окнами
 pub const EVENT_STATE_SYNC_INVALIDATION: &str = "state-sync:invalidation";
@@ -40,8 +43,8 @@ pub struct PartialTranscriptionPayload {
     pub text: String,
     pub timestamp: i64,
     pub is_segment_final: bool, // true когда сегмент финализирован (is_final=true в Deepgram)
-    pub start: f64, // start время utterance в секундах (от Deepgram)
-    pub duration: f64, // длительность utterance в секундах (от Deepgram)
+    pub start: f64,             // start время utterance в секундах (от Deepgram)
+    pub duration: f64,          // длительность utterance в секундах (от Deepgram)
 }
 
 impl PartialTranscriptionPayload {

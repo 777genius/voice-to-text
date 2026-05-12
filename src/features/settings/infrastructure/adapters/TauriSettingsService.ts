@@ -80,6 +80,12 @@ class TauriSettingsService {
     if (typeof config.hide_recording_window_on_hotkey === 'boolean') {
       args.hideRecordingWindowOnHotkey = config.hide_recording_window_on_hotkey;
     }
+    if (typeof config.show_mini_recording_window === 'boolean') {
+      args.showMiniRecordingWindow = config.show_mini_recording_window;
+    }
+    if (typeof config.keep_recording_until_manual_stop === 'boolean') {
+      args.keepRecordingUntilManualStop = config.keep_recording_until_manual_stop;
+    }
     if (typeof config.selected_audio_device === 'string' || config.selected_audio_device === null) {
       args.selectedAudioDevice = config.selected_audio_device;
     }

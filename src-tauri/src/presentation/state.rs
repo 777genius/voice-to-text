@@ -649,6 +649,18 @@ impl AppState {
             while let Some(_) = rx_guard.recv().await {
                 log::info!("VAD silence timeout detected - auto-stopping recording");
 
+                let manual_stop_only = if let Some(state) = app_handle.try_state::<AppState>() {
+                    state.config.read().await.keep_recording_until_manual_stop
+                } else {
+                    false
+                };
+                if manual_stop_only {
+                    log::info!(
+                        "VAD timeout ignored - keep_recording_until_manual_stop is enabled"
+                    );
+                    continue;
+                }
+
                 // Проверяем что действительно идет запись
                 let status = service.get_status().await;
                 if status != crate::domain::RecordingStatus::Recording {

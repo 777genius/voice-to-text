@@ -1,13 +1,14 @@
 use std::{
+    sync::atomic::{AtomicBool, AtomicI64, Ordering},
     sync::{Arc, Mutex},
-    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
-use tauri::{AppHandle, Emitter, Runtime};
-use tauri_plugin_updater::UpdaterExt;
 #[cfg(target_os = "windows")]
 use super::config_store::ConfigStore;
+use crate::presentation::events::EVENT_UPDATE_AVAILABLE;
+use tauri::{AppHandle, Emitter, Runtime};
+use tauri_plugin_updater::UpdaterExt;
 
 /// Защита от двойного старта установки.
 ///
@@ -15,6 +16,13 @@ use super::config_store::ConfigStore;
 /// в двух местах почти одновременно. Обновление — это ресурсная операция, поэтому делаем простой
 /// глобальный lock на процесс.
 static INSTALL_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static UPDATE_CHECK_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+static LAST_UPDATE_CHECK_COMPLETED_MS: AtomicI64 = AtomicI64::new(0);
+static CACHED_AVAILABLE_UPDATE: Mutex<Option<UpdateInfo>> = Mutex::new(None);
+
+const BACKGROUND_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const INTERACTIVE_UPDATE_CHECK_MIN_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Информация о доступном обновлении, которую отдаём во frontend.
 #[derive(Clone, serde::Serialize)]
@@ -36,42 +44,113 @@ struct UpdateInstallStagePayload {
     version: String,
 }
 
-/// Запускает фоновую проверку обновлений: сразу при старте, далее каждые 6 часов
+/// Запускает фоновую проверку обновлений: сразу при старте, далее каждые 15 минут
 pub fn start_background_update_check<R: Runtime>(app: AppHandle<R>) {
     tauri::async_runtime::spawn(async move {
         // Небольшая задержка чтобы приложение успело инициализироваться
         tokio::time::sleep(Duration::from_secs(5)).await;
 
         loop {
-            log::info!("Checking for app updates (background check)");
+            run_update_check_and_emit(app.clone(), "background").await;
 
-            match check_for_update(app.clone()).await {
-                Ok(Some(update)) => {
-                    log::info!("Update available: {}", update.version);
-                    // Уведомляем frontend о доступном обновлении
-                    if let Err(e) = app.emit("update:available", update) {
-                        log::error!("Failed to emit update event: {}", e);
-                    }
-                }
-                Ok(None) => {
-                    log::debug!("No updates available");
-                }
-                Err(e) => {
-                    log::error!("Failed to check for updates: {}", e);
-                }
-            }
-
-            // Ждем 6 часов до следующей проверки
-            tokio::time::sleep(Duration::from_secs(6 * 3600)).await;
+            tokio::time::sleep(BACKGROUND_UPDATE_CHECK_INTERVAL).await;
         }
     });
 }
 
+pub fn request_interactive_update_check<R: Runtime>(app: AppHandle<R>, source: &'static str) {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let min_interval_ms = INTERACTIVE_UPDATE_CHECK_MIN_INTERVAL.as_millis() as i64;
+    let last_ms = LAST_UPDATE_CHECK_COMPLETED_MS.load(Ordering::Relaxed);
+
+    if last_ms > 0 && now_ms.saturating_sub(last_ms) < min_interval_ms {
+        emit_cached_available_update(&app, source);
+        log::debug!(
+            "Skipping interactive update check from {}: checked {}ms ago",
+            source,
+            now_ms.saturating_sub(last_ms)
+        );
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        run_update_check_and_emit(app, source).await;
+    });
+}
+
+pub async fn run_manual_update_check_and_emit<R: Runtime>(app: AppHandle<R>, source: &str) {
+    run_update_check_and_emit(app, source).await;
+}
+
+pub fn remember_update_check_result(update: Option<UpdateInfo>) {
+    if let Ok(mut cached) = CACHED_AVAILABLE_UPDATE.lock() {
+        *cached = update;
+    }
+}
+
+fn emit_cached_available_update<R: Runtime>(app: &AppHandle<R>, source: &str) {
+    let cached_update = CACHED_AVAILABLE_UPDATE
+        .lock()
+        .ok()
+        .and_then(|cached| cached.clone());
+
+    if let Some(update) = cached_update {
+        log::debug!(
+            "Re-emitting cached available update from {}: {}",
+            source,
+            update.version
+        );
+        if let Err(e) = app.emit(EVENT_UPDATE_AVAILABLE, update) {
+            log::error!("Failed to emit cached update event: {}", e);
+        }
+    }
+}
+
+async fn run_update_check_and_emit<R: Runtime>(app: AppHandle<R>, source: &str) {
+    if UPDATE_CHECK_IN_PROGRESS
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        emit_cached_available_update(&app, source);
+        log::debug!(
+            "Skipping update check from {}: check already in progress",
+            source
+        );
+        return;
+    }
+
+    log::info!("Checking for app updates ({})", source);
+
+    match tokio::time::timeout(UPDATE_CHECK_TIMEOUT, check_for_update(app.clone())).await {
+        Ok(Ok(Some(update))) => {
+            LAST_UPDATE_CHECK_COMPLETED_MS
+                .store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
+            log::info!("Update available: {}", update.version);
+            remember_update_check_result(Some(update.clone()));
+            if let Err(e) = app.emit(EVENT_UPDATE_AVAILABLE, update) {
+                log::error!("Failed to emit update event: {}", e);
+            }
+        }
+        Ok(Ok(None)) => {
+            LAST_UPDATE_CHECK_COMPLETED_MS
+                .store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
+            remember_update_check_result(None);
+            log::debug!("No updates available");
+        }
+        Ok(Err(e)) => {
+            log::error!("Failed to check for updates: {}", e);
+        }
+        Err(_) => {
+            log::error!("Update check timed out after {:?}", UPDATE_CHECK_TIMEOUT);
+        }
+    }
+
+    UPDATE_CHECK_IN_PROGRESS.store(false, Ordering::SeqCst);
+}
+
 /// Проверяет наличие обновлений (без установки)
 /// Возвращает версию если доступна, None если обновлений нет
-pub async fn check_for_update<R: Runtime>(
-    app: AppHandle<R>,
-) -> Result<Option<UpdateInfo>, String> {
+pub async fn check_for_update<R: Runtime>(app: AppHandle<R>) -> Result<Option<UpdateInfo>, String> {
     let updater = app
         .updater_builder()
         .build()
@@ -104,9 +183,7 @@ pub async fn check_for_update<R: Runtime>(
 ///
 /// Важно: подтверждение делаем во frontend (наш UpdateDialog), поэтому тут
 /// не показываем системный диалог — иначе получится двойное подтверждение.
-pub async fn check_and_install_update<R: Runtime>(
-    app: AppHandle<R>,
-) -> Result<String, String> {
+pub async fn check_and_install_update<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
     let updater = app
         .updater_builder()
         .build()

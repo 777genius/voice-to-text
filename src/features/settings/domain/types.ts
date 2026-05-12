@@ -49,6 +49,8 @@ export interface AppConfigData {
   auto_paste_text: boolean;
   play_completion_sound: boolean;
   hide_recording_window_on_hotkey: boolean;
+  show_mini_recording_window: boolean;
+  keep_recording_until_manual_stop: boolean;
   selected_audio_device: string | null;
 }
 
@@ -81,6 +83,8 @@ export interface SettingsState {
   autoPasteText: boolean;
   playCompletionSound: boolean;
   hideRecordingWindowOnHotkey: boolean;
+  showMiniRecordingWindow: boolean;
+  keepRecordingUntilManualStop: boolean;
 
   // Deepgram keyterms
   deepgramKeyterms: string;

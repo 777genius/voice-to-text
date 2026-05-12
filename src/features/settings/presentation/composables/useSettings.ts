@@ -91,6 +91,16 @@ export function useSettings() {
     set: (value: boolean) => store.setHideRecordingWindowOnHotkey(value),
   });
 
+  const showMiniRecordingWindow = computed({
+    get: () => store.showMiniRecordingWindow,
+    set: (value: boolean) => store.setShowMiniRecordingWindow(value),
+  });
+
+  const keepRecordingUntilManualStop = computed({
+    get: () => store.keepRecordingUntilManualStop,
+    set: (value: boolean) => store.setKeepRecordingUntilManualStop(value),
+  });
+
   const deepgramKeyterms = computed({
     get: () => store.deepgramKeyterms,
     set: (value: string) => store.setDeepgramKeyterms(value),
@@ -127,6 +137,8 @@ export function useSettings() {
           store.setAutoPasteText(appConfigStoreInstance.autoPasteText);
           store.setPlayCompletionSound(appConfigStoreInstance.playCompletionSound);
           store.setHideRecordingWindowOnHotkey(appConfigStoreInstance.hideRecordingWindowOnHotkey);
+          store.setShowMiniRecordingWindow(appConfigStoreInstance.showMiniRecordingWindow);
+          store.setKeepRecordingUntilManualStop(appConfigStoreInstance.keepRecordingUntilManualStop);
           store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
         } else {
           store.setMicrophoneSensitivity(95, { persist: false });
@@ -135,6 +147,8 @@ export function useSettings() {
           store.setAutoPasteText(false);
           store.setPlayCompletionSound(false);
           store.setHideRecordingWindowOnHotkey(false);
+          store.setShowMiniRecordingWindow(false);
+          store.setKeepRecordingUntilManualStop(false);
           store.setSelectedAudioDevice('');
         }
 
@@ -194,6 +208,8 @@ export function useSettings() {
         store.setAutoPasteText(appConfigStoreInstance.autoPasteText);
         store.setPlayCompletionSound(appConfigStoreInstance.playCompletionSound);
         store.setHideRecordingWindowOnHotkey(appConfigStoreInstance.hideRecordingWindowOnHotkey);
+        store.setShowMiniRecordingWindow(appConfigStoreInstance.showMiniRecordingWindow);
+        store.setKeepRecordingUntilManualStop(appConfigStoreInstance.keepRecordingUntilManualStop);
         store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
       } else {
         try {
@@ -204,6 +220,8 @@ export function useSettings() {
           store.setAutoPasteText(appConfig.auto_paste_text ?? false);
           store.setPlayCompletionSound(appConfig.play_completion_sound ?? false);
           store.setHideRecordingWindowOnHotkey(appConfig.hide_recording_window_on_hotkey ?? false);
+          store.setShowMiniRecordingWindow(appConfig.show_mini_recording_window ?? false);
+          store.setKeepRecordingUntilManualStop(appConfig.keep_recording_until_manual_stop ?? false);
           store.setSelectedAudioDevice(appConfig.selected_audio_device ?? '');
         } catch (err) {
           console.log('App config не загружен, используем значения по умолчанию');
@@ -376,6 +394,26 @@ export function useSettings() {
         appUpdatePayload.hide_recording_window_on_hotkey = store.hideRecordingWindowOnHotkey;
       }
 
+      const hasShowMiniWindowChange = persistedState
+        ? persistedState.showMiniRecordingWindow !== store.showMiniRecordingWindow
+        : latestApp.show_mini_recording_window !== store.showMiniRecordingWindow;
+      if (
+        hasShowMiniWindowChange &&
+        latestApp.show_mini_recording_window !== store.showMiniRecordingWindow
+      ) {
+        appUpdatePayload.show_mini_recording_window = store.showMiniRecordingWindow;
+      }
+
+      const hasManualStopOnlyChange = persistedState
+        ? persistedState.keepRecordingUntilManualStop !== store.keepRecordingUntilManualStop
+        : latestApp.keep_recording_until_manual_stop !== store.keepRecordingUntilManualStop;
+      if (
+        hasManualStopOnlyChange &&
+        latestApp.keep_recording_until_manual_stop !== store.keepRecordingUntilManualStop
+      ) {
+        appUpdatePayload.keep_recording_until_manual_stop = store.keepRecordingUntilManualStop;
+      }
+
       const selectedDevice = normalizeAudioDevice(store.selectedAudioDevice);
       const persistedDevice = normalizeAudioDevice(persistedState?.selectedAudioDevice);
       const latestDevice = normalizeAudioDevice(latestApp.selected_audio_device);
@@ -534,6 +572,8 @@ export function useSettings() {
     autoPasteText,
     playCompletionSound,
     hideRecordingWindowOnHotkey,
+    showMiniRecordingWindow,
+    keepRecordingUntilManualStop,
     deepgramKeyterms,
 
     // Store state (через computed для корректной реактивности)

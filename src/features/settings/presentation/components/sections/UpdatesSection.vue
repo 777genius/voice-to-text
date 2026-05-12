@@ -44,6 +44,13 @@ async function focusThisSection(): Promise<void> {
   runHighlight();
 }
 
+async function focusAndCheckUpdates(): Promise<void> {
+  await focusThisSection();
+  if (!updateStore.availableVersion && !updateStore.isChecking) {
+    await checkForUpdates();
+  }
+}
+
 function consumePendingFocusFromStorage(): boolean {
   try {
     const raw = localStorage.getItem(SETTINGS_PENDING_FOCUS_KEY);
@@ -69,7 +76,7 @@ onMounted(async () => {
     // Фокус из других окон (бейдж/трей)
     try {
       unlistenFocus = await listen(EVENT_SETTINGS_FOCUS_UPDATES, async () => {
-        await focusThisSection();
+        await focusAndCheckUpdates();
       });
     } catch {}
   }
@@ -77,7 +84,7 @@ onMounted(async () => {
   // Fallback: если фокус запросили до того, как окно было готово/слушатель повесился
   // или если мы в web-режиме (без tauri).
   if (consumePendingFocusFromStorage()) {
-    await focusThisSection();
+    await focusAndCheckUpdates();
   }
 });
 
@@ -99,7 +106,10 @@ onUnmounted(() => {
     class="updates-section"
     :class="{ 'updates-section--highlight': isHighlighted }"
   >
-    <SettingGroup :title="t('settings.updates.label')">
+    <SettingGroup
+      section-id="updates"
+      :title="t('settings.updates.label')"
+    >
       <div class="d-flex flex-column ga-3">
         <div v-if="updateStore.currentVersion" class="text-caption text-medium-emphasis">
           {{ t('settings.updates.currentVersion', { version: updateStore.currentVersion }) }}

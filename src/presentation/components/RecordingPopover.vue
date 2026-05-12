@@ -31,7 +31,6 @@ async function onDragMouseDown(e: MouseEvent) {
     el = el.parentElement;
   }
   try {
-    const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow');
     await getCurrentWebviewWindow().startDragging();
   } catch (err) {
     console.error('Failed to start dragging:', err);
@@ -50,7 +49,9 @@ const showProfile = ref(false);
 const showUpdateDialog = ref(false);
 const appVersion = ref('');
 const glowColor = ref<'blue' | 'red' | null>(null);
+const isMiniClosing = ref(false);
 const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+const isMiniWindow = computed(() => appConfigStore.showMiniRecordingWindow);
 
 // Для отображения заменяем CmdOrCtrl на понятное пользователю название
 const recordingHotkey = computed(() => {
@@ -71,6 +72,38 @@ const recordingHotkey = computed(() => {
 
   if (!isMac) return mapped.replace(/CmdOrCtrl/g, 'Ctrl');
   return mapped.replace(/CmdOrCtrl/g, 'Cmd');
+});
+
+function pickLatestSpeechFragment(text: string): string {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const lastLine = lines.length > 0 ? lines[lines.length - 1] : '';
+  const sentenceMatches = lastLine.match(/[^.!?。！？…]+[.!?。！？…]?/gu) ?? [];
+  const lastSentence = sentenceMatches
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .pop() ?? lastLine;
+  const words = lastSentence.split(/\s+/).filter(Boolean);
+  return words.length > 18 ? words.slice(-18).join(' ') : lastSentence;
+}
+
+const miniDisplayText = computed(() => {
+  if (store.error || store.hasError) {
+    return store.error || t('main.errorGeneric');
+  }
+
+  const latestRecognized =
+    pickLatestSpeechFragment(store.partialText) ||
+    pickLatestSpeechFragment(store.accumulatedText) ||
+    pickLatestSpeechFragment(store.finalText);
+
+  if (latestRecognized) return latestRecognized;
+  if (store.isStarting || store.isConnecting) return t('main.connecting');
+  if (store.isRecording) return t('main.listening');
+  if (store.isProcessing) return store.displayText;
+  return '';
 });
 
 // Debouncing для hotkey - блокирует повторные вызовы в течение 500ms
@@ -95,13 +128,21 @@ watch(
 const transcriptionTextRef = ref<HTMLElement | null>(null);
 
 // Динамическая высота окна при росте текста
-const WINDOW_WIDTH = 460;
+const FULL_WINDOW_WIDTH = 460;
 const BASE_WINDOW_HEIGHT = 330;
+const MINI_WINDOW_WIDTH = 236;
+const MINI_WINDOW_HEIGHT = 38;
+const MINI_CLOSE_ANIMATION_MS = 180;
 const TEXT_THRESHOLD_PX = 128;
 const MAX_WINDOW_HEIGHT = 700;
 const NON_TEXT_HEIGHT = 200;
 
 function adjustWindowHeight() {
+  if (isMiniWindow.value) {
+    void setWindowSize(MINI_WINDOW_WIDTH, MINI_WINDOW_HEIGHT);
+    return;
+  }
+
   const el = transcriptionTextRef.value;
   if (!el || !isTauriAvailable()) return;
 
@@ -116,19 +157,77 @@ function adjustWindowHeight() {
 }
 
 async function setWindowHeight(height: number) {
+  await setWindowSize(FULL_WINDOW_WIDTH, height);
+}
+
+async function setWindowSize(width: number, height: number) {
   try {
     const win = getCurrentWebviewWindow();
     const currentSize = await win.innerSize();
-    const targetHeight = Math.round(height * (window.devicePixelRatio || 1));
-    // Не дёргаем resize если разница меньше 5px
-    if (Math.abs(currentSize.height - targetHeight) < 5) return;
-    await win.setSize(new LogicalSize(WINDOW_WIDTH, height));
+    const scale = window.devicePixelRatio || 1;
+    const targetWidth = Math.round(width * scale);
+    const targetHeight = Math.round(height * scale);
+    if (
+      Math.abs(currentSize.width - targetWidth) < 5 &&
+      Math.abs(currentSize.height - targetHeight) < 5
+    ) {
+      return;
+    }
+    await win.setSize(new LogicalSize(width, height));
+    await invoke('fit_recording_window_to_visible_area');
   } catch {}
+}
+
+function applyRecordingWindowSize() {
+  if (isMiniWindow.value) {
+    void setWindowSize(MINI_WINDOW_WIDTH, MINI_WINDOW_HEIGHT);
+    return;
+  }
+  adjustWindowHeight();
+}
+
+let hideRecordingWindowTimeout: number | null = null;
+
+function cancelPendingHideRecordingWindow() {
+  if (hideRecordingWindowTimeout !== null) {
+    window.clearTimeout(hideRecordingWindowTimeout);
+    hideRecordingWindowTimeout = null;
+  }
+  isMiniClosing.value = false;
+}
+
+function scheduleHideRecordingWindow(reason: string) {
+  if (hideRecordingWindowTimeout !== null) {
+    window.clearTimeout(hideRecordingWindowTimeout);
+  }
+
+  const delay = isMiniWindow.value ? MINI_CLOSE_ANIMATION_MS : 50;
+  if (isMiniWindow.value) {
+    isMiniClosing.value = true;
+  }
+
+  hideRecordingWindowTimeout = window.setTimeout(async () => {
+    hideRecordingWindowTimeout = null;
+    try {
+      const window = getCurrentWebviewWindow();
+      await window.hide();
+      console.log(`[AutoHide] Window hidden successfully (${reason})`);
+    } catch (err) {
+      console.error('[AutoHide] Failed to hide window:', err);
+    } finally {
+      isMiniClosing.value = false;
+    }
+  }, delay);
 }
 
 // Автоскролл + подгонка высоты окна при обновлении текста
 watch(() => store.displayText, () => {
   nextTick(() => {
+    if (isMiniWindow.value) {
+      applyRecordingWindowSize();
+      return;
+    }
+
     const el = transcriptionTextRef.value;
     if (!el) return;
 
@@ -141,6 +240,12 @@ watch(() => store.displayText, () => {
     }
 
     adjustWindowHeight();
+  });
+});
+
+watch(isMiniWindow, () => {
+  nextTick(() => {
+    applyRecordingWindowSize();
   });
 });
 
@@ -158,10 +263,13 @@ onMounted(async () => {
   await store.initialize();
   await appConfigStore.startSync();
   await sttConfigStore.startSync();
+  await nextTick();
+  applyRecordingWindowSize();
 
   // Очищаем UI при фактическом показе окна (НЕ через focus: main может быть nonactivating NSPanel).
   // Важно: не очищаем посреди активной записи — иначе можно потерять текст если пользователь скрыл и снова показал окно.
   unlistenWindowShown = await listen(EVENT_RECORDING_WINDOW_SHOWN, async () => {
+    cancelPendingHideRecordingWindow();
     // Подтягиваем актуальную auth session из Rust SoT (important when WebView was "frozen").
     // Best-effort: не блокируем UI на сетевых/IPC проблемах.
     void auth.initialize({ silent: true });
@@ -175,7 +283,7 @@ onMounted(async () => {
       // После reconcile UI должен быть не в Recording — тогда смело чистим.
       if (!store.isRecording && !store.isStarting && !store.isProcessing) {
         store.clearText();
-        setWindowHeight(BASE_WINDOW_HEIGHT);
+        applyRecordingWindowSize();
       }
       return;
     }
@@ -201,7 +309,7 @@ onMounted(async () => {
 
     // Гарантируем "чистый лист" перед новым стартом.
     store.clearText();
-    setWindowHeight(BASE_WINDOW_HEIGHT);
+    applyRecordingWindowSize();
 
     console.log('[Hotkey] Starting recording...');
     await store.startRecording();
@@ -210,26 +318,21 @@ onMounted(async () => {
 
   // Слушаем статус для звука и автоскрытия окна при остановке
   unlistenAutoHide = await listen<{ status: string; stopped_via_hotkey?: boolean }>('recording:status', async (event) => {
-    // Проигрываем звук при ЛЮБОЙ остановке записи (через hotkey, кнопку, или автоматически)
-    if (event.payload.status === 'Idle') {
-      if (appConfigStore.playCompletionSound) {
-        console.log('[Sound] Recording stopped, playing done sound');
-        playDoneSound();
-      }
+    if (event.payload.status !== 'Idle') {
+      cancelPendingHideRecordingWindow();
+      return;
+    }
 
-      // Автоматически скрываем окно ТОЛЬКО когда запись остановлена через hotkey
-      if (event.payload.stopped_via_hotkey) {
-        console.log('[AutoHide] Stopped via hotkey, hiding window');
-        setTimeout(async () => {
-          try {
-            const window = getCurrentWebviewWindow();
-            await window.hide();
-            console.log('[AutoHide] Window hidden successfully');
-          } catch (err) {
-            console.error('[AutoHide] Failed to hide window:', err);
-          }
-        }, 50);
-      }
+    // Проигрываем звук при ЛЮБОЙ остановке записи (через hotkey, кнопку, или автоматически)
+    if (appConfigStore.playCompletionSound) {
+      console.log('[Sound] Recording stopped, playing done sound');
+      playDoneSound();
+    }
+
+    if (appConfigStore.showMiniRecordingWindow) {
+      scheduleHideRecordingWindow('mini window recording stopped');
+    } else if (event.payload.stopped_via_hotkey) {
+      scheduleHideRecordingWindow('stopped via hotkey');
     }
   });
 
@@ -251,6 +354,7 @@ onUnmounted(() => {
   if (unlistenWindowShown) {
     unlistenWindowShown();
   }
+  cancelPendingHideRecordingWindow();
 });
 
 const handleToggle = async () => {
@@ -363,10 +467,59 @@ const minimizeWindow = async () => {
 </script>
 
 <template>
-  <div class="popover-container">
-    <div class="popover">
-      <AudioVisualizer :active="store.isStarting || store.isRecording" />
-      <div class="popover-content">
+  <div class="popover-container" :class="{ mini: isMiniWindow, 'mini-closing': isMiniClosing }">
+    <div class="popover" :class="{ mini: isMiniWindow, 'mini-closing': isMiniClosing }">
+      <template v-if="isMiniWindow">
+        <div class="mini-popover-content" data-tauri-drag-region @mousedown="onDragMouseDown">
+          <span
+            class="mini-status-dot"
+            :class="{
+              recording: store.isRecording,
+              starting: store.isStarting || store.isConnecting,
+              processing: store.isProcessing,
+              error: store.hasError || Boolean(store.error),
+            }"
+          ></span>
+
+          <div
+            class="mini-transcription-text"
+            :class="{
+              recording: store.hasVisibleTranscriptionText,
+              placeholder: !store.hasVisibleTranscriptionText,
+              error: store.hasError || Boolean(store.error),
+            }"
+            :title="miniDisplayText"
+          >
+            {{ miniDisplayText }}
+          </div>
+
+          <div class="mini-actions no-drag">
+            <button
+              v-if="authStore.isAuthenticated"
+              class="mini-icon-button"
+              @click="openProfile"
+              :title="t('profile.title')"
+            >
+              <span class="mdi mdi-account-circle-outline"></span>
+            </button>
+            <button class="mini-icon-button" @click="minimizeWindow" :title="t('main.minimize')">
+              <span class="mdi mdi-window-minimize"></span>
+            </button>
+            <button
+              class="mini-icon-button"
+              data-testid="open-settings"
+              @click="openSettings"
+              :title="t('main.settings')"
+            >
+              <span class="mdi mdi-cog-outline"></span>
+            </button>
+          </div>
+        </div>
+      </template>
+
+      <template v-else>
+        <AudioVisualizer :active="store.isStarting || store.isRecording" />
+        <div class="popover-content">
       <!-- Header -->
       <div class="header" data-tauri-drag-region @mousedown="onDragMouseDown">
         <div class="title-row">
@@ -487,6 +640,7 @@ const minimizeWindow = async () => {
         <span class="hint">{{ t('main.hotkeyHint', { hotkey: recordingHotkey }) }}</span>
       </div>
       </div>
+      </template>
     </div>
 
     <!-- Settings Modal -->
@@ -524,6 +678,127 @@ const minimizeWindow = async () => {
   box-sizing: border-box;
   overflow: hidden;
   position: relative;
+}
+
+.popover.mini {
+  border-radius: 7px;
+  gap: 0;
+  transform-origin: right center;
+  transition: transform 180ms cubic-bezier(0.4, 0, 0.2, 1), opacity 140ms ease;
+  will-change: transform, opacity;
+}
+
+.popover.mini.mini-closing {
+  opacity: 0;
+  transform: scaleX(0);
+}
+
+.popover-container.mini-closing {
+  pointer-events: none;
+}
+
+.mini-popover-content {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 5px 2px 7px;
+  cursor: default;
+  user-select: none;
+}
+
+.mini-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-text-secondary);
+  opacity: 0.7;
+}
+
+.mini-status-dot.recording {
+  background: #22c55e;
+  opacity: 1;
+  animation: mini-status-pulse 1.4s ease-in-out infinite;
+}
+
+.mini-status-dot.starting,
+.mini-status-dot.processing {
+  background: var(--color-warning);
+  opacity: 1;
+  animation: mini-status-pulse 1.2s ease-in-out infinite;
+}
+
+.mini-status-dot.error {
+  background: var(--color-error);
+  opacity: 1;
+}
+
+@keyframes mini-status-pulse {
+  0%, 100% {
+    transform: scale(0.9);
+  }
+  50% {
+    transform: scale(1.12);
+  }
+}
+
+.mini-transcription-text {
+  min-width: 0;
+  color: var(--color-text-secondary);
+  font-size: 12.5px;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+
+.mini-transcription-text.recording {
+  color: var(--color-accent);
+}
+
+.mini-transcription-text.error {
+  color: var(--color-error);
+}
+
+.mini-transcription-text.placeholder {
+  color: var(--color-text-secondary);
+}
+
+.mini-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+}
+
+.mini-icon-button {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, opacity 0.15s ease;
+}
+
+.mini-icon-button:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--color-text);
+}
+
+:global(.theme-light) .mini-icon-button:hover {
+  background: rgba(0, 0, 0, 0.06);
 }
 
 :global(.theme-light) .popover-container {

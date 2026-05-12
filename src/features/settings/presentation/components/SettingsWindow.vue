@@ -64,6 +64,8 @@ function snapshotSettingsState(): SettingsState {
     autoPasteText: settingsStore.autoPasteText,
     playCompletionSound: settingsStore.playCompletionSound,
     hideRecordingWindowOnHotkey: settingsStore.hideRecordingWindowOnHotkey,
+    showMiniRecordingWindow: settingsStore.showMiniRecordingWindow,
+    keepRecordingUntilManualStop: settingsStore.keepRecordingUntilManualStop,
     deepgramKeyterms: settingsStore.deepgramKeyterms,
   };
 }

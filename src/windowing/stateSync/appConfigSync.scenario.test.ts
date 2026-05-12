@@ -45,6 +45,8 @@ describe('scenario: app-config sync across windows (mocked tauri)', () => {
       auto_paste_text: false,
       play_completion_sound: false,
       hide_recording_window_on_hotkey: false,
+      show_mini_recording_window: false,
+      keep_recording_until_manual_stop: false,
       microphone_sensitivity: 100,
       selected_audio_device: null,
     };
@@ -63,6 +65,18 @@ describe('scenario: app-config sync across windows (mocked tauri)', () => {
           currentData = {
             ...currentData,
             hide_recording_window_on_hotkey: args.hideRecordingWindowOnHotkey,
+          };
+        }
+        if (typeof args?.showMiniRecordingWindow === 'boolean') {
+          currentData = {
+            ...currentData,
+            show_mini_recording_window: args.showMiniRecordingWindow,
+          };
+        }
+        if (typeof args?.keepRecordingUntilManualStop === 'boolean') {
+          currentData = {
+            ...currentData,
+            keep_recording_until_manual_stop: args.keepRecordingUntilManualStop,
           };
         }
         currentRevision = String(BigInt(currentRevision) + BigInt(1));

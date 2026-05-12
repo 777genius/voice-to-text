@@ -36,6 +36,8 @@ export const useSettingsStore = defineStore('settings', () => {
   const autoPasteText = ref(false);
   const playCompletionSound = ref(false);
   const hideRecordingWindowOnHotkey = ref(false);
+  const showMiniRecordingWindow = ref(false);
+  const keepRecordingUntilManualStop = ref(false);
   const deepgramKeyterms = ref('');
   const persistedState = ref<SettingsState | null>(null);
 
@@ -87,6 +89,8 @@ export const useSettingsStore = defineStore('settings', () => {
     autoPasteText: autoPasteText.value,
     playCompletionSound: playCompletionSound.value,
     hideRecordingWindowOnHotkey: hideRecordingWindowOnHotkey.value,
+    showMiniRecordingWindow: showMiniRecordingWindow.value,
+    keepRecordingUntilManualStop: keepRecordingUntilManualStop.value,
     deepgramKeyterms: deepgramKeyterms.value,
   }));
 
@@ -250,6 +254,14 @@ export const useSettingsStore = defineStore('settings', () => {
     hideRecordingWindowOnHotkey.value = value;
   }
 
+  function setShowMiniRecordingWindow(value: boolean) {
+    showMiniRecordingWindow.value = value;
+  }
+
+  function setKeepRecordingUntilManualStop(value: boolean) {
+    keepRecordingUntilManualStop.value = value;
+  }
+
   function setDeepgramKeyterms(value: string, _opts?: { persist?: boolean }) {
     const nextRaw = String(value ?? '');
     deepgramKeyterms.value = nextRaw;
@@ -310,6 +322,10 @@ export const useSettingsStore = defineStore('settings', () => {
       playCompletionSound.value = state.playCompletionSound;
     if (state.hideRecordingWindowOnHotkey !== undefined)
       hideRecordingWindowOnHotkey.value = state.hideRecordingWindowOnHotkey;
+    if (state.showMiniRecordingWindow !== undefined)
+      showMiniRecordingWindow.value = state.showMiniRecordingWindow;
+    if (state.keepRecordingUntilManualStop !== undefined)
+      keepRecordingUntilManualStop.value = state.keepRecordingUntilManualStop;
     if (state.deepgramKeyterms !== undefined)
       setDeepgramKeyterms(state.deepgramKeyterms, { persist: false });
   }
@@ -343,6 +359,8 @@ export const useSettingsStore = defineStore('settings', () => {
     autoPasteText,
     playCompletionSound,
     hideRecordingWindowOnHotkey,
+    showMiniRecordingWindow,
+    keepRecordingUntilManualStop,
     deepgramKeyterms,
     persistedState,
     availableAudioDevices,
@@ -374,6 +392,8 @@ export const useSettingsStore = defineStore('settings', () => {
     setAutoPasteText,
     setPlayCompletionSound,
     setHideRecordingWindowOnHotkey,
+    setShowMiniRecordingWindow,
+    setKeepRecordingUntilManualStop,
     setDeepgramKeyterms,
     setAvailableAudioDevices,
     setAccessibilityPermission,

@@ -20,6 +20,8 @@ export type UpdateAppConfigInvokeArgs = Partial<{
   autoPasteText: boolean;
   playCompletionSound: boolean;
   hideRecordingWindowOnHotkey: boolean;
+  showMiniRecordingWindow: boolean;
+  keepRecordingUntilManualStop: boolean;
   selectedAudioDevice: string | null;
 }>;
 
@@ -30,6 +32,8 @@ const ALLOWED_KEYS = new Set([
   'autoPasteText',
   'playCompletionSound',
   'hideRecordingWindowOnHotkey',
+  'showMiniRecordingWindow',
+  'keepRecordingUntilManualStop',
   'selectedAudioDevice',
 ]);
 
@@ -62,6 +66,8 @@ function assertValidUpdateAppConfigArgs(args: Record<string, unknown>): void {
       case 'autoPasteText':
       case 'playCompletionSound':
       case 'hideRecordingWindowOnHotkey':
+      case 'showMiniRecordingWindow':
+      case 'keepRecordingUntilManualStop':
         if (typeof v !== 'boolean') {
           throw new Error(`[update_app_config] "${k}" должен быть boolean, получили: ${String(v)}`);
         }

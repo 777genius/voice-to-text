@@ -57,6 +57,8 @@ describe('useSettings saveConfig', () => {
     store.setAutoCopyToClipboard(true);
     store.setAutoPasteText(false);
     store.setHideRecordingWindowOnHotkey(false);
+    store.setShowMiniRecordingWindow(false);
+    store.setKeepRecordingUntilManualStop(false);
     store.setSelectedAudioDevice('');
     store.setDeepgramKeyterms('', { persist: false });
     store.capturePersistedState();
@@ -80,6 +82,8 @@ describe('useSettings saveConfig', () => {
       auto_paste_text: false,
       play_completion_sound: false,
       hide_recording_window_on_hotkey: false,
+      show_mini_recording_window: false,
+      keep_recording_until_manual_stop: false,
       selected_audio_device: null,
     });
 
@@ -104,6 +108,8 @@ describe('useSettings saveConfig', () => {
     store.setAutoCopyToClipboard(true);
     store.setAutoPasteText(false);
     store.setHideRecordingWindowOnHotkey(false);
+    store.setShowMiniRecordingWindow(false);
+    store.setKeepRecordingUntilManualStop(false);
     store.setSelectedAudioDevice('');
     store.setDeepgramKeyterms('', { persist: false });
     store.capturePersistedState();
@@ -123,6 +129,8 @@ describe('useSettings saveConfig', () => {
         auto_paste_text: false,
         play_completion_sound: false,
         hide_recording_window_on_hotkey: false,
+        show_mini_recording_window: false,
+        keep_recording_until_manual_stop: false,
         selected_audio_device: null,
       })
       .mockResolvedValueOnce({
@@ -132,6 +140,8 @@ describe('useSettings saveConfig', () => {
         auto_paste_text: false,
         play_completion_sound: false,
         hide_recording_window_on_hotkey: false,
+        show_mini_recording_window: false,
+        keep_recording_until_manual_stop: false,
         selected_audio_device: null,
       });
 
@@ -155,6 +165,8 @@ describe('useSettings saveConfig', () => {
     store.setAutoPasteText(false);
     store.setPlayCompletionSound(false);
     store.setHideRecordingWindowOnHotkey(false);
+    store.setShowMiniRecordingWindow(false);
+    store.setKeepRecordingUntilManualStop(false);
     store.setSelectedAudioDevice('');
     store.setDeepgramKeyterms('', { persist: false });
     store.capturePersistedState();
@@ -173,6 +185,8 @@ describe('useSettings saveConfig', () => {
       auto_paste_text: false,
       play_completion_sound: false,
       hide_recording_window_on_hotkey: false,
+      show_mini_recording_window: false,
+      keep_recording_until_manual_stop: false,
       selected_audio_device: null,
     });
 
@@ -184,6 +198,53 @@ describe('useSettings saveConfig', () => {
     expect(tauriSettingsServiceMock.updateSttConfig).not.toHaveBeenCalled();
     expect(tauriSettingsServiceMock.updateAppConfig).toHaveBeenCalledWith({
       hide_recording_window_on_hotkey: true,
+    });
+  });
+
+  it('сохраняет только новые режимы окна и ручной остановки', async () => {
+    const store = useSettingsStore();
+    store.setLanguage('ru', { persist: false });
+    store.setMicrophoneSensitivity(100, { persist: false });
+    store.setRecordingHotkey('CmdOrCtrl+Shift+X');
+    store.setAutoCopyToClipboard(true);
+    store.setAutoPasteText(false);
+    store.setPlayCompletionSound(false);
+    store.setHideRecordingWindowOnHotkey(false);
+    store.setShowMiniRecordingWindow(false);
+    store.setKeepRecordingUntilManualStop(false);
+    store.setSelectedAudioDevice('');
+    store.setDeepgramKeyterms('', { persist: false });
+    store.capturePersistedState();
+
+    store.setShowMiniRecordingWindow(true);
+    store.setKeepRecordingUntilManualStop(true);
+
+    tauriSettingsServiceMock.getSttConfig.mockResolvedValueOnce({
+      language: 'ru',
+      deepgram_keyterms: null,
+    });
+
+    tauriSettingsServiceMock.getAppConfig.mockResolvedValueOnce({
+      microphone_sensitivity: 100,
+      recording_hotkey: 'CmdOrCtrl+Shift+X',
+      auto_copy_to_clipboard: true,
+      auto_paste_text: false,
+      play_completion_sound: false,
+      hide_recording_window_on_hotkey: false,
+      show_mini_recording_window: false,
+      keep_recording_until_manual_stop: false,
+      selected_audio_device: null,
+    });
+
+    tauriSettingsServiceMock.updateAppConfig.mockResolvedValue(undefined);
+
+    const { saveConfig } = useSettings();
+    await expect(saveConfig()).resolves.toBe(true);
+
+    expect(tauriSettingsServiceMock.updateSttConfig).not.toHaveBeenCalled();
+    expect(tauriSettingsServiceMock.updateAppConfig).toHaveBeenCalledWith({
+      show_mini_recording_window: true,
+      keep_recording_until_manual_stop: true,
     });
   });
 });

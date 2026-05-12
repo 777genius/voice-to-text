@@ -18,6 +18,8 @@ export function areSettingsStatesEqual(a: SettingsState | null, b: SettingsState
     a.autoPasteText === b.autoPasteText &&
     a.playCompletionSound === b.playCompletionSound &&
     a.hideRecordingWindowOnHotkey === b.hideRecordingWindowOnHotkey &&
+    a.showMiniRecordingWindow === b.showMiniRecordingWindow &&
+    a.keepRecordingUntilManualStop === b.keepRecordingUntilManualStop &&
     a.deepgramKeyterms === b.deepgramKeyterms
   );
 }

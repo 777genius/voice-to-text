@@ -6,10 +6,10 @@ mod presentation;
 
 mod demo;
 
+use crate::domain::RecordingWindowPosition;
 use infrastructure::ConfigStore;
 use presentation::commands;
 use presentation::state::AppState;
-#[cfg(target_os = "windows")]
 use std::time::Duration;
 use tauri::{Emitter, Manager};
 
@@ -25,6 +25,53 @@ tauri_panel! {
             can_become_main_window: false
         }
     })
+}
+
+fn schedule_recording_window_position_save(
+    app_handle: tauri::AppHandle,
+    position: tauri::PhysicalPosition<i32>,
+) {
+    let position_to_save = RecordingWindowPosition {
+        x: position.x,
+        y: position.y,
+    };
+
+    tauri::async_runtime::spawn(async move {
+        let Some(state) = app_handle.try_state::<AppState>() else {
+            return;
+        };
+
+        {
+            let mut config = state.config.write().await;
+            if !config.show_mini_recording_window {
+                return;
+            }
+            if config.recording_window_position.as_ref() == Some(&position_to_save) {
+                return;
+            }
+            config.recording_window_position = Some(position_to_save.clone());
+        }
+
+        tokio::time::sleep(Duration::from_millis(450)).await;
+
+        let Some(state) = app_handle.try_state::<AppState>() else {
+            return;
+        };
+        let config_to_save = {
+            let config = state.config.read().await;
+            if !config.show_mini_recording_window {
+                return;
+            }
+            if config.recording_window_position.as_ref() != Some(&position_to_save) {
+                return;
+            }
+            config.clone()
+        };
+
+        if let Err(e) = ConfigStore::save_app_config(&config_to_save).await {
+            log::warn!("Failed to save recording window position: {}", e);
+        }
+    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -101,6 +148,7 @@ pub fn run() {
             commands::toggle_window,
             commands::toggle_recording_with_window,
             commands::minimize_window,
+            commands::fit_recording_window_to_visible_area,
             commands::update_stt_config,
             commands::get_app_config_snapshot,
             commands::get_stt_config_snapshot,
@@ -246,13 +294,23 @@ pub fn run() {
                 // Настраиваем обработчик закрытия окна
                 // При попытке закрыть - скрываем вместо завершения приложения
                 let window_clone = window.clone();
+                let app_handle_for_position = app.handle().clone();
                 window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        // Отменяем закрытие
-                        api.prevent_close();
-                        // Скрываем окно
-                        let _ = window_clone.hide();
-                        log::debug!("Window hidden instead of closed (app still running in tray)");
+                    match event {
+                        tauri::WindowEvent::CloseRequested { api, .. } => {
+                            // Отменяем закрытие
+                            api.prevent_close();
+                            // Скрываем окно
+                            let _ = window_clone.hide();
+                            log::debug!("Window hidden instead of closed (app still running in tray)");
+                        }
+                        tauri::WindowEvent::Moved(position) => {
+                            schedule_recording_window_position_save(
+                                app_handle_for_position.clone(),
+                                *position,
+                            );
+                        }
+                        _ => {}
                     }
                 });
             }
@@ -657,6 +715,10 @@ pub fn run() {
                             let _ = window.show();
                         }
                         let _ = window.set_focus();
+                        crate::infrastructure::updater::request_interactive_update_check(
+                            _app.clone(),
+                            "macos_dock_reopen",
+                        );
                     }
                 }
             }

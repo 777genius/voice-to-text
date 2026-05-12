@@ -2,7 +2,10 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
 
-use crate::domain::{AudioCapture, RecordingStatus, SttConnectionCategory, SttError};
+use crate::domain::{
+    AppConfig, AudioCapture, RecordingStatus, RecordingWindowPosition, SttConnectionCategory,
+    SttError,
+};
 use crate::infrastructure::{AuthSession, AuthStore, AuthUser, ConfigStore};
 use crate::presentation::{
     events::*, AppState, AudioLevelPayload, ConnectionQualityPayload, FinalTranscriptionPayload,
@@ -378,7 +381,97 @@ pub async fn get_recording_status(state: State<'_, AppState>) -> Result<Recordin
     Ok(state.transcription_service.get_status().await)
 }
 
-use tauri::{PhysicalPosition, Position};
+use tauri::{LogicalSize, PhysicalPosition, Position};
+
+const RECORDING_WINDOW_EDGE_MARGIN_PX: i32 = 32;
+const FULL_RECORDING_WINDOW_WIDTH: f64 = 460.0;
+const FULL_RECORDING_WINDOW_HEIGHT: f64 = 330.0;
+const MINI_RECORDING_WINDOW_WIDTH: f64 = 236.0;
+const MINI_RECORDING_WINDOW_HEIGHT: f64 = 38.0;
+
+enum RecordingWindowPlacement {
+    Center,
+    Mini {
+        saved_position: Option<RecordingWindowPosition>,
+    },
+}
+
+fn recording_window_placement_from_config(config: &AppConfig) -> RecordingWindowPlacement {
+    if config.show_mini_recording_window {
+        RecordingWindowPlacement::Mini {
+            saved_position: config.recording_window_position.clone(),
+        }
+    } else {
+        RecordingWindowPlacement::Center
+    }
+}
+
+fn recording_window_size_from_config(config: &AppConfig) -> LogicalSize<f64> {
+    if config.show_mini_recording_window {
+        LogicalSize::new(MINI_RECORDING_WINDOW_WIDTH, MINI_RECORDING_WINDOW_HEIGHT)
+    } else {
+        LogicalSize::new(FULL_RECORDING_WINDOW_WIDTH, FULL_RECORDING_WINDOW_HEIGHT)
+    }
+}
+
+fn clamp_axis(value: i32, min: i32, max: i32) -> i32 {
+    if max < min {
+        min
+    } else {
+        value.clamp(min, max)
+    }
+}
+
+fn fit_position_to_monitor(
+    position: PhysicalPosition<i32>,
+    monitor_size: tauri::PhysicalSize<u32>,
+    monitor_position: PhysicalPosition<i32>,
+    window_size: tauri::PhysicalSize<u32>,
+) -> PhysicalPosition<i32> {
+    let min_x = monitor_position.x + RECORDING_WINDOW_EDGE_MARGIN_PX;
+    let min_y = monitor_position.y + RECORDING_WINDOW_EDGE_MARGIN_PX;
+    let max_x = monitor_position.x + monitor_size.width as i32
+        - window_size.width as i32
+        - RECORDING_WINDOW_EDGE_MARGIN_PX;
+    let max_y = monitor_position.y + monitor_size.height as i32
+        - window_size.height as i32
+        - RECORDING_WINDOW_EDGE_MARGIN_PX;
+
+    PhysicalPosition {
+        x: clamp_axis(position.x, min_x, max_x),
+        y: clamp_axis(position.y, min_y, max_y),
+    }
+}
+
+fn calculate_recording_window_position(
+    placement: &RecordingWindowPlacement,
+    monitor_size: tauri::PhysicalSize<u32>,
+    monitor_position: PhysicalPosition<i32>,
+    window_size: tauri::PhysicalSize<u32>,
+) -> PhysicalPosition<i32> {
+    match placement {
+        RecordingWindowPlacement::Center => PhysicalPosition {
+            x: monitor_position.x + (monitor_size.width as i32 - window_size.width as i32) / 2,
+            y: monitor_position.y + (monitor_size.height as i32 - window_size.height as i32) / 2,
+        },
+        RecordingWindowPlacement::Mini { saved_position } => {
+            let default_position = PhysicalPosition {
+                x: monitor_position.x + monitor_size.width as i32
+                    - window_size.width as i32
+                    - RECORDING_WINDOW_EDGE_MARGIN_PX,
+                y: monitor_position.y + monitor_size.height as i32
+                    - window_size.height as i32
+                    - RECORDING_WINDOW_EDGE_MARGIN_PX,
+            };
+            let requested = saved_position
+                .as_ref()
+                .map(|p| PhysicalPosition { x: p.x, y: p.y })
+                .unwrap_or(default_position);
+
+            fit_position_to_monitor(requested, monitor_size, monitor_position, window_size)
+        }
+    }
+}
 
 async fn save_active_app_bundle_id_for_auto_paste(_state: &AppState) {
     #[cfg(target_os = "macos")]
@@ -390,14 +483,22 @@ async fn save_active_app_bundle_id_for_auto_paste(_state: &AppState) {
     }
 }
 
-/// Показывает окно на активном мониторе (где находится курсор мыши) - для Window
-pub fn show_window_on_active_monitor(window: &Window) -> Result<(), String> {
+/// Показывает recording окно с учетом пользовательского режима размещения.
+pub fn show_window_with_recording_config(
+    window: &Window,
+    config: &AppConfig,
+) -> Result<(), String> {
+    window
+        .set_size(recording_window_size_from_config(config))
+        .map_err(|e| format!("Failed to set recording window size: {}", e))?;
+
     show_window_on_active_monitor_impl(
         || window.current_monitor(),
         || window.primary_monitor(),
         || window.outer_size(),
         |pos| window.set_position(pos),
         || window.show(),
+        recording_window_placement_from_config(config),
     )
 }
 
@@ -411,16 +512,73 @@ pub fn show_webview_window_on_active_monitor<R: tauri::Runtime>(
         || window.outer_size(),
         |pos| window.set_position(pos),
         || window.show(),
+        RecordingWindowPlacement::Center,
     )
 }
 
-/// Общая реализация для позиционирования окна по центру текущего монитора
+/// Показывает recording WebviewWindow с учетом пользовательского режима размещения.
+pub fn show_webview_window_with_recording_config<R: tauri::Runtime>(
+    window: &WebviewWindow<R>,
+    config: &AppConfig,
+) -> Result<(), String> {
+    window
+        .set_size(recording_window_size_from_config(config))
+        .map_err(|e| format!("Failed to set recording window size: {}", e))?;
+
+    show_window_on_active_monitor_impl(
+        || window.current_monitor(),
+        || window.primary_monitor(),
+        || window.outer_size(),
+        |pos| window.set_position(pos),
+        || window.show(),
+        recording_window_placement_from_config(config),
+    )
+}
+
+/// Удерживает recording окно внутри видимой области текущего монитора после resize.
+#[tauri::command]
+pub fn fit_recording_window_to_visible_area(window: Window) -> Result<(), String> {
+    let current_monitor = window
+        .current_monitor()
+        .map_err(|e| format!("Failed to get current monitor: {}", e))?
+        .or_else(|| {
+            log::warn!("current_monitor() вернул None, использую primary монитор");
+            window.primary_monitor().ok().flatten()
+        })
+        .ok_or("No monitor found")?;
+
+    let monitor_size = *current_monitor.size();
+    let monitor_position = *current_monitor.position();
+    let window_size = window
+        .outer_size()
+        .map_err(|e| format!("Failed to get window size: {}", e))?;
+    let current_position = window
+        .outer_position()
+        .map_err(|e| format!("Failed to get window position: {}", e))?;
+    let next_position = fit_position_to_monitor(
+        current_position,
+        monitor_size,
+        monitor_position,
+        window_size,
+    );
+
+    if next_position != current_position {
+        window
+            .set_position(Position::Physical(next_position))
+            .map_err(|e| format!("Failed to set window position: {}", e))?;
+    }
+
+    Ok(())
+}
+
+/// Общая реализация для позиционирования окна на текущем мониторе
 fn show_window_on_active_monitor_impl<F1, F2, F3, F4, F5>(
     get_current_monitor: F1,
     get_primary_monitor: F2,
     get_outer_size: F3,
     set_position: F4,
     show: F5,
+    placement: RecordingWindowPlacement,
 ) -> Result<(), String>
 where
     F1: FnOnce() -> tauri::Result<Option<tauri::Monitor>>,
@@ -455,20 +613,27 @@ where
     // Получаем размеры окна
     let window_size = get_outer_size().map_err(|e| format!("Failed to get window size: {}", e))?;
 
-    // Вычисляем центральную позицию на мониторе
-    let x = monitor_position.x + (monitor_size.width as i32 - window_size.width as i32) / 2;
-    let y = monitor_position.y + (monitor_size.height as i32 - window_size.height as i32) / 2;
+    let target_position = calculate_recording_window_position(
+        &placement,
+        *monitor_size,
+        *monitor_position,
+        window_size,
+    );
 
-    log::debug!("Устанавливаю позицию окна: ({}, {})", x, y);
+    log::debug!(
+        "Устанавливаю позицию окна: ({}, {})",
+        target_position.x,
+        target_position.y
+    );
 
     // Устанавливаем позицию окна
-    set_position(Position::Physical(PhysicalPosition { x, y }))
+    set_position(Position::Physical(target_position))
         .map_err(|e| format!("Failed to set window position: {}", e))?;
 
     // Показываем окно
     show().map_err(|e| e.to_string())?;
 
-    log::info!("✅ Окно показано по центру монитора");
+    log::info!("✅ Окно показано");
 
     Ok(())
 }
@@ -500,6 +665,8 @@ mod snapshot_contract_tests {
                 auto_paste_text: false,
                 play_completion_sound: false,
                 hide_recording_window_on_hotkey: false,
+                show_mini_recording_window: false,
+                keep_recording_until_manual_stop: false,
                 selected_audio_device: None,
             },
         };
@@ -530,6 +697,8 @@ mod snapshot_contract_tests {
         assert!(data.contains_key("auto_paste_text"));
         assert!(data.contains_key("play_completion_sound"));
         assert!(data.contains_key("hide_recording_window_on_hotkey"));
+        assert!(data.contains_key("show_mini_recording_window"));
+        assert!(data.contains_key("keep_recording_until_manual_stop"));
         assert!(data.contains_key("selected_audio_device"));
     }
 
@@ -591,7 +760,8 @@ pub async fn toggle_window(state: State<'_, AppState>, window: Window) -> Result
             }
         }
 
-        show_window_on_active_monitor(&window)?;
+        let config = state.config.read().await.clone();
+        show_window_with_recording_config(&window, &config)?;
 
         // Сообщаем фронту, что окно показано (для надёжного reset UI).
         // Не используем focus, т.к. main на macOS может быть nonactivating NSPanel.
@@ -626,7 +796,10 @@ pub async fn toggle_recording_with_window(
 
     match current_status {
         RecordingStatus::Idle => {
-            let hide_window_on_hotkey = state.config.read().await.hide_recording_window_on_hotkey;
+            let config = state.config.read().await.clone();
+            let hide_window_on_hotkey =
+                config.hide_recording_window_on_hotkey && !config.show_mini_recording_window;
+            let force_show_window = config.show_mini_recording_window;
             let window_visible = window.is_visible().map_err(|e| e.to_string())?;
 
             if hide_window_on_hotkey {
@@ -635,11 +808,11 @@ pub async fn toggle_recording_with_window(
                 } else {
                     window.hide().map_err(|e| e.to_string())?;
                 }
-            } else if !window_visible {
+            } else if force_show_window || !window_visible {
                 // Перед показом окна сохраняем bundle ID текущего активного приложения.
                 save_active_app_bundle_id_for_auto_paste(state.inner()).await;
 
-                show_window_on_active_monitor(&window)?;
+                show_window_with_recording_config(&window, &config)?;
 
                 // Сообщаем фронту, что окно показано (для надёжного reset UI).
                 let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
@@ -648,7 +821,7 @@ pub async fn toggle_recording_with_window(
             // Запускаем запись
             if let Err(err) = start_recording(state.clone(), app_handle).await {
                 if hide_window_on_hotkey {
-                    if let Err(show_err) = show_window_on_active_monitor(&window) {
+                    if let Err(show_err) = show_window_with_recording_config(&window, &config) {
                         log::warn!(
                             "Failed to show recording window after hotkey start error: {}",
                             show_err
@@ -725,7 +898,10 @@ pub async fn toggle_recording_with_window_internal(
 
     match current_status {
         RecordingStatus::Idle => {
-            let hide_window_on_hotkey = state.config.read().await.hide_recording_window_on_hotkey;
+            let config = state.config.read().await.clone();
+            let hide_window_on_hotkey =
+                config.hide_recording_window_on_hotkey && !config.show_mini_recording_window;
+            let force_show_window = config.show_mini_recording_window;
             let window_visible = window.is_visible().map_err(|e| e.to_string())?;
 
             if hide_window_on_hotkey {
@@ -734,9 +910,9 @@ pub async fn toggle_recording_with_window_internal(
                 } else {
                     window.hide().map_err(|e| e.to_string())?;
                 }
-            } else if !window_visible {
+            } else if force_show_window || !window_visible {
                 save_active_app_bundle_id_for_auto_paste(state).await;
-                show_webview_window_on_active_monitor(&window)?;
+                show_webview_window_with_recording_config(&window, &config)?;
 
                 // Сообщаем фронту, что окно показано (для надёжного reset UI).
                 let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
@@ -750,7 +926,9 @@ pub async fn toggle_recording_with_window_internal(
                 .ok_or_else(|| "AppState не доступен".to_string())?;
             if let Err(err) = start_recording(state_handle, app_handle.clone()).await {
                 if hide_window_on_hotkey {
-                    if let Err(show_err) = show_webview_window_on_active_monitor(&window) {
+                    if let Err(show_err) =
+                        show_webview_window_with_recording_config(&window, &config)
+                    {
                         log::warn!(
                             "Failed to show recording window after hotkey start error: {}",
                             show_err
@@ -948,6 +1126,8 @@ pub struct AppConfigSnapshotData {
     pub auto_paste_text: bool,
     pub play_completion_sound: bool,
     pub hide_recording_window_on_hotkey: bool,
+    pub show_mini_recording_window: bool,
+    pub keep_recording_until_manual_stop: bool,
     pub selected_audio_device: Option<String>,
 }
 
@@ -965,6 +1145,8 @@ pub async fn get_app_config_snapshot(
         auto_paste_text: config.auto_paste_text,
         play_completion_sound: config.play_completion_sound,
         hide_recording_window_on_hotkey: config.hide_recording_window_on_hotkey,
+        show_mini_recording_window: config.show_mini_recording_window,
+        keep_recording_until_manual_stop: config.keep_recording_until_manual_stop,
         selected_audio_device: config.selected_audio_device,
     };
     let revision = state.app_config_revision.read().await.to_string();
@@ -1171,10 +1353,12 @@ pub async fn update_app_config(
     auto_paste_text: Option<bool>,
     play_completion_sound: Option<bool>,
     hide_recording_window_on_hotkey: Option<bool>,
+    show_mini_recording_window: Option<bool>,
+    keep_recording_until_manual_stop: Option<bool>,
     selected_audio_device: Option<String>,
 ) -> Result<(), String> {
-    log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}, auto_copy: {:?}, auto_paste: {:?}, completion_sound: {:?}, hide_window_on_hotkey: {:?}, device: {:?}",
-        microphone_sensitivity, recording_hotkey, auto_copy_to_clipboard, auto_paste_text, play_completion_sound, hide_recording_window_on_hotkey, selected_audio_device);
+    log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}, auto_copy: {:?}, auto_paste: {:?}, completion_sound: {:?}, hide_window_on_hotkey: {:?}, mini_window: {:?}, manual_stop_only: {:?}, device: {:?}",
+        microphone_sensitivity, recording_hotkey, auto_copy_to_clipboard, auto_paste_text, play_completion_sound, hide_recording_window_on_hotkey, show_mini_recording_window, keep_recording_until_manual_stop, selected_audio_device);
 
     // Защита от "тихих" провалов: если фронт случайно отправил snake_case ключи,
     // Tauri не сматчит аргументы, и сюда придут одни None.
@@ -1185,9 +1369,11 @@ pub async fn update_app_config(
         && auto_paste_text.is_none()
         && play_completion_sound.is_none()
         && hide_recording_window_on_hotkey.is_none()
+        && show_mini_recording_window.is_none()
+        && keep_recording_until_manual_stop.is_none()
         && selected_audio_device.is_none()
     {
-        return Err("update_app_config: не получены поля для обновления. Проверьте, что фронтенд отправляет args в camelCase (например microphoneSensitivity, recordingHotkey, autoCopyToClipboard, autoPasteText, playCompletionSound, hideRecordingWindowOnHotkey, selectedAudioDevice).".to_string());
+        return Err("update_app_config: не получены поля для обновления. Проверьте, что фронтенд отправляет args в camelCase (например microphoneSensitivity, recordingHotkey, autoCopyToClipboard, autoPasteText, playCompletionSound, hideRecordingWindowOnHotkey, showMiniRecordingWindow, keepRecordingUntilManualStop, selectedAudioDevice).".to_string());
     }
 
     let mut config = state.config.write().await;
@@ -1276,6 +1462,30 @@ pub async fn update_app_config(
                 hide_window_on_hotkey
             );
             config.hide_recording_window_on_hotkey = hide_window_on_hotkey;
+            any_changed = true;
+        }
+    }
+
+    if let Some(show_mini_window) = show_mini_recording_window {
+        if config.show_mini_recording_window != show_mini_window {
+            log::info!(
+                "Updating show_mini_recording_window: {} -> {}",
+                config.show_mini_recording_window,
+                show_mini_window
+            );
+            config.show_mini_recording_window = show_mini_window;
+            any_changed = true;
+        }
+    }
+
+    if let Some(manual_stop_only) = keep_recording_until_manual_stop {
+        if config.keep_recording_until_manual_stop != manual_stop_only {
+            log::info!(
+                "Updating keep_recording_until_manual_stop: {} -> {}",
+                config.keep_recording_until_manual_stop,
+                manual_stop_only
+            );
+            config.keep_recording_until_manual_stop = manual_stop_only;
             any_changed = true;
         }
     }
@@ -2116,7 +2326,10 @@ pub async fn show_auth_window(app_handle: AppHandle) -> Result<(), String> {
 
 /// Показывает recording окно (main) и скрывает auth
 #[tauri::command]
-pub async fn show_recording_window(app_handle: AppHandle) -> Result<(), String> {
+pub async fn show_recording_window(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
     log::info!("Command: show_recording_window");
 
     // Скрываем auth окно
@@ -2142,7 +2355,8 @@ pub async fn show_recording_window(app_handle: AppHandle) -> Result<(), String> 
 
     // Показываем recording окно (NSPanel - появляется поверх fullscreen, без фокуса)
     if let Some(window) = app_handle.get_webview_window("main") {
-        show_webview_window_on_active_monitor(&window)?;
+        let config = state.config.read().await.clone();
+        show_webview_window_with_recording_config(&window, &config)?;
         let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
         if let Err(e) = window.set_always_on_top(true) {
             log::warn!("Failed to enable always-on-top for main window: {}", e);
