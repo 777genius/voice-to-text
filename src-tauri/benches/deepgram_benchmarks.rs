@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
@@ -148,8 +148,8 @@ fn bench_multi_frequency_audio_generation(c: &mut Criterion) {
             for i in 0..sample_rate {
                 let t = i as f32 / sample_rate as f32;
                 let val = (2.0 * std::f32::consts::PI * 300.0 * t).sin() * 3000.0
-                        + (2.0 * std::f32::consts::PI * 600.0 * t).sin() * 2000.0
-                        + (2.0 * std::f32::consts::PI * 1200.0 * t).sin() * 1000.0;
+                    + (2.0 * std::f32::consts::PI * 600.0 * t).sin() * 2000.0
+                    + (2.0 * std::f32::consts::PI * 1200.0 * t).sin() * 1000.0;
                 samples.push(val as i16);
             }
 
@@ -212,12 +212,11 @@ fn bench_config_cloning(c: &mut Criterion) {
 
 /// Бенчмарк создания провайдера через Factory
 fn bench_factory_provider_creation(c: &mut Criterion) {
-    use app_lib::infrastructure::factory::DefaultSttProviderFactory;
     use app_lib::domain::SttProviderFactory;
+    use app_lib::infrastructure::factory::DefaultSttProviderFactory;
 
     let factory = DefaultSttProviderFactory::new();
-    let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key(&get_test_api_key());
+    let config = SttConfig::new(SttProviderType::Deepgram).with_api_key(&get_test_api_key());
 
     c.bench_function("factory_create_provider", |b| {
         b.iter(|| {
@@ -230,7 +229,8 @@ fn bench_factory_provider_creation(c: &mut Criterion) {
 /// Бенчмарк сериализации транскрипции в JSON
 fn bench_transcription_serialization(c: &mut Criterion) {
     let transcription = Transcription {
-        text: "Привет, это тестовая транскрипция для проверки производительности сериализации".to_string(),
+        text: "Привет, это тестовая транскрипция для проверки производительности сериализации"
+            .to_string(),
         confidence: Some(0.95),
         is_final: true,
         language: Some("ru".to_string()),
@@ -275,7 +275,7 @@ fn bench_multiple_chunks_processing(c: &mut Criterion) {
                     }
                     black_box(chunks);
                 });
-            }
+            },
         );
     }
 
@@ -302,7 +302,7 @@ fn bench_bytes_to_samples_conversion(c: &mut Criterion) {
                         .collect();
                     black_box(samples);
                 });
-            }
+            },
         );
     }
 

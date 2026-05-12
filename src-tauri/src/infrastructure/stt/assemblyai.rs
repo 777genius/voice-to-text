@@ -3,10 +3,10 @@ use futures_util::{SinkExt, StreamExt};
 use http::Request;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use tokio::net::TcpStream;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
-use tokio_tungstenite::{connect_async, tungstenite::Message, WebSocketStream, MaybeTlsStream};
-use tokio::net::TcpStream;
+use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 use crate::domain::{
     AudioChunk, SttConfig, SttConnectionCategory, SttConnectionError, SttError, SttProvider,
@@ -65,7 +65,9 @@ impl SttProvider for AssemblyAIProvider {
         log::info!("AssemblyAI Provider: Initializing (v3)");
 
         // Приоритет: пользовательский ключ → встроенный ключ
-        let api_key = config.assemblyai_api_key.clone()
+        let api_key = config
+            .assemblyai_api_key
+            .clone()
             .or_else(|| {
                 // Fallback на встроенный ключ
                 if embedded_keys::has_embedded_assemblyai_key() {
@@ -74,12 +76,20 @@ impl SttProvider for AssemblyAIProvider {
                     None
                 }
             })
-            .ok_or_else(|| SttError::Configuration(
-                "AssemblyAI API key is required (either user key or embedded key)".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                SttError::Configuration(
+                    "AssemblyAI API key is required (either user key or embedded key)".to_string(),
+                )
+            })?;
 
-        log::info!("AssemblyAI Provider: Using {} API key",
-            if config.assemblyai_api_key.is_some() { "user" } else { "embedded" });
+        log::info!(
+            "AssemblyAI Provider: Using {} API key",
+            if config.assemblyai_api_key.is_some() {
+                "user"
+            } else {
+                "embedded"
+            }
+        );
 
         self.api_key = Some(api_key);
         self.config = Some(config.clone());
@@ -96,17 +106,19 @@ impl SttProvider for AssemblyAIProvider {
         log::info!("AssemblyAI Provider: Starting stream (v3 endpoint)");
 
         if self.is_streaming {
-            return Err(SttError::Processing(
-                "Stream already active".to_string(),
-            ));
+            return Err(SttError::Processing("Stream already active".to_string()));
         }
 
-        let api_key = self.api_key.as_ref()
+        let api_key = self
+            .api_key
+            .as_ref()
             .ok_or_else(|| SttError::Configuration("API key not set".to_string()))?
             .clone();
 
         // Получаем язык из конфига для использования в транскрипциях
-        let configured_language = self.config.as_ref()
+        let configured_language = self
+            .config
+            .as_ref()
             .and_then(|c| Some(c.language.clone()))
             .unwrap_or_else(|| "en".to_string());
 
@@ -115,24 +127,23 @@ impl SttProvider for AssemblyAIProvider {
 
         // Конвертируем короткие коды языков в полные BCP-47 для AssemblyAI
         let language_code = match language.as_str() {
-            "ru" => "ru",  // Russian
-            "en" => "en",  // English (global)
-            "es" => "es",  // Spanish
-            "fr" => "fr",  // French
-            "de" => "de",  // German
-            "it" => "it",  // Italian
-            "pt" => "pt",  // Portuguese
-            "nl" => "nl",  // Dutch
-            "ja" => "ja",  // Japanese
-            "ko" => "ko",  // Korean
-            "zh" => "zh",  // Chinese
+            "ru" => "ru",   // Russian
+            "en" => "en",   // English (global)
+            "es" => "es",   // Spanish
+            "fr" => "fr",   // French
+            "de" => "de",   // German
+            "it" => "it",   // Italian
+            "pt" => "pt",   // Portuguese
+            "nl" => "nl",   // Dutch
+            "ja" => "ja",   // Japanese
+            "ko" => "ko",   // Korean
+            "zh" => "zh",   // Chinese
             other => other, // Pass as-is
         };
 
         let url = format!(
             "{}?sample_rate=16000&encoding=pcm_s16le&language_code={}",
-            ASSEMBLYAI_WS_URL,
-            language_code
+            ASSEMBLYAI_WS_URL, language_code
         );
 
         log::debug!("Connecting to {}", url);
@@ -144,7 +155,10 @@ impl SttProvider for AssemblyAIProvider {
             .header("Connection", "Upgrade")
             .header("Upgrade", "websocket")
             .header("Sec-WebSocket-Version", "13")
-            .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
+            .header(
+                "Sec-WebSocket-Key",
+                tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+            )
             .header("Authorization", &api_key)
             .body(())
             .map_err(|e| {
@@ -154,14 +168,12 @@ impl SttProvider for AssemblyAIProvider {
                 )))
             })?;
 
-        let (ws_stream, _response) = connect_async(request)
-            .await
-            .map_err(|e| {
-                SttError::Connection(SttConnectionError::simple(format!(
-                    "WS connection failed: {}",
-                    e
-                )))
-            })?;
+        let (ws_stream, _response) = connect_async(request).await.map_err(|e| {
+            SttError::Connection(SttConnectionError::simple(format!(
+                "WS connection failed: {}",
+                e
+            )))
+        })?;
 
         log::info!("AssemblyAI WebSocket connected");
 
@@ -193,7 +205,12 @@ impl SttProvider for AssemblyAIProvider {
                                     session_notify.notify_one();
                                 }
 
-                                Self::handle_message(json, &on_partial, &on_final, &lang_for_transcription);
+                                Self::handle_message(
+                                    json,
+                                    &on_partial,
+                                    &on_final,
+                                    &lang_for_transcription,
+                                );
                             }
                             Err(e) => {
                                 log::error!("Failed to parse AssemblyAI message: {}", e);
@@ -235,7 +252,7 @@ impl SttProvider for AssemblyAIProvider {
         log::info!("Waiting for session to be ready...");
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            self.session_ready.notified()
+            self.session_ready.notified(),
         )
         .await
         .map_err(|_| {
@@ -254,15 +271,21 @@ impl SttProvider for AssemblyAIProvider {
             return Err(SttError::Processing("Not streaming".to_string()));
         }
 
-        let write = self.ws_write.as_mut()
-            .ok_or_else(|| SttError::Processing("WebSocket write handle not available".to_string()))?;
+        let write = self.ws_write.as_mut().ok_or_else(|| {
+            SttError::Processing("WebSocket write handle not available".to_string())
+        })?;
 
         // Проверяем уровень сигнала для детекции тишины
         let max_amplitude = chunk.data.iter().map(|&s| s.abs()).max().unwrap_or(0);
-        let avg_amplitude: i32 = chunk.data.iter().map(|&s| s.abs() as i32).sum::<i32>() / chunk.data.len().max(1) as i32;
+        let avg_amplitude: i32 = chunk.data.iter().map(|&s| s.abs() as i32).sum::<i32>()
+            / chunk.data.len().max(1) as i32;
 
         if max_amplitude > 1000 {
-            log::debug!("Audio signal detected: max={}, avg={}", max_amplitude, avg_amplitude);
+            log::debug!(
+                "Audio signal detected: max={}, avg={}",
+                max_amplitude,
+                avg_amplitude
+            );
         }
 
         // Добавляем чанк в буфер
@@ -275,13 +298,15 @@ impl SttProvider for AssemblyAIProvider {
         // Отправляем когда накопилось достаточно
         if self.audio_buffer.len() >= MIN_SAMPLES {
             // Convert i16 samples to bytes (little-endian PCM)
-            let bytes: Vec<u8> = self.audio_buffer
+            let bytes: Vec<u8> = self
+                .audio_buffer
                 .iter()
                 .flat_map(|&sample| sample.to_le_bytes())
                 .collect();
 
             let duration_ms = (self.audio_buffer.len() * 1000) / 16000;
-            log::debug!("Sending {} samples (~{}ms, {} bytes) to AssemblyAI",
+            log::debug!(
+                "Sending {} samples (~{}ms, {} bytes) to AssemblyAI",
                 self.audio_buffer.len(),
                 duration_ms,
                 bytes.len()
@@ -311,12 +336,16 @@ impl SttProvider for AssemblyAIProvider {
         // Отправляем остатки из буфера если есть
         if !self.audio_buffer.is_empty() {
             if let Some(write) = self.ws_write.as_mut() {
-                let bytes: Vec<u8> = self.audio_buffer
+                let bytes: Vec<u8> = self
+                    .audio_buffer
                     .iter()
                     .flat_map(|&sample| sample.to_le_bytes())
                     .collect();
 
-                log::debug!("Flushing remaining {} samples from buffer", self.audio_buffer.len());
+                log::debug!(
+                    "Flushing remaining {} samples from buffer",
+                    self.audio_buffer.len()
+                );
                 let _ = write.send(Message::Binary(bytes)).await;
                 self.audio_buffer.clear();
             }
@@ -394,7 +423,8 @@ impl AssemblyAIProvider {
                 let is_end_of_turn = json["end_of_turn"].as_bool().unwrap_or(false);
 
                 // Извлекаем язык из ответа (если есть) или используем сконфигурированный
-                let detected_language = json.get("language")
+                let detected_language = json
+                    .get("language")
                     .and_then(|l| l.as_str())
                     .map(|s| s.to_string())
                     .or_else(|| Some(configured_language.to_string()));
@@ -409,14 +439,16 @@ impl AssemblyAIProvider {
 
                             let transcription = Transcription {
                                 text: text.to_string(),
-                                confidence: json["end_of_turn_confidence"].as_f64().map(|v| v as f32),
+                                confidence: json["end_of_turn_confidence"]
+                                    .as_f64()
+                                    .map(|v| v as f32),
                                 is_final: true,
                                 language: detected_language,
                                 timestamp: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_else(|_| std::time::Duration::from_secs(0))
                                     .as_secs() as i64,
-                                start: 0.0, // AssemblyAI не предоставляет start время
+                                start: 0.0,    // AssemblyAI не предоставляет start время
                                 duration: 0.0, // AssemblyAI не предоставляет duration
                             };
 
@@ -426,14 +458,16 @@ impl AssemblyAIProvider {
 
                             let transcription = Transcription {
                                 text: text.to_string(),
-                                confidence: json["end_of_turn_confidence"].as_f64().map(|v| v as f32),
+                                confidence: json["end_of_turn_confidence"]
+                                    .as_f64()
+                                    .map(|v| v as f32),
                                 is_final: false,
                                 language: detected_language.clone(),
                                 timestamp: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_else(|_| std::time::Duration::from_secs(0))
                                     .as_secs() as i64,
-                                start: 0.0, // AssemblyAI не предоставляет start время
+                                start: 0.0,    // AssemblyAI не предоставляет start время
                                 duration: 0.0, // AssemblyAI не предоставляет duration
                             };
 

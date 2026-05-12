@@ -1,11 +1,12 @@
-use std::sync::{Arc, Mutex, atomic::{AtomicUsize, AtomicBool, Ordering}};
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
-use app_lib::domain::{
-    AudioChunk, SttConfig, SttProvider, SttProviderType, Transcription,
-};
-use app_lib::infrastructure::stt::{DeepgramProvider, AssemblyAIProvider};
+use app_lib::domain::{AudioChunk, SttConfig, SttProvider, SttProviderType, Transcription};
+use app_lib::infrastructure::stt::{AssemblyAIProvider, DeepgramProvider};
 
 mod test_support;
 use test_support::{noop_connection_quality, noop_error, stderr_error, SttConfigTestExt};
@@ -62,7 +63,10 @@ async fn test_websocket_ping_pong_mechanism() {
             // Проверяем что можем отправлять данные (значит Ping/Pong работает)
             let chunk = AudioChunk::new(vec![100i16; 1600], 16000, 1);
             let result = provider.send_audio(&chunk).await;
-            assert!(result.is_ok(), "Соединение должно быть живым благодаря Ping/Pong");
+            assert!(
+                result.is_ok(),
+                "Соединение должно быть живым благодаря Ping/Pong"
+            );
         }
     }
 
@@ -147,7 +151,12 @@ async fn test_websocket_graceful_vs_abrupt_close() {
     let on_e = noop_error();
 
     provider1
-        .start_stream(on_p.clone(), on_f.clone(), on_e.clone(), noop_connection_quality())
+        .start_stream(
+            on_p.clone(),
+            on_f.clone(),
+            on_e.clone(),
+            noop_connection_quality(),
+        )
         .await
         .unwrap();
 
@@ -162,7 +171,10 @@ async fn test_websocket_graceful_vs_abrupt_close() {
     provider1.stop_stream().await.unwrap();
     let graceful_duration = graceful_start.elapsed();
 
-    println!("   Graceful close завершен за {:.2}s", graceful_duration.as_secs_f32());
+    println!(
+        "   Graceful close завершен за {:.2}s",
+        graceful_duration.as_secs_f32()
+    );
 
     sleep(Duration::from_millis(500)).await;
 
@@ -186,14 +198,26 @@ async fn test_websocket_graceful_vs_abrupt_close() {
     provider2.abort().await.unwrap();
     let abrupt_duration = abrupt_start.elapsed();
 
-    println!("   Abrupt close завершен за {:.2}s", abrupt_duration.as_secs_f32());
+    println!(
+        "   Abrupt close завершен за {:.2}s",
+        abrupt_duration.as_secs_f32()
+    );
 
     println!("\n📊 Сравнение:");
-    println!("   Graceful close: {:.2}s (ждет финальные результаты)", graceful_duration.as_secs_f32());
-    println!("   Abrupt close:   {:.2}s (немедленное прерывание)", abrupt_duration.as_secs_f32());
+    println!(
+        "   Graceful close: {:.2}s (ждет финальные результаты)",
+        graceful_duration.as_secs_f32()
+    );
+    println!(
+        "   Abrupt close:   {:.2}s (немедленное прерывание)",
+        abrupt_duration.as_secs_f32()
+    );
 
     // Abrupt должен быть значительно быстрее
-    assert!(abrupt_duration < graceful_duration, "Abort должен быть быстрее graceful close");
+    assert!(
+        abrupt_duration < graceful_duration,
+        "Abort должен быть быстрее graceful close"
+    );
 
     println!("✅ Оба типа закрытия работают корректно");
 }
@@ -275,7 +299,10 @@ async fn test_websocket_concurrent_sending() {
     provider.stop_stream().await.unwrap();
 
     let transcriptions = sent_count.load(Ordering::SeqCst);
-    println!("\n📊 Результат: получено {} транскрипций от 5 конкурентных задач", transcriptions);
+    println!(
+        "\n📊 Результат: получено {} транскрипций от 5 конкурентных задач",
+        transcriptions
+    );
     println!("✅ Конкурентная отправка работает корректно");
 }
 
@@ -391,7 +418,12 @@ async fn test_websocket_rapid_start_stop() {
         println!("   Цикл {}/10", i);
 
         provider
-            .start_stream(on_p.clone(), on_f.clone(), on_e.clone(), noop_connection_quality())
+            .start_stream(
+                on_p.clone(),
+                on_f.clone(),
+                on_e.clone(),
+                noop_connection_quality(),
+            )
             .await
             .unwrap();
 
@@ -542,8 +574,11 @@ async fn test_websocket_huge_chunks() {
 
         assert!(result.is_ok(), "Отправка больших чанков должна работать");
 
-        println!("   Чанк {} (1 сек аудио) отправлен за {:.1}ms",
-            i + 1, send_duration.as_millis());
+        println!(
+            "   Чанк {} (1 сек аудио) отправлен за {:.1}ms",
+            i + 1,
+            send_duration.as_millis()
+        );
 
         sleep(Duration::from_millis(200)).await;
     }
@@ -693,7 +728,11 @@ async fn test_websocket_send_latency_measurement() {
         latencies.push(latency.as_micros());
 
         if i % 10 == 0 {
-            println!("   Чанк {}: {:.2}ms", i, latency.as_micros() as f32 / 1000.0);
+            println!(
+                "   Чанк {}: {:.2}ms",
+                i,
+                latency.as_micros() as f32 / 1000.0
+            );
         }
 
         sleep(Duration::from_millis(100)).await;
@@ -722,7 +761,10 @@ async fn test_websocket_send_latency_measurement() {
     println!("   Max:      {:.2}ms", *max as f32 / 1000.0);
 
     // Латентность должна быть разумной (< 100ms для большинства)
-    assert!((p95 as f32 / 1000.0) < 100.0, "P95 латентность должна быть < 100ms");
+    assert!(
+        (p95 as f32 / 1000.0) < 100.0,
+        "P95 латентность должна быть < 100ms"
+    );
 
     println!("✅ Латентность отправки в пределах нормы");
 }
@@ -805,12 +847,18 @@ async fn test_websocket_transcription_rate() {
     let times_clone = transcription_times.clone();
 
     let on_partial = Arc::new(move |t: Transcription| {
-        times_clone.lock().unwrap().push((Instant::now(), t.text.clone(), false));
+        times_clone
+            .lock()
+            .unwrap()
+            .push((Instant::now(), t.text.clone(), false));
     });
 
     let times_final = transcription_times.clone();
     let on_final = Arc::new(move |t: Transcription| {
-        times_final.lock().unwrap().push((Instant::now(), t.text.clone(), true));
+        times_final
+            .lock()
+            .unwrap()
+            .push((Instant::now(), t.text.clone(), true));
     });
 
     let on_error = noop_error();
@@ -911,7 +959,11 @@ async fn test_websocket_throughput() {
     println!("📊 Результаты:");
     println!("   Длительность: {:.2}s", actual_duration);
     println!("   Отправлено чанков: {}", chunks_sent);
-    println!("   Отправлено байт: {} ({:.2} KB)", bytes_sent, bytes_sent as f32 / 1024.0);
+    println!(
+        "   Отправлено байт: {} ({:.2} KB)",
+        bytes_sent,
+        bytes_sent as f32 / 1024.0
+    );
     println!("   Throughput: {:.2} KB/s", throughput_bytes / 1024.0);
     println!("   Throughput: {:.4} Mbps", throughput_mbps);
 

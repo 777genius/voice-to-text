@@ -72,7 +72,7 @@ impl Transcription {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecordingStatus {
     Idle,
-    Starting, // Запись инициализируется (WebSocket подключается, audio capture запускается)
+    Starting,  // Запись инициализируется (WebSocket подключается, audio capture запускается)
     Recording, // Запись активна и работает
     Processing,
     Error,
@@ -114,15 +114,13 @@ mod tests {
 
     #[test]
     fn test_transcription_with_confidence() {
-        let t = Transcription::new("test".to_string(), true)
-            .with_confidence(0.95);
+        let t = Transcription::new("test".to_string(), true).with_confidence(0.95);
         assert_eq!(t.confidence, Some(0.95));
     }
 
     #[test]
     fn test_transcription_with_language() {
-        let t = Transcription::new("test".to_string(), true)
-            .with_language("en".to_string());
+        let t = Transcription::new("test".to_string(), true).with_language("en".to_string());
         assert_eq!(t.language, Some("en".to_string()));
     }
 

@@ -44,14 +44,10 @@ pub enum ClientMessage {
 #[allow(dead_code)]
 pub enum ServerMessage {
     /// Сессия готова к приёму аудио
-    Ready {
-        session_id: String,
-    },
+    Ready { session_id: String },
 
     /// Подтверждение приёма аудио чанка
-    Ack {
-        seq: u64,
-    },
+    Ack { seq: u64 },
 
     /// Промежуточный результат (может измениться)
     Partial {
@@ -86,10 +82,7 @@ pub enum ServerMessage {
     },
 
     /// Ошибка
-    Error {
-        code: String,
-        message: String,
-    },
+    Error { code: String, message: String },
 }
 
 #[cfg(test)]
@@ -146,7 +139,11 @@ mod tests {
         let msg: ServerMessage = serde_json::from_str(json).unwrap();
 
         match msg {
-            ServerMessage::UsageUpdate { seconds_used, seconds_remaining_plan, .. } => {
+            ServerMessage::UsageUpdate {
+                seconds_used,
+                seconds_remaining_plan,
+                ..
+            } => {
                 assert!((seconds_used - 10.5).abs() < 0.01);
                 assert!((seconds_remaining_plan - 989.5).abs() < 0.01);
             }

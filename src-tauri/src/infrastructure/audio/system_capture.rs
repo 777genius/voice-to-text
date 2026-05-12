@@ -6,7 +6,9 @@ use rubato::{
 };
 use std::sync::{Arc, Mutex};
 
-use crate::domain::{AudioCapture, AudioChunk, AudioChunkCallback, AudioConfig, AudioError, AudioResult};
+use crate::domain::{
+    AudioCapture, AudioChunk, AudioChunkCallback, AudioConfig, AudioError, AudioResult,
+};
 
 /// Real system audio capture using cpal + rubato resampling
 ///
@@ -70,7 +72,8 @@ impl SystemAudioCapture {
     /// If device_name is None, uses default input device
     pub fn with_device(device_name: Option<String>) -> AudioResult<Self> {
         let host = cpal::default_host();
-        let (device, native_config) = Self::select_device_and_config(&host, device_name.as_deref())?;
+        let (device, native_config) =
+            Self::select_device_and_config(&host, device_name.as_deref())?;
 
         Ok(Self {
             requested_device_name: device_name,
@@ -98,9 +101,10 @@ impl SystemAudioCapture {
         let device = if let Some(name) = device_name.and_then(Self::normalize_device_name) {
             log::info!("Looking for audio input device: {}", name);
 
-            host
-                .input_devices()
-                .map_err(|e| AudioError::DeviceNotFound(format!("Failed to enumerate devices: {}", e)))?
+            host.input_devices()
+                .map_err(|e| {
+                    AudioError::DeviceNotFound(format!("Failed to enumerate devices: {}", e))
+                })?
                 .find(|d| {
                     d.name()
                         .ok()
@@ -115,8 +119,9 @@ impl SystemAudioCapture {
                 })?
         } else {
             log::info!("Using default audio input device");
-            host.default_input_device()
-                .ok_or_else(|| AudioError::DeviceNotFound("No input device available".to_string()))?
+            host.default_input_device().ok_or_else(|| {
+                AudioError::DeviceNotFound("No input device available".to_string())
+            })?
         };
 
         let selected_device_name = device.name().unwrap_or_else(|_| "Unknown".to_string());
@@ -130,9 +135,13 @@ impl SystemAudioCapture {
                 log::warn!("Failed to get default input config: {}. Falling back to supported_input_configs()", e);
                 let cfg_range = device
                     .supported_input_configs()
-                    .map_err(|e| AudioError::Configuration(format!("Failed to get supported configs: {}", e)))?
+                    .map_err(|e| {
+                        AudioError::Configuration(format!("Failed to get supported configs: {}", e))
+                    })?
                     .next()
-                    .ok_or_else(|| AudioError::Configuration("No supported input configs found".to_string()))?;
+                    .ok_or_else(|| {
+                        AudioError::Configuration("No supported input configs found".to_string())
+                    })?;
                 cfg_range.with_max_sample_rate()
             }
         };
@@ -196,10 +205,7 @@ impl SystemAudioCapture {
     }
 
     /// Create resampler for converting native sample rate to 16kHz
-    fn create_resampler(
-        from_sample_rate: u32,
-        channels: usize,
-    ) -> AudioResult<SincFixedIn<f32>> {
+    fn create_resampler(from_sample_rate: u32, channels: usize) -> AudioResult<SincFixedIn<f32>> {
         let params = SincInterpolationParameters {
             sinc_len: 256,
             f_cutoff: 0.95,
@@ -234,10 +240,7 @@ impl SystemAudioCapture {
     /// Convert unsigned i16 PCM (u16) to signed i16 PCM
     #[inline]
     fn u16_to_i16(samples: &[u16]) -> Vec<i16> {
-        samples
-            .iter()
-            .map(|&s| (s as i32 - 32768) as i16)
-            .collect()
+        samples.iter().map(|&s| (s as i32 - 32768) as i16).collect()
     }
 
     /// Downmix N-channel PCM to mono by averaging channels
@@ -275,9 +278,7 @@ impl AudioCapture for SystemAudioCapture {
 
     async fn start_capture(&mut self, on_chunk: AudioChunkCallback) -> AudioResult<()> {
         if self.is_capturing {
-            return Err(AudioError::Capture(
-                "Already capturing audio".to_string(),
-            ));
+            return Err(AudioError::Capture("Already capturing audio".to_string()));
         }
 
         // На некоторых устройствах (особенно на macOS) stream может не собраться с первого раза,
@@ -338,7 +339,8 @@ impl AudioCapture for SystemAudioCapture {
                     let chunk: Vec<i16> = buffer.drain(..RESAMPLER_CHUNK_SIZE).collect();
 
                     let final_samples = if let Some(ref rs) = resampler_clone {
-                        let float_chunk: Vec<f32> = chunk.iter().map(|&s| s as f32 / 32767.0).collect();
+                        let float_chunk: Vec<f32> =
+                            chunk.iter().map(|&s| s as f32 / 32767.0).collect();
                         let resampler_input = vec![float_chunk];
 
                         let mut resampler_guard = match rs.lock() {
@@ -361,7 +363,8 @@ impl AudioCapture for SystemAudioCapture {
                         chunk
                     };
 
-                    let audio_chunk = AudioChunk::new(final_samples, TARGET_SAMPLE_RATE, TARGET_CHANNELS);
+                    let audio_chunk =
+                        AudioChunk::new(final_samples, TARGET_SAMPLE_RATE, TARGET_CHANNELS);
                     on_chunk_cb(audio_chunk);
                 }
             };
@@ -381,7 +384,9 @@ impl AudioCapture for SystemAudioCapture {
                         err_fn,
                         None,
                     )
-                    .map_err(|e| AudioError::Capture(format!("Failed to build audio stream: {}", e))),
+                    .map_err(|e| {
+                        AudioError::Capture(format!("Failed to build audio stream: {}", e))
+                    }),
                 SampleFormat::I16 => self
                     .device
                     .build_input_stream(
@@ -392,7 +397,9 @@ impl AudioCapture for SystemAudioCapture {
                         err_fn,
                         None,
                     )
-                    .map_err(|e| AudioError::Capture(format!("Failed to build audio stream: {}", e))),
+                    .map_err(|e| {
+                        AudioError::Capture(format!("Failed to build audio stream: {}", e))
+                    }),
                 SampleFormat::U16 => self
                     .device
                     .build_input_stream(
@@ -403,7 +410,9 @@ impl AudioCapture for SystemAudioCapture {
                         err_fn,
                         None,
                     )
-                    .map_err(|e| AudioError::Capture(format!("Failed to build audio stream: {}", e))),
+                    .map_err(|e| {
+                        AudioError::Capture(format!("Failed to build audio stream: {}", e))
+                    }),
                 other => Err(AudioError::Configuration(format!(
                     "Unsupported input sample format: {:?}",
                     other
@@ -453,7 +462,9 @@ impl AudioCapture for SystemAudioCapture {
             return Ok(());
         }
 
-        Err(AudioError::Capture("Failed to start audio capture after retry".to_string()))
+        Err(AudioError::Capture(
+            "Failed to start audio capture after retry".to_string(),
+        ))
     }
 
     async fn stop_capture(&mut self) -> AudioResult<()> {
@@ -526,14 +537,22 @@ mod tests {
     #[test]
     fn test_f32_to_i16_edge_cases() {
         // Тест граничных случаев конвертации
-        let edge_cases = vec![-1.5, 1.5, -2.0, 2.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY];
+        let edge_cases = vec![
+            -1.5,
+            1.5,
+            -2.0,
+            2.0,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ];
         let output = SystemAudioCapture::f32_to_i16(&edge_cases);
 
         // Значения должны быть clamped в диапазон [-1.0, 1.0]
         assert_eq!(output[0], -32767); // -1.5 clamped to -1.0
-        assert_eq!(output[1], 32767);  // 1.5 clamped to 1.0
+        assert_eq!(output[1], 32767); // 1.5 clamped to 1.0
         assert_eq!(output[2], -32767); // -2.0 clamped to -1.0
-        assert_eq!(output[3], 32767);  // 2.0 clamped to 1.0
+        assert_eq!(output[3], 32767); // 2.0 clamped to 1.0
     }
 
     #[test]

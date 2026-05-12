@@ -59,18 +59,10 @@ fn map_part_to_parser_token(token: &str) -> String {
         "/" => "Slash".to_string(),
 
         // Already-token forms we support (keep as-is).
-        "Backquote"
-        | "Minus"
-        | "Equal"
-        | "BracketLeft"
-        | "BracketRight"
-        | "Backslash"
-        | "IntlBackslash"
-        | "Semicolon"
-        | "Quote"
-        | "Comma"
-        | "Period"
-        | "Slash" => token.to_string(),
+        "Backquote" | "Minus" | "Equal" | "BracketLeft" | "BracketRight" | "Backslash"
+        | "IntlBackslash" | "Semicolon" | "Quote" | "Comma" | "Period" | "Slash" => {
+            token.to_string()
+        }
 
         other => other.to_string(),
     }
@@ -90,7 +82,11 @@ mod tests {
     #[test]
     fn normalize_bare_backquote_symbol_to_token() {
         let out = normalize_recording_hotkey("`").expect("must be normalized");
-        assert!(out.parse::<Shortcut>().is_ok(), "normalized shortcut must parse: {}", out);
+        assert!(
+            out.parse::<Shortcut>().is_ok(),
+            "normalized shortcut must parse: {}",
+            out
+        );
         // В разных версиях/платформах парсер может принимать и "`", и "Backquote".
         assert!(
             out == "`" || out == "Backquote",
@@ -101,9 +97,12 @@ mod tests {
 
     #[test]
     fn normalize_converts_backquote_token_with_modifier() {
-        let out =
-            normalize_recording_hotkey("CmdOrCtrl+Backquote").expect("must be valid after normalize");
-        assert!(out.parse::<Shortcut>().is_ok(), "normalized shortcut must parse: {}", out);
+        let out = normalize_recording_hotkey("CmdOrCtrl+Backquote")
+            .expect("must be valid after normalize");
+        assert!(
+            out.parse::<Shortcut>().is_ok(),
+            "normalized shortcut must parse: {}",
+            out
+        );
     }
 }
-

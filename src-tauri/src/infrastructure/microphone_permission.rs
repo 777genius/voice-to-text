@@ -34,7 +34,8 @@ pub fn microphone_permission_status() -> MicrophonePermissionStatus {
 
     unsafe {
         // AVMediaTypeAudio == "soun"
-        let media: id = msg_send![class!(NSString), stringWithUTF8String: b"soun\0".as_ptr() as *const i8];
+        let media: id =
+            msg_send![class!(NSString), stringWithUTF8String: b"soun\0".as_ptr() as *const i8];
         let raw: i32 = msg_send![class!(AVCaptureDevice), authorizationStatusForMediaType: media];
         let status = status_from_raw(raw);
 
@@ -81,4 +82,3 @@ pub fn open_microphone_settings() -> Result<()> {
 pub fn open_microphone_settings() -> Result<()> {
     Ok(())
 }
-

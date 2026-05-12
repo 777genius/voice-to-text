@@ -8,11 +8,11 @@ use futures_util::{SinkExt, StreamExt};
 use http::Request;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
-use tokio::net::TcpStream;
 
 use crate::domain::{
     AudioChunk, ConnectionQualityCallback, ErrorCallback, SttConfig, SttConnectionCategory,
@@ -236,7 +236,11 @@ impl SttProvider for BackendProvider {
         log::info!(
             "BackendProvider: config.backend_auth_token present: {}, len: {}",
             config.backend_auth_token.is_some(),
-            config.backend_auth_token.as_ref().map(|t| t.len()).unwrap_or(0)
+            config
+                .backend_auth_token
+                .as_ref()
+                .map(|t| t.len())
+                .unwrap_or(0)
         );
 
         let auth_token = if cfg!(debug_assertions) {
@@ -310,7 +314,10 @@ impl SttProvider for BackendProvider {
         let request = Request::builder()
             .method("GET")
             .uri(&ws_url)
-            .header("Host", self.backend_url.replace("wss://", "").replace("ws://", ""))
+            .header(
+                "Host",
+                self.backend_url.replace("wss://", "").replace("ws://", ""),
+            )
             .header("Connection", "Upgrade")
             .header("Upgrade", "websocket")
             .header("Sec-WebSocket-Version", "13")
@@ -555,7 +562,11 @@ impl SttProvider for BackendProvider {
                 .map(|t| t.trim().to_string())
                 .filter(|t| !t.is_empty())
                 .collect();
-            if terms.is_empty() { None } else { Some(terms) }
+            if terms.is_empty() {
+                None
+            } else {
+                Some(terms)
+            }
         });
 
         let config_msg = ClientMessage::Config {
@@ -613,7 +624,8 @@ impl SttProvider for BackendProvider {
                                         // Это даёт чёткую границу между "старыми" и "новыми" результатами.
                                         let swapped = {
                                             let mut state = callbacks_state.lock().await;
-                                            if state.swap_on_next_ack && seq > state.swap_after_seq {
+                                            if state.swap_on_next_ack && seq > state.swap_after_seq
+                                            {
                                                 state.swap_on_next_ack = false;
                                                 state.swap_after_seq = 0;
                                                 if state.pending.is_some() {
@@ -677,7 +689,8 @@ impl SttProvider for BackendProvider {
                                     } => {
                                         let remaining = seconds_remaining_total
                                             .unwrap_or(seconds_remaining_plan);
-                                        shared_remaining.store(remaining.to_bits(), Ordering::SeqCst);
+                                        shared_remaining
+                                            .store(remaining.to_bits(), Ordering::SeqCst);
                                         log::debug!(
                                             "Usage: used={:.1}s, remaining={:.1}s",
                                             seconds_used,
@@ -718,8 +731,12 @@ impl SttProvider for BackendProvider {
                                         if let Some(cb) = cb {
                                             let category = match code.as_str() {
                                                 "timeout" => Some(SttConnectionCategory::Timeout),
-                                                "rate_limit" | "too_many_sessions" => Some(SttConnectionCategory::RateLimited),
-                                                "LIMIT_EXCEEDED" => Some(SttConnectionCategory::LimitExceeded),
+                                                "rate_limit" | "too_many_sessions" => {
+                                                    Some(SttConnectionCategory::RateLimited)
+                                                }
+                                                "LIMIT_EXCEEDED" => {
+                                                    Some(SttConnectionCategory::LimitExceeded)
+                                                }
                                                 _ => Some(SttConnectionCategory::Unknown),
                                             };
                                             cb(SttError::Connection(SttConnectionError {
@@ -755,7 +772,9 @@ impl SttProvider for BackendProvider {
                             let code_u16 = frame.as_ref().map(|f| u16::from(f.code));
                             let mut category = match code_u16 {
                                 Some(1008) => SttConnectionCategory::LimitExceeded,
-                                Some(1012) | Some(1013) | Some(1014) => SttConnectionCategory::ServerUnavailable,
+                                Some(1012) | Some(1013) | Some(1014) => {
+                                    SttConnectionCategory::ServerUnavailable
+                                }
                                 Some(1000) => SttConnectionCategory::Closed,
                                 _ => SttConnectionCategory::ServerUnavailable,
                             };
@@ -815,14 +834,24 @@ impl SttProvider for BackendProvider {
                                     let kind_str = format!("{:?}", kind);
                                     let os_error = ioe.raw_os_error();
                                     let category = match kind {
-                                        std::io::ErrorKind::ConnectionRefused => SttConnectionCategory::Refused,
-                                        std::io::ErrorKind::ConnectionReset => SttConnectionCategory::Reset,
-                                        std::io::ErrorKind::BrokenPipe => SttConnectionCategory::ServerUnavailable,
+                                        std::io::ErrorKind::ConnectionRefused => {
+                                            SttConnectionCategory::Refused
+                                        }
+                                        std::io::ErrorKind::ConnectionReset => {
+                                            SttConnectionCategory::Reset
+                                        }
+                                        std::io::ErrorKind::BrokenPipe => {
+                                            SttConnectionCategory::ServerUnavailable
+                                        }
                                         std::io::ErrorKind::NotConnected
                                         | std::io::ErrorKind::NetworkUnreachable
                                         | std::io::ErrorKind::HostUnreachable
-                                        | std::io::ErrorKind::AddrNotAvailable => SttConnectionCategory::Offline,
-                                        std::io::ErrorKind::TimedOut => SttConnectionCategory::Timeout,
+                                        | std::io::ErrorKind::AddrNotAvailable => {
+                                            SttConnectionCategory::Offline
+                                        }
+                                        std::io::ErrorKind::TimedOut => {
+                                            SttConnectionCategory::Timeout
+                                        }
                                         _ => SttConnectionCategory::Unknown,
                                     };
                                     SttConnectionDetails {
@@ -832,15 +861,19 @@ impl SttProvider for BackendProvider {
                                         ..Default::default()
                                     }
                                 }
-                                tokio_tungstenite::tungstenite::Error::Tls(_) => SttConnectionDetails {
-                                    category: Some(SttConnectionCategory::Tls),
-                                    ..Default::default()
-                                },
+                                tokio_tungstenite::tungstenite::Error::Tls(_) => {
+                                    SttConnectionDetails {
+                                        category: Some(SttConnectionCategory::Tls),
+                                        ..Default::default()
+                                    }
+                                }
                                 tokio_tungstenite::tungstenite::Error::ConnectionClosed
-                                | tokio_tungstenite::tungstenite::Error::AlreadyClosed => SttConnectionDetails {
-                                    category: Some(SttConnectionCategory::Closed),
-                                    ..Default::default()
-                                },
+                                | tokio_tungstenite::tungstenite::Error::AlreadyClosed => {
+                                    SttConnectionDetails {
+                                        category: Some(SttConnectionCategory::Closed),
+                                        ..Default::default()
+                                    }
+                                }
                                 _ => SttConnectionDetails {
                                     category: Some(SttConnectionCategory::Unknown),
                                     ..Default::default()
@@ -969,7 +1002,8 @@ impl SttProvider for BackendProvider {
                 .batch_started_at
                 .map(|t| now.saturating_duration_since(t).as_millis() as u64)
                 .unwrap_or(0);
-            let ready_to_send = self.audio_batch_frames >= MIN_FRAMES_PER_MESSAGE || batch_age_ms >= MAX_BATCH_WAIT_MS;
+            let ready_to_send = self.audio_batch_frames >= MIN_FRAMES_PER_MESSAGE
+                || batch_age_ms >= MAX_BATCH_WAIT_MS;
             if !ready_to_send {
                 return Ok(());
             }
@@ -989,7 +1023,9 @@ impl SttProvider for BackendProvider {
             if next_at > now2 {
                 tokio::time::sleep_until(tokio::time::Instant::from_std(next_at)).await;
             }
-            self.next_send_at = Some(std::time::Instant::now() + std::time::Duration::from_millis(MIN_SEND_INTERVAL_MS));
+            self.next_send_at = Some(
+                std::time::Instant::now() + std::time::Duration::from_millis(MIN_SEND_INTERVAL_MS),
+            );
 
             self.sent_chunks_count += 1;
             self.sent_bytes_total += bytes.len();
@@ -1050,7 +1086,8 @@ impl SttProvider for BackendProvider {
                     let mut guard = ws_write.lock().await;
                     guard.send(Message::Binary(bytes)).await
                 };
-                let _ = tokio::time::timeout(Duration::from_secs(WS_SEND_TIMEOUT_SECS), flush_fut).await;
+                let _ = tokio::time::timeout(Duration::from_secs(WS_SEND_TIMEOUT_SECS), flush_fut)
+                    .await;
             }
         }
 
@@ -1073,7 +1110,8 @@ impl SttProvider for BackendProvider {
                 let mut guard = ws_write.lock().await;
                 guard.close().await
             };
-            let _ = tokio::time::timeout(Duration::from_secs(WS_SEND_TIMEOUT_SECS), close_fut).await;
+            let _ =
+                tokio::time::timeout(Duration::from_secs(WS_SEND_TIMEOUT_SECS), close_fut).await;
         }
 
         // Останавливаем receiver task
@@ -1127,7 +1165,8 @@ impl SttProvider for BackendProvider {
                 let mut guard = ws_write.lock().await;
                 guard.close().await
             };
-            let _ = tokio::time::timeout(Duration::from_secs(WS_SEND_TIMEOUT_SECS), close_fut).await;
+            let _ =
+                tokio::time::timeout(Duration::from_secs(WS_SEND_TIMEOUT_SECS), close_fut).await;
         }
 
         if let Some(task) = self.receiver_task.take() {
@@ -1170,7 +1209,8 @@ impl SttProvider for BackendProvider {
                     let mut guard = ws_write.lock().await;
                     guard.send(Message::Binary(bytes)).await
                 };
-                let _ = tokio::time::timeout(Duration::from_secs(WS_SEND_TIMEOUT_SECS), flush_fut).await;
+                let _ = tokio::time::timeout(Duration::from_secs(WS_SEND_TIMEOUT_SECS), flush_fut)
+                    .await;
             }
         }
 

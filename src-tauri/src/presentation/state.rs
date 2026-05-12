@@ -1,14 +1,13 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::RwLock;
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
+use tokio::sync::RwLock;
 
 use crate::application::TranscriptionService;
 use crate::domain::{AppConfig, AudioCapture, AudioError, Transcription, UiPreferences};
 use crate::infrastructure::{
     audio::{SystemAudioCapture, VadCaptureWrapper, VadProcessor},
-    AuthSession, AuthStore, AuthStoreData, AuthUser, ConfigStore,
-    DefaultSttProviderFactory,
+    AuthSession, AuthStore, AuthStoreData, AuthUser, ConfigStore, DefaultSttProviderFactory,
 };
 
 /// State for microphone testing
@@ -167,7 +166,10 @@ impl AppState {
                 log::error!("Failed to initialize VAD: {}. Proceeding without VAD.", e);
                 // Fallback: use system audio without VAD
                 let stt_factory = Arc::new(DefaultSttProviderFactory::new());
-                let service = Arc::new(TranscriptionService::new(Box::new(system_audio), stt_factory));
+                let service = Arc::new(TranscriptionService::new(
+                    Box::new(system_audio),
+                    stt_factory,
+                ));
 
                 // Создаем dummy channel для VAD (не будет использоваться без VAD)
                 let (vad_tx, vad_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -222,8 +224,10 @@ impl AppState {
 
         let transcription_service = Arc::new(TranscriptionService::new(audio_capture, stt_factory));
 
-        log::info!("AppState initialized with SystemAudioCapture + VAD (timeout: {}ms)",
-            app_config.vad_silence_timeout_ms);
+        log::info!(
+            "AppState initialized with SystemAudioCapture + VAD (timeout: {}ms)",
+            app_config.vad_silence_timeout_ms
+        );
 
         Self {
             transcription_service,
@@ -328,7 +332,12 @@ impl AppState {
         AppState::emit_invalidation(app_handle, "app-config", revision, None).await;
     }
 
-    async fn emit_invalidation(app_handle: &AppHandle, topic: &str, revision: String, source_id: Option<String>) {
+    async fn emit_invalidation(
+        app_handle: &AppHandle,
+        topic: &str,
+        revision: String,
+        source_id: Option<String>,
+    ) {
         let _ = app_handle.emit(
             crate::presentation::events::EVENT_STATE_SYNC_INVALIDATION,
             crate::presentation::StateSyncInvalidationPayload {
@@ -463,7 +472,10 @@ impl AppState {
                     Ok(c) => c,
                     Err(e) => {
                         log::warn!("[auth-refresh] failed to build HTTP client: {}", e);
-                        tokio::time::sleep(tokio::time::Duration::from_secs(ERROR_RETRY_DELAY_SECS)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(
+                            ERROR_RETRY_DELAY_SECS,
+                        ))
+                        .await;
                         continue;
                     }
                 };
@@ -482,7 +494,10 @@ impl AppState {
                     Ok(r) => r,
                     Err(e) => {
                         log::warn!("[auth-refresh] network error: {}", e);
-                        tokio::time::sleep(tokio::time::Duration::from_secs(ERROR_RETRY_DELAY_SECS)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(
+                            ERROR_RETRY_DELAY_SECS,
+                        ))
+                        .await;
                         continue;
                     }
                 };
@@ -490,9 +505,7 @@ impl AppState {
                 if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
                     let now_ms = chrono::Utc::now().timestamp_millis();
                     let access_ttl_ms = sess2.access_expires_at_ms - now_ms;
-                    let refresh_ttl_ms = sess2
-                        .refresh_expires_at_ms
-                        .map(|ms| ms - now_ms);
+                    let refresh_ttl_ms = sess2.refresh_expires_at_ms.map(|ms| ms - now_ms);
 
                     // Считываем ответ, чтобы логировать серверный код/сообщение (важно для диагностики).
                     let body_text = resp.text().await.unwrap_or_default();
@@ -500,7 +513,10 @@ impl AppState {
                         let v: serde_json::Value = serde_json::from_str(&body_text).ok()?;
                         // envelope: { error: { code, message } }
                         let err = v.get("error")?;
-                        let code = err.get("code").and_then(|x| x.as_str()).map(|s| s.to_string());
+                        let code = err
+                            .get("code")
+                            .and_then(|x| x.as_str())
+                            .map(|s| s.to_string());
                         let msg = err
                             .get("message")
                             .and_then(|x| x.as_str())
@@ -516,8 +532,10 @@ impl AppState {
                     let became_stale = {
                         let store = auth_store_arc.read().await;
                         let current_device_id = store.device_id.clone();
-                        let current_refresh = store.session.as_ref().and_then(|s| s.refresh_token.clone());
-                        current_device_id != device_id2 || current_refresh != Some(refresh_token2.clone())
+                        let current_refresh =
+                            store.session.as_ref().and_then(|s| s.refresh_token.clone());
+                        current_device_id != device_id2
+                            || current_refresh != Some(refresh_token2.clone())
                     };
 
                     if became_stale {
@@ -549,10 +567,22 @@ impl AppState {
                     *is_authenticated_arc.write().await = false;
 
                     let rev_state = AppState::bump_revision(&auth_state_revision).await;
-                    AppState::emit_invalidation(&app_handle_for_task, "auth-state", rev_state, None).await;
+                    AppState::emit_invalidation(
+                        &app_handle_for_task,
+                        "auth-state",
+                        rev_state,
+                        None,
+                    )
+                    .await;
 
                     let rev_session = AppState::bump_revision(&auth_session_revision).await;
-                    AppState::emit_invalidation(&app_handle_for_task, "auth-session", rev_session, None).await;
+                    AppState::emit_invalidation(
+                        &app_handle_for_task,
+                        "auth-session",
+                        rev_session,
+                        None,
+                    )
+                    .await;
 
                     // Clear STT token
                     if let Some(state) = app_handle_for_task.try_state::<AppState>() {
@@ -567,7 +597,8 @@ impl AppState {
                         "[auth-refresh] refresh failed: status={}",
                         resp.status().as_u16()
                     );
-                    tokio::time::sleep(tokio::time::Duration::from_secs(ERROR_RETRY_DELAY_SECS)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(ERROR_RETRY_DELAY_SECS))
+                        .await;
                     continue;
                 }
 
@@ -575,19 +606,29 @@ impl AppState {
                     Ok(j) => j,
                     Err(e) => {
                         log::warn!("[auth-refresh] invalid JSON: {}", e);
-                        tokio::time::sleep(tokio::time::Duration::from_secs(ERROR_RETRY_DELAY_SECS)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(
+                            ERROR_RETRY_DELAY_SECS,
+                        ))
+                        .await;
                         continue;
                     }
                 };
 
-                let access_expires_at_ms = match AppState::parse_rfc3339_to_ms(&json.data.access_expires_at) {
-                    Some(ms) => ms,
-                    None => {
-                        log::warn!("[auth-refresh] bad access_expires_at: {}", json.data.access_expires_at);
-                        tokio::time::sleep(tokio::time::Duration::from_secs(ERROR_RETRY_DELAY_SECS)).await;
-                        continue;
-                    }
-                };
+                let access_expires_at_ms =
+                    match AppState::parse_rfc3339_to_ms(&json.data.access_expires_at) {
+                        Some(ms) => ms,
+                        None => {
+                            log::warn!(
+                                "[auth-refresh] bad access_expires_at: {}",
+                                json.data.access_expires_at
+                            );
+                            tokio::time::sleep(tokio::time::Duration::from_secs(
+                                ERROR_RETRY_DELAY_SECS,
+                            ))
+                            .await;
+                            continue;
+                        }
+                    };
 
                 let refresh_expires_at_ms = json
                     .data
@@ -627,7 +668,13 @@ impl AppState {
 
                 // Emit auth-session invalidation (auth-state stays the same)
                 let rev_session = AppState::bump_revision(&auth_session_revision).await;
-                AppState::emit_invalidation(&app_handle_for_task, "auth-session", rev_session, None).await;
+                AppState::emit_invalidation(
+                    &app_handle_for_task,
+                    "auth-session",
+                    rev_session,
+                    None,
+                )
+                .await;
 
                 // Continue loop (will schedule next refresh)
                 let _ = device_id; // silence unused warning in some builds
@@ -655,9 +702,7 @@ impl AppState {
                     false
                 };
                 if manual_stop_only {
-                    log::info!(
-                        "VAD timeout ignored - keep_recording_until_manual_stop is enabled"
-                    );
+                    log::info!("VAD timeout ignored - keep_recording_until_manual_stop is enabled");
                     continue;
                 }
 

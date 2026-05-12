@@ -50,4 +50,3 @@ impl SttConfigTestExt for SttConfig {
         self
     }
 }
-

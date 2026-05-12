@@ -1,5 +1,9 @@
-use crate::domain::{SttConfig, SttError, SttProvider, SttProviderFactory, SttProviderType, SttResult};
-use crate::infrastructure::stt::{AssemblyAIProvider, BackendProvider, DeepgramProvider, WhisperLocalProvider};
+use crate::domain::{
+    SttConfig, SttError, SttProvider, SttProviderFactory, SttProviderType, SttResult,
+};
+use crate::infrastructure::stt::{
+    AssemblyAIProvider, BackendProvider, DeepgramProvider, WhisperLocalProvider,
+};
 
 /// Factory for creating STT providers based on configuration
 ///

@@ -2,9 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::sleep;
 
-use app_lib::domain::{
-    AudioChunk, SttConfig, SttProvider, SttProviderType, Transcription,
-};
+use app_lib::domain::{AudioChunk, SttConfig, SttProvider, SttProviderType, Transcription};
 use app_lib::infrastructure::stt::AssemblyAIProvider;
 
 mod test_support;
@@ -16,8 +14,7 @@ fn get_api_key() -> String {
     let _ = dotenv::dotenv();
 
     // Читаем из переменной окружения
-    std::env::var("ASSEMBLY_AI_KEY")
-        .unwrap_or_else(|_| "test-key".to_string())
+    std::env::var("ASSEMBLY_AI_KEY").unwrap_or_else(|_| "test-key".to_string())
 }
 
 /// Тест базовой инициализации AssemblyAI provider
@@ -39,7 +36,11 @@ async fn test_assemblyai_initialization() {
     config_with_key.assemblyai_api_key = Some(get_api_key());
 
     let result = provider.initialize(&config_with_key).await;
-    assert!(result.is_ok(), "Should succeed with user API key: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Should succeed with user API key: {:?}",
+        result
+    );
 }
 
 /// Тест конфигурации с разными языками
@@ -72,7 +73,8 @@ async fn test_assemblyai_audio_encoding() {
     let chunk = AudioChunk::new(samples.clone(), 16000, 1);
 
     // Конвертируем в bytes как это делает AssemblyAI
-    let bytes: Vec<u8> = chunk.data
+    let bytes: Vec<u8> = chunk
+        .data
         .iter()
         .flat_map(|&sample| sample.to_le_bytes())
         .collect();
@@ -104,12 +106,16 @@ async fn test_assemblyai_base64_encoding() {
     let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
 
     // Проверяем что можно декодировать
-    let decoded = base64::engine::general_purpose::STANDARD.decode(&encoded).unwrap();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&encoded)
+        .unwrap();
     assert_eq!(decoded, bytes);
 
     // Проверяем формат (должен быть валидный base64)
     assert!(!encoded.is_empty());
-    assert!(encoded.chars().all(|c| c.is_alphanumeric() || c == '+' || c == '/' || c == '='));
+    assert!(encoded
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '+' || c == '/' || c == '='));
 }
 
 /// Тест state transitions (idle → streaming → stopped)
@@ -198,8 +204,8 @@ async fn test_assemblyai_graceful_shutdown() {
 /// Тест Factory integration - проверяем что можно создать через Factory
 #[tokio::test]
 async fn test_assemblyai_factory_creation() {
-    use app_lib::infrastructure::factory::DefaultSttProviderFactory;
     use app_lib::domain::SttProviderFactory;
+    use app_lib::infrastructure::factory::DefaultSttProviderFactory;
 
     let factory = DefaultSttProviderFactory::new();
 
@@ -250,8 +256,12 @@ fn decode_mp3_to_pcm(mp3_path: &str) -> Result<Vec<i16>, Box<dyn std::error::Err
         }
     }
 
-    println!("📊 MP3 декодирован: {} Hz, {} channels, {} samples",
-             sample_rate, channels, all_samples.len());
+    println!(
+        "📊 MP3 декодирован: {} Hz, {} channels, {} samples",
+        sample_rate,
+        channels,
+        all_samples.len()
+    );
 
     // Конвертируем в mono если нужно
     let mono_samples: Vec<i16> = if channels == 2 {
@@ -267,7 +277,10 @@ fn decode_mp3_to_pcm(mp3_path: &str) -> Result<Vec<i16>, Box<dyn std::error::Err
     let resampled = if sample_rate != 16000 {
         println!("🔄 Ресемплирование {} Hz → 16000 Hz", sample_rate);
 
-        use rubato::{Resampler, SincFixedIn, SincInterpolationType, SincInterpolationParameters, WindowFunction};
+        use rubato::{
+            Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
+            WindowFunction,
+        };
 
         let params = SincInterpolationParameters {
             sinc_len: 256,
@@ -300,15 +313,21 @@ fn decode_mp3_to_pcm(mp3_path: &str) -> Result<Vec<i16>, Box<dyn std::error::Err
 
     // Проверяем амплитуду сигнала для отладки
     let max_amplitude = resampled.iter().map(|&s| s.abs()).max().unwrap_or(0);
-    let avg_amplitude: i32 = resampled.iter().map(|&s| s.abs() as i32).sum::<i32>()
-        / resampled.len().max(1) as i32;
+    let avg_amplitude: i32 =
+        resampled.iter().map(|&s| s.abs() as i32).sum::<i32>() / resampled.len().max(1) as i32;
 
-    println!("✅ Финальный PCM: 16000 Hz mono, {} samples (~{:.1} sec)",
-             resampled.len(),
-             resampled.len() as f32 / 16000.0);
-    println!("   Амплитуда: max={}, avg={}, rms={:.0}",
-             max_amplitude, avg_amplitude,
-             (resampled.iter().map(|&s| (s as f32).powi(2)).sum::<f32>() / resampled.len() as f32).sqrt());
+    println!(
+        "✅ Финальный PCM: 16000 Hz mono, {} samples (~{:.1} sec)",
+        resampled.len(),
+        resampled.len() as f32 / 16000.0
+    );
+    println!(
+        "   Амплитуда: max={}, avg={}, rms={:.0}",
+        max_amplitude,
+        avg_amplitude,
+        (resampled.iter().map(|&s| (s as f32).powi(2)).sum::<f32>() / resampled.len() as f32)
+            .sqrt()
+    );
 
     Ok(resampled)
 }
@@ -371,8 +390,12 @@ async fn test_real_mp3_transcription_assemblyai() {
         provider.send_audio(&chunk).await.unwrap();
 
         if i % 10 == 0 {
-            println!("  Отправлено {}/{} чанков (~{:.1}s)",
-                     i, total_chunks, i as f32 * 0.03);
+            println!(
+                "  Отправлено {}/{} чанков (~{:.1}s)",
+                i,
+                total_chunks,
+                i as f32 * 0.03
+            );
         }
 
         // Задержка 30ms для имитации реального времени
@@ -492,8 +515,12 @@ async fn test_real_mp3_long_transcription_assemblyai() {
         provider.send_audio(&chunk).await.unwrap();
 
         if i % 30 == 0 {
-            println!("  Отправлено {}/{} чанков (~{:.1}s)",
-                     i, total_chunks, i as f32 * 0.03);
+            println!(
+                "  Отправлено {}/{} чанков (~{:.1}s)",
+                i,
+                total_chunks,
+                i as f32 * 0.03
+            );
         }
 
         // Задержка 30ms для имитации реального времени
@@ -526,7 +553,10 @@ async fn test_real_mp3_long_transcription_assemblyai() {
             println!("  [{}] {}", i + 1, text);
         }
         if partial_results.len() > 5 {
-            println!("  ... и ещё {} partial результатов", partial_results.len() - 5);
+            println!(
+                "  ... и ещё {} partial результатов",
+                partial_results.len() - 5
+            );
         }
     }
 

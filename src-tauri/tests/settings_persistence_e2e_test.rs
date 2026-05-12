@@ -61,4 +61,3 @@ async fn settings_persist_across_restart_like_flow() {
     assert_eq!(stt_after.deepgram_keyterms.as_deref(), Some(keyterms));
     assert_eq!(app_after.microphone_sensitivity, 135);
 }
-

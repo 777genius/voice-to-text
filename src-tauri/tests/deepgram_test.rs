@@ -2,9 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::sleep;
 
-use app_lib::domain::{
-    AudioChunk, SttConfig, SttProvider, SttProviderType, Transcription,
-};
+use app_lib::domain::{AudioChunk, SttConfig, SttProvider, SttProviderType, Transcription};
 use app_lib::infrastructure::stt::DeepgramProvider;
 
 mod test_support;
@@ -34,14 +32,20 @@ fn get_api_key() -> Option<String> {
 async fn test_deepgram_initialization() {
     let mut provider = DeepgramProvider::new();
 
-    assert!(provider.name().contains("Deepgram"), "Provider name should contain 'Deepgram'");
+    assert!(
+        provider.name().contains("Deepgram"),
+        "Provider name should contain 'Deepgram'"
+    );
     assert!(provider.is_online());
     assert!(provider.supports_streaming());
 
     // Инициализация без пользовательского ключа должна использовать встроенный ключ
     let config = SttConfig::default();
     let result = provider.initialize(&config).await;
-    assert!(result.is_ok(), "Инициализация должна пройти со встроенным ключом");
+    assert!(
+        result.is_ok(),
+        "Инициализация должна пройти со встроенным ключом"
+    );
 
     // Пользовательский ключ (если задан) тоже должен приниматься
     if let Some(api_key) = get_api_key() {
@@ -50,7 +54,11 @@ async fn test_deepgram_initialization() {
         config_with_key.language = "ru".to_string();
 
         let result = provider.initialize(&config_with_key).await;
-        assert!(result.is_ok(), "Инициализация с пользовательским ключом должна пройти успешно: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Инициализация с пользовательским ключом должна пройти успешно: {:?}",
+            result
+        );
     }
 }
 
@@ -60,22 +68,19 @@ async fn test_deepgram_configuration() {
     let mut provider = DeepgramProvider::new();
 
     // Русский язык
-    let mut config_ru = SttConfig::new(SttProviderType::Deepgram)
-        .with_language("ru");
+    let mut config_ru = SttConfig::new(SttProviderType::Deepgram).with_language("ru");
 
     let result = provider.initialize(&config_ru).await;
     assert!(result.is_ok());
 
     // Английский язык
-    let mut config_en = SttConfig::new(SttProviderType::Deepgram)
-        .with_language("en");
+    let mut config_en = SttConfig::new(SttProviderType::Deepgram).with_language("en");
 
     let result = provider.initialize(&config_en).await;
     assert!(result.is_ok());
 
     // Кастомная модель
-    let mut config_custom = SttConfig::new(SttProviderType::Deepgram)
-        .with_model("nova-2");
+    let mut config_custom = SttConfig::new(SttProviderType::Deepgram).with_model("nova-2");
 
     let result = provider.initialize(&config_custom).await;
     assert!(result.is_ok());
@@ -100,7 +105,10 @@ async fn test_deepgram_state_machine() {
 
     // Попытка остановить до начала должна быть безопасной
     let result = provider.stop_stream().await;
-    assert!(result.is_ok(), "Stop без активного stream должен быть безопасным");
+    assert!(
+        result.is_ok(),
+        "Stop без активного stream должен быть безопасным"
+    );
 }
 
 /// Тестируем audio encoding и buffering
@@ -124,7 +132,8 @@ async fn test_deepgram_audio_encoding() {
     assert_eq!(chunk.duration_ms(), duration_ms as u64);
 
     // Проверяем конвертацию в байты (как это делает Deepgram)
-    let bytes: Vec<u8> = chunk.data
+    let bytes: Vec<u8> = chunk
+        .data
         .iter()
         .flat_map(|&sample| sample.to_le_bytes())
         .collect();
@@ -232,8 +241,8 @@ async fn test_deepgram_callbacks() {
 /// Проверяем Factory integration
 #[tokio::test]
 async fn test_deepgram_factory_creation() {
-    use app_lib::infrastructure::factory::DefaultSttProviderFactory;
     use app_lib::domain::SttProviderFactory;
+    use app_lib::infrastructure::factory::DefaultSttProviderFactory;
 
     let factory = DefaultSttProviderFactory::new();
 
@@ -246,7 +255,10 @@ async fn test_deepgram_factory_creation() {
     assert!(result.is_ok(), "Factory должна создать Deepgram провайдер");
 
     let mut provider = result.unwrap();
-    assert!(provider.name().contains("Deepgram"), "Provider name should contain 'Deepgram'");
+    assert!(
+        provider.name().contains("Deepgram"),
+        "Provider name should contain 'Deepgram'"
+    );
 
     // Проверяем инициализацию через Factory
     let init_result = provider.initialize(&config).await;
@@ -263,8 +275,7 @@ async fn test_deepgram_factory_creation() {
 async fn test_deepgram_full_lifecycle() {
     let mut provider = DeepgramProvider::new();
 
-    let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_language("en"); // Используем en для теста
+    let config = SttConfig::new(SttProviderType::Deepgram).with_language("en"); // Используем en для теста
 
     provider.initialize(&config).await.unwrap();
 
@@ -324,8 +335,7 @@ async fn test_deepgram_full_lifecycle() {
 async fn test_deepgram_websocket_connection() {
     let mut provider = DeepgramProvider::new();
 
-    let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_language("en");
+    let config = SttConfig::new(SttProviderType::Deepgram).with_language("en");
 
     provider.initialize(&config).await.unwrap();
 
@@ -343,7 +353,11 @@ async fn test_deepgram_websocket_connection() {
     let result = provider
         .start_stream(on_partial, on_final, on_error, noop_connection_quality())
         .await;
-    assert!(result.is_ok(), "WebSocket подключение не удалось: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "WebSocket подключение не удалось: {:?}",
+        result
+    );
 
     println!("✅ WebSocket соединение установлено");
 
@@ -360,8 +374,7 @@ async fn test_deepgram_connection_error() {
     let mut provider = DeepgramProvider::new();
 
     // Неправильный API key
-    let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key("invalid_key_12345");
+    let config = SttConfig::new(SttProviderType::Deepgram).with_api_key("invalid_key_12345");
 
     provider.initialize(&config).await.unwrap();
 
@@ -382,8 +395,7 @@ async fn test_deepgram_connection_error() {
 async fn test_deepgram_real_voice_transcription() {
     let mut provider = DeepgramProvider::new();
 
-    let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_language("ru");
+    let config = SttConfig::new(SttProviderType::Deepgram).with_language("ru");
 
     provider.initialize(&config).await.unwrap();
 
@@ -417,8 +429,8 @@ async fn test_deepgram_real_voice_transcription() {
             let t = i as f32 / sample_rate as f32;
             // Микс частот чтобы имитировать голос
             let val = (2.0 * std::f32::consts::PI * 300.0 * t).sin() * 3000.0
-                    + (2.0 * std::f32::consts::PI * 600.0 * t).sin() * 2000.0
-                    + (2.0 * std::f32::consts::PI * 1200.0 * t).sin() * 1000.0;
+                + (2.0 * std::f32::consts::PI * 600.0 * t).sin() * 2000.0
+                + (2.0 * std::f32::consts::PI * 1200.0 * t).sin() * 1000.0;
             samples.push(val as i16);
         }
 
@@ -439,8 +451,7 @@ async fn test_deepgram_real_voice_transcription() {
 async fn test_deepgram_keepalive() {
     let mut provider = DeepgramProvider::new();
 
-    let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_language("ru");
+    let config = SttConfig::new(SttProviderType::Deepgram).with_language("ru");
 
     provider.initialize(&config).await.unwrap();
 
@@ -461,7 +472,10 @@ async fn test_deepgram_keepalive() {
     // Если соединение живо - значит KeepAlive работает
     let chunk = AudioChunk::new(vec![100i16; 1600], 16000, 1);
     let result = provider.send_audio(&chunk).await;
-    assert!(result.is_ok(), "Соединение должно быть живым благодаря KeepAlive");
+    assert!(
+        result.is_ok(),
+        "Соединение должно быть живым благодаря KeepAlive"
+    );
 
     provider.stop_stream().await.unwrap();
 }
@@ -475,17 +489,16 @@ async fn test_deepgram_keepalive() {
 #[ignore]
 async fn test_e2e_full_pipeline_with_deepgram() {
     use app_lib::application::services::TranscriptionService;
-    use app_lib::infrastructure::factory::DefaultSttProviderFactory;
-    use app_lib::infrastructure::audio::MockAudioCapture;
     use app_lib::domain::{AudioConfig, RecordingStatus};
+    use app_lib::infrastructure::audio::MockAudioCapture;
+    use app_lib::infrastructure::factory::DefaultSttProviderFactory;
 
     let mock_capture = Box::new(MockAudioCapture::new());
     let factory = Arc::new(DefaultSttProviderFactory::new());
     let service = TranscriptionService::new(mock_capture, factory);
 
     // Настраиваем Deepgram
-    let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_language("ru");
+    let config = SttConfig::new(SttProviderType::Deepgram).with_language("ru");
 
     service.update_config(config).await.unwrap();
 
@@ -542,8 +555,7 @@ async fn test_e2e_full_pipeline_with_deepgram() {
 async fn test_e2e_multiple_sessions() {
     let mut provider = DeepgramProvider::new();
 
-    let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_language("ru");
+    let config = SttConfig::new(SttProviderType::Deepgram).with_language("ru");
 
     provider.initialize(&config).await.unwrap();
 
@@ -587,8 +599,7 @@ async fn test_e2e_multiple_sessions() {
 async fn test_e2e_long_session() {
     let mut provider = DeepgramProvider::new();
 
-    let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_language("ru");
+    let config = SttConfig::new(SttProviderType::Deepgram).with_language("ru");
 
     provider.initialize(&config).await.unwrap();
 
@@ -653,8 +664,7 @@ async fn test_e2e_language_switching() {
     for lang in languages {
         println!("\n🌍 Тестируем язык: {}", lang);
 
-        let config = SttConfig::new(SttProviderType::Deepgram)
-                .with_language(lang);
+        let config = SttConfig::new(SttProviderType::Deepgram).with_language(lang);
 
         provider.initialize(&config).await.unwrap();
 
@@ -690,8 +700,7 @@ async fn test_e2e_language_switching() {
 async fn test_e2e_abort_during_session() {
     let mut provider = DeepgramProvider::new();
 
-    let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_language("ru");
+    let config = SttConfig::new(SttProviderType::Deepgram).with_language("ru");
 
     provider.initialize(&config).await.unwrap();
 
@@ -725,7 +734,10 @@ async fn test_e2e_abort_during_session() {
     // Проверяем что провайдер в безопасном состоянии
     let chunk = AudioChunk::new(vec![100i16; 1600], 16000, 1);
     let result = provider.send_audio(&chunk).await;
-    assert!(result.is_err(), "После abort отправка аудио должна вернуть ошибку");
+    assert!(
+        result.is_err(),
+        "После abort отправка аудио должна вернуть ошибку"
+    );
 
     println!("✅ Abort отработал корректно");
 }
@@ -762,8 +774,12 @@ fn decode_mp3_to_pcm(mp3_path: &str) -> Result<Vec<i16>, Box<dyn std::error::Err
         }
     }
 
-    println!("📊 MP3 декодирован: {} Hz, {} channels, {} samples",
-             sample_rate, channels, all_samples.len());
+    println!(
+        "📊 MP3 декодирован: {} Hz, {} channels, {} samples",
+        sample_rate,
+        channels,
+        all_samples.len()
+    );
 
     // Конвертируем в mono если нужно
     let mono_samples: Vec<i16> = if channels == 2 {
@@ -779,7 +795,10 @@ fn decode_mp3_to_pcm(mp3_path: &str) -> Result<Vec<i16>, Box<dyn std::error::Err
     let resampled = if sample_rate != 16000 {
         println!("🔄 Ресемплирование {} Hz → 16000 Hz", sample_rate);
 
-        use rubato::{Resampler, SincFixedIn, SincInterpolationType, SincInterpolationParameters, WindowFunction};
+        use rubato::{
+            Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
+            WindowFunction,
+        };
 
         let params = SincInterpolationParameters {
             sinc_len: 256,
@@ -812,15 +831,21 @@ fn decode_mp3_to_pcm(mp3_path: &str) -> Result<Vec<i16>, Box<dyn std::error::Err
 
     // Проверяем амплитуду сигнала для отладки
     let max_amplitude = resampled.iter().map(|&s| s.abs()).max().unwrap_or(0);
-    let avg_amplitude: i32 = resampled.iter().map(|&s| s.abs() as i32).sum::<i32>()
-        / resampled.len().max(1) as i32;
+    let avg_amplitude: i32 =
+        resampled.iter().map(|&s| s.abs() as i32).sum::<i32>() / resampled.len().max(1) as i32;
 
-    println!("✅ Финальный PCM: 16000 Hz mono, {} samples (~{:.1} sec)",
-             resampled.len(),
-             resampled.len() as f32 / 16000.0);
-    println!("   Амплитуда: max={}, avg={}, rms={:.0}",
-             max_amplitude, avg_amplitude,
-             (resampled.iter().map(|&s| (s as f32).powi(2)).sum::<f32>() / resampled.len() as f32).sqrt());
+    println!(
+        "✅ Финальный PCM: 16000 Hz mono, {} samples (~{:.1} sec)",
+        resampled.len(),
+        resampled.len() as f32 / 16000.0
+    );
+    println!(
+        "   Амплитуда: max={}, avg={}, rms={:.0}",
+        max_amplitude,
+        avg_amplitude,
+        (resampled.iter().map(|&s| (s as f32).powi(2)).sum::<f32>() / resampled.len() as f32)
+            .sqrt()
+    );
 
     Ok(resampled)
 }
@@ -839,7 +864,11 @@ async fn test_real_mp3_decode() {
     assert!(samples.len() > 1000, "Аудио слишком короткое");
 
     let duration_sec = samples.len() as f32 / 16000.0;
-    println!("✅ MP3 успешно декодирован: {} семплов, {:.2} секунд", samples.len(), duration_sec);
+    println!(
+        "✅ MP3 успешно декодирован: {} семплов, {:.2} секунд",
+        samples.len(),
+        duration_sec
+    );
 }
 
 /// Тест с реальным MP3 - полная транскрипция через Deepgram
@@ -859,8 +888,7 @@ async fn test_real_mp3_transcription_deepgram() {
 
     let mut provider = DeepgramProvider::new();
 
-    let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_language("en"); // Английский для теста
+    let config = SttConfig::new(SttProviderType::Deepgram).with_language("en"); // Английский для теста
 
     provider.initialize(&config).await.unwrap();
 
@@ -898,8 +926,12 @@ async fn test_real_mp3_transcription_deepgram() {
         provider.send_audio(&chunk).await.unwrap();
 
         if i % 10 == 0 {
-            println!("  Отправлено {}/{} чанков (~{:.1}s)",
-                     i, total_chunks, i as f32 * 0.1);
+            println!(
+                "  Отправлено {}/{} чанков (~{:.1}s)",
+                i,
+                total_chunks,
+                i as f32 * 0.1
+            );
         }
 
         // Небольшая задержка чтобы имитировать реальное время
@@ -939,7 +971,8 @@ async fn test_real_mp3_transcription_deepgram() {
         let lower = final_result.to_lowercase();
         assert!(
             lower.contains("whatsapp") || lower.contains("what") || lower.contains("app"),
-            "Ожидали получить 'WhatsApp', но получили: '{}'", final_result
+            "Ожидали получить 'WhatsApp', но получили: '{}'",
+            final_result
         );
     } else if partial_results > 0 {
         println!("✅ Получено {} partial результатов", partial_results);
@@ -967,8 +1000,7 @@ async fn test_real_mp3_long_transcription_deepgram() {
 
     let mut provider = DeepgramProvider::new();
 
-    let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_language("en"); // Английский для теста
+    let config = SttConfig::new(SttProviderType::Deepgram).with_language("en"); // Английский для теста
 
     provider.initialize(&config).await.unwrap();
 
@@ -1006,8 +1038,12 @@ async fn test_real_mp3_long_transcription_deepgram() {
         provider.send_audio(&chunk).await.unwrap();
 
         if i % 10 == 0 {
-            println!("  Отправлено {}/{} чанков (~{:.1}s)",
-                     i, total_chunks, i as f32 * 0.1);
+            println!(
+                "  Отправлено {}/{} чанков (~{:.1}s)",
+                i,
+                total_chunks,
+                i as f32 * 0.1
+            );
         }
 
         // Небольшая задержка чтобы имитировать реальное время
@@ -1065,8 +1101,7 @@ async fn test_real_mp3_transcription_quality() {
 
     let mut provider = DeepgramProvider::new();
 
-    let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_language("en");
+    let config = SttConfig::new(SttProviderType::Deepgram).with_language("en");
 
     provider.initialize(&config).await.unwrap();
 
@@ -1161,8 +1196,7 @@ async fn test_real_mp3_different_chunk_sizes() {
 
         let mut provider = DeepgramProvider::new();
 
-        let config = SttConfig::new(SttProviderType::Deepgram)
-                .with_language("en");
+        let config = SttConfig::new(SttProviderType::Deepgram).with_language("en");
 
         provider.initialize(&config).await.unwrap();
 

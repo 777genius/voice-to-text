@@ -2,10 +2,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::sleep;
 
-use app_lib::domain::{
-    AudioChunk, SttConfig, SttProvider, SttProviderType, Transcription,
-};
-use app_lib::infrastructure::stt::{DeepgramProvider, AssemblyAIProvider};
+use app_lib::domain::{AudioChunk, SttConfig, SttProvider, SttProviderType, Transcription};
+use app_lib::infrastructure::stt::{AssemblyAIProvider, DeepgramProvider};
 
 mod test_support;
 use test_support::{classify_error_type, noop_connection_quality, stderr_error, SttConfigTestExt};
@@ -58,7 +56,10 @@ async fn test_e2e_deepgram_websocket_connection() {
     let result = provider
         .start_stream(on_partial, on_final, on_error, noop_connection_quality())
         .await;
-    assert!(result.is_ok(), "WebSocket подключение должно пройти успешно");
+    assert!(
+        result.is_ok(),
+        "WebSocket подключение должно пройти успешно"
+    );
 
     println!("✅ WebSocket соединение установлено");
 
@@ -101,7 +102,10 @@ async fn test_e2e_assemblyai_websocket_connection() {
     let result = provider
         .start_stream(on_partial, on_final, on_error, noop_connection_quality())
         .await;
-    assert!(result.is_ok(), "WebSocket подключение должно пройти успешно");
+    assert!(
+        result.is_ok(),
+        "WebSocket подключение должно пройти успешно"
+    );
 
     println!("✅ WebSocket соединение установлено");
 
@@ -211,7 +215,10 @@ async fn test_e2e_multiple_sequential_connections() {
         sleep(Duration::from_millis(300)).await;
     }
 
-    println!("\n✅ Все {} подключений прошли успешно (утечек памяти нет)", connections_count);
+    println!(
+        "\n✅ Все {} подключений прошли успешно (утечек памяти нет)",
+        connections_count
+    );
 }
 
 /// E2E: Тест abort во время активного соединения
@@ -249,7 +256,10 @@ async fn test_e2e_abort_during_active_connection() {
     // Проверяем что провайдер в безопасном состоянии
     let chunk = AudioChunk::new(vec![100i16; 1600], 16000, 1);
     let result = provider.send_audio(&chunk).await;
-    assert!(result.is_err(), "После abort отправка должна вернуть ошибку");
+    assert!(
+        result.is_err(),
+        "После abort отправка должна вернуть ошибку"
+    );
 
     println!("✅ Abort отработал корректно");
 }
@@ -278,7 +288,10 @@ async fn test_e2e_deepgram_message_handling() {
     let texts_clone = all_texts.clone();
     let on_partial = Arc::new(move |t: Transcription| {
         *p_count.lock().unwrap() += 1;
-        texts_clone.lock().unwrap().push(format!("[PARTIAL] {}", t.text));
+        texts_clone
+            .lock()
+            .unwrap()
+            .push(format!("[PARTIAL] {}", t.text));
         println!("📝 Partial: {}", t.text);
     });
 
@@ -286,7 +299,10 @@ async fn test_e2e_deepgram_message_handling() {
     let texts_final = all_texts.clone();
     let on_final = Arc::new(move |t: Transcription| {
         *f_count.lock().unwrap() += 1;
-        texts_final.lock().unwrap().push(format!("[FINAL] {}", t.text));
+        texts_final
+            .lock()
+            .unwrap()
+            .push(format!("[FINAL] {}", t.text));
         println!("✅ Final: {}", t.text);
     });
 
@@ -350,8 +366,7 @@ async fn test_e2e_connection_error_invalid_key() {
     let mut provider = DeepgramProvider::new();
 
     // Специально неверный ключ
-    let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key("invalid_key_12345_wrong");
+    let config = SttConfig::new(SttProviderType::Deepgram).with_api_key("invalid_key_12345_wrong");
 
     provider.initialize(&config).await.unwrap();
 
@@ -404,8 +419,9 @@ async fn test_e2e_connection_timeout_handling() {
     // Пытаемся подключиться с таймаутом
     let result = tokio::time::timeout(
         Duration::from_secs(10),
-        provider.start_stream(on_partial, on_final, on_error, noop_connection_quality())
-    ).await;
+        provider.start_stream(on_partial, on_final, on_error, noop_connection_quality()),
+    )
+    .await;
 
     match result {
         Ok(Ok(_)) => {
@@ -508,7 +524,11 @@ async fn test_e2e_slow_network_simulation() {
         let send_duration = send_start.elapsed();
 
         if result.is_ok() {
-            println!("  Чанк {} отправлен за {:.1}ms", i + 1, send_duration.as_millis());
+            println!(
+                "  Чанк {} отправлен за {:.1}ms",
+                i + 1,
+                send_duration.as_millis()
+            );
         } else {
             println!("  ⚠️ Чанк {} не отправлен: {:?}", i + 1, result);
         }
@@ -556,7 +576,11 @@ async fn test_e2e_batch_sending() {
         let send_duration = send_start.elapsed();
 
         if result.is_ok() {
-            println!("  Большой чанк {} (500ms) отправлен за {:.1}ms", i + 1, send_duration.as_millis());
+            println!(
+                "  Большой чанк {} (500ms) отправлен за {:.1}ms",
+                i + 1,
+                send_duration.as_millis()
+            );
         } else {
             eprintln!("  ⚠️ Ошибка отправки: {:?}", result);
         }
@@ -621,7 +645,10 @@ async fn test_e2e_high_frequency_sending() {
     println!("📊 Результаты:");
     println!("  Успешно отправлено: {}", sent);
     println!("  Ошибок: {}", failed);
-    println!("  Success rate: {:.1}%", (sent as f32 / (sent + failed) as f32) * 100.0);
+    println!(
+        "  Success rate: {:.1}%",
+        (sent as f32 / (sent + failed) as f32) * 100.0
+    );
 
     assert!(sent > 90, "Большинство отправок должны быть успешными");
 
@@ -641,7 +668,10 @@ async fn test_e2e_keepalive_mechanism() {
     provider.initialize(&config).await.unwrap();
 
     // Проверяем что провайдер поддерживает keep-alive
-    assert!(provider.supports_keep_alive(), "Deepgram должен поддерживать keep-alive");
+    assert!(
+        provider.supports_keep_alive(),
+        "Deepgram должен поддерживать keep-alive"
+    );
 
     let on_partial = Arc::new(|t: Transcription| println!("📝 {}", t.text));
     let on_final = Arc::new(|t: Transcription| println!("✅ {}", t.text));
@@ -668,7 +698,10 @@ async fn test_e2e_keepalive_mechanism() {
     // Ставим на паузу (keep-alive режим)
     println!("⏸️  Ставим на паузу (keep-alive)...");
     provider.pause_stream().await.unwrap();
-    assert!(provider.is_connection_alive(), "Соединение должно быть живым в режиме паузы");
+    assert!(
+        provider.is_connection_alive(),
+        "Соединение должно быть живым в режиме паузы"
+    );
 
     // Ждем 10 секунд - за это время keep-alive должен сработать несколько раз
     println!("⏱️  Ждем 10 секунд (keep-alive работает в фоне)...");
@@ -689,7 +722,10 @@ async fn test_e2e_keepalive_mechanism() {
     for _ in 0..5 {
         let chunk = AudioChunk::new(vec![100i16; 1600], 16000, 1);
         let result = provider.send_audio(&chunk).await;
-        assert!(result.is_ok(), "После pause/resume отправка должна работать");
+        assert!(
+            result.is_ok(),
+            "После pause/resume отправка должна работать"
+        );
         sleep(Duration::from_millis(100)).await;
     }
 
@@ -747,13 +783,19 @@ async fn test_e2e_recovery_after_connection_loss() {
     let recovery_result = provider
         .start_stream(on_partial, on_final, on_error, noop_connection_quality())
         .await;
-    assert!(recovery_result.is_ok(), "Восстановление соединения должно работать");
+    assert!(
+        recovery_result.is_ok(),
+        "Восстановление соединения должно работать"
+    );
 
     // Проверяем что можем отправлять данные
     for _ in 0..5 {
         let chunk = AudioChunk::new(vec![100i16; 1600], 16000, 1);
         let result = provider.send_audio(&chunk).await;
-        assert!(result.is_ok(), "После восстановления отправка должна работать");
+        assert!(
+            result.is_ok(),
+            "После восстановления отправка должна работать"
+        );
         sleep(Duration::from_millis(100)).await;
     }
 
@@ -843,7 +885,10 @@ async fn test_e2e_long_session_with_pauses() {
     provider.stop_stream().await.unwrap();
 
     let trans_count = transcriptions.lock().unwrap().len();
-    println!("\n✅ Длинная сессия завершена. Получено {} транскрипций", trans_count);
+    println!(
+        "\n✅ Длинная сессия завершена. Получено {} транскрипций",
+        trans_count
+    );
 }
 
 /// E2E: Сравнение производительности Deepgram vs AssemblyAI
@@ -872,7 +917,12 @@ async fn test_e2e_performance_comparison() {
     let on_e = stderr_error();
 
     deepgram
-        .start_stream(on_p.clone(), on_f.clone(), on_e.clone(), noop_connection_quality())
+        .start_stream(
+            on_p.clone(),
+            on_f.clone(),
+            on_e.clone(),
+            noop_connection_quality(),
+        )
         .await
         .unwrap();
 
@@ -921,13 +971,15 @@ async fn test_e2e_performance_comparison() {
 
     if deepgram_duration < assemblyai_duration {
         let diff = assemblyai_duration.as_secs_f32() - deepgram_duration.as_secs_f32();
-        println!("  🏆 Deepgram быстрее на {:.2}s ({:.1}%)",
+        println!(
+            "  🏆 Deepgram быстрее на {:.2}s ({:.1}%)",
             diff,
             (diff / assemblyai_duration.as_secs_f32()) * 100.0
         );
     } else {
         let diff = deepgram_duration.as_secs_f32() - assemblyai_duration.as_secs_f32();
-        println!("  🏆 AssemblyAI быстрее на {:.2}s ({:.1}%)",
+        println!(
+            "  🏆 AssemblyAI быстрее на {:.2}s ({:.1}%)",
             diff,
             (diff / deepgram_duration.as_secs_f32()) * 100.0
         );

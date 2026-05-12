@@ -32,7 +32,8 @@ impl AudioSpectrumAnalyzer {
         // Hann window - делает картинку более стабильной и приятной
         let mut window = [0.0f32; FFT_SIZE];
         for i in 0..FFT_SIZE {
-            window[i] = 0.5 - 0.5 * ((2.0 * std::f32::consts::PI * i as f32) / (FFT_SIZE as f32 - 1.0)).cos();
+            window[i] = 0.5
+                - 0.5 * ((2.0 * std::f32::consts::PI * i as f32) / (FFT_SIZE as f32 - 1.0)).cos();
         }
 
         Self {
@@ -112,4 +113,3 @@ impl AudioSpectrumAnalyzer {
         Some(self.bars)
     }
 }
-

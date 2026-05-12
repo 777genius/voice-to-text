@@ -12,17 +12,15 @@ fn main() {
     }
 
     // Читаем API ключи из переменных окружения
-    let deepgram_key = env::var("DEEPGRAM_API_KEY")
-        .unwrap_or_else(|_| {
-            println!("cargo:warning=DEEPGRAM_API_KEY not found in environment");
-            String::new()
-        });
+    let deepgram_key = env::var("DEEPGRAM_API_KEY").unwrap_or_else(|_| {
+        println!("cargo:warning=DEEPGRAM_API_KEY not found in environment");
+        String::new()
+    });
 
-    let assemblyai_key = env::var("ASSEMBLYAI_API_KEY")
-        .unwrap_or_else(|_| {
-            println!("cargo:warning=ASSEMBLYAI_API_KEY not found in environment");
-            String::new()
-        });
+    let assemblyai_key = env::var("ASSEMBLYAI_API_KEY").unwrap_or_else(|_| {
+        println!("cargo:warning=ASSEMBLYAI_API_KEY not found in environment");
+        String::new()
+    });
 
     // Генерируем Rust код с встроенными ключами
     let embedded_keys_code = format!(
@@ -53,8 +51,7 @@ pub fn has_embedded_assemblyai_key() -> bool {{
     let dest_path = out_dir.join("embedded_keys.rs");
 
     // Записываем сгенерированный код
-    fs::write(&dest_path, embedded_keys_code)
-        .expect("Failed to write embedded_keys.rs");
+    fs::write(&dest_path, embedded_keys_code).expect("Failed to write embedded_keys.rs");
 
     println!("cargo:rerun-if-changed=../.env");
     println!("cargo:rerun-if-env-changed=DEEPGRAM_API_KEY");

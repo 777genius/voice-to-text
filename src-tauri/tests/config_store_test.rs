@@ -1,8 +1,8 @@
+use app_lib::domain::{AppConfig, SttConfig, SttProviderType};
 use app_lib::infrastructure::ConfigStore;
-use app_lib::domain::{SttConfig, SttProviderType, AppConfig};
+use serial_test::serial;
 use std::fs;
 use std::path::PathBuf;
-use serial_test::serial;
 use uuid::Uuid;
 
 const CONFIG_DIR_ENV: &str = "VOICE_TO_TEXT_CONFIG_DIR";
@@ -92,7 +92,10 @@ async fn test_delete_stt_config() {
 
     // Повторное удаление должно быть безопасным
     let delete_again = ConfigStore::delete_config().await;
-    assert!(delete_again.is_ok(), "Повторное удаление должно быть безопасным");
+    assert!(
+        delete_again.is_ok(),
+        "Повторное удаление должно быть безопасным"
+    );
 }
 
 #[tokio::test]
@@ -111,16 +114,28 @@ async fn test_save_and_load_app_config() {
 
     // Сохраняем
     let save_result = ConfigStore::save_app_config(&app_config).await;
-    assert!(save_result.is_ok(), "Сохранение app config должно пройти успешно");
+    assert!(
+        save_result.is_ok(),
+        "Сохранение app config должно пройти успешно"
+    );
 
     // Загружаем обратно
     let loaded = ConfigStore::load_app_config().await;
     assert!(loaded.is_ok(), "Загрузка app config должна пройти успешно");
 
     let loaded_config = loaded.unwrap();
-    assert_eq!(loaded_config.auto_copy_to_clipboard, app_config.auto_copy_to_clipboard);
-    assert_eq!(loaded_config.auto_close_window, app_config.auto_close_window);
-    assert_eq!(loaded_config.vad_silence_timeout_ms, app_config.vad_silence_timeout_ms);
+    assert_eq!(
+        loaded_config.auto_copy_to_clipboard,
+        app_config.auto_copy_to_clipboard
+    );
+    assert_eq!(
+        loaded_config.auto_close_window,
+        app_config.auto_close_window
+    );
+    assert_eq!(
+        loaded_config.vad_silence_timeout_ms,
+        app_config.vad_silence_timeout_ms
+    );
 
     // Очистка
     let _ = ConfigStore::delete_app_config().await;
@@ -139,8 +154,14 @@ async fn test_load_app_config_when_not_exists() {
 
     let config = result.unwrap();
     let default_config = AppConfig::default();
-    assert_eq!(config.auto_copy_to_clipboard, default_config.auto_copy_to_clipboard);
-    assert_eq!(config.vad_silence_timeout_ms, default_config.vad_silence_timeout_ms);
+    assert_eq!(
+        config.auto_copy_to_clipboard,
+        default_config.auto_copy_to_clipboard
+    );
+    assert_eq!(
+        config.vad_silence_timeout_ms,
+        default_config.vad_silence_timeout_ms
+    );
 }
 
 #[tokio::test]
@@ -153,11 +174,17 @@ async fn test_delete_app_config() {
 
     // Удаляем
     let delete_result = ConfigStore::delete_app_config().await;
-    assert!(delete_result.is_ok(), "Удаление app config должно пройти успешно");
+    assert!(
+        delete_result.is_ok(),
+        "Удаление app config должно пройти успешно"
+    );
 
     // Повторное удаление должно быть безопасным
     let delete_again = ConfigStore::delete_app_config().await;
-    assert!(delete_again.is_ok(), "Повторное удаление app config должно быть безопасным");
+    assert!(
+        delete_again.is_ok(),
+        "Повторное удаление app config должно быть безопасным"
+    );
 }
 
 #[tokio::test]
@@ -259,11 +286,7 @@ async fn test_concurrent_config_operations() {
 
     // Запускаем несколько параллельных чтений
     let handles: Vec<_> = (0..5)
-        .map(|_| {
-            tokio::spawn(async {
-                ConfigStore::load_config().await
-            })
-        })
+        .map(|_| tokio::spawn(async { ConfigStore::load_config().await }))
         .collect();
 
     // Все операции должны завершиться успешно

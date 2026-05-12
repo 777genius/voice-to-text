@@ -1,13 +1,13 @@
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use std::time::Duration;
+use tokio::sync::RwLock;
 use tokio::time::sleep;
 
 use app_lib::application::services::TranscriptionService;
 use app_lib::domain::{
-    AudioCapture, AudioChunk, AudioConfig, AudioLevelCallback, ConnectionQualityCallback, ErrorCallback,
-    RecordingStatus, SttConfig, SttError, SttProvider, SttProviderFactory, SttProviderType,
-    Transcription, TranscriptionCallback,
+    AudioCapture, AudioChunk, AudioConfig, AudioLevelCallback, ConnectionQualityCallback,
+    ErrorCallback, RecordingStatus, SttConfig, SttError, SttProvider, SttProviderFactory,
+    SttProviderType, Transcription, TranscriptionCallback,
 };
 use app_lib::infrastructure::audio::MockAudioCapture;
 use async_trait::async_trait;
@@ -121,7 +121,9 @@ impl SttProvider for MockSttProvider {
         _on_connection_quality: ConnectionQualityCallback,
     ) -> Result<(), SttError> {
         if !*self.initialized.read().await {
-            return Err(SttError::Configuration("Provider not initialized".to_string()));
+            return Err(SttError::Configuration(
+                "Provider not initialized".to_string(),
+            ));
         }
 
         *self.streaming.write().await = true;
@@ -154,7 +156,9 @@ impl SttProvider for MockSttProvider {
 
     async fn pause_stream(&mut self) -> Result<(), SttError> {
         if !self.supports_keep_alive_flag {
-            return Err(SttError::Configuration("Keep-alive not supported".to_string()));
+            return Err(SttError::Configuration(
+                "Keep-alive not supported".to_string(),
+            ));
         }
         *self.paused.write().await = true;
         Ok(())
@@ -168,13 +172,15 @@ impl SttProvider for MockSttProvider {
         _on_connection_quality: ConnectionQualityCallback,
     ) -> Result<(), SttError> {
         if !self.supports_keep_alive_flag {
-            return Err(SttError::Configuration("Keep-alive not supported".to_string()));
+            return Err(SttError::Configuration(
+                "Keep-alive not supported".to_string(),
+            ));
         }
 
         if !self.is_connection_alive() {
-            return Err(SttError::Connection(app_lib::domain::SttConnectionError::simple(
-                "Connection not alive",
-            )));
+            return Err(SttError::Connection(
+                app_lib::domain::SttConnectionError::simple("Connection not alive"),
+            ));
         }
 
         *self.streaming.write().await = true;
@@ -309,28 +315,32 @@ async fn test_start_recording_prevents_double_start() {
     let on_connection_quality = Arc::new(|_: String, _: Option<String>| {});
 
     // Первый старт должен пройти
-    let result1 = service.start_recording(
-        on_partial.clone(),
-        on_final.clone(),
-        on_audio_level.clone(),
-        on_audio_spectrum.clone(),
-        on_error.clone(),
-        on_connection_quality.clone(),
-    ).await;
+    let result1 = service
+        .start_recording(
+            on_partial.clone(),
+            on_final.clone(),
+            on_audio_level.clone(),
+            on_audio_spectrum.clone(),
+            on_error.clone(),
+            on_connection_quality.clone(),
+        )
+        .await;
     assert!(result1.is_ok(), "Первый старт должен пройти");
 
     // Даем время на переход в Recording
     sleep(Duration::from_millis(50)).await;
 
     // Второй старт должен вернуть ошибку
-    let result2 = service.start_recording(
-        on_partial,
-        on_final,
-        on_audio_level,
-        on_audio_spectrum,
-        on_error,
-        on_connection_quality,
-    ).await;
+    let result2 = service
+        .start_recording(
+            on_partial,
+            on_final,
+            on_audio_level,
+            on_audio_spectrum,
+            on_error,
+            on_connection_quality,
+        )
+        .await;
     assert!(result2.is_err(), "Повторный старт должен вернуть ошибку");
 
     // Останавливаем
@@ -347,7 +357,10 @@ async fn test_stop_recording_without_start() {
 
     // Попытка остановить без старта
     let result = service.stop_recording().await;
-    assert!(result.is_err(), "Остановка без старта должна вернуть ошибку");
+    assert!(
+        result.is_err(),
+        "Остановка без старта должна вернуть ошибку"
+    );
 }
 
 #[tokio::test]
@@ -359,7 +372,10 @@ async fn test_full_recording_lifecycle() {
     let service = TranscriptionService::new(audio_capture, factory);
 
     // Инициализация
-    service.initialize_audio(AudioConfig::default()).await.unwrap();
+    service
+        .initialize_audio(AudioConfig::default())
+        .await
+        .unwrap();
 
     let on_partial = Arc::new(|_: Transcription| {});
     let on_final = Arc::new(|_: Transcription| {});
@@ -371,14 +387,17 @@ async fn test_full_recording_lifecycle() {
     assert_eq!(service.get_status().await, RecordingStatus::Idle);
 
     // Старт
-    service.start_recording(
-        on_partial,
-        on_final,
-        on_audio_level,
-        on_audio_spectrum,
-        on_error,
-        Arc::new(|_: String, _: Option<String>| {}),
-    ).await.unwrap();
+    service
+        .start_recording(
+            on_partial,
+            on_final,
+            on_audio_level,
+            on_audio_spectrum,
+            on_error,
+            Arc::new(|_: String, _: Option<String>| {}),
+        )
+        .await
+        .unwrap();
 
     // Даем время на переход
     sleep(Duration::from_millis(100)).await;
@@ -407,7 +426,10 @@ async fn test_keep_alive_mode() {
     config.keep_connection_alive = true;
     service.update_config(config).await.unwrap();
 
-    service.initialize_audio(AudioConfig::default()).await.unwrap();
+    service
+        .initialize_audio(AudioConfig::default())
+        .await
+        .unwrap();
 
     let on_partial = Arc::new(|_: Transcription| {});
     let on_final = Arc::new(|_: Transcription| {});
@@ -416,14 +438,17 @@ async fn test_keep_alive_mode() {
     let on_error = Arc::new(|_err: SttError| {});
 
     // Старт
-    service.start_recording(
-        on_partial.clone(),
-        on_final.clone(),
-        on_audio_level.clone(),
-        on_audio_spectrum.clone(),
-        on_error.clone(),
-        Arc::new(|_: String, _: Option<String>| {}),
-    ).await.unwrap();
+    service
+        .start_recording(
+            on_partial.clone(),
+            on_final.clone(),
+            on_audio_level.clone(),
+            on_audio_spectrum.clone(),
+            on_error.clone(),
+            Arc::new(|_: String, _: Option<String>| {}),
+        )
+        .await
+        .unwrap();
 
     sleep(Duration::from_millis(100)).await;
 
@@ -436,15 +461,20 @@ async fn test_keep_alive_mode() {
     assert_eq!(service.get_status().await, RecordingStatus::Idle);
 
     // Быстрый повторный старт должен использовать существующее соединение
-    let result2 = service.start_recording(
-        on_partial,
-        on_final,
-        on_audio_level,
-        on_audio_spectrum,
-        on_error,
-        Arc::new(|_: String, _: Option<String>| {}),
-    ).await;
-    assert!(result2.is_ok(), "Быстрый рестарт с keep-alive должен работать");
+    let result2 = service
+        .start_recording(
+            on_partial,
+            on_final,
+            on_audio_level,
+            on_audio_spectrum,
+            on_error,
+            Arc::new(|_: String, _: Option<String>| {}),
+        )
+        .await;
+    assert!(
+        result2.is_ok(),
+        "Быстрый рестарт с keep-alive должен работать"
+    );
 
     service.stop_recording().await.unwrap();
 }
@@ -498,7 +528,9 @@ async fn test_keep_alive_connection_resets_on_language_change() {
 
         async fn pause_stream(&mut self) -> Result<(), SttError> {
             if !self.supports_keep_alive {
-                return Err(SttError::Configuration("Keep-alive not supported".to_string()));
+                return Err(SttError::Configuration(
+                    "Keep-alive not supported".to_string(),
+                ));
             }
             self.paused = true;
             Ok(())
@@ -512,12 +544,14 @@ async fn test_keep_alive_connection_resets_on_language_change() {
             _on_connection_quality: ConnectionQualityCallback,
         ) -> Result<(), SttError> {
             if !self.supports_keep_alive {
-                return Err(SttError::Configuration("Keep-alive not supported".to_string()));
+                return Err(SttError::Configuration(
+                    "Keep-alive not supported".to_string(),
+                ));
             }
             if !self.is_connection_alive() {
-                return Err(SttError::Connection(app_lib::domain::SttConnectionError::simple(
-                    "Connection not alive",
-                )));
+                return Err(SttError::Connection(
+                    app_lib::domain::SttConnectionError::simple("Connection not alive"),
+                ));
             }
             self.streaming = true;
             self.paused = false;
@@ -575,7 +609,10 @@ async fn test_keep_alive_connection_resets_on_language_change() {
     config.language = "ru".to_string();
     service.update_config(config).await.unwrap();
 
-    service.initialize_audio(AudioConfig::default()).await.unwrap();
+    service
+        .initialize_audio(AudioConfig::default())
+        .await
+        .unwrap();
 
     let on_partial = Arc::new(|_: Transcription| {});
     let on_final = Arc::new(|_: Transcription| {});
@@ -638,7 +675,10 @@ async fn test_recording_status_transitions() {
     // Idle -> Starting -> Recording
     assert_eq!(service.get_status().await, RecordingStatus::Idle);
 
-    service.initialize_audio(AudioConfig::default()).await.unwrap();
+    service
+        .initialize_audio(AudioConfig::default())
+        .await
+        .unwrap();
 
     let on_partial = Arc::new(|_: Transcription| {});
     let on_final = Arc::new(|_: Transcription| {});
@@ -646,14 +686,17 @@ async fn test_recording_status_transitions() {
     let on_audio_spectrum = Arc::new(|_: [f32; 48]| {});
     let on_error = Arc::new(|_err: SttError| {});
 
-    service.start_recording(
-        on_partial,
-        on_final,
-        on_audio_level,
-        on_audio_spectrum,
-        on_error,
-        Arc::new(|_: String, _: Option<String>| {}),
-    ).await.unwrap();
+    service
+        .start_recording(
+            on_partial,
+            on_final,
+            on_audio_level,
+            on_audio_spectrum,
+            on_error,
+            Arc::new(|_: String, _: Option<String>| {}),
+        )
+        .await
+        .unwrap();
 
     sleep(Duration::from_millis(100)).await;
     assert_eq!(service.get_status().await, RecordingStatus::Recording);

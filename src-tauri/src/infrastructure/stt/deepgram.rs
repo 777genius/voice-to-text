@@ -4,11 +4,11 @@ use http::Request;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{Notify, Mutex};
+use tokio::net::TcpStream;
+use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
-use tokio_tungstenite::{connect_async, tungstenite::Message, WebSocketStream, MaybeTlsStream};
-use tokio::net::TcpStream;
+use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 use crate::domain::{
     AudioChunk, ConnectionQualityCallback, ErrorCallback, SttConfig, SttConnectionCategory,
@@ -48,7 +48,7 @@ pub struct DeepgramProvider {
     on_error_callback: Option<ErrorCallback>,
     on_connection_quality_callback: Option<ConnectionQualityCallback>,
     sent_chunks_count: usize, // счетчик отправленных чанков для диагностики
-    sent_bytes_total: usize, // общее количество отправленных байт
+    sent_bytes_total: usize,  // общее количество отправленных байт
 
     // Поля для мониторинга качества связи
     consecutive_errors: usize, // счётчик последовательных ошибок
@@ -57,7 +57,7 @@ pub struct DeepgramProvider {
     current_quality: Arc<Mutex<String>>, // текущее состояние качества связи (Good/Poor/Recovering)
 
     // Поля для автоматического переподключения
-    is_reconnecting: bool, // флаг что идёт процесс переподключения
+    is_reconnecting: bool,     // флаг что идёт процесс переподключения
     reconnect_attempts: usize, // количество попыток переподключения
     audio_buffer_during_reconnect: Arc<Mutex<Vec<AudioChunk>>>, // буфер аудио во время reconnect
 }
@@ -104,7 +104,9 @@ impl SttProvider for DeepgramProvider {
         log::info!("DeepgramProvider: Initializing");
 
         // Приоритет: пользовательский ключ → встроенный ключ
-        let api_key = config.deepgram_api_key.clone()
+        let api_key = config
+            .deepgram_api_key
+            .clone()
             .or_else(|| {
                 // Fallback на встроенный ключ
                 if embedded_keys::has_embedded_deepgram_key() {
@@ -113,12 +115,20 @@ impl SttProvider for DeepgramProvider {
                     None
                 }
             })
-            .ok_or_else(|| SttError::Configuration(
-                "Deepgram API key is required (either user key or embedded key)".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                SttError::Configuration(
+                    "Deepgram API key is required (either user key or embedded key)".to_string(),
+                )
+            })?;
 
-        log::info!("DeepgramProvider: Using {} API key",
-            if config.deepgram_api_key.is_some() { "user" } else { "embedded" });
+        log::info!(
+            "DeepgramProvider: Using {} API key",
+            if config.deepgram_api_key.is_some() {
+                "user"
+            } else {
+                "embedded"
+            }
+        );
 
         self.api_key = Some(api_key);
         self.config = Some(config.clone());
@@ -135,25 +145,33 @@ impl SttProvider for DeepgramProvider {
         log::info!("DeepgramProvider: Starting stream");
 
         if self.is_streaming {
-            return Err(SttError::Processing(
-                "Stream already active".to_string(),
-            ));
+            return Err(SttError::Processing("Stream already active".to_string()));
         }
 
-        let api_key = self.api_key.as_ref()
+        let api_key = self
+            .api_key
+            .as_ref()
             .ok_or_else(|| SttError::Configuration("API key not set".to_string()))?
             .clone();
 
-        let language = self.config.as_ref()
+        let language = self
+            .config
+            .as_ref()
             .and_then(|c| Some(c.language.clone()))
             .unwrap_or_else(|| "en".to_string());
 
         // Nova-3 поддерживает 47+ языков, включая русский
-        let model = self.config.as_ref()
+        let model = self
+            .config
+            .as_ref()
             .and_then(|c| c.model.clone())
             .unwrap_or_else(|| "nova-3".to_string());
 
-        log::info!("Using Deepgram model '{}' for language '{}'", model, language);
+        log::info!(
+            "Using Deepgram model '{}' for language '{}'",
+            model,
+            language
+        );
 
         // Собираем URL с параметрами (добавляем channels=1 для mono)
         let mut url = format!(
@@ -164,7 +182,11 @@ impl SttProvider for DeepgramProvider {
         );
 
         // Добавляем keyterms если заданы
-        if let Some(ref raw) = self.config.as_ref().and_then(|c| c.deepgram_keyterms.clone()) {
+        if let Some(ref raw) = self
+            .config
+            .as_ref()
+            .and_then(|c| c.deepgram_keyterms.clone())
+        {
             for term in raw.split(',').map(|t| t.trim()).filter(|t| !t.is_empty()) {
                 url.push_str(&format!("&keyterm={}", urlencoding::encode(term)));
             }
@@ -180,7 +202,10 @@ impl SttProvider for DeepgramProvider {
             .header("Connection", "Upgrade")
             .header("Upgrade", "websocket")
             .header("Sec-WebSocket-Version", "13")
-            .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
+            .header(
+                "Sec-WebSocket-Key",
+                tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+            )
             .header("Authorization", format!("Token {}", api_key))
             .body(())
             .map_err(|e| {
@@ -190,14 +215,12 @@ impl SttProvider for DeepgramProvider {
                 )))
             })?;
 
-        let (ws_stream, _response) = connect_async(request)
-            .await
-            .map_err(|e| {
-                SttError::Connection(SttConnectionError::simple(format!(
-                    "WS connection failed: {}",
-                    e
-                )))
-            })?;
+        let (ws_stream, _response) = connect_async(request).await.map_err(|e| {
+            SttError::Connection(SttConnectionError::simple(format!(
+                "WS connection failed: {}",
+                e
+            )))
+        })?;
 
         log::info!("Deepgram WebSocket connected");
 
@@ -252,9 +275,15 @@ impl SttProvider for DeepgramProvider {
 
                         // Если нет ответа от сервера больше 3 секунд - плохая связь
                         if elapsed > Duration::from_secs(3) && *current_quality == "Good" {
-                            log::warn!("Connection quality degraded: no server response for {:.1}s", elapsed.as_secs_f64());
+                            log::warn!(
+                                "Connection quality degraded: no server response for {:.1}s",
+                                elapsed.as_secs_f64()
+                            );
                             *current_quality = "Poor".to_string();
-                            on_connection_quality_monitor("Poor".to_string(), Some("No server response for 3+ seconds".to_string()));
+                            on_connection_quality_monitor(
+                                "Poor".to_string(),
+                                Some("No server response for 3+ seconds".to_string()),
+                            );
                         }
                         // Если связь восстановилась (получили ответ после плохой связи)
                         else if elapsed <= Duration::from_secs(2) && *current_quality == "Poor" {
@@ -282,7 +311,9 @@ impl SttProvider for DeepgramProvider {
             while let Some(msg_result) = read.next().await {
                 // Проверяем флаг паузы и игнорируем сообщения если на паузе
                 if *is_paused_flag_for_receiver.lock().await {
-                    log::trace!("Ignoring message from Deepgram - stream is paused (keep-alive mode)");
+                    log::trace!(
+                        "Ignoring message from Deepgram - stream is paused (keep-alive mode)"
+                    );
                     continue;
                 }
 
@@ -303,7 +334,11 @@ impl SttProvider for DeepgramProvider {
                                     session_notify.notify_one();
                                 }
 
-                                Self::handle_message(json, &on_partial_for_receiver, &on_final_for_receiver);
+                                Self::handle_message(
+                                    json,
+                                    &on_partial_for_receiver,
+                                    &on_final_for_receiver,
+                                );
                             }
                             Err(e) => {
                                 log::error!("Failed to parse Deepgram message: {}", e);
@@ -399,7 +434,7 @@ impl SttProvider for DeepgramProvider {
                 match write.send(Message::Text(keepalive_msg.to_string())).await {
                     Ok(_) => {
                         log::trace!("Sent KeepAlive to Deepgram");
-                    },
+                    }
                     Err(e) => {
                         log::debug!("KeepAlive failed, connection closed: {}", e);
                         break;
@@ -445,7 +480,10 @@ impl SttProvider for DeepgramProvider {
             // Ограничиваем размер буфера (макс 80 чанков = ~4 секунды @ 50ms)
             if buffer.len() < 80 {
                 buffer.push(chunk.clone());
-                log::debug!("Buffering audio chunk during reconnect ({} buffered)", buffer.len());
+                log::debug!(
+                    "Buffering audio chunk during reconnect ({} buffered)",
+                    buffer.len()
+                );
             } else {
                 log::warn!("Reconnect buffer full, dropping oldest chunk");
                 buffer.remove(0);
@@ -460,8 +498,9 @@ impl SttProvider for DeepgramProvider {
             return Ok(());
         }
 
-        let write = self.ws_write.as_ref()
-            .ok_or_else(|| SttError::Processing("WebSocket write handle not available".to_string()))?;
+        let write = self.ws_write.as_ref().ok_or_else(|| {
+            SttError::Processing("WebSocket write handle not available".to_string())
+        })?;
 
         // KeepAlive теперь отправляется отдельной задачей, не нужно здесь
 
@@ -474,7 +513,8 @@ impl SttProvider for DeepgramProvider {
 
         if self.audio_buffer.len() >= MIN_SAMPLES {
             // Конвертируем i16 семплы в байты (little-endian PCM)
-            let bytes: Vec<u8> = self.audio_buffer
+            let bytes: Vec<u8> = self
+                .audio_buffer
                 .iter()
                 .flat_map(|&sample| sample.to_le_bytes())
                 .collect();
@@ -529,18 +569,24 @@ impl SttProvider for DeepgramProvider {
 
                     // Логируем каждый 10-й чанк для диагностики
                     if self.sent_chunks_count % 10 == 0 {
-                        log::debug!("Sent chunk #{} to Deepgram: {} bytes ({:.2} KB total, took {:.1}ms)",
-                            self.sent_chunks_count, bytes_len,
+                        log::debug!(
+                            "Sent chunk #{} to Deepgram: {} bytes ({:.2} KB total, took {:.1}ms)",
+                            self.sent_chunks_count,
+                            bytes_len,
                             self.sent_bytes_total as f64 / 1024.0,
-                            send_duration.as_millis());
+                            send_duration.as_millis()
+                        );
                     }
 
                     // Предупреждаем если отправка медленная (>100ms может быть проблемой сети)
                     if send_duration.as_millis() > 100 {
-                        log::warn!("Slow WebSocket send detected: chunk #{} took {:.1}ms (network issue?)",
-                            self.sent_chunks_count, send_duration.as_millis());
+                        log::warn!(
+                            "Slow WebSocket send detected: chunk #{} took {:.1}ms (network issue?)",
+                            self.sent_chunks_count,
+                            send_duration.as_millis()
+                        );
                     }
-                },
+                }
                 Err(e) => {
                     log::warn!("Could not send audio data (connection error): {}", e);
 
@@ -549,13 +595,19 @@ impl SttProvider for DeepgramProvider {
 
                     // Если 3 или более ошибок подряд - пытаемся переподключиться
                     if self.consecutive_errors >= 3 {
-                        log::warn!("Connection lost after {} errors, attempting reconnect", self.consecutive_errors);
+                        log::warn!(
+                            "Connection lost after {} errors, attempting reconnect",
+                            self.consecutive_errors
+                        );
 
                         // Освобождаем write_guard перед вызовом reconnect (иначе будет ошибка borrow checker)
                         drop(write_guard);
 
                         // Буферизуем текущий чанк перед попыткой reconnect
-                        self.audio_buffer_during_reconnect.lock().await.push(chunk.clone());
+                        self.audio_buffer_during_reconnect
+                            .lock()
+                            .await
+                            .push(chunk.clone());
 
                         // Пытаемся переподключиться
                         match self.reconnect().await {
@@ -573,7 +625,9 @@ impl SttProvider for DeepgramProvider {
                                     callback(SttError::Connection(SttConnectionError {
                                         message: format!("Connection lost: {}", reconnect_error),
                                         details: SttConnectionDetails {
-                                            category: Some(SttConnectionCategory::ServerUnavailable),
+                                            category: Some(
+                                                SttConnectionCategory::ServerUnavailable,
+                                            ),
                                             ..Default::default()
                                         },
                                     }));
@@ -606,25 +660,34 @@ impl SttProvider for DeepgramProvider {
         }
 
         // Логируем статистику отправки перед остановкой
-        log::info!("Deepgram session stats: sent {} chunks, {:.2} KB total",
+        log::info!(
+            "Deepgram session stats: sent {} chunks, {:.2} KB total",
             self.sent_chunks_count,
-            self.sent_bytes_total as f64 / 1024.0);
+            self.sent_bytes_total as f64 / 1024.0
+        );
 
         // Отправляем остатки буфера (игнорируем ошибки если соединение уже закрыто)
         if !self.audio_buffer.is_empty() {
             if let Some(write) = self.ws_write.as_ref() {
-                let bytes: Vec<u8> = self.audio_buffer
+                let bytes: Vec<u8> = self
+                    .audio_buffer
                     .iter()
                     .flat_map(|&sample| sample.to_le_bytes())
                     .collect();
 
-                log::debug!("Flushing remaining {} samples from buffer", self.audio_buffer.len());
+                log::debug!(
+                    "Flushing remaining {} samples from buffer",
+                    self.audio_buffer.len()
+                );
 
                 // Игнорируем ошибку если WebSocket уже закрыт
                 let mut write_guard = write.lock().await;
                 match write_guard.send(Message::Binary(bytes)).await {
-                    Ok(_) => {},
-                    Err(e) => log::debug!("Could not send final buffer (connection may be closed): {}", e),
+                    Ok(_) => {}
+                    Err(e) => log::debug!(
+                        "Could not send final buffer (connection may be closed): {}",
+                        e
+                    ),
                 }
                 self.audio_buffer.clear();
             }
@@ -641,8 +704,11 @@ impl SttProvider for DeepgramProvider {
                     log::debug!("CloseStream sent, waiting for final results...");
                     // Даем больше времени на получение финальных результатов (1 секунда)
                     tokio::time::sleep(Duration::from_millis(1000)).await;
-                },
-                Err(e) => log::debug!("Could not send CloseStream (connection may be closed): {}", e),
+                }
+                Err(e) => log::debug!(
+                    "Could not send CloseStream (connection may be closed): {}",
+                    e
+                ),
             }
 
             // Не отправляем Message::Close - Deepgram сам закрывает соединение после CloseStream
@@ -689,9 +755,11 @@ impl SttProvider for DeepgramProvider {
     }
 
     async fn abort(&mut self) -> SttResult<()> {
-        log::info!("DeepgramProvider: Aborting stream (sent {} chunks, {:.2} KB)",
+        log::info!(
+            "DeepgramProvider: Aborting stream (sent {} chunks, {:.2} KB)",
             self.sent_chunks_count,
-            self.sent_bytes_total as f64 / 1024.0);
+            self.sent_bytes_total as f64 / 1024.0
+        );
 
         // Останавливаем keepalive задачу
         if let Some(task) = self.keepalive_task.take() {
@@ -874,7 +942,10 @@ impl DeepgramProvider {
     async fn check_connection_health(&self) -> (bool, Option<String>) {
         // Проверка 1: WebSocket write handle должен существовать
         if self.ws_write.is_none() {
-            return (false, Some("WebSocket write handle not available".to_string()));
+            return (
+                false,
+                Some("WebSocket write handle not available".to_string()),
+            );
         }
 
         // Проверка 2: Receiver task должен быть живым
@@ -900,10 +971,13 @@ impl DeepgramProvider {
 
                 // Если прошло больше 10 секунд с последнего ответа - соединение мёртвое
                 if elapsed > Duration::from_secs(10) {
-                    return (false, Some(format!(
-                        "No server response for {} seconds",
-                        elapsed.as_secs()
-                    )));
+                    return (
+                        false,
+                        Some(format!(
+                            "No server response for {} seconds",
+                            elapsed.as_secs()
+                        )),
+                    );
                 }
             }
         }
@@ -927,7 +1001,10 @@ impl DeepgramProvider {
 
         // Отправляем событие Poor с reason
         if let Some(callback) = &self.on_connection_quality_callback {
-            callback("Poor".to_string(), Some("Connection lost, reconnecting...".to_string()));
+            callback(
+                "Poor".to_string(),
+                Some("Connection lost, reconnecting...".to_string()),
+            );
         }
 
         // Останавливаем старые задачи
@@ -950,17 +1027,22 @@ impl DeepgramProvider {
         let _on_error = self.on_error_callback.clone().ok_or_else(|| {
             SttError::Internal("on_error callback not set during reconnect".to_string())
         })?;
-        let on_connection_quality = self.on_connection_quality_callback.clone().ok_or_else(|| {
-            SttError::Internal("on_connection_quality callback not set during reconnect".to_string())
-        })?;
+        let on_connection_quality =
+            self.on_connection_quality_callback.clone().ok_or_else(|| {
+                SttError::Internal(
+                    "on_connection_quality callback not set during reconnect".to_string(),
+                )
+            })?;
 
-        let config = self.config.clone().ok_or_else(|| {
-            SttError::Internal("config not set during reconnect".to_string())
-        })?;
+        let config = self
+            .config
+            .clone()
+            .ok_or_else(|| SttError::Internal("config not set during reconnect".to_string()))?;
 
-        let api_key = self.api_key.clone().ok_or_else(|| {
-            SttError::Configuration("API key not set".to_string())
-        })?;
+        let api_key = self
+            .api_key
+            .clone()
+            .ok_or_else(|| SttError::Configuration("API key not set".to_string()))?;
 
         // Делаем до 3 попыток переподключения
         const MAX_ATTEMPTS: usize = 3;
@@ -974,7 +1056,10 @@ impl DeepgramProvider {
             if let Some(callback) = &self.on_connection_quality_callback {
                 callback(
                     "Poor".to_string(),
-                    Some(format!("Reconnecting (attempt {}/{})...", attempt, MAX_ATTEMPTS))
+                    Some(format!(
+                        "Reconnecting (attempt {}/{})...",
+                        attempt, MAX_ATTEMPTS
+                    )),
                 );
             }
 
@@ -1005,13 +1090,21 @@ impl DeepgramProvider {
                 .header("Connection", "Upgrade")
                 .header("Upgrade", "websocket")
                 .header("Sec-WebSocket-Version", "13")
-                .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key())
+                .header(
+                    "Sec-WebSocket-Key",
+                    tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+                )
                 .header("Authorization", format!("Token {}", api_key))
                 .body(())
             {
                 Ok(req) => req,
                 Err(e) => {
-                    log::warn!("Failed to build request (attempt {}/{}): {}", attempt, MAX_ATTEMPTS, e);
+                    log::warn!(
+                        "Failed to build request (attempt {}/{}): {}",
+                        attempt,
+                        MAX_ATTEMPTS,
+                        e
+                    );
                     continue;
                 }
             };
@@ -1019,12 +1112,21 @@ impl DeepgramProvider {
             let ws_stream = match connect_async(request).await {
                 Ok((stream, _)) => stream,
                 Err(e) => {
-                    log::warn!("Failed to connect (attempt {}/{}): {}", attempt, MAX_ATTEMPTS, e);
+                    log::warn!(
+                        "Failed to connect (attempt {}/{}): {}",
+                        attempt,
+                        MAX_ATTEMPTS,
+                        e
+                    );
                     continue;
                 }
             };
 
-            log::info!("WebSocket reconnected successfully (attempt {}/{})", attempt, MAX_ATTEMPTS);
+            log::info!(
+                "WebSocket reconnected successfully (attempt {}/{})",
+                attempt,
+                MAX_ATTEMPTS
+            );
 
             // Разделяем стрим на read/write
             let (write, mut read) = ws_stream.split();
@@ -1071,8 +1173,13 @@ impl DeepgramProvider {
                             if elapsed > Duration::from_secs(3) && *current_quality == "Good" {
                                 log::warn!("Connection quality degraded after reconnect: no server response for {:.1}s", elapsed.as_secs_f64());
                                 *current_quality = "Poor".to_string();
-                                on_connection_quality_monitor("Poor".to_string(), Some("No server response for 3+ seconds".to_string()));
-                            } else if elapsed <= Duration::from_secs(2) && *current_quality == "Poor" {
+                                on_connection_quality_monitor(
+                                    "Poor".to_string(),
+                                    Some("No server response for 3+ seconds".to_string()),
+                                );
+                            } else if elapsed <= Duration::from_secs(2)
+                                && *current_quality == "Poor"
+                            {
                                 log::info!("Connection quality recovering after reconnect");
                                 *current_quality = "Recovering".to_string();
                                 on_connection_quality_monitor("Recovering".to_string(), None);
@@ -1096,7 +1203,9 @@ impl DeepgramProvider {
                 while let Some(msg_result) = read.next().await {
                     // Проверяем флаг паузы и игнорируем сообщения если на паузе
                     if *is_paused_flag_for_receiver.lock().await {
-                        log::trace!("Ignoring message from Deepgram after reconnect - stream is paused");
+                        log::trace!(
+                            "Ignoring message from Deepgram after reconnect - stream is paused"
+                        );
                         continue;
                     }
 
@@ -1115,10 +1224,17 @@ impl DeepgramProvider {
                                         session_notify.notify_one();
                                     }
 
-                                    Self::handle_message(json, &on_partial_for_receiver, &on_final_for_receiver);
+                                    Self::handle_message(
+                                        json,
+                                        &on_partial_for_receiver,
+                                        &on_final_for_receiver,
+                                    );
                                 }
                                 Err(e) => {
-                                    log::error!("Failed to parse Deepgram message after reconnect: {}", e);
+                                    log::error!(
+                                        "Failed to parse Deepgram message after reconnect: {}",
+                                        e
+                                    );
                                 }
                             }
                         }
@@ -1149,8 +1265,14 @@ impl DeepgramProvider {
                     let keepalive_msg = json!({"type": "KeepAlive"});
                     let mut write_guard = ws_write_for_keepalive.lock().await;
 
-                    if let Err(e) = write_guard.send(Message::Text(keepalive_msg.to_string())).await {
-                        log::debug!("Could not send KeepAlive after reconnect (connection closed): {}", e);
+                    if let Err(e) = write_guard
+                        .send(Message::Text(keepalive_msg.to_string()))
+                        .await
+                    {
+                        log::debug!(
+                            "Could not send KeepAlive after reconnect (connection closed): {}",
+                            e
+                        );
                         break;
                     }
                 }
@@ -1183,7 +1305,9 @@ impl DeepgramProvider {
                 for chunk in buffered_chunks {
                     // Отправляем через send_audio но НЕ через рекурсию
                     // Просто отправляем напрямую через WebSocket
-                    let bytes: Vec<u8> = chunk.data.iter()
+                    let bytes: Vec<u8> = chunk
+                        .data
+                        .iter()
                         .flat_map(|&sample| sample.to_le_bytes())
                         .collect();
 
@@ -1244,7 +1368,9 @@ impl DeepgramProvider {
                 // Извлекаем транскрипцию из первой альтернативы
                 // Структура Streaming API: channel.alternatives[0]
                 if let Some(channel) = json.get("channel") {
-                    if let Some(alternatives) = channel.get("alternatives").and_then(|a| a.as_array()) {
+                    if let Some(alternatives) =
+                        channel.get("alternatives").and_then(|a| a.as_array())
+                    {
                         log::trace!("Found {} alternative(s)", alternatives.len());
                         if let Some(first_alt) = alternatives.first() {
                             let text = first_alt["transcript"].as_str().unwrap_or("");
@@ -1254,7 +1380,8 @@ impl DeepgramProvider {
                                 let confidence = first_alt["confidence"].as_f64().map(|v| v as f32);
 
                                 // Извлекаем язык из alternatives[0].languages (по документации)
-                                let detected_language = first_alt.get("languages")
+                                let detected_language = first_alt
+                                    .get("languages")
                                     .and_then(|l| l.as_array())
                                     .and_then(|arr| arr.first())
                                     .and_then(|lang| lang.as_str())
@@ -1273,8 +1400,9 @@ impl DeepgramProvider {
                                     timestamp: std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .unwrap_or_else(|_| std::time::Duration::from_secs(0))
-                                        .as_secs() as i64,
-                                    start, // передаем start время из Deepgram
+                                        .as_secs()
+                                        as i64,
+                                    start,    // передаем start время из Deepgram
                                     duration, // передаем duration из Deepgram
                                 };
 
@@ -1405,7 +1533,10 @@ mod tests {
 
         let result = provider.initialize(&config).await;
         assert!(result.is_ok(), "Should succeed with embedded key");
-        assert!(provider.api_key.is_some(), "API key should be set from embedded key");
+        assert!(
+            provider.api_key.is_some(),
+            "API key should be set from embedded key"
+        );
     }
 
     #[tokio::test]
@@ -1474,18 +1605,34 @@ mod tests {
         let on_connection_quality = Arc::new(|_: String, _: Option<String>| {});
 
         // Не streaming - ошибка
-        let result = provider.resume_stream(on_partial.clone(), on_final.clone(), on_error.clone(), on_connection_quality.clone()).await;
+        let result = provider
+            .resume_stream(
+                on_partial.clone(),
+                on_final.clone(),
+                on_error.clone(),
+                on_connection_quality.clone(),
+            )
+            .await;
         assert!(result.is_err());
 
         // Streaming но не paused - ошибка
         provider.is_streaming = true;
-        let result = provider.resume_stream(on_partial.clone(), on_final.clone(), on_error.clone(), on_connection_quality.clone()).await;
+        let result = provider
+            .resume_stream(
+                on_partial.clone(),
+                on_final.clone(),
+                on_error.clone(),
+                on_connection_quality.clone(),
+            )
+            .await;
         assert!(result.is_err());
 
         // Streaming + paused без реального соединения - ошибка (health check)
         provider.is_paused = true;
         provider.audio_buffer = vec![1, 2, 3];
-        let result = provider.resume_stream(on_partial, on_final, on_error, on_connection_quality).await;
+        let result = provider
+            .resume_stream(on_partial, on_final, on_error, on_connection_quality)
+            .await;
         assert!(result.is_err());
         assert!(!provider.is_streaming);
         assert!(!provider.is_paused);

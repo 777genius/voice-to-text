@@ -1,7 +1,7 @@
-use std::path::{Path, PathBuf};
 use anyhow::Result;
+use std::path::{Path, PathBuf};
 
-use crate::domain::{SttConfig, AppConfig, UiPreferences};
+use crate::domain::{AppConfig, SttConfig, UiPreferences};
 
 /// Маркер "приложение только что обновилось".
 ///
@@ -138,8 +138,8 @@ impl ConfigStore {
             }
         }
 
-        let config_dir = dirs::config_dir()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get config directory"))?;
+        let config_dir =
+            dirs::config_dir().ok_or_else(|| anyhow::anyhow!("Failed to get config directory"))?;
         let app_config_dir = Self::scoped_config_dir(&config_dir);
 
         // Важно: create_dir_all идемпотентен и надёжнее, чем exists() (race).
@@ -184,7 +184,12 @@ impl ConfigStore {
             Ok(v) => v,
             Err(e) => {
                 let bak = Self::backup_path(&path);
-                log::warn!("Failed to read STT config {:?}: {}. Trying backup {:?}.", path, e, bak);
+                log::warn!(
+                    "Failed to read STT config {:?}: {}. Trying backup {:?}.",
+                    path,
+                    e,
+                    bak
+                );
                 let json_bak = tokio::fs::read_to_string(&bak).await?;
                 let cfg_bak: SttConfig = serde_json::from_str(&json_bak)?;
                 // Best-effort: восстанавливаем основной файл, чтобы следующий старт был стабильным.
@@ -255,7 +260,12 @@ impl ConfigStore {
             Ok(v) => v,
             Err(e) => {
                 let bak = Self::backup_path(&path);
-                log::warn!("Failed to read app config {:?}: {}. Trying backup {:?}.", path, e, bak);
+                log::warn!(
+                    "Failed to read app config {:?}: {}. Trying backup {:?}.",
+                    path,
+                    e,
+                    bak
+                );
                 let json_bak = tokio::fs::read_to_string(&bak).await?;
                 let cfg_bak: AppConfig = serde_json::from_str(&json_bak)?;
                 if let Ok(pretty) = serde_json::to_string_pretty(&cfg_bak) {
@@ -357,7 +367,12 @@ impl ConfigStore {
             Ok(v) => v,
             Err(e) => {
                 let bak = Self::backup_path(&path);
-                log::warn!("Failed to read UI preferences {:?}: {}. Trying backup {:?}.", path, e, bak);
+                log::warn!(
+                    "Failed to read UI preferences {:?}: {}. Trying backup {:?}.",
+                    path,
+                    e,
+                    bak
+                );
                 let json_bak = tokio::fs::read_to_string(&bak).await?;
                 let prefs_bak: UiPreferences = serde_json::from_str(&json_bak)?;
                 if let Ok(pretty) = serde_json::to_string_pretty(&prefs_bak) {
@@ -530,8 +545,16 @@ mod tests {
         std::fs::create_dir_all(&legacy_dir).unwrap();
 
         std::fs::write(legacy_dir.join("stt_config.json"), "{\"language\":\"ru\"}").unwrap();
-        std::fs::write(legacy_dir.join("app_config.json"), "{\"microphone_sensitivity\":175}").unwrap();
-        std::fs::write(legacy_dir.join("ui_preferences.json"), "{\"theme\":\"dark\"}").unwrap();
+        std::fs::write(
+            legacy_dir.join("app_config.json"),
+            "{\"microphone_sensitivity\":175}",
+        )
+        .unwrap();
+        std::fs::write(
+            legacy_dir.join("ui_preferences.json"),
+            "{\"theme\":\"dark\"}",
+        )
+        .unwrap();
 
         ConfigStore::migrate_legacy_settings_once(&root).unwrap();
 

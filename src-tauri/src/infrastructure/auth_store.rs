@@ -93,8 +93,8 @@ impl AuthStore {
     }
 
     fn config_dir() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get config directory"))?;
+        let config_dir =
+            dirs::config_dir().ok_or_else(|| anyhow::anyhow!("Failed to get config directory"))?;
         let app_config_dir = Self::scoped_config_dir(&config_dir);
 
         // Важно: create_dir_all идемпотентен и надёжнее, чем exists() (race).
@@ -195,10 +195,15 @@ mod tests {
 
     #[test]
     fn migrate_legacy_store_once_copies_existing_auth_store_for_dev_storage() {
-        let root = std::env::temp_dir().join(format!("voice-to-text-auth-migrate-{}", Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("voice-to-text-auth-migrate-{}", Uuid::new_v4()));
         let legacy_dir = root.join("voice-to-text");
         std::fs::create_dir_all(&legacy_dir).unwrap();
-        std::fs::write(legacy_dir.join("auth_store.json"), "{\"device_id\":\"desktop-1\",\"session\":null}").unwrap();
+        std::fs::write(
+            legacy_dir.join("auth_store.json"),
+            "{\"device_id\":\"desktop-1\",\"session\":null}",
+        )
+        .unwrap();
 
         AuthStore::migrate_legacy_store_once(&root).unwrap();
 

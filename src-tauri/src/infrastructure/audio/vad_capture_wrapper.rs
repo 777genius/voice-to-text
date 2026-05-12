@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::domain::{AudioCapture, AudioChunk, AudioChunkCallback, AudioConfig, AudioResult};
 use crate::infrastructure::audio::{VadProcessor, VadResult};
@@ -25,7 +25,7 @@ pub struct VadCaptureWrapper {
     on_silence_timeout: Option<SilenceTimeoutCallback>,
     audio_config: AudioConfig,
     silence_timeout_triggered: Arc<Mutex<bool>>, // Флаг для одноразового вызова callback
-    running: Arc<AtomicBool>, // Защита от "хвостов" callback после stop_capture
+    running: Arc<AtomicBool>,                    // Защита от "хвостов" callback после stop_capture
 }
 
 impl VadCaptureWrapper {
