@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.6] - 2026-05-12
+
+### Changed
+- The mini recording window is now enabled by default for new app configurations.
+- Auto-paste now inserts finalized speech segments sooner instead of waiting for the whole utterance to finish.
+
+### Fixed
+- Auto-paste now avoids duplicating already inserted finalized text and ignores stale paste completions from older recording sessions.
+
+---
+
 ## [0.10.5] - 2026-05-03
 
 ### Added
