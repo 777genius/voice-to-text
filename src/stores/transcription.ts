@@ -744,27 +744,14 @@ export const useTranscriptionStore = defineStore('transcription', () => {
                 accumulated_text: accumulatedText.value
               });
 
-              // Сохраняем accumulated текст от предыдущей utterance если он есть
-              if (accumulatedText.value) {
-                const oldFinalText = finalText.value;
-                console.log('💾 [BEFORE SAVE] finalText:', oldFinalText);
-                console.log('💾 [BEFORE SAVE] accumulated:', accumulatedText.value);
-
-                finalText.value = finalText.value
-                  ? `${finalText.value} ${accumulatedText.value}`
-                  : accumulatedText.value;
-
-                console.log('💾 [AFTER SAVE] finalText:', finalText.value);
-                console.log('💾 Successfully saved accumulated text to finalText');
-
-                accumulatedText.value = '';
-                animatedAccumulatedText.value = '';
-                lastFinalizedSegmentKey.value = '';
-              } else {
-                console.log('💾 [SKIP] No accumulated text to save (already empty)');
+              // Не создаём final до `speech_final`: Deepgram может начать новый segment
+              // внутри того же utterance. Сохраняем прошлый interim как live accumulated.
+              if (partialText.value) {
+                accumulatedText.value = mergeTranscriptText(accumulatedText.value, partialText.value);
+                animateAccumulatedText(accumulatedText.value);
               }
 
-              // Начинаем новую utterance
+              // Начинаем новый segment
               currentUtteranceStart.value = event.payload.start;
               partialText.value = event.payload.text;
 

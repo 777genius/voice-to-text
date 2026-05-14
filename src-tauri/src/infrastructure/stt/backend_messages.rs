@@ -54,6 +54,12 @@ pub enum ServerMessage {
         text: String,
         #[serde(default)]
         confidence: Option<f32>,
+        #[serde(default)]
+        is_segment_final: Option<bool>,
+        #[serde(default)]
+        start_ms: Option<u64>,
+        #[serde(default)]
+        duration_ms: Option<u64>,
     },
 
     /// Финальный результат (не изменится)
@@ -61,6 +67,8 @@ pub enum ServerMessage {
         text: String,
         #[serde(default)]
         confidence: Option<f32>,
+        #[serde(default)]
+        start_ms: Option<u64>,
         /// Длительность обработанного аудио в мс
         duration_ms: u64,
     },
@@ -125,9 +133,41 @@ mod tests {
         let msg: ServerMessage = serde_json::from_str(json).unwrap();
 
         match msg {
-            ServerMessage::Partial { text, confidence } => {
+            ServerMessage::Partial {
+                text,
+                confidence,
+                is_segment_final,
+                start_ms,
+                duration_ms,
+            } => {
                 assert_eq!(text, "привет");
                 assert_eq!(confidence, Some(0.85));
+                assert_eq!(is_segment_final, None);
+                assert_eq!(start_ms, None);
+                assert_eq!(duration_ms, None);
+            }
+            _ => panic!("Expected Partial message"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_v2_segment_final_partial_message() {
+        let json = r#"{"type":"partial","text":"первый кусок","confidence":0.9,"is_segment_final":true,"start_ms":120,"duration_ms":980}"#;
+        let msg: ServerMessage = serde_json::from_str(json).unwrap();
+
+        match msg {
+            ServerMessage::Partial {
+                text,
+                confidence,
+                is_segment_final,
+                start_ms,
+                duration_ms,
+            } => {
+                assert_eq!(text, "первый кусок");
+                assert_eq!(confidence, Some(0.9));
+                assert_eq!(is_segment_final, Some(true));
+                assert_eq!(start_ms, Some(120));
+                assert_eq!(duration_ms, Some(980));
             }
             _ => panic!("Expected Partial message"),
         }

@@ -278,6 +278,59 @@ describe('transcription connect-retry reliability', () => {
     expect(store.displayText).toBe('да да');
   });
 
+  it('не переносит live segment в finalText до speech_final при смене start', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 16, status: 'Recording', stopped_via_hotkey: false },
+    });
+
+    await handlers.get('transcription:partial')({
+      payload: {
+        session_id: 16,
+        text: 'первая часть',
+        timestamp: 1,
+        is_segment_final: false,
+        start: 0,
+        duration: 0.8,
+      },
+    });
+
+    await handlers.get('transcription:partial')({
+      payload: {
+        session_id: 16,
+        text: 'вторая часть',
+        timestamp: 2,
+        is_segment_final: false,
+        start: 0.8,
+        duration: 0.9,
+      },
+    });
+
+    expect(store.finalText).toBe('');
+    expect(store.displayText).toBe('первая часть вторая часть');
+
+    await handlers.get('transcription:final')({
+      payload: {
+        session_id: 16,
+        text: '',
+        timestamp: 3,
+      },
+    });
+
+    expect(store.finalText).toBe('первая часть вторая часть');
+  });
+
   it('append-ит finalized chunks по Deepgram, даже если слова повторяются на границе', async () => {
     const handlers = new Map<string, any>();
 

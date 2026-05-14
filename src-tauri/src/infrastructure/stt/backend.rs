@@ -607,7 +607,7 @@ impl SttProvider for BackendProvider {
         });
 
         let config_msg = ClientMessage::Config {
-            protocol_v: 1,
+            protocol_v: 2,
             provider: provider_name.to_string(),
             language: config.language.clone(),
             sample_rate: 16000,
@@ -679,9 +679,22 @@ impl SttProvider for BackendProvider {
                                         }
                                     }
 
-                                    ServerMessage::Partial { text, confidence } => {
+                                    ServerMessage::Partial {
+                                        text,
+                                        confidence,
+                                        is_segment_final,
+                                        start_ms,
+                                        duration_ms,
+                                    } => {
                                         log::debug!("Partial: {} (conf: {:?})", text, confidence);
-                                        let mut transcription = Transcription::partial(text);
+                                        let mut transcription = Transcription::new(
+                                            text,
+                                            is_segment_final.unwrap_or(false),
+                                        )
+                                        .with_timing(
+                                            start_ms.unwrap_or(0) as f64 / 1000.0,
+                                            duration_ms.unwrap_or(0) as f64 / 1000.0,
+                                        );
                                         if let Some(conf) = confidence {
                                             transcription = transcription.with_confidence(conf);
                                         }
@@ -697,6 +710,7 @@ impl SttProvider for BackendProvider {
                                     ServerMessage::Final {
                                         text,
                                         confidence,
+                                        start_ms,
                                         duration_ms,
                                     } => {
                                         log::debug!(
@@ -706,7 +720,10 @@ impl SttProvider for BackendProvider {
                                             duration_ms
                                         );
                                         let mut transcription = Transcription::final_result(text)
-                                            .with_timing(0.0, duration_ms as f64 / 1000.0);
+                                            .with_timing(
+                                                start_ms.unwrap_or(0) as f64 / 1000.0,
+                                                duration_ms as f64 / 1000.0,
+                                            );
                                         if let Some(conf) = confidence {
                                             transcription = transcription.with_confidence(conf);
                                         }
