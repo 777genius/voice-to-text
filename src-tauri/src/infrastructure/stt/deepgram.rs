@@ -1422,7 +1422,7 @@ impl DeepgramProvider {
                                     is_final, speech_final, from_finalize, text, confidence, start, duration);
 
                                 // Отправляем как final когда речь завершена или пришёл flush от Finalize.
-                                if is_final && (speech_final || from_finalize) {
+                                if speech_final || from_finalize {
                                     log::info!(
                                         "✅ Final transcript: '{}' → вызываем on_final callback",
                                         text
@@ -1727,6 +1727,40 @@ mod tests {
         });
 
         DeepgramProvider::handle_message(json, &on_partial, &on_final);
+        assert!(*final_called.lock().unwrap());
+    }
+
+    #[test]
+    fn test_handle_message_speech_final_without_is_final_is_final() {
+        let partial_called = Arc::new(std::sync::Mutex::new(false));
+        let final_called = Arc::new(std::sync::Mutex::new(false));
+
+        let p_called = partial_called.clone();
+        let on_partial: TranscriptionCallback = Arc::new(move |_: Transcription| {
+            *p_called.lock().unwrap() = true;
+        });
+
+        let f_called = final_called.clone();
+        let on_final: TranscriptionCallback = Arc::new(move |_: Transcription| {
+            *f_called.lock().unwrap() = true;
+        });
+
+        let json = json!({
+            "type": "Results",
+            "is_final": false,
+            "speech_final": true,
+            "channel": {
+                "alternatives": [
+                    {
+                        "transcript": "speech endpoint text",
+                        "confidence": 0.98
+                    }
+                ]
+            }
+        });
+
+        DeepgramProvider::handle_message(json, &on_partial, &on_final);
+        assert!(!*partial_called.lock().unwrap());
         assert!(*final_called.lock().unwrap());
     }
 
