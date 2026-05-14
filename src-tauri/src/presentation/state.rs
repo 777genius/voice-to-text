@@ -389,6 +389,7 @@ impl AppState {
         let task = tauri::async_runtime::spawn(async move {
             const REFRESH_BUFFER_MS: i64 = 2 * 60 * 1000; // 2 minutes before access expiry
             const ERROR_RETRY_DELAY_SECS: u64 = 30;
+            const MIN_SUCCESS_REFRESH_INTERVAL_SECS: u64 = 30;
 
             #[derive(serde::Serialize)]
             struct RefreshReq {
@@ -674,6 +675,14 @@ impl AppState {
                     rev_session,
                     None,
                 )
+                .await;
+
+                // Если локальные часы сильно ушли вперёд, access_expires_at может выглядеть
+                // уже истёкшим сразу после успешного refresh. Минимальная пауза защищает backend
+                // от tight-loop, а нормальный TTL всё равно будет досчитан на следующем круге.
+                tokio::time::sleep(tokio::time::Duration::from_secs(
+                    MIN_SUCCESS_REFRESH_INTERVAL_SECS,
+                ))
                 .await;
 
                 // Continue loop (will schedule next refresh)

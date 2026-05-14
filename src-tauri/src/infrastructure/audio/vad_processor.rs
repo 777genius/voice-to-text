@@ -7,7 +7,7 @@ use crate::domain::{SttError, SttResult};
 ///
 /// Requirements:
 /// - Fixed 30ms frames (480 samples @ 16kHz)
-/// - Configurable silence timeout for auto-stop (default: 3000ms from AppConfig)
+/// - Configurable silence timeout for auto-stop (default: 5000ms from AppConfig)
 /// - Sample rate: 16kHz mono PCM i16
 const FRAME_SIZE_MS: usize = 30;
 const FRAME_SIZE_SAMPLES: usize = 480; // 16kHz * 30ms / 1000
@@ -71,7 +71,7 @@ impl VadProcessor {
         })
     }
 
-    /// Create VAD processor with default settings (3000ms timeout, Quality mode)
+    /// Create VAD processor with default settings (5000ms timeout, Quality mode)
     pub fn default() -> SttResult<Self> {
         Self::new(None, None)
     }

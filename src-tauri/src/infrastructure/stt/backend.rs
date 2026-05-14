@@ -135,6 +135,43 @@ struct CallbackState {
     swap_after_seq: u64,
 }
 
+impl CallbackState {
+    fn error_callback(&self) -> Option<ErrorCallback> {
+        if self.swap_on_next_ack {
+            if let Some(pending) = self.pending.as_ref() {
+                return Some(pending.on_error.clone());
+            }
+        }
+        self.active.as_ref().map(|c| c.on_error.clone())
+    }
+}
+
+fn category_for_server_error(code: &str) -> SttConnectionCategory {
+    match code {
+        "timeout" | "TIMEOUT" => SttConnectionCategory::Timeout,
+        "rate_limit" | "too_many_sessions" | "RATE_LIMIT_EXCEEDED" | "TOO_MANY_SESSIONS" => {
+            SttConnectionCategory::RateLimited
+        }
+        "LIMIT_EXCEEDED" => SttConnectionCategory::LimitExceeded,
+        "PROVIDER_UNAVAILABLE" | "PROVIDER_ERROR" | "INTERNAL_ERROR" => {
+            SttConnectionCategory::ServerUnavailable
+        }
+        _ => SttConnectionCategory::Unknown,
+    }
+}
+
+fn server_error_closes_stream(code: &str) -> bool {
+    matches!(
+        code,
+        "RATE_LIMIT_EXCEEDED"
+            | "TOO_MANY_SESSIONS"
+            | "LIMIT_EXCEEDED"
+            | "PROVIDER_UNAVAILABLE"
+            | "PROVIDER_ERROR"
+            | "INTERNAL_ERROR"
+    )
+}
+
 impl BackendProvider {
     pub fn new() -> Self {
         Self {
@@ -596,6 +633,7 @@ impl SttProvider for BackendProvider {
             log::debug!("Backend receiver task started");
 
             const LIMIT_REMAINING_THRESHOLD: f32 = 5.0;
+            let mut server_error_reported = false;
 
             while let Some(msg_result) = read.next().await {
                 match msg_result {
@@ -724,25 +762,18 @@ impl SttProvider for BackendProvider {
 
                                     ServerMessage::Error { code, message } => {
                                         log::error!("Server error: {} - {}", code, message);
+                                        server_error_reported = server_error_closes_stream(&code);
                                         let cb = {
                                             let state = callbacks_state.lock().await;
-                                            state.active.as_ref().map(|c| c.on_error.clone())
+                                            state.error_callback()
                                         };
                                         if let Some(cb) = cb {
-                                            let category = match code.as_str() {
-                                                "timeout" => Some(SttConnectionCategory::Timeout),
-                                                "rate_limit" | "too_many_sessions" => {
-                                                    Some(SttConnectionCategory::RateLimited)
-                                                }
-                                                "LIMIT_EXCEEDED" => {
-                                                    Some(SttConnectionCategory::LimitExceeded)
-                                                }
-                                                _ => Some(SttConnectionCategory::Unknown),
-                                            };
                                             cb(SttError::Connection(SttConnectionError {
                                                 message,
                                                 details: SttConnectionDetails {
-                                                    category,
+                                                    category: Some(category_for_server_error(
+                                                        &code,
+                                                    )),
                                                     server_code: Some(code),
                                                     ..Default::default()
                                                 },
@@ -759,14 +790,15 @@ impl SttProvider for BackendProvider {
 
                     Ok(Message::Close(frame)) => {
                         log::info!("WebSocket closed by server: {:?}", frame);
-                        // Если мы сами инициировали закрытие (stop_stream) — не эмитим ошибку в UI.
-                        if is_closed_flag.load(Ordering::SeqCst) {
+                        // Если мы сами инициировали закрытие или уже отдали точную ServerMessage::Error,
+                        // не эмитим вторую обобщённую ошибку в UI.
+                        if is_closed_flag.load(Ordering::SeqCst) || server_error_reported {
                             break;
                         }
                         is_closed_flag.store(true, Ordering::SeqCst);
                         let cb = {
                             let state = callbacks_state.lock().await;
-                            state.active.as_ref().map(|c| c.on_error.clone())
+                            state.error_callback()
                         };
                         if let Some(cb) = cb {
                             let code_u16 = frame.as_ref().map(|f| u16::from(f.code));
@@ -818,14 +850,15 @@ impl SttProvider for BackendProvider {
 
                     Err(e) => {
                         log::error!("WebSocket error: {}", e);
-                        // Если закрытие инициировано нами — не поднимаем "ошибку соединения" в UI.
-                        if is_closed_flag.load(Ordering::SeqCst) {
+                        // Если закрытие инициировано нами или уже отдали точную ServerMessage::Error,
+                        // не поднимаем вторую обобщённую ошибку в UI.
+                        if is_closed_flag.load(Ordering::SeqCst) || server_error_reported {
                             break;
                         }
                         is_closed_flag.store(true, Ordering::SeqCst);
                         let cb = {
                             let state = callbacks_state.lock().await;
-                            state.active.as_ref().map(|c| c.on_error.clone())
+                            state.error_callback()
                         };
                         if let Some(cb) = cb {
                             let mut details = match &e {
@@ -1299,6 +1332,7 @@ impl SttProvider for BackendProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn test_backend_provider_new() {
@@ -1328,5 +1362,55 @@ mod tests {
     fn test_backend_provider_supports_streaming() {
         let provider = BackendProvider::new();
         assert!(provider.supports_streaming());
+    }
+
+    #[test]
+    fn test_server_error_code_categories() {
+        assert_eq!(
+            category_for_server_error("RATE_LIMIT_EXCEEDED"),
+            SttConnectionCategory::RateLimited
+        );
+        assert_eq!(
+            category_for_server_error("TOO_MANY_SESSIONS"),
+            SttConnectionCategory::RateLimited
+        );
+        assert_eq!(
+            category_for_server_error("PROVIDER_UNAVAILABLE"),
+            SttConnectionCategory::ServerUnavailable
+        );
+    }
+
+    #[test]
+    fn test_only_fatal_server_errors_suppress_following_close() {
+        assert!(server_error_closes_stream("RATE_LIMIT_EXCEEDED"));
+        assert!(server_error_closes_stream("PROVIDER_UNAVAILABLE"));
+        assert!(!server_error_closes_stream("BAD_REQUEST"));
+    }
+
+    #[test]
+    fn test_error_callback_prefers_pending_during_resume() {
+        fn callback_set(marker: Arc<AtomicUsize>, value: usize) -> CallbackSet {
+            CallbackSet {
+                on_partial: Arc::new(|_| {}),
+                on_final: Arc::new(|_| {}),
+                on_error: Arc::new(move |_| {
+                    marker.store(value, Ordering::Relaxed);
+                }),
+                on_connection_quality: Arc::new(|_, _| {}),
+            }
+        }
+
+        let marker = Arc::new(AtomicUsize::new(0));
+        let state = CallbackState {
+            active: Some(callback_set(marker.clone(), 1)),
+            pending: Some(callback_set(marker.clone(), 2)),
+            swap_on_next_ack: true,
+            swap_after_seq: 10,
+        };
+
+        let cb = state.error_callback().expect("error callback");
+        cb(SttError::Processing("boom".to_string()));
+
+        assert_eq!(marker.load(Ordering::Relaxed), 2);
     }
 }

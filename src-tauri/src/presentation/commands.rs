@@ -1039,9 +1039,12 @@ pub async fn update_stt_config(
     // В backend-only режиме keep-alive полезен: это снижает latency при повторном старте записи,
     // потому что мы переиспользуем WebSocket соединение с нашим сервером.
     //
-    // Важно: TTL задаётся в Rust-сервисе и синхронизируется с backend idle timeout.
-    // Иначе локальный keep-alive закроет WS раньше, чем это сделал бы сервер, и пользователь снова увидит "Подключение...".
+    // Важно: TTL держим чуть ниже backend audio idle timeout.
+    // Иначе локальный keep-alive может попытаться переиспользовать WS на границе серверного закрытия.
     config.keep_connection_alive = true;
+    if config.provider == crate::domain::SttProviderType::Backend {
+        config.keep_alive_ttl_secs = 105;
+    }
 
     log::debug!(
         "Setting keep_connection_alive={} for provider {:?}",

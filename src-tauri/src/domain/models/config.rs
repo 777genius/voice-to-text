@@ -68,8 +68,8 @@ pub struct SttConfig {
     /// Сколько держать соединение живым после остановки записи (если keep_connection_alive=true).
     ///
     /// Важно: keep-alive удерживает streaming соединение на стороне провайдера (Deepgram) и занимает слот
-    /// по лимиту параллельных соединений. Для backend-only режима держим разумный баланс UX/ресурсов:
-    /// по умолчанию 1 час, чтобы повторные запуски записи не пересоздавали WS слишком часто.
+    /// по лимиту параллельных соединений. Для backend-only режима держим TTL чуть ниже серверного
+    /// audio_idle_ttl_secs=120, чтобы idle клиенты закрывались до серверного timeout.
     #[serde(default = "default_keep_alive_ttl_secs")]
     pub keep_alive_ttl_secs: u64,
 
@@ -80,7 +80,7 @@ pub struct SttConfig {
 }
 
 fn default_keep_alive_ttl_secs() -> u64 {
-    3600
+    105
 }
 
 impl Default for SttConfig {
@@ -249,7 +249,7 @@ mod tests {
         assert!(config.backend_auth_token.is_none());
         assert!(config.backend_url.is_none());
         assert!(!config.keep_connection_alive);
-        assert_eq!(config.keep_alive_ttl_secs, 3600);
+        assert_eq!(config.keep_alive_ttl_secs, 105);
     }
 
     #[test]

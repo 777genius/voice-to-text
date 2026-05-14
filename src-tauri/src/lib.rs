@@ -426,9 +426,9 @@ pub fn run() {
                             stt.backend_auth_token = store.session.as_ref().map(|s| s.access_token.clone());
                             if stt.provider == crate::domain::SttProviderType::Backend {
                                 stt.keep_connection_alive = true;
-                                const MIN_BACKEND_KEEPALIVE_TTL_SECS: u64 = 3600;
-                                if stt.keep_alive_ttl_secs < MIN_BACKEND_KEEPALIVE_TTL_SECS {
-                                    stt.keep_alive_ttl_secs = MIN_BACKEND_KEEPALIVE_TTL_SECS;
+                                const BACKEND_KEEPALIVE_TTL_SECS: u64 = 105;
+                                if stt.keep_alive_ttl_secs != BACKEND_KEEPALIVE_TTL_SECS {
+                                    stt.keep_alive_ttl_secs = BACKEND_KEEPALIVE_TTL_SECS;
                                 }
                             }
                             // Если не смогли прочитать с диска — не перезаписываем файл дефолтами.
@@ -461,8 +461,8 @@ pub fn run() {
                         let _guard = state.stt_config_guard.lock().await;
 
                         // Backend-only режим: по умолчанию держим соединение живым между сессиями записи.
-                        // TTL синхронизируем с backend idle timeout, чтобы reconnect не происходил раньше времени
-                        // только из-за локального Tauri таймера.
+                        // TTL держим чуть ниже backend audio idle timeout, чтобы клиент закрывал idle WS
+                        // до серверного timeout и не пытался переиспользовать поток на границе закрытия.
                         let mut config_migrated = false;
                         if saved_config.provider == crate::domain::SttProviderType::Backend
                             && !saved_config.keep_connection_alive
@@ -475,14 +475,13 @@ pub fn run() {
                             );
                         }
 
-                        // UX: keep-alive должен быть заметно полезным для частых hotkey-сессий.
-                        // Если TTL слишком маленький, пользователь снова увидит "Подключение..." раньше,
-                        // чем backend успеет закрыть idle streaming session.
-                        const MIN_BACKEND_KEEPALIVE_TTL_SECS: u64 = 3600;
+                        // UX: keep-alive должен быть заметно полезным для частых hotkey-сессий,
+                        // но idle Deepgram streams не должны занимать concurrency slots надолго.
+                        const BACKEND_KEEPALIVE_TTL_SECS: u64 = 105;
                         if saved_config.provider == crate::domain::SttProviderType::Backend
-                            && saved_config.keep_alive_ttl_secs < MIN_BACKEND_KEEPALIVE_TTL_SECS
+                            && saved_config.keep_alive_ttl_secs != BACKEND_KEEPALIVE_TTL_SECS
                         {
-                            saved_config.keep_alive_ttl_secs = MIN_BACKEND_KEEPALIVE_TTL_SECS;
+                            saved_config.keep_alive_ttl_secs = BACKEND_KEEPALIVE_TTL_SECS;
                             config_migrated = true;
                             log::info!(
                                 "Migrated keep_alive_ttl_secs for backend provider to {}s",

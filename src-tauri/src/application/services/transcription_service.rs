@@ -863,9 +863,11 @@ impl TranscriptionService {
         let mut config = config;
         if config.provider == SttProviderType::Backend {
             config.keep_connection_alive = true;
-            const MIN_BACKEND_KEEPALIVE_TTL_SECS: u64 = 3600;
-            if config.keep_alive_ttl_secs < MIN_BACKEND_KEEPALIVE_TTL_SECS {
-                config.keep_alive_ttl_secs = MIN_BACKEND_KEEPALIVE_TTL_SECS;
+            // Держим клиентский TTL ниже backend audio_idle_ttl_secs=120, чтобы не переиспользовать
+            // WS в момент, когда сервер уже закрывает idle stream.
+            const BACKEND_KEEPALIVE_TTL_SECS: u64 = 105;
+            if config.keep_alive_ttl_secs != BACKEND_KEEPALIVE_TTL_SECS {
+                config.keep_alive_ttl_secs = BACKEND_KEEPALIVE_TTL_SECS;
             }
         }
 

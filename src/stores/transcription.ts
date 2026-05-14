@@ -1483,6 +1483,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  function currentConnectFailureDetails(): TranscriptionErrorPayload['error_details'] | null {
+    return lastConnectFailureDetails.value ?? null;
+  }
+
   function calcBackoffMs(attemptIndex: number): number {
     // attemptIndex: 1..N
     // Плавный backoff: 600ms, 1200ms, 2000ms, 3000ms...
@@ -1651,6 +1655,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     // На каждый запуск сбрасываем маркеры исхода подключения
     lastConnectFailure.value = null;
     lastConnectFailureRaw.value = '';
+    lastConnectFailureDetails.value = null;
 
     console.log('[ConnectRetry] Starting recording (single attempt)');
     await invoke<string>('start_recording');
@@ -1673,6 +1678,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         connectAttempt.value = attempt;
         lastConnectFailure.value = null;
         lastConnectFailureRaw.value = '';
+        lastConnectFailureDetails.value = null;
 
         try {
           // Перед первой попыткой гарантируем, что access token свежий.
@@ -1709,7 +1715,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
           // Если ошибка пришла не через events, пробуем классифицировать по raw строке
           const raw = lastConnectFailureRaw.value || formatUnknownError(err);
-          const details = lastConnectFailureDetails.value;
+          const details = currentConnectFailureDetails();
           const detected = failureType || detectErrorTypeFromRaw(raw) || 'connection';
 
           const httpStatus = details?.httpStatus ?? extractHttpStatusFromRaw(raw);
