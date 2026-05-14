@@ -25,29 +25,6 @@ const authContainerMock = vi.hoisted(() => ({
   },
 }));
 
-const appConfigMock = vi.hoisted(() => ({
-  autoCopyToClipboard: false,
-  autoPasteText: false,
-  playCompletionSound: false,
-  hideRecordingWindowOnHotkey: false,
-  showMiniRecordingWindow: false,
-  keepRecordingUntilManualStop: false,
-}));
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
-    resolve = res;
-  });
-  return { promise, resolve };
-}
-
-async function flushMicrotasks() {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
-}
-
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args: any[]) => invokeMock(...args),
 }));
@@ -58,10 +35,6 @@ vi.mock('@tauri-apps/api/event', () => ({
 
 vi.mock('../utils/tauri', () => ({
   isTauriAvailable: () => true,
-}));
-
-vi.mock('./appConfig', () => ({
-  useAppConfigStore: () => appConfigMock,
 }));
 
 vi.mock('../features/auth/infrastructure/repositories/TokenRepository', () => ({
@@ -92,12 +65,6 @@ describe('transcription connect-retry reliability', () => {
     authStoreMock.reset.mockReset();
     authStoreMock.setAuthenticated.mockReset();
     authContainerMock.refreshTokensUseCase.execute.mockReset();
-    appConfigMock.autoCopyToClipboard = false;
-    appConfigMock.autoPasteText = false;
-    appConfigMock.playCompletionSound = false;
-    appConfigMock.hideRecordingWindowOnHotkey = false;
-    appConfigMock.showMiniRecordingWindow = false;
-    appConfigMock.keepRecordingUntilManualStop = false;
 
     // initialize() не вызываем, но пусть listen будет безопасным.
     listenMock.mockResolvedValue(() => {});
@@ -411,199 +378,5 @@ describe('transcription connect-retry reliability', () => {
     });
 
     expect(store.finalText).toBe('готово');
-  });
-
-  it('auto-paste вставляет segment-final сразу и не дублирует его на speech-final', async () => {
-    const handlers = new Map<string, any>();
-    appConfigMock.autoPasteText = true;
-
-    listenMock.mockImplementation(async (eventName: string, handler: any) => {
-      handlers.set(eventName, handler);
-      return () => {};
-    });
-
-    invokeMock.mockResolvedValue(null);
-
-    const store = useTranscriptionStore();
-    await store.initialize();
-
-    const statusHandler = handlers.get('recording:status');
-    const partialHandler = handlers.get('transcription:partial');
-    const finalHandler = handlers.get('transcription:final');
-
-    await statusHandler({
-      payload: { session_id: 7, status: 'Recording', stopped_via_hotkey: false },
-    });
-
-    await partialHandler({
-      payload: {
-        session_id: 7,
-        text: 'Первый кусок',
-        timestamp: 1,
-        is_segment_final: true,
-        start: 0,
-        duration: 1,
-      },
-    });
-
-    await partialHandler({
-      payload: {
-        session_id: 7,
-        text: 'второй кусок',
-        timestamp: 2,
-        is_segment_final: true,
-        start: 1,
-        duration: 1,
-      },
-    });
-
-    await finalHandler({
-      payload: {
-        session_id: 7,
-        text: '',
-        timestamp: 3,
-      },
-    });
-
-    const pasteCalls = invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text');
-    expect(pasteCalls).toEqual([
-      ['auto_paste_text', { text: 'Первый кусок' }],
-      ['auto_paste_text', { text: ' второй кусок' }],
-    ]);
-  });
-
-  it('auto-paste сериализует segment-final события, если первая вставка еще идет', async () => {
-    const handlers = new Map<string, any>();
-    const firstPaste = deferred<null>();
-    appConfigMock.autoPasteText = true;
-
-    listenMock.mockImplementation(async (eventName: string, handler: any) => {
-      handlers.set(eventName, handler);
-      return () => {};
-    });
-
-    let pasteCallCount = 0;
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === 'auto_paste_text') {
-        pasteCallCount++;
-        return pasteCallCount === 1 ? firstPaste.promise : Promise.resolve(null);
-      }
-      return Promise.resolve(null);
-    });
-
-    const store = useTranscriptionStore();
-    await store.initialize();
-
-    const statusHandler = handlers.get('recording:status');
-    const partialHandler = handlers.get('transcription:partial');
-
-    await statusHandler({
-      payload: { session_id: 8, status: 'Recording', stopped_via_hotkey: false },
-    });
-
-    const firstPartial = partialHandler({
-      payload: {
-        session_id: 8,
-        text: 'Первый кусок',
-        timestamp: 1,
-        is_segment_final: true,
-        start: 0,
-        duration: 1,
-      },
-    });
-    await flushMicrotasks();
-
-    expect(invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text')).toEqual([
-      ['auto_paste_text', { text: 'Первый кусок' }],
-    ]);
-
-    const secondPartial = partialHandler({
-      payload: {
-        session_id: 8,
-        text: 'второй кусок',
-        timestamp: 2,
-        is_segment_final: true,
-        start: 1,
-        duration: 1,
-      },
-    });
-    await flushMicrotasks();
-
-    expect(invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text')).toHaveLength(1);
-
-    firstPaste.resolve(null);
-    await Promise.all([firstPartial, secondPartial]);
-
-    const pasteCalls = invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text');
-    expect(pasteCalls).toEqual([
-      ['auto_paste_text', { text: 'Первый кусок' }],
-      ['auto_paste_text', { text: ' второй кусок' }],
-    ]);
-  });
-
-  it('auto-paste не переносит baseline старой вставки в новую сессию', async () => {
-    const handlers = new Map<string, any>();
-    const oldPaste = deferred<null>();
-    appConfigMock.autoPasteText = true;
-
-    listenMock.mockImplementation(async (eventName: string, handler: any) => {
-      handlers.set(eventName, handler);
-      return () => {};
-    });
-
-    let pasteCallCount = 0;
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === 'auto_paste_text') {
-        pasteCallCount++;
-        return pasteCallCount === 1 ? oldPaste.promise : Promise.resolve(null);
-      }
-      return Promise.resolve(null);
-    });
-
-    const store = useTranscriptionStore();
-    await store.initialize();
-
-    const statusHandler = handlers.get('recording:status');
-    const partialHandler = handlers.get('transcription:partial');
-
-    await statusHandler({
-      payload: { session_id: 10, status: 'Recording', stopped_via_hotkey: false },
-    });
-
-    const oldPartial = partialHandler({
-      payload: {
-        session_id: 10,
-        text: 'Старый текст',
-        timestamp: 1,
-        is_segment_final: true,
-        start: 0,
-        duration: 1,
-      },
-    });
-    await flushMicrotasks();
-
-    await statusHandler({
-      payload: { session_id: 11, status: 'Recording', stopped_via_hotkey: false },
-    });
-
-    oldPaste.resolve(null);
-    await oldPartial;
-
-    await partialHandler({
-      payload: {
-        session_id: 11,
-        text: 'Новый текст',
-        timestamp: 2,
-        is_segment_final: true,
-        start: 0,
-        duration: 1,
-      },
-    });
-
-    const pasteCalls = invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text');
-    expect(pasteCalls).toEqual([
-      ['auto_paste_text', { text: 'Старый текст' }],
-      ['auto_paste_text', { text: 'Новый текст' }],
-    ]);
   });
 });
