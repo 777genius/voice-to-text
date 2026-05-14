@@ -15,7 +15,7 @@ pub struct Transcription {
     /// Language detected or used
     pub language: Option<String>,
 
-    /// Timestamp when transcription was created
+    /// Unix timestamp in milliseconds when transcription was created
     pub timestamp: i64,
 
     /// Start time of the audio segment in seconds (from Deepgram)
@@ -35,7 +35,7 @@ impl Transcription {
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_secs() as i64,
+                .as_millis() as i64,
             start: 0.0,
             duration: 0.0,
         }
@@ -95,7 +95,7 @@ mod tests {
         assert!(t.is_final);
         assert!(t.confidence.is_none());
         assert!(t.language.is_none());
-        assert!(t.timestamp > 0);
+        assert!(t.timestamp > 1_000_000_000_000);
     }
 
     #[test]

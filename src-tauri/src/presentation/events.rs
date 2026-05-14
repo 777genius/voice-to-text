@@ -41,6 +41,7 @@ pub struct PartialTranscriptionPayload {
     /// Нужен, чтобы frontend мог игнорировать "поздние" события от предыдущей сессии.
     pub session_id: u64,
     pub text: String,
+    /// Unix timestamp in milliseconds.
     pub timestamp: i64,
     pub is_segment_final: bool, // true когда сегмент финализирован (is_final=true в Deepgram)
     pub start: f64,             // start время utterance в секундах (от Deepgram)
@@ -68,6 +69,7 @@ pub struct FinalTranscriptionPayload {
     pub text: String,
     pub confidence: Option<f32>,
     pub language: Option<String>,
+    /// Unix timestamp in milliseconds.
     pub timestamp: i64,
     pub start: f64,
     pub duration: f64,

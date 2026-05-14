@@ -447,7 +447,7 @@ impl AssemblyAIProvider {
                                 timestamp: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_else(|_| std::time::Duration::from_secs(0))
-                                    .as_secs() as i64,
+                                    .as_millis() as i64,
                                 start: 0.0,    // AssemblyAI не предоставляет start время
                                 duration: 0.0, // AssemblyAI не предоставляет duration
                             };
@@ -466,7 +466,7 @@ impl AssemblyAIProvider {
                                 timestamp: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_else(|_| std::time::Duration::from_secs(0))
-                                    .as_secs() as i64,
+                                    .as_millis() as i64,
                                 start: 0.0,    // AssemblyAI не предоставляет start время
                                 duration: 0.0, // AssemblyAI не предоставляет duration
                             };
