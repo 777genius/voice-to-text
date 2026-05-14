@@ -12,8 +12,6 @@ Modern voice-to-text desktop application using AI, built with Tauri 2.0, Rust, a
 - **45+ Languages** — Full Deepgram Nova-3 support with real-time multilingual detection
 - **Real-time Transcription** — Instant partial and final results via WebSocket streaming
 - **Global Hotkey** — Quick access with customizable hotkeys (default: Cmd+Shift+X / Ctrl+Shift+X)
-- **Auto-copy to Clipboard** — Instant access to transcribed text
-- **Auto-paste** — Automatically paste text into the active window (requires Accessibility permission on macOS)
 - **System Tray** — Runs in background, accessible from tray icon
 - **Auto-Updates** — Automatic update checks with secure cryptographic signatures
 - **Cross-Platform** — macOS (Intel & Apple Silicon), Windows, Linux
@@ -43,7 +41,7 @@ src-tauri/src/
 │   ├── licensing/       # License validation (Paddle)
 │   ├── config_store.rs  # Persistent configuration
 │   ├── clipboard.rs     # Clipboard integration
-│   ├── auto_paste.rs    # Auto-paste functionality
+│   ├── auto_paste.rs    # Legacy auto-paste command (disabled in current UI/runtime)
 │   ├── updater.rs       # Auto-update logic
 │   └── factory.rs       # Provider Factory (DI)
 │
@@ -126,6 +124,20 @@ pnpm tauri:build
 # Run tests
 pnpm test
 ```
+
+### Backend And Deepgram Notes
+
+- Backend repo: `/Users/belief/dev/projects/VoicetextAI/backend`
+- Production backend is deployed on Render. Use Render MCP when checking production deploy status, logs, or backend health.
+- Deepgram streaming display should follow Deepgram websocket semantics:
+  - append every non-empty `is_final=true` transcript segment to the current utterance buffer
+  - only move the buffered utterance into final UI text on `speech_final=true`
+  - also flush the current utterance when the backend marks an explicit Deepgram `Finalize` result with `from_finalize=true`
+  - send websocket control messages as JSON text frames, including `KeepAlive`, `Finalize`, and `CloseStream`
+- Real sample audio files useful for manual/e2e transcription checks:
+  - `/Users/belief/Documents/2026-05-14 23.56.41.ogg`
+  - `/Users/belief/Documents/2026-05-14 23.57.41.ogg`
+  - `/Users/belief/Documents/2026-05-14 23.57.56.ogg`
 
 #### Linux System Dependencies
 
