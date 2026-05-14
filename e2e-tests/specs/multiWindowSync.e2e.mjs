@@ -23,8 +23,8 @@ describe('multi-window sync (real tauri webdriver)', () => {
     const uiRes = await invoke('update_ui_preferences', { theme: 'light', locale: 'en' });
     if (uiRes && uiRes.__error) throw new Error(uiRes.__error);
 
-    // 2) app-config: меняем авто-копирование
-    const appRes = await invoke('update_app_config', { auto_copy_to_clipboard: true });
+    // 2) app-config: меняем чувствительность микрофона
+    const appRes = await invoke('update_app_config', { microphoneSensitivity: 123 });
     if (appRes && appRes.__error) throw new Error(appRes.__error);
 
     // 3) stt-config: меняем язык
@@ -48,7 +48,7 @@ describe('multi-window sync (real tauri webdriver)', () => {
 
     await waitFor(async () => {
       const cfg = await browser.execute(() => window.__E2E__.getAppConfig());
-      return cfg.autoCopyToClipboard === true;
+      return cfg.microphoneSensitivity === 123;
     });
 
     await waitFor(async () => {
@@ -57,4 +57,3 @@ describe('multi-window sync (real tauri webdriver)', () => {
     });
   });
 });
-

@@ -17,7 +17,7 @@ describe('multi-window sync (late join)', () => {
     const uiRes = await invoke('update_ui_preferences', { theme: 'light', locale: 'en' });
     if (uiRes && uiRes.__error) throw new Error(uiRes.__error);
 
-    const appRes = await invoke('update_app_config', { auto_copy_to_clipboard: true });
+    const appRes = await invoke('update_app_config', { microphoneSensitivity: 123 });
     if (appRes && appRes.__error) throw new Error(appRes.__error);
 
     const sttRes = await invoke('update_stt_config', {
@@ -43,7 +43,7 @@ describe('multi-window sync (late join)', () => {
 
     await waitFor(async () => {
       const cfg = await browser.execute(() => window.__E2E__.getAppConfig());
-      return cfg.autoCopyToClipboard === true;
+      return cfg.microphoneSensitivity === 123;
     });
 
     await waitFor(async () => {
@@ -52,4 +52,3 @@ describe('multi-window sync (late join)', () => {
     });
   });
 });
-

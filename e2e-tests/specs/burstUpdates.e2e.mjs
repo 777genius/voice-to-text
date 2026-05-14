@@ -19,9 +19,9 @@ describe('multi-window sync (burst updates)', () => {
     await ensureE2E();
 
     // Burst updates: шлём несколько апдейтов подряд.
-    const res1 = await invoke('update_app_config', { auto_copy_to_clipboard: false });
+    const res1 = await invoke('update_app_config', { microphoneSensitivity: 80 });
     if (res1 && res1.__error) throw new Error(res1.__error);
-    const res2 = await invoke('update_app_config', { auto_copy_to_clipboard: true });
+    const res2 = await invoke('update_app_config', { microphoneSensitivity: 123 });
     if (res2 && res2.__error) throw new Error(res2.__error);
 
     const res3 = await invoke('update_ui_preferences', { theme: 'dark', locale: 'ru' });
@@ -57,7 +57,7 @@ describe('multi-window sync (burst updates)', () => {
 
     await waitFor(async () => {
       const cfg = await browser.execute(() => window.__E2E__.getAppConfig());
-      return cfg.autoCopyToClipboard === true;
+      return cfg.microphoneSensitivity === 123;
     });
 
     await waitFor(async () => {
@@ -66,4 +66,3 @@ describe('multi-window sync (burst updates)', () => {
     });
   });
 });
-
