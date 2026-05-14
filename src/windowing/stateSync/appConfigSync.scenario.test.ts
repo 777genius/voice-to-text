@@ -104,11 +104,11 @@ describe('scenario: app-config sync across windows (mocked tauri)', () => {
     await appConfigMain.startSync();
     expect(appConfigMain.autoCopyToClipboard).toBe(false);
 
-    // "Settings window" triggers update on Rust side
+    // "Settings window" triggers a stale auto-copy update; app store keeps auto actions disabled.
     await invokeMock(CMD_UPDATE_APP_CONFIG, { autoCopyToClipboard: true });
 
     await vi.waitFor(() => {
-      expect(appConfigMain.autoCopyToClipboard).toBe(true);
+      expect(appConfigMain.autoCopyToClipboard).toBe(false);
     });
 
     await invokeMock(CMD_UPDATE_APP_CONFIG, { hideRecordingWindowOnHotkey: true });

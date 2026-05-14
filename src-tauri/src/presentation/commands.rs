@@ -1144,8 +1144,8 @@ pub async fn get_app_config_snapshot(
     let data = AppConfigSnapshotData {
         microphone_sensitivity: config.microphone_sensitivity,
         recording_hotkey: config.recording_hotkey,
-        auto_copy_to_clipboard: config.auto_copy_to_clipboard,
-        auto_paste_text: config.auto_paste_text,
+        auto_copy_to_clipboard: false,
+        auto_paste_text: false,
         play_completion_sound: config.play_completion_sound,
         hide_recording_window_on_hotkey: config.hide_recording_window_on_hotkey,
         show_mini_recording_window: config.show_mini_recording_window,
@@ -1421,26 +1421,15 @@ pub async fn update_app_config(
         }
     }
 
-    if let Some(auto_copy) = auto_copy_to_clipboard {
-        if config.auto_copy_to_clipboard != auto_copy {
-            log::info!(
-                "Updating auto_copy_to_clipboard: {} -> {}",
-                config.auto_copy_to_clipboard,
-                auto_copy
-            );
-            config.auto_copy_to_clipboard = auto_copy;
+    // Auto actions are intentionally disabled. Keep the IPC fields for compatibility,
+    // but do not allow old UI state or stale configs to turn them back on.
+    if auto_copy_to_clipboard.is_some() || auto_paste_text.is_some() {
+        if config.auto_copy_to_clipboard {
+            config.auto_copy_to_clipboard = false;
             any_changed = true;
         }
-    }
-
-    if let Some(auto_paste) = auto_paste_text {
-        if config.auto_paste_text != auto_paste {
-            log::info!(
-                "Updating auto_paste_text: {} -> {}",
-                config.auto_paste_text,
-                auto_paste
-            );
-            config.auto_paste_text = auto_paste;
+        if config.auto_paste_text {
+            config.auto_paste_text = false;
             any_changed = true;
         }
     }

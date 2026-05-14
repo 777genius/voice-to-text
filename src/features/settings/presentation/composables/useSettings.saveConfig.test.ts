@@ -78,7 +78,7 @@ describe('useSettings saveConfig', () => {
     tauriSettingsServiceMock.getAppConfig.mockResolvedValueOnce({
       microphone_sensitivity: 100,
       recording_hotkey: 'CmdOrCtrl+Shift+X',
-      auto_copy_to_clipboard: true,
+      auto_copy_to_clipboard: false,
       auto_paste_text: false,
       play_completion_sound: false,
       hide_recording_window_on_hotkey: false,
@@ -125,7 +125,7 @@ describe('useSettings saveConfig', () => {
       .mockResolvedValueOnce({
         microphone_sensitivity: 100,
         recording_hotkey: 'CmdOrCtrl+Shift+X',
-        auto_copy_to_clipboard: true,
+        auto_copy_to_clipboard: false,
         auto_paste_text: false,
         play_completion_sound: false,
         hide_recording_window_on_hotkey: false,
@@ -136,7 +136,7 @@ describe('useSettings saveConfig', () => {
       .mockResolvedValueOnce({
         microphone_sensitivity: 175,
         recording_hotkey: 'CmdOrCtrl+Shift+X',
-        auto_copy_to_clipboard: true,
+        auto_copy_to_clipboard: false,
         auto_paste_text: false,
         play_completion_sound: false,
         hide_recording_window_on_hotkey: false,
@@ -181,7 +181,7 @@ describe('useSettings saveConfig', () => {
     tauriSettingsServiceMock.getAppConfig.mockResolvedValueOnce({
       microphone_sensitivity: 100,
       recording_hotkey: 'CmdOrCtrl+Shift+X',
-      auto_copy_to_clipboard: true,
+      auto_copy_to_clipboard: false,
       auto_paste_text: false,
       play_completion_sound: false,
       hide_recording_window_on_hotkey: false,
@@ -227,7 +227,7 @@ describe('useSettings saveConfig', () => {
     tauriSettingsServiceMock.getAppConfig.mockResolvedValueOnce({
       microphone_sensitivity: 100,
       recording_hotkey: 'CmdOrCtrl+Shift+X',
-      auto_copy_to_clipboard: true,
+      auto_copy_to_clipboard: false,
       auto_paste_text: false,
       play_completion_sound: false,
       hide_recording_window_on_hotkey: false,

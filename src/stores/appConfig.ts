@@ -15,7 +15,7 @@ export const useAppConfigStore = defineStore('appConfig', () => {
   const isSyncing = ref(false);
 
   const recordingHotkey = ref('CmdOrCtrl+Shift+X');
-  const autoCopyToClipboard = ref(true);
+  const autoCopyToClipboard = ref(false);
   const autoPasteText = ref(false);
   const playCompletionSound = ref(false);
   const hideRecordingWindowOnHotkey = ref(false);
@@ -29,8 +29,9 @@ export const useAppConfigStore = defineStore('appConfig', () => {
   function applySnapshot(data: AppConfigSnapshotData, rev: string): void {
     revision.value = rev;
     recordingHotkey.value = data.recording_hotkey ?? recordingHotkey.value;
-    autoCopyToClipboard.value = data.auto_copy_to_clipboard ?? autoCopyToClipboard.value;
-    autoPasteText.value = data.auto_paste_text ?? autoPasteText.value;
+    // Auto-copy/auto-paste intentionally stay disabled even if an old config snapshot has them enabled.
+    autoCopyToClipboard.value = false;
+    autoPasteText.value = false;
     playCompletionSound.value = data.play_completion_sound ?? playCompletionSound.value;
     hideRecordingWindowOnHotkey.value =
       data.hide_recording_window_on_hotkey ?? hideRecordingWindowOnHotkey.value;

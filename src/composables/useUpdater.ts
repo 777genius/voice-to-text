@@ -107,6 +107,8 @@ export function useUpdater() {
   // Настроить глобальный listener для события 'update:available'
   // Вызывается один раз в App.vue
   async function setupUpdateListener(): Promise<void> {
+    if (!isTauriAvailable()) return;
+
     // Предотвращаем дублирование listeners
     if (unlistenUpdateAvailable) {
       return;

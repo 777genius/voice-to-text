@@ -190,8 +190,8 @@ impl Default for AppConfig {
         Self {
             stt: SttConfig::default(),
             recording_hotkey: "CmdOrCtrl+Shift+X".to_string(), // Cmd на Mac, Ctrl на Win/Linux
-            auto_copy_to_clipboard: true,
-            auto_paste_text: false, // По умолчанию выключено (может раздражать)
+            auto_copy_to_clipboard: false,
+            auto_paste_text: false,
             play_completion_sound: false,
             hide_recording_window_on_hotkey: false,
             show_mini_recording_window: true,
@@ -286,7 +286,7 @@ mod tests {
     fn test_app_config_default() {
         let config = AppConfig::default();
         assert_eq!(config.recording_hotkey, "CmdOrCtrl+Shift+X");
-        assert!(config.auto_copy_to_clipboard);
+        assert!(!config.auto_copy_to_clipboard);
         assert!(!config.auto_paste_text);
         assert!(!config.play_completion_sound);
         assert!(!config.hide_recording_window_on_hotkey);

@@ -32,7 +32,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const recordingHotkey = ref('CmdOrCtrl+Shift+X');
   const microphoneSensitivity = ref(100);
   const selectedAudioDevice = ref('');
-  const autoCopyToClipboard = ref(true);
+  const autoCopyToClipboard = ref(false);
   const autoPasteText = ref(false);
   const playCompletionSound = ref(false);
   const hideRecordingWindowOnHotkey = ref(false);
@@ -239,11 +239,13 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   function setAutoCopyToClipboard(value: boolean) {
-    autoCopyToClipboard.value = value;
+    void value;
+    autoCopyToClipboard.value = false;
   }
 
   function setAutoPasteText(value: boolean) {
-    autoPasteText.value = value;
+    void value;
+    autoPasteText.value = false;
   }
 
   function setPlayCompletionSound(value: boolean) {
@@ -314,10 +316,9 @@ export const useSettingsStore = defineStore('settings', () => {
       setMicrophoneSensitivity(state.microphoneSensitivity, { persist: false });
     if (state.selectedAudioDevice !== undefined)
       selectedAudioDevice.value = state.selectedAudioDevice;
-    if (state.autoCopyToClipboard !== undefined)
-      autoCopyToClipboard.value = state.autoCopyToClipboard;
-    if (state.autoPasteText !== undefined)
-      autoPasteText.value = state.autoPasteText;
+    // auto-copy/auto-paste are intentionally disabled.
+    autoCopyToClipboard.value = false;
+    autoPasteText.value = false;
     if (state.playCompletionSound !== undefined)
       playCompletionSound.value = state.playCompletionSound;
     if (state.hideRecordingWindowOnHotkey !== undefined)

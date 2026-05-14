@@ -65,7 +65,7 @@ describe('useAppConfigStore sync', () => {
     expect(store.revision).toBe('7');
     expect(store.recordingHotkey).toBe('CmdOrCtrl+Shift+P');
     expect(store.autoCopyToClipboard).toBe(false);
-    expect(store.autoPasteText).toBe(true);
+    expect(store.autoPasteText).toBe(false);
     expect(store.playCompletionSound).toBe(true);
     expect(store.hideRecordingWindowOnHotkey).toBe(true);
     expect(store.showMiniRecordingWindow).toBe(true);
@@ -94,7 +94,7 @@ describe('useAppConfigStore sync', () => {
 
     expect(store.revision).toBe('42');
     expect(store.recordingHotkey).toBe('Alt+Z');
-    expect(store.autoCopyToClipboard).toBe(true);
+    expect(store.autoCopyToClipboard).toBe(false);
     expect(store.autoPasteText).toBe(false);
     expect(store.playCompletionSound).toBe(true);
     expect(store.hideRecordingWindowOnHotkey).toBe(true);
