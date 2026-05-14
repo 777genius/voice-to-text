@@ -69,6 +69,8 @@ pub struct FinalTranscriptionPayload {
     pub confidence: Option<f32>,
     pub language: Option<String>,
     pub timestamp: i64,
+    pub start: f64,
+    pub duration: f64,
 }
 
 impl FinalTranscriptionPayload {
@@ -79,6 +81,8 @@ impl FinalTranscriptionPayload {
             confidence: t.confidence,
             language: t.language,
             timestamp: t.timestamp,
+            start: t.start,
+            duration: t.duration,
         }
     }
 }

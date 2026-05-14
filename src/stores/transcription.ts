@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { isTauriAvailable } from '../utils/tauri';
 import { i18n } from '../i18n';
+import { appendTranscriptText, mergeTranscriptText } from '../utils/transcriptionText';
 import { api } from '../features/auth/infrastructure/api/apiClient';
 import { useAuthStore } from '../features/auth/store/authStore';
 import { useAppConfigStore } from './appConfig';
@@ -45,7 +46,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const finalText = ref<string>(''); // полный финальный результат (для копирования)
   const error = ref<string | null>(null);
   const errorType = ref<TranscriptionErrorPayload['error_type'] | null>(null);
-  const lastFinalizedText = ref<string>(''); // последний финализированный текст (для дедупликации)
+  const lastFinalizedSegmentKey = ref<string>(''); // последний finalized range (для дедупликации)
   const connectionQuality = ref<ConnectionQuality>(ConnectionQuality.Good);
 
   // Retry логика подключения (когда запись ещё не стартанула и мы пытаемся подключиться к STT)
@@ -136,6 +137,63 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   // Отслеживание utterances по start времени
   const currentUtteranceStart = ref<number>(-1); // start время текущей utterance (-1 = нет активной)
+
+  function normalizeForDedup(v: string): string {
+    return String(v ?? '')
+      .toLowerCase()
+      .replace(/[\u200B-\u200D\uFEFF]/g, '')
+      .replace(/[.,!?;:"'`(){}\[\]<>\-–—_\\/|@#$%^&*+=~]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function hasEnoughContextForVisibleOverlap(norm: string): boolean {
+    if (!norm) return false;
+    const words = norm.split(' ').filter(Boolean);
+    return words.length >= 3 || norm.length >= 18;
+  }
+
+  function combineVisibleTranscriptParts(parts: string[]): string {
+    let combined = '';
+
+    for (const part of parts) {
+      const next = String(part ?? '').trim();
+      if (!next) continue;
+      if (!combined) {
+        combined = next;
+        continue;
+      }
+
+      const combinedNorm = normalizeForDedup(combined);
+      const nextNorm = normalizeForDedup(next);
+      const canUseVisibleOverlap =
+        hasEnoughContextForVisibleOverlap(combinedNorm) ||
+        hasEnoughContextForVisibleOverlap(nextNorm);
+      if (!canUseVisibleOverlap) {
+        combined = `${combined} ${next}`.trim();
+        continue;
+      }
+
+      if (hasEnoughContextForVisibleOverlap(nextNorm) && combinedNorm.includes(nextNorm)) {
+        continue;
+      }
+      if (hasEnoughContextForVisibleOverlap(combinedNorm) && nextNorm.includes(combinedNorm)) {
+        combined = next;
+        continue;
+      }
+
+      combined = mergeTranscriptText(combined, next);
+    }
+
+    return combined.trim();
+  }
+
+  function finalizedRangeKey(start?: number, duration?: number): string {
+    const s = Number(start);
+    const d = Number(duration);
+    if (!Number.isFinite(s) || !Number.isFinite(d) || d <= 0) return '';
+    return `${s.toFixed(3)}|${d.toFixed(3)}`;
+  }
 
   // Анимированный текст для эффекта печати
   const animatedPartialText = ref<string>('');
@@ -372,7 +430,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     if (partial) parts.push(partial);
 
     if (parts.length > 0) {
-      return parts.join(' ');
+      return combineVisibleTranscriptParts(parts);
     }
 
     // Показываем placeholder только когда в режиме Idle
@@ -606,15 +664,16 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             current_utterance_start: currentUtteranceStart.value,
             current_accumulated: accumulatedText.value,
             current_partial: partialText.value,
-            last_finalized: lastFinalizedText.value
+            last_finalized: lastFinalizedSegmentKey.value
           });
 
           // Если сегмент финализирован (is_final=true, но не speech_final)
           if (event.payload.is_segment_final) {
             const newText = event.payload.text;
+            const segKey = finalizedRangeKey(event.payload.start, event.payload.duration);
 
             // Проверка на точный дубликат (защита от повторной отправки того же сегмента)
-            if (newText === lastFinalizedText.value) {
+            if (segKey && segKey === lastFinalizedSegmentKey.value) {
               console.log('⚠️ Exact duplicate segment detected, skipping:', newText);
               return;
             }
@@ -624,11 +683,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             console.log('🔒 [BEFORE ACCUMULATE] accumulated:', oldAccumulated);
             console.log('🔒 [BEFORE ACCUMULATE] newText:', newText);
 
-            accumulatedText.value = accumulatedText.value
-              ? `${accumulatedText.value} ${newText}`
-              : newText;
+            // Deepgram `is_final=true` chunks cover finalized audio ranges.
+            // Append them verbatim; overlap removal is only for live/interim display.
+            accumulatedText.value = appendTranscriptText(accumulatedText.value, newText);
 
-            lastFinalizedText.value = newText;
+            lastFinalizedSegmentKey.value = segKey;
 
             console.log('🔒 [AFTER ACCUMULATE] accumulated:', accumulatedText.value);
             console.log('🔒 Utterance finalized and accumulated:', {
@@ -700,7 +759,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
                 accumulatedText.value = '';
                 animatedAccumulatedText.value = '';
-                lastFinalizedText.value = '';
+                lastFinalizedSegmentKey.value = '';
               } else {
                 console.log('💾 [SKIP] No accumulated text to save (already empty)');
               }
@@ -751,16 +810,25 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           // РЕШЕНИЕ: ВСЕГДА добавляем accumulated к FINAL тексту (если есть).
           // Дублирования не будет, т.к. accumulated очищается только при сохранении в finalText.
           if (event.payload.text || accumulatedText.value || partialText.value) {
-            const currentUtteranceText = [accumulatedText.value, event.payload.text || partialText.value]
-              .filter(Boolean)
-              .join(' ')
-              .trim();
+            const finalKey = finalizedRangeKey(event.payload.start, event.payload.duration);
+            const isDuplicateFinalRange =
+              !!event.payload.text &&
+              !!finalKey &&
+              finalKey === lastFinalizedSegmentKey.value &&
+              !!accumulatedText.value.trim();
+            const currentUtteranceText = isDuplicateFinalRange
+              ? accumulatedText.value.trim()
+              : event.payload.text
+                ? appendTranscriptText(accumulatedText.value, event.payload.text).trim()
+                : mergeTranscriptText(accumulatedText.value, partialText.value).trim();
 
             console.log('🔗 [SPEECH_FINAL] Combining utterance:', {
               accumulated: accumulatedText.value,
               partial: partialText.value,
               final_payload: event.payload.text,
-              used_source: event.payload.text ? 'FINAL payload' : 'accumulated+partial',
+              used_source: isDuplicateFinalRange
+                ? 'deduped finalized range'
+                : event.payload.text ? 'FINAL payload' : 'accumulated+partial',
               combined: currentUtteranceText
             });
 
@@ -775,7 +843,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             // чтобы избежать дублирования в UI
             partialText.value = '';
             accumulatedText.value = '';
-            lastFinalizedText.value = '';
+            lastFinalizedSegmentKey.value = '';
             currentUtteranceStart.value = -1;
 
             // Очищаем анимированные тексты
@@ -908,7 +976,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             partialText.value = '';
             accumulatedText.value = '';
             finalText.value = '';
-            lastFinalizedText.value = '';
+            lastFinalizedSegmentKey.value = '';
             currentUtteranceStart.value = -1;
             error.value = null;
             errorType.value = null;
@@ -1622,7 +1690,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     partialText.value = '';
     accumulatedText.value = '';
     finalText.value = '';
-    lastFinalizedText.value = '';
+    lastFinalizedSegmentKey.value = '';
     currentUtteranceStart.value = -1;
 
     // Сбрасываем прогресс auto-paste

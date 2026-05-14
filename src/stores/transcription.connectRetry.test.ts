@@ -194,6 +194,172 @@ describe('transcription connect-retry reliability', () => {
     expect(store.error).toContain('Микрофон недоступен');
   });
 
+  it('не показывает finalized и cumulative interim дублем', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 12, status: 'Recording', stopped_via_hotkey: false },
+    });
+
+    await handlers.get('transcription:partial')({
+      payload: {
+        session_id: 12,
+        text: 'Ты слышишь, что',
+        timestamp: 1,
+        is_segment_final: true,
+        start: 0,
+        duration: 1.1,
+      },
+    });
+
+    await handlers.get('transcription:partial')({
+      payload: {
+        session_id: 12,
+        text: 'Ты слышишь, что я говорю?',
+        timestamp: 2,
+        is_segment_final: false,
+        start: 1.1,
+        duration: 1.5,
+      },
+    });
+
+    expect(store.displayText).toBe('Ты слышишь, что я говорю?');
+  });
+
+  it('не схлопывает короткие повторы в live отображении', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 13, status: 'Recording', stopped_via_hotkey: false },
+    });
+
+    await handlers.get('transcription:partial')({
+      payload: {
+        session_id: 13,
+        text: 'да',
+        timestamp: 1,
+        is_segment_final: true,
+        start: 0,
+        duration: 0.3,
+      },
+    });
+
+    await handlers.get('transcription:partial')({
+      payload: {
+        session_id: 13,
+        text: 'да',
+        timestamp: 2,
+        is_segment_final: false,
+        start: 0.3,
+        duration: 0.2,
+      },
+    });
+
+    expect(store.displayText).toBe('да да');
+  });
+
+  it('append-ит finalized chunks по Deepgram, даже если слова повторяются на границе', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 14, status: 'Recording', stopped_via_hotkey: false },
+    });
+
+    await handlers.get('transcription:partial')({
+      payload: {
+        session_id: 14,
+        text: 'two two',
+        timestamp: 1,
+        is_segment_final: true,
+        start: 0,
+        duration: 3.26,
+      },
+    });
+
+    await handlers.get('transcription:final')({
+      payload: {
+        session_id: 14,
+        text: 'two two three three',
+        timestamp: 2,
+        start: 3.26,
+        duration: 2.24,
+      },
+    });
+
+    expect(store.finalText).toBe('two two two two three three');
+  });
+
+  it('не дублирует speech_final с тем же finalized audio range', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 15, status: 'Recording', stopped_via_hotkey: false },
+    });
+
+    await handlers.get('transcription:partial')({
+      payload: {
+        session_id: 15,
+        text: 'готово',
+        timestamp: 1,
+        is_segment_final: true,
+        start: 1,
+        duration: 0.7,
+      },
+    });
+
+    await handlers.get('transcription:final')({
+      payload: {
+        session_id: 15,
+        text: 'готово',
+        timestamp: 2,
+        start: 1,
+        duration: 0.7,
+      },
+    });
+
+    expect(store.finalText).toBe('готово');
+  });
+
   it('auto-paste вставляет segment-final сразу и не дублирует его на speech-final', async () => {
     const handlers = new Map<string, any>();
     appConfigMock.autoPasteText = true;
