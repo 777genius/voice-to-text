@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * Секция автоматических действий (auto-copy, auto-paste)
+ * Секция автоматических действий записи.
  */
 
 import { useI18n } from 'vue-i18n';
@@ -9,58 +9,15 @@ import { useSettings } from '../../composables/useSettings';
 
 const { t } = useI18n();
 const {
-  autoCopyToClipboard,
-  autoPasteText,
   playCompletionSound,
   hideRecordingWindowOnHotkey,
   showMiniRecordingWindow,
   keepRecordingUntilManualStop,
-  hasAccessibilityPermission,
-  isMacOS,
-  requestAccessibilityPermission,
 } = useSettings();
 </script>
 
 <template>
   <SettingGroup :title="t('settings.autoActions.label')">
-    <div class="auto-action-option">
-      <v-checkbox
-        v-model="autoCopyToClipboard"
-        density="compact"
-        hide-details
-        color="primary"
-        class="auto-action-checkbox"
-      >
-        <template #label>
-          <span class="auto-action-copy">
-            <span class="auto-action-label">{{ t('settings.autoActions.copy') }}</span>
-            <span class="auto-action-hint">{{ t('settings.autoActions.hintCopyBody') }}</span>
-          </span>
-        </template>
-      </v-checkbox>
-    </div>
-
-    <div class="auto-action-option">
-      <v-checkbox
-        v-model="autoPasteText"
-        density="compact"
-        hide-details
-        color="primary"
-        class="auto-action-checkbox"
-      >
-        <template #label>
-          <span class="auto-action-copy">
-            <span class="auto-action-label">{{ t('settings.autoActions.paste') }}</span>
-            <span class="auto-action-hint">
-              {{ t('settings.autoActions.hintPasteBody') }}
-              {{ t('settings.autoActions.hintPasteUnstablePlatforms') }}
-              {{ isMacOS ? t('settings.autoActions.hintMacPermission') : '' }}
-            </span>
-          </span>
-        </template>
-      </v-checkbox>
-    </div>
-
     <div class="auto-action-option">
       <v-checkbox
         v-model="playCompletionSound"
@@ -128,33 +85,6 @@ const {
         </template>
       </v-checkbox>
     </div>
-
-    <!-- Предупреждение о разрешении Accessibility для macOS -->
-    <v-alert
-      v-if="autoPasteText && !hasAccessibilityPermission && isMacOS"
-      type="warning"
-      variant="tonal"
-      class="mt-3"
-    >
-      <div class="d-flex flex-column">
-        <div class="font-weight-medium mb-1">
-          {{ t('settings.autoActions.accessibilityTitle') }}
-        </div>
-        <div class="text-body-2 mb-2">
-          {{ t('settings.autoActions.accessibilityBody') }}
-        </div>
-        <v-btn
-          color="warning"
-          variant="flat"
-          size="small"
-          class="align-self-start"
-          @click="requestAccessibilityPermission"
-        >
-          {{ t('settings.autoActions.accessibilityButton') }}
-        </v-btn>
-      </div>
-    </v-alert>
-
   </SettingGroup>
 </template>
 
