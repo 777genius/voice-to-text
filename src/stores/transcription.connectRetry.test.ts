@@ -474,6 +474,16 @@ describe('transcription connect-retry reliability', () => {
       },
     });
 
+    await handlers.get('transcription:final')({
+      payload: {
+        session_id: 15,
+        text: 'готово',
+        timestamp: 3,
+        start: 1,
+        duration: 0.7,
+      },
+    });
+
     expect(store.finalText).toBe('готово');
   });
 });

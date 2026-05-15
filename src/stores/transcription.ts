@@ -46,6 +46,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const error = ref<string | null>(null);
   const errorType = ref<TranscriptionErrorPayload['error_type'] | null>(null);
   const lastFinalizedSegmentKey = ref<string>(''); // последний finalized range (для дедупликации)
+  const lastSpeechFinalRangeKey = ref<string>(''); // последний speech_final range (для дедупликации)
   const connectionQuality = ref<ConnectionQuality>(ConnectionQuality.Good);
 
   // Retry логика подключения (когда запись ещё не стартанула и мы пытаемся подключиться к STT)
@@ -697,6 +698,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           // Дублирования не будет, т.к. accumulated очищается только при сохранении в finalText.
           if (event.payload.text || accumulatedText.value || partialText.value) {
             const finalKey = finalizedRangeKey(event.payload.start, event.payload.duration);
+            if (finalKey && finalKey === lastSpeechFinalRangeKey.value) {
+              console.log('⚠️ Duplicate speech_final range detected, skipping:', finalKey);
+              return;
+            }
             const isDuplicateFinalRange =
               !!event.payload.text &&
               !!finalKey &&
@@ -752,6 +757,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             finalText.value = finalText.value
               ? `${finalText.value} ${currentUtteranceText}`
               : currentUtteranceText;
+            if (finalKey) {
+              lastSpeechFinalRangeKey.value = finalKey;
+            }
 
             console.log('📋 [AFTER ADD] finalText:', finalText.value);
             console.log('📋 Successfully added utterance to finalText');
@@ -838,6 +846,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             accumulatedText.value = '';
             finalText.value = '';
             lastFinalizedSegmentKey.value = '';
+            lastSpeechFinalRangeKey.value = '';
             currentUtteranceStart.value = -1;
             error.value = null;
             errorType.value = null;
@@ -1534,6 +1543,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     accumulatedText.value = '';
     finalText.value = '';
     lastFinalizedSegmentKey.value = '';
+    lastSpeechFinalRangeKey.value = '';
     currentUtteranceStart.value = -1;
 
     // Очищаем анимированный текст
