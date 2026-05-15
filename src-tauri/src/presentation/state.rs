@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::RwLock;
@@ -103,6 +103,10 @@ pub struct AppState {
     /// Нужен из‑за key repeat / случайных двойных срабатываний, которые выглядят как "мигание" окна.
     pub last_recording_hotkey_ms: AtomicU64,
 
+    /// One-shot restart request for the case when the user presses hotkey while stop/finalize is
+    /// still draining and the service is temporarily in Processing.
+    pub restart_recording_after_processing_requested: AtomicBool,
+
     /// Счётчик сессий записи. Нужен, чтобы маркировать события transcription:* и не смешивать сессии.
     pub transcription_session_seq: AtomicU64,
 
@@ -152,6 +156,7 @@ impl AppState {
                     auth_refresh_task_guard: Arc::new(tokio::sync::Mutex::new(())),
                     stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
                     last_recording_hotkey_ms: AtomicU64::new(0),
+                    restart_recording_after_processing_requested: AtomicBool::new(false),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
                 };
@@ -200,6 +205,7 @@ impl AppState {
                     auth_refresh_task_guard: Arc::new(tokio::sync::Mutex::new(())),
                     stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
                     last_recording_hotkey_ms: AtomicU64::new(0),
+                    restart_recording_after_processing_requested: AtomicBool::new(false),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
                 };
@@ -255,6 +261,7 @@ impl AppState {
             auth_refresh_task_guard: Arc::new(tokio::sync::Mutex::new(())),
             stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
             last_recording_hotkey_ms: AtomicU64::new(0),
+            restart_recording_after_processing_requested: AtomicBool::new(false),
             transcription_session_seq: AtomicU64::new(0),
             active_transcription_session_id: AtomicU64::new(0),
         }

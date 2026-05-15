@@ -52,6 +52,7 @@ const glowColor = ref<'blue' | 'red' | null>(null);
 const isMiniClosing = ref(false);
 const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
 const isMiniWindow = computed(() => appConfigStore.showMiniRecordingWindow);
+const useMiniLayout = computed(() => isMiniWindow.value && !showUpdateDialog.value);
 
 // Для отображения заменяем CmdOrCtrl на понятное пользователю название
 const recordingHotkey = computed(() => {
@@ -132,14 +133,20 @@ const FULL_WINDOW_WIDTH = 460;
 const BASE_WINDOW_HEIGHT = 330;
 const MINI_WINDOW_WIDTH = 236;
 const MINI_WINDOW_HEIGHT = 38;
+const UPDATE_DIALOG_WINDOW_HEIGHT = 430;
 const MINI_CLOSE_ANIMATION_MS = 180;
 const TEXT_THRESHOLD_PX = 128;
 const MAX_WINDOW_HEIGHT = 700;
 const NON_TEXT_HEIGHT = 200;
 
 function adjustWindowHeight() {
-  if (isMiniWindow.value) {
+  if (useMiniLayout.value) {
     void setWindowSize(MINI_WINDOW_WIDTH, MINI_WINDOW_HEIGHT);
+    return;
+  }
+
+  if (showUpdateDialog.value) {
+    void setWindowSize(FULL_WINDOW_WIDTH, UPDATE_DIALOG_WINDOW_HEIGHT);
     return;
   }
 
@@ -179,7 +186,7 @@ async function setWindowSize(width: number, height: number) {
 }
 
 function applyRecordingWindowSize() {
-  if (isMiniWindow.value) {
+  if (useMiniLayout.value) {
     void setWindowSize(MINI_WINDOW_WIDTH, MINI_WINDOW_HEIGHT);
     return;
   }
@@ -201,8 +208,8 @@ function scheduleHideRecordingWindow(reason: string) {
     window.clearTimeout(hideRecordingWindowTimeout);
   }
 
-  const delay = isMiniWindow.value ? MINI_CLOSE_ANIMATION_MS : 50;
-  if (isMiniWindow.value) {
+  const delay = useMiniLayout.value ? MINI_CLOSE_ANIMATION_MS : 50;
+  if (useMiniLayout.value) {
     isMiniClosing.value = true;
   }
 
@@ -223,7 +230,7 @@ function scheduleHideRecordingWindow(reason: string) {
 // Автоскролл + подгонка высоты окна при обновлении текста
 watch(() => store.displayText, () => {
   nextTick(() => {
-    if (isMiniWindow.value) {
+    if (useMiniLayout.value) {
       applyRecordingWindowSize();
       return;
     }
@@ -243,7 +250,7 @@ watch(() => store.displayText, () => {
   });
 });
 
-watch(isMiniWindow, () => {
+watch([isMiniWindow, showUpdateDialog], () => {
   nextTick(() => {
     applyRecordingWindowSize();
   });
@@ -444,6 +451,13 @@ const closeProfile = () => {
   showProfile.value = false;
 };
 
+const openUpdateDialog = async () => {
+  cancelPendingHideRecordingWindow();
+  showUpdateDialog.value = true;
+  await nextTick();
+  applyRecordingWindowSize();
+};
+
 // Если store запросил открытие формы лицензии (например, через кнопку в ошибке)
 watch(() => store.wantsLicenseActivation, (val) => {
   if (val) {
@@ -467,9 +481,9 @@ const minimizeWindow = async () => {
 </script>
 
 <template>
-  <div class="popover-container" :class="{ mini: isMiniWindow, 'mini-closing': isMiniClosing }">
-    <div class="popover" :class="{ mini: isMiniWindow, 'mini-closing': isMiniClosing }">
-      <template v-if="isMiniWindow">
+  <div class="popover-container" :class="{ mini: useMiniLayout, 'mini-closing': isMiniClosing }">
+    <div class="popover" :class="{ mini: useMiniLayout, 'mini-closing': isMiniClosing }">
+      <template v-if="useMiniLayout">
         <div class="mini-popover-content" data-tauri-drag-region @mousedown="onDragMouseDown">
           <span
             class="mini-status-dot"
@@ -494,6 +508,7 @@ const minimizeWindow = async () => {
           </div>
 
           <div class="mini-actions no-drag">
+            <UpdateIndicator compact @click="openUpdateDialog" />
             <button
               v-if="authStore.isAuthenticated"
               class="mini-icon-button"
@@ -525,7 +540,7 @@ const minimizeWindow = async () => {
         <div class="title-row">
           <div class="title">{{ t('app.title') }}</div>
           <span v-if="appVersion" class="app-version">{{ appVersion }}</span>
-          <UpdateIndicator class="no-drag" @click="showUpdateDialog = true" />
+          <UpdateIndicator compact class="no-drag" @click="openUpdateDialog" />
         </div>
         <div class="header-right">
           <button class="minimize-button no-drag" @click="minimizeWindow" :title="t('main.minimize')">

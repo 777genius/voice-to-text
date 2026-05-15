@@ -1,5 +1,6 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
 
 use crate::domain::{
@@ -73,6 +74,109 @@ fn emit_idle_recording_status(app_handle: &AppHandle, session_id: u64, stopped_v
 
 fn should_hide_recording_window_immediately_on_hotkey_stop(config: &AppConfig) -> bool {
     config.show_mini_recording_window || config.hide_recording_window_on_hotkey
+}
+
+fn should_show_recording_window_on_processing_hotkey(
+    config: &AppConfig,
+    window_visible: bool,
+) -> bool {
+    config.show_mini_recording_window
+        || (!window_visible && !config.hide_recording_window_on_hotkey)
+}
+
+const HOTKEY_PROCESSING_RESTART_WAIT: Duration = Duration::from_millis(2_500);
+const HOTKEY_PROCESSING_RESTART_POLL: Duration = Duration::from_millis(50);
+
+fn queue_recording_restart_after_processing(app_handle: AppHandle) {
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        log::warn!("Cannot queue hotkey restart after Processing: AppState is unavailable");
+        return;
+    };
+
+    if state
+        .restart_recording_after_processing_requested
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        log::debug!("Hotkey restart after Processing is already queued");
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        let max_attempts = (HOTKEY_PROCESSING_RESTART_WAIT.as_millis()
+            / HOTKEY_PROCESSING_RESTART_POLL.as_millis())
+        .max(1);
+        let mut should_start = false;
+
+        for _ in 0..max_attempts {
+            tokio::time::sleep(HOTKEY_PROCESSING_RESTART_POLL).await;
+
+            let Some(state) = app_handle.try_state::<AppState>() else {
+                log::warn!("Cannot continue queued hotkey restart: AppState is unavailable");
+                return;
+            };
+
+            match state.transcription_service.get_status().await {
+                RecordingStatus::Idle => {
+                    should_start = true;
+                    break;
+                }
+                RecordingStatus::Processing => {}
+                RecordingStatus::Starting | RecordingStatus::Recording | RecordingStatus::Error => {
+                    break;
+                }
+            }
+        }
+
+        let Some(state) = app_handle.try_state::<AppState>() else {
+            log::warn!("Cannot finish queued hotkey restart: AppState is unavailable");
+            return;
+        };
+
+        state
+            .restart_recording_after_processing_requested
+            .store(false, Ordering::SeqCst);
+
+        if !should_start {
+            log::debug!("Queued hotkey restart expired before service returned to Idle");
+            return;
+        }
+
+        if !*state.is_authenticated.read().await {
+            log::info!("Queued hotkey restart skipped: user is not authenticated");
+            return;
+        }
+
+        let Some(window) = app_handle.get_webview_window("main") else {
+            log::warn!("Queued hotkey restart skipped: main window is unavailable");
+            return;
+        };
+
+        let config = state.config.read().await.clone();
+        save_active_app_bundle_id_for_auto_paste(state.inner()).await;
+
+        let hide_window_on_hotkey =
+            config.hide_recording_window_on_hotkey && !config.show_mini_recording_window;
+        if !hide_window_on_hotkey {
+            if let Err(err) = show_webview_window_with_recording_config(&window, &config) {
+                log::warn!(
+                    "Queued hotkey restart failed to show recording window: {}",
+                    err
+                );
+                return;
+            }
+            let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
+        }
+
+        let Some(state_for_start) = app_handle.try_state::<AppState>() else {
+            log::warn!("Queued hotkey restart cannot start: AppState is unavailable");
+            return;
+        };
+
+        if let Err(err) = start_recording(state_for_start, app_handle.clone()).await {
+            log::error!("Queued hotkey restart failed to start recording: {}", err);
+        }
+    });
 }
 
 async fn stop_recording_and_emit_idle(
@@ -689,8 +793,9 @@ where
 #[cfg(test)]
 mod snapshot_contract_tests {
     use super::{
-        should_hide_recording_window_immediately_on_hotkey_stop, AppConfigSnapshotData,
-        SnapshotEnvelope, SttConfigSnapshotData,
+        should_hide_recording_window_immediately_on_hotkey_stop,
+        should_show_recording_window_on_processing_hotkey, AppConfigSnapshotData, SnapshotEnvelope,
+        SttConfigSnapshotData,
     };
     use crate::domain::{AppConfig, SttProviderType};
 
@@ -729,6 +834,29 @@ mod snapshot_contract_tests {
         config.hide_recording_window_on_hotkey = true;
         assert!(should_hide_recording_window_immediately_on_hotkey_stop(
             &config
+        ));
+    }
+
+    #[test]
+    fn processing_hotkey_reopens_hidden_or_mini_window() {
+        let mut config = AppConfig::default();
+        config.show_mini_recording_window = false;
+
+        assert!(should_show_recording_window_on_processing_hotkey(
+            &config, false
+        ));
+        assert!(!should_show_recording_window_on_processing_hotkey(
+            &config, true
+        ));
+
+        config.hide_recording_window_on_hotkey = true;
+        assert!(!should_show_recording_window_on_processing_hotkey(
+            &config, false
+        ));
+
+        config.show_mini_recording_window = true;
+        assert!(should_show_recording_window_on_processing_hotkey(
+            &config, true
         ));
     }
 
@@ -949,8 +1077,17 @@ pub async fn toggle_recording_with_window(
             log::info!("Recording stopped via hotkey");
         }
         RecordingStatus::Processing => {
-            // Игнорируем - запись уже останавливается
-            log::debug!("Ignoring toggle - recording is already being processed");
+            let config = state.config.read().await.clone();
+            let window_visible = window.is_visible().map_err(|e| e.to_string())?;
+
+            if should_show_recording_window_on_processing_hotkey(&config, window_visible) {
+                save_active_app_bundle_id_for_auto_paste(state.inner()).await;
+                show_window_with_recording_config(&window, &config)?;
+                let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
+            }
+
+            queue_recording_restart_after_processing(app_handle.clone());
+            log::debug!("Queued hotkey restart while recording stop/finalize is processing");
         }
         RecordingStatus::Error => {
             log::warn!("Cannot toggle recording - system is in error state");
@@ -1063,7 +1200,17 @@ pub async fn toggle_recording_with_window_internal(
             log::info!("Recording stopped via hotkey");
         }
         RecordingStatus::Processing => {
-            log::debug!("Ignoring toggle - recording is processing");
+            let config = state.config.read().await.clone();
+            let window_visible = window.is_visible().map_err(|e| e.to_string())?;
+
+            if should_show_recording_window_on_processing_hotkey(&config, window_visible) {
+                save_active_app_bundle_id_for_auto_paste(state).await;
+                show_webview_window_with_recording_config(&window, &config)?;
+                let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
+            }
+
+            queue_recording_restart_after_processing(app_handle.clone());
+            log::debug!("Queued hotkey restart while recording stop/finalize is processing");
         }
         RecordingStatus::Error => {
             log::warn!("Cannot toggle recording - error state");
