@@ -345,6 +345,7 @@ pub async fn start_recording(
 
         // Сначала transcription:error, потом recording:status=Error (во фронте есть логика suppression/retry).
         on_error(stt);
+        clear_active_transcription_session_id_if_current(state.inner(), session_id);
 
         return Err(error);
     }
