@@ -91,5 +91,24 @@ describe('getWindowMode', () => {
       })
     ).toEqual({ render: 'none', desiredWindow: 'auth' });
   });
-});
 
+  it('update window: authenticated -> render update', () => {
+    expect(
+      getWindowMode({
+        windowLabel: 'update',
+        isInitialized: true,
+        isAuthenticated: true,
+      })
+    ).toEqual({ render: 'update', desiredWindow: null });
+  });
+
+  it('update window: unauthenticated -> render update', () => {
+    expect(
+      getWindowMode({
+        windowLabel: 'update',
+        isInitialized: true,
+        isAuthenticated: false,
+      })
+    ).toEqual({ render: 'update', desiredWindow: null });
+  });
+});

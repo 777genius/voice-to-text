@@ -4,6 +4,7 @@ import { useTheme } from 'vuetify';
 import { useAuth, useAuthState } from './features/auth';
 import AuthScreen from './features/auth/presentation/components/AuthScreen.vue';
 import RecordingPopover from './presentation/components/RecordingPopover.vue';
+import UpdateWindow from './presentation/components/UpdateWindow.vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -87,6 +88,7 @@ const showAuth = computed(() => mode.value.render === 'auth');
 const showApp = computed(() => mode.value.render === 'main');
 const showSettings = computed(() => mode.value.render === 'settings');
 const showProfile = computed(() => mode.value.render === 'profile');
+const showUpdate = computed(() => mode.value.render === 'update');
 
 // Если окно по правилам не должно показывать UI — прячем его, чтобы не оставалось "невидимого стекла".
 watch(
@@ -97,11 +99,15 @@ watch(
     if (isHmrReload) return;
     try {
       if (render === 'none') {
-      await getCurrentWindow().hide();
+        await getCurrentWindow().hide();
       } else {
         // Settings/Profile окна контролируются командами backend,
         // поэтому НЕ показываем их автоматически на старте.
-        if (windowLabel.value !== 'settings' && windowLabel.value !== 'profile') {
+        if (
+          windowLabel.value !== 'settings' &&
+          windowLabel.value !== 'profile' &&
+          windowLabel.value !== 'update'
+        ) {
           await getCurrentWindow().show();
         }
       }
@@ -255,7 +261,11 @@ onMounted(async () => {
     try {
       const label = String(getCurrentWindow().label);
       windowLabel.value =
-        label === 'main' || label === 'auth' || label === 'settings' || label === 'profile'
+        label === 'main' ||
+        label === 'auth' ||
+        label === 'settings' ||
+        label === 'profile' ||
+        label === 'update'
           ? label
           : 'unknown';
     } catch {
@@ -406,6 +416,8 @@ if (import.meta.hot) {
     <SettingsWindow v-else-if="showSettings" />
 
     <ProfileWindow v-else-if="showProfile" />
+
+    <UpdateWindow v-else-if="showUpdate" />
 
     <div v-else-if="showApp" class="app">
       <RecordingPopover />

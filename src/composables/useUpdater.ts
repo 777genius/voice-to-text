@@ -81,6 +81,38 @@ export function useUpdater() {
     }
   }
 
+  async function loadCachedAvailableUpdate(): Promise<string | null> {
+    if (!isTauriAvailable()) {
+      return null;
+    }
+
+    try {
+      const update = await invoke<AppUpdateInfo | null>('get_cached_available_update');
+      if (!update) return null;
+
+      const notes = await resolveUpdateNotes(update.version, update.body);
+      store.setAvailableUpdate(update.version, notes);
+      return update.version;
+    } catch (err) {
+      console.error('Failed to load cached update:', err);
+      return null;
+    }
+  }
+
+  async function openUpdateWindow(): Promise<boolean> {
+    if (!isTauriAvailable()) {
+      return false;
+    }
+
+    try {
+      await invoke('show_update_window');
+      return true;
+    } catch (err) {
+      console.error('Failed to open update window:', err);
+      return false;
+    }
+  }
+
   // Установка обновления
   async function installUpdate(): Promise<void> {
     store.isInstalling = true;
@@ -191,6 +223,8 @@ export function useUpdater() {
     // Actions
     loadCurrentVersion,
     checkForUpdates,
+    loadCachedAvailableUpdate,
+    openUpdateWindow,
     installUpdate,
     dismissUpdate,
     setupUpdateListener,

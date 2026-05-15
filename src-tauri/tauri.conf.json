@@ -79,6 +79,21 @@
                 "center": true,
                 "resizable": true,
                 "url": "index.html"
+            },
+            {
+                "label": "update",
+                "title": "VoicetextAI - Update",
+                "width": 440,
+                "height": 460,
+                "visible": false,
+                "decorations": false,
+                "transparent": true,
+                "shadow": false,
+                "alwaysOnTop": false,
+                "skipTaskbar": false,
+                "center": true,
+                "resizable": false,
+                "url": "index.html"
             }
         ],
         "security": {

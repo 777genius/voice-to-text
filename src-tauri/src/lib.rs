@@ -162,7 +162,9 @@ pub fn run() {
             commands::register_recording_hotkey,
             commands::unregister_recording_hotkey,
             commands::check_for_updates,
+            commands::get_cached_available_update,
             commands::install_update,
+            commands::show_update_window,
             commands::get_available_whisper_models,
             commands::check_whisper_model,
             commands::download_whisper_model,
@@ -213,7 +215,7 @@ pub fn run() {
                     log::info!("DEMO mode: opening demo windows for state-sync showcase");
 
                     // Уничтожаем стандартные окна из tauri.conf.json — они не нужны в demo
-                    for label in &["main", "auth", "profile", "settings"] {
+                    for label in &["main", "auth", "profile", "settings", "update"] {
                         if let Some(w) = app.get_webview_window(label) {
                             let _ = w.destroy();
                         }
@@ -397,6 +399,21 @@ pub fn run() {
                 });
 
                 log::info!("Profile window configured (regular NSWindow for keyboard input)");
+            }
+
+            if let Some(update_window) = app.get_webview_window("update") {
+                let _ = update_window.hide();
+
+                let update_clone = update_window.clone();
+                update_window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = update_clone.hide();
+                        log::debug!("Update window hidden instead of closed");
+                    }
+                });
+
+                log::info!("Update window configured");
             }
 
             // Загружаем сохраненные конфигурации

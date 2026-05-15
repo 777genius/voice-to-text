@@ -2253,7 +2253,15 @@ pub async fn check_for_updates(
     app_handle: AppHandle,
 ) -> Result<Option<crate::infrastructure::updater::UpdateInfo>, String> {
     log::info!("Command: check_for_updates");
-    crate::infrastructure::updater::check_for_update(app_handle).await
+    let update = crate::infrastructure::updater::check_for_update(app_handle).await?;
+    crate::infrastructure::updater::remember_update_check_result(update.clone());
+    Ok(update)
+}
+
+/// Returns the last cached available update, if one was found by background or manual checks
+#[tauri::command]
+pub fn get_cached_available_update() -> Option<crate::infrastructure::updater::UpdateInfo> {
+    crate::infrastructure::updater::cached_available_update()
 }
 
 /// Check and install application update with user confirmation
@@ -2261,6 +2269,21 @@ pub async fn check_for_updates(
 pub async fn install_update(app_handle: AppHandle) -> Result<String, String> {
     log::info!("Command: install_update");
     crate::infrastructure::updater::check_and_install_update(app_handle).await
+}
+
+/// Shows the standalone update window without resizing the recording popover
+#[tauri::command]
+pub async fn show_update_window(app_handle: AppHandle) -> Result<(), String> {
+    log::info!("Command: show_update_window");
+
+    if let Some(update) = app_handle.get_webview_window("update") {
+        show_webview_window_on_active_monitor(&update)?;
+        update.set_focus().map_err(|e| e.to_string())?;
+        let _ = update.emit("update-window-opened", ());
+        return Ok(());
+    }
+
+    Err("Update window not found".to_string())
 }
 
 //

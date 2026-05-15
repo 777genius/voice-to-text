@@ -1,6 +1,6 @@
-export type AppWindowLabel = 'main' | 'auth' | 'settings' | 'profile' | 'unknown';
+export type AppWindowLabel = 'main' | 'auth' | 'settings' | 'profile' | 'update' | 'unknown';
 
-export type AppRenderMode = 'loading' | 'main' | 'auth' | 'settings' | 'profile' | 'none';
+export type AppRenderMode = 'loading' | 'main' | 'auth' | 'settings' | 'profile' | 'update' | 'none';
 
 export type DesiredWindow = 'main' | 'auth' | null;
 
@@ -46,6 +46,9 @@ export function getWindowMode(input: WindowModeInput): WindowModeOutput {
         ? { render: 'profile', desiredWindow: null }
         : { render: 'none', desiredWindow: 'auth' };
 
+    case 'update':
+      return { render: 'update', desiredWindow: null };
+
     default:
       // В браузере/тестах: оставляем старое поведение как fallback.
       return input.isAuthenticated
@@ -53,4 +56,3 @@ export function getWindowMode(input: WindowModeInput): WindowModeOutput {
         : { render: 'auth', desiredWindow: null };
   }
 }
-

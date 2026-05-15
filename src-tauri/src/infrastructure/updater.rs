@@ -88,13 +88,15 @@ pub fn remember_update_check_result(update: Option<UpdateInfo>) {
     }
 }
 
-fn emit_cached_available_update<R: Runtime>(app: &AppHandle<R>, source: &str) {
-    let cached_update = CACHED_AVAILABLE_UPDATE
+pub fn cached_available_update() -> Option<UpdateInfo> {
+    CACHED_AVAILABLE_UPDATE
         .lock()
         .ok()
-        .and_then(|cached| cached.clone());
+        .and_then(|cached| cached.clone())
+}
 
-    if let Some(update) = cached_update {
+fn emit_cached_available_update<R: Runtime>(app: &AppHandle<R>, source: &str) {
+    if let Some(update) = cached_available_update() {
         log::debug!(
             "Re-emitting cached available update from {}: {}",
             source,

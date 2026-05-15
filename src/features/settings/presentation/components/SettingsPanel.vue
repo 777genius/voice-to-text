@@ -7,6 +7,7 @@
 import { ref, computed, nextTick, onMounted, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import UpdateDialog from '@/presentation/components/UpdateDialog.vue';
+import { useUpdater } from '@/composables/useUpdater';
 import { useSettings } from '../composables/useSettings';
 import { useSettingsTheme } from '../composables/useSettingsTheme';
 import { useSettingsStore } from '../../store/settingsStore';
@@ -42,6 +43,7 @@ const {
 
 // Инициализация темы
 const { initializeTheme } = useSettingsTheme();
+const { openUpdateWindow } = useUpdater();
 
 // Диалог обновления
 const showUpdateDialog = ref(false);
@@ -200,6 +202,14 @@ async function handleSave() {
   }
 }
 
+async function handleShowUpdate(): Promise<void> {
+  if (await openUpdateWindow()) {
+    return;
+  }
+
+  showUpdateDialog.value = true;
+}
+
 watch(
   () => settingsStore.selectedAudioDevice,
   (next, prev) => {
@@ -258,7 +268,7 @@ watch(
           <MicTestSection />
 
           <!-- Обновления -->
-          <UpdatesSection @show-update-dialog="showUpdateDialog = true" />
+          <UpdatesSection @show-update-dialog="handleShowUpdate" />
 
           <!-- Ошибка сохранения -->
           <v-alert

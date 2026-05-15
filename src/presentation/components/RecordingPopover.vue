@@ -17,6 +17,7 @@ import ProfilePopover from './ProfilePopover.vue';
 import UpdateIndicator from './UpdateIndicator.vue';
 import UpdateDialog from './UpdateDialog.vue';
 import AudioVisualizer from './AudioVisualizer.vue';
+import { useUpdater } from '../../composables/useUpdater';
 import { playShowSound, playDoneSound, preloadUiSounds } from '../../utils/sound';
 import { isTauriAvailable } from '../../utils/tauri';
 import { EVENT_RECORDING_WINDOW_SHOWN } from '@/types';
@@ -43,6 +44,7 @@ const settingsStore = useSettingsStore();
 const sttConfigStore = useSttConfigStore();
 const authStore = useAuthStore();
 const auth = useAuth();
+const { openUpdateWindow } = useUpdater();
 const { t } = useI18n();
 const showSettings = ref(false);
 const showProfile = ref(false);
@@ -453,6 +455,11 @@ const closeProfile = () => {
 
 const openUpdateDialog = async () => {
   cancelPendingHideRecordingWindow();
+
+  if (await openUpdateWindow()) {
+    return;
+  }
+
   showUpdateDialog.value = true;
   await nextTick();
   applyRecordingWindowSize();

@@ -8,6 +8,7 @@ import { isTauriAvailable } from '@/utils/tauri';
 import { useAppConfigStore } from '@/stores/appConfig';
 import { useSttConfigStore } from '@/stores/sttConfig';
 import UpdateDialog from '@/presentation/components/UpdateDialog.vue';
+import { useUpdater } from '@/composables/useUpdater';
 import { useSettings } from '../composables/useSettings';
 import { useSettingsTheme } from '../composables/useSettingsTheme';
 import { useSettingsStore } from '../../store/settingsStore';
@@ -30,6 +31,7 @@ const { t, locale } = useI18n();
 const { loadConfig, saveConfig, isSaving, isLoading, errorMessage, clearError } =
   useSettings();
 const { initializeTheme } = useSettingsTheme();
+const { openUpdateWindow } = useUpdater();
 
 const appConfigStore = useAppConfigStore();
 const sttConfigStore = useSttConfigStore();
@@ -223,6 +225,14 @@ async function handleSave(): Promise<void> {
   await handleClose({ discard: false });
 }
 
+async function handleShowUpdate(): Promise<void> {
+  if (await openUpdateWindow()) {
+    return;
+  }
+
+  showUpdateDialog.value = true;
+}
+
 watch(
   () => settingsStore.selectedAudioDevice,
   (next, prev) => {
@@ -265,7 +275,7 @@ watch(
         <AutoActionsSection />
         <AudioDeviceSection />
         <MicTestSection />
-        <UpdatesSection @show-update-dialog="showUpdateDialog = true" />
+        <UpdatesSection @show-update-dialog="handleShowUpdate" />
 
         <v-alert
           v-if="errorMessage"
