@@ -32,7 +32,8 @@ const DEV_BACKEND_URL: &str = "ws://localhost:8080";
 // Без них connect/send могут "подвиснуть" и UI будет бесконечно ждать.
 const WS_CONNECT_TIMEOUT_SECS: u64 = 8;
 const WS_SEND_TIMEOUT_SECS: u64 = 3;
-const FINALIZE_SETTLE_TIMEOUT_MS: u64 = 900;
+const FINALIZE_DRAIN_ACK_TIMEOUT_MS: u64 = 1800;
+const CAPABILITY_FINALIZE_ACK: &str = "finalize_ack";
 
 /// Проверяем, что URL указывает на локальный бэкенд (localhost/loopback).
 ///
@@ -103,6 +104,7 @@ pub struct BackendProvider {
     // Поэтому нельзя захватывать callbacks в spawn при start_stream — иначе при resume_stream
     // они не обновятся и события будут уходить в старую "сессию" UI.
     callbacks: Arc<Mutex<CallbackState>>,
+    finalize_waiter: Arc<Mutex<Option<tokio::sync::oneshot::Sender<FinalizeDrainComplete>>>>,
     on_usage_update_callback: Option<UsageUpdateCallback>,
 
     // Статистика
@@ -134,6 +136,12 @@ struct CallbackState {
     // Защита от "поздних" ACK старой записи:
     // активируем pending только когда получили ACK с seq БОЛЬШЕ последнего отправленного seq на момент resume_stream.
     swap_after_seq: u64,
+}
+
+#[derive(Debug)]
+struct FinalizeDrainComplete {
+    status: String,
+    saw_result: bool,
 }
 
 impl CallbackState {
@@ -188,6 +196,7 @@ impl BackendProvider {
             is_closed: Arc::new(AtomicBool::new(true)), // Изначально закрыто
             last_remaining_secs: Arc::new(AtomicU32::new(f32::MAX.to_bits())),
             callbacks: Arc::new(Mutex::new(CallbackState::default())),
+            finalize_waiter: Arc::new(Mutex::new(None)),
             on_usage_update_callback: None,
             sent_chunks_count: 0,
             sent_bytes_total: 0,
@@ -615,6 +624,7 @@ impl SttProvider for BackendProvider {
             channels: 1,
             encoding: "pcm_s16le".to_string(),
             keyterms,
+            capabilities: vec![CAPABILITY_FINALIZE_ACK.to_string()],
         };
 
         self.send_json(&config_msg).await?;
@@ -623,6 +633,7 @@ impl SttProvider for BackendProvider {
         // Запускаем receiver task для обработки сообщений от сервера.
         // Берём callbacks из self.callbacks, чтобы они могли обновляться при resume_stream.
         let callbacks_state = self.callbacks.clone();
+        let finalize_waiter = self.finalize_waiter.clone();
         let on_usage_cb = self.on_usage_update_callback.clone();
         let is_closed_flag = self.is_closed.clone();
         let shared_remaining = self.last_remaining_secs.clone();
@@ -796,6 +807,19 @@ impl SttProvider for BackendProvider {
                                                     ..Default::default()
                                                 },
                                             }));
+                                        }
+                                    }
+
+                                    ServerMessage::FinalizeComplete { status, saw_result } => {
+                                        log::debug!(
+                                            "Finalize drain complete: status={}, saw_result={}",
+                                            status,
+                                            saw_result
+                                        );
+                                        let waiter = finalize_waiter.lock().await.take();
+                                        if let Some(waiter) = waiter {
+                                            let _ = waiter
+                                                .send(FinalizeDrainComplete { status, saw_result });
                                         }
                                     }
                                 }
@@ -1144,6 +1168,7 @@ impl SttProvider for BackendProvider {
 
         // ПЕРВЫМ ДЕЛОМ ставим флаг закрытия — это предотвращает race condition
         self.is_closed.store(true, Ordering::SeqCst);
+        let _ = self.finalize_waiter.lock().await.take();
 
         if !self.is_streaming {
             return Ok(());
@@ -1205,6 +1230,7 @@ impl SttProvider for BackendProvider {
 
         // ПЕРВЫМ ДЕЛОМ ставим флаг закрытия
         self.is_closed.store(true, Ordering::SeqCst);
+        let _ = self.finalize_waiter.lock().await.take();
 
         if let Some(task) = self.keepalive_task.take() {
             task.abort();
@@ -1265,14 +1291,39 @@ impl SttProvider for BackendProvider {
             }
         }
 
-        // Best-effort: просим сервер форсировать финализацию провайдера (Deepgram Finalize),
-        // чтобы "хвост" последней фразы пришёл ДО следующей записи и не протёк в новую UI-сессию.
+        let finalize_rx = {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            *self.finalize_waiter.lock().await = Some(tx);
+            rx
+        };
+
+        // Просим сервер форсировать финализацию провайдера (Deepgram Finalize) и ждём
+        // backend-level drain ack. На старом backend ack не придёт, поэтому есть bounded fallback.
         if let Err(e) = self.send_json(&ClientMessage::Finalize).await {
+            let _ = self.finalize_waiter.lock().await.take();
             log::warn!("BackendProvider: finalize failed on pause: {}", e);
         } else {
-            // Deepgram Finalize is asynchronous: the final result can arrive shortly after the
-            // control message. Keep callbacks active briefly before the UI receives Idle.
-            tokio::time::sleep(Duration::from_millis(FINALIZE_SETTLE_TIMEOUT_MS)).await;
+            match tokio::time::timeout(
+                Duration::from_millis(FINALIZE_DRAIN_ACK_TIMEOUT_MS),
+                finalize_rx,
+            )
+            .await
+            {
+                Ok(Ok(done)) => {
+                    log::debug!(
+                        "BackendProvider: finalize drain ack received: status={}, saw_result={}",
+                        done.status,
+                        done.saw_result
+                    );
+                }
+                Ok(Err(_)) => {
+                    log::debug!("BackendProvider: finalize drain waiter dropped");
+                }
+                Err(_) => {
+                    let _ = self.finalize_waiter.lock().await.take();
+                    log::debug!("BackendProvider: finalize drain ack timeout");
+                }
+            }
         }
 
         self.is_paused = true;

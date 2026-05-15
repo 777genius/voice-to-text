@@ -239,13 +239,11 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   function setAutoCopyToClipboard(value: boolean) {
-    void value;
-    autoCopyToClipboard.value = false;
+    autoCopyToClipboard.value = Boolean(value);
   }
 
   function setAutoPasteText(value: boolean) {
-    void value;
-    autoPasteText.value = false;
+    autoPasteText.value = Boolean(value);
   }
 
   function setPlayCompletionSound(value: boolean) {
@@ -316,9 +314,10 @@ export const useSettingsStore = defineStore('settings', () => {
       setMicrophoneSensitivity(state.microphoneSensitivity, { persist: false });
     if (state.selectedAudioDevice !== undefined)
       selectedAudioDevice.value = state.selectedAudioDevice;
-    // auto-copy/auto-paste are intentionally disabled.
-    autoCopyToClipboard.value = false;
-    autoPasteText.value = false;
+    if (state.autoCopyToClipboard !== undefined)
+      autoCopyToClipboard.value = state.autoCopyToClipboard;
+    if (state.autoPasteText !== undefined)
+      autoPasteText.value = state.autoPasteText;
     if (state.playCompletionSound !== undefined)
       playCompletionSound.value = state.playCompletionSound;
     if (state.hideRecordingWindowOnHotkey !== undefined)

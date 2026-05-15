@@ -25,6 +25,9 @@ pub enum ClientMessage {
         /// Ключевые термины для улучшения распознавания
         #[serde(skip_serializing_if = "Option::is_none")]
         keyterms: Option<Vec<String>>,
+        /// Optional protocol capabilities. Unknown values are ignored by older backends.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
     },
 
     /// Клиент закрывает сессию
@@ -92,6 +95,9 @@ pub enum ServerMessage {
 
     /// Ошибка
     Error { code: String, message: String },
+
+    /// Backend завершил bounded-drain после Finalize.
+    FinalizeComplete { status: String, saw_result: bool },
 }
 
 #[cfg(test)]
@@ -108,11 +114,13 @@ mod tests {
             channels: 1,
             encoding: "pcm_s16le".to_string(),
             keyterms: None,
+            capabilities: vec!["finalize_ack".to_string()],
         };
 
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""type":"config""#));
         assert!(json.contains(r#""provider":"deepgram""#));
+        assert!(json.contains(r#""capabilities":["finalize_ack"]"#));
     }
 
     #[test]
@@ -224,6 +232,20 @@ mod tests {
                 assert_eq!(message, "Usage limit reached");
             }
             _ => panic!("Expected Error message"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_finalize_complete_message() {
+        let json = r#"{"type":"finalize_complete","status":"flushed","saw_result":true}"#;
+        let msg: ServerMessage = serde_json::from_str(json).unwrap();
+
+        match msg {
+            ServerMessage::FinalizeComplete { status, saw_result } => {
+                assert_eq!(status, "flushed");
+                assert!(saw_result);
+            }
+            _ => panic!("Expected FinalizeComplete message"),
         }
     }
 }

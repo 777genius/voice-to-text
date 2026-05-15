@@ -104,11 +104,11 @@ describe('scenario: app-config sync across windows (mocked tauri)', () => {
     await appConfigMain.startSync();
     expect(appConfigMain.autoCopyToClipboard).toBe(false);
 
-    // "Settings window" triggers a stale auto-copy update; app store keeps auto actions disabled.
+    // "Settings window" toggles auto-copy; main window receives it through state sync.
     await invokeMock(CMD_UPDATE_APP_CONFIG, { autoCopyToClipboard: true });
 
     await vi.waitFor(() => {
-      expect(appConfigMain.autoCopyToClipboard).toBe(false);
+      expect(appConfigMain.autoCopyToClipboard).toBe(true);
     });
 
     await invokeMock(CMD_UPDATE_APP_CONFIG, { hideRecordingWindowOnHotkey: true });
