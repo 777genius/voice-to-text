@@ -71,6 +71,10 @@ fn emit_idle_recording_status(app_handle: &AppHandle, session_id: u64, stopped_v
     );
 }
 
+fn should_hide_recording_window_immediately_on_hotkey_stop(config: &AppConfig) -> bool {
+    config.show_mini_recording_window || config.hide_recording_window_on_hotkey
+}
+
 async fn stop_recording_and_emit_idle(
     state: &AppState,
     app_handle: &AppHandle,
@@ -684,8 +688,11 @@ where
 
 #[cfg(test)]
 mod snapshot_contract_tests {
-    use super::{AppConfigSnapshotData, SnapshotEnvelope, SttConfigSnapshotData};
-    use crate::domain::SttProviderType;
+    use super::{
+        should_hide_recording_window_immediately_on_hotkey_stop, AppConfigSnapshotData,
+        SnapshotEnvelope, SttConfigSnapshotData,
+    };
+    use crate::domain::{AppConfig, SttProviderType};
 
     fn assert_absent(json: &str, needles: &[&str]) {
         for needle in needles {
@@ -696,6 +703,33 @@ mod snapshot_contract_tests {
                 json
             );
         }
+    }
+
+    #[test]
+    fn hotkey_stop_hides_mini_window_before_finalize_drain() {
+        let mut config = AppConfig::default();
+        config.show_mini_recording_window = true;
+        config.hide_recording_window_on_hotkey = false;
+
+        assert!(should_hide_recording_window_immediately_on_hotkey_stop(
+            &config
+        ));
+    }
+
+    #[test]
+    fn hotkey_stop_does_not_hide_regular_window_unless_configured() {
+        let mut config = AppConfig::default();
+        config.show_mini_recording_window = false;
+        config.hide_recording_window_on_hotkey = false;
+
+        assert!(!should_hide_recording_window_immediately_on_hotkey_stop(
+            &config
+        ));
+
+        config.hide_recording_window_on_hotkey = true;
+        assert!(should_hide_recording_window_immediately_on_hotkey_stop(
+            &config
+        ));
     }
 
     #[test]
@@ -883,8 +917,34 @@ pub async fn toggle_recording_with_window(
             log::debug!("Ignoring toggle - recording is starting (WebSocket connecting, audio capture initializing)");
         }
         RecordingStatus::Recording => {
+            let config = state.config.read().await.clone();
+            let hidden_for_hotkey_stop =
+                if should_hide_recording_window_immediately_on_hotkey_stop(&config) {
+                    let window_visible = window.is_visible().map_err(|e| e.to_string())?;
+                    if window_visible {
+                        window.hide().map_err(|e| e.to_string())?;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
             // Останавливаем запись
-            let _result = stop_recording_and_emit_idle(state.inner(), &app_handle, true).await?;
+            if let Err(err) = stop_recording_and_emit_idle(state.inner(), &app_handle, true).await {
+                if hidden_for_hotkey_stop {
+                    if let Err(show_err) = show_window_with_recording_config(&window, &config) {
+                        log::warn!(
+                            "Failed to restore recording window after hotkey stop error: {}",
+                            show_err
+                        );
+                    } else {
+                        let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
+                    }
+                }
+                return Err(err);
+            }
 
             log::info!("Recording stopped via hotkey");
         }
@@ -970,7 +1030,35 @@ pub async fn toggle_recording_with_window_internal(
             log::debug!("Ignoring toggle - recording is starting");
         }
         RecordingStatus::Recording => {
-            let _result = stop_recording_and_emit_idle(state, &app_handle, true).await?;
+            let config = state.config.read().await.clone();
+            let hidden_for_hotkey_stop =
+                if should_hide_recording_window_immediately_on_hotkey_stop(&config) {
+                    let window_visible = window.is_visible().map_err(|e| e.to_string())?;
+                    if window_visible {
+                        window.hide().map_err(|e| e.to_string())?;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+            if let Err(err) = stop_recording_and_emit_idle(state, &app_handle, true).await {
+                if hidden_for_hotkey_stop {
+                    if let Err(show_err) =
+                        show_webview_window_with_recording_config(&window, &config)
+                    {
+                        log::warn!(
+                            "Failed to restore recording window after hotkey stop error: {}",
+                            show_err
+                        );
+                    } else {
+                        let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
+                    }
+                }
+                return Err(err);
+            }
 
             log::info!("Recording stopped via hotkey");
         }
