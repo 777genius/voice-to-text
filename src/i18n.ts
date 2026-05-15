@@ -38,7 +38,7 @@ const messages = {
       language: {
         label: 'Language',
         searchPlaceholder: 'Search language...',
-        multiHint: 'Auto-detection of 10 languages: English, Spanish, French, German, Portuguese, Italian, Dutch, Hindi, Japanese, Russian.',
+        multiHint: 'Multilingual recognition across 10 languages: English, Spanish, French, German, Portuguese, Italian, Dutch, Hindi, Japanese, Russian.',
       },
       apiKeys: {
         label: 'API Keys (optional)',
@@ -395,7 +395,7 @@ const messages = {
       language: {
         label: 'Язык',
         searchPlaceholder: 'Поиск языка...',
-        multiHint: 'Автоопределение 10 языков: английский, испанский, французский, немецкий, португальский, итальянский, нидерландский, хинди, японский, русский.',
+        multiHint: 'Мультиязычное распознавание 10 языков: английский, испанский, французский, немецкий, португальский, итальянский, нидерландский, хинди, японский, русский.',
       },
       apiKeys: {
         label: 'API ключи (опционально)',
@@ -752,7 +752,7 @@ const messages = {
       language: {
         label: 'Idioma',
         searchPlaceholder: 'Buscar idioma...',
-        multiHint: 'Detección automática de 10 idiomas: inglés, español, francés, alemán, portugués, italiano, neerlandés, hindi, japonés, ruso.',
+        multiHint: 'Reconocimiento multilingüe en 10 idiomas: inglés, español, francés, alemán, portugués, italiano, neerlandés, hindi, japonés, ruso.',
       },
       apiKeys: {
         label: 'Claves API (opcional)',
@@ -1109,7 +1109,7 @@ const messages = {
       language: {
         label: 'Langue',
         searchPlaceholder: 'Rechercher une langue...',
-        multiHint: 'Détection automatique de 10 langues : anglais, espagnol, français, allemand, portugais, italien, néerlandais, hindi, japonais, russe.',
+        multiHint: 'Reconnaissance multilingue dans 10 langues : anglais, espagnol, français, allemand, portugais, italien, néerlandais, hindi, japonais, russe.',
       },
       apiKeys: {
         label: 'Clés API (optionnel)',
@@ -1466,7 +1466,7 @@ const messages = {
       language: {
         label: 'Sprache',
         searchPlaceholder: 'Sprache suchen...',
-        multiHint: 'Automatische Erkennung von 10 Sprachen: Englisch, Spanisch, Französisch, Deutsch, Portugiesisch, Italienisch, Niederländisch, Hindi, Japanisch, Russisch.',
+        multiHint: 'Mehrsprachige Erkennung in 10 Sprachen: Englisch, Spanisch, Französisch, Deutsch, Portugiesisch, Italienisch, Niederländisch, Hindi, Japanisch, Russisch.',
       },
       apiKeys: {
         label: 'API-Schlüssel (optional)',
@@ -1823,7 +1823,7 @@ const messages = {
       language: {
         label: 'Мова',
         searchPlaceholder: 'Пошук мови...',
-        multiHint: 'Автовизначення 10 мов: англійська, іспанська, французька, німецька, португальська, італійська, нідерландська, гінді, японська, російська.',
+        multiHint: 'Багатомовне розпізнавання 10 мов: англійська, іспанська, французька, німецька, португальська, італійська, нідерландська, гінді, японська, російська.',
       },
       apiKeys: {
         label: 'API ключі (опційно)',
