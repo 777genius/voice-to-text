@@ -32,6 +32,7 @@ const DEV_BACKEND_URL: &str = "ws://localhost:8080";
 // Без них connect/send могут "подвиснуть" и UI будет бесконечно ждать.
 const WS_CONNECT_TIMEOUT_SECS: u64 = 8;
 const WS_SEND_TIMEOUT_SECS: u64 = 3;
+const FINALIZE_SETTLE_TIMEOUT_MS: u64 = 900;
 
 /// Проверяем, что URL указывает на локальный бэкенд (localhost/loopback).
 ///
@@ -1268,6 +1269,10 @@ impl SttProvider for BackendProvider {
         // чтобы "хвост" последней фразы пришёл ДО следующей записи и не протёк в новую UI-сессию.
         if let Err(e) = self.send_json(&ClientMessage::Finalize).await {
             log::warn!("BackendProvider: finalize failed on pause: {}", e);
+        } else {
+            // Deepgram Finalize is asynchronous: the final result can arrive shortly after the
+            // control message. Keep callbacks active briefly before the UI receives Idle.
+            tokio::time::sleep(Duration::from_millis(FINALIZE_SETTLE_TIMEOUT_MS)).await;
         }
 
         self.is_paused = true;

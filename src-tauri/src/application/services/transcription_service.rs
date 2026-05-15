@@ -13,6 +13,8 @@ use crate::application::AudioSpectrumAnalyzer;
 
 type Result<T> = anyhow::Result<T>;
 
+const AUDIO_PROCESSOR_STOP_DRAIN_TIMEOUT: Duration = Duration::from_millis(2500);
+
 /// Main application service that orchestrates transcription workflow
 ///
 /// This service follows the Dependency Inversion Principle by depending on
@@ -50,6 +52,41 @@ impl TranscriptionService {
         *self.microphone_sensitivity.write().await = sensitivity.min(200);
     }
 
+    async fn abort_audio_processor_task(&self, reason: &str) {
+        if let Some(task) = self.audio_processor_task.write().await.take() {
+            log::debug!("Aborting audio processor task: {}", reason);
+            task.abort();
+            let _ = task.await;
+        }
+    }
+
+    async fn drain_audio_processor_task(&self, reason: &str) {
+        let Some(mut task) = self.audio_processor_task.write().await.take() else {
+            return;
+        };
+
+        tokio::select! {
+            result = &mut task => {
+                if let Err(e) = result {
+                    if e.is_cancelled() {
+                        log::debug!("Audio processor task cancelled while draining: {}", reason);
+                    } else {
+                        log::warn!("Audio processor task failed while draining ({}): {}", reason, e);
+                    }
+                }
+            }
+            _ = tokio::time::sleep(AUDIO_PROCESSOR_STOP_DRAIN_TIMEOUT) => {
+                log::warn!(
+                    "Audio processor did not drain within {:?} while {}; aborting",
+                    AUDIO_PROCESSOR_STOP_DRAIN_TIMEOUT,
+                    reason
+                );
+                task.abort();
+                let _ = task.await;
+            }
+        }
+    }
+
     /// Start recording and transcription
     pub async fn start_recording(
         &self,
@@ -79,11 +116,8 @@ impl TranscriptionService {
 
         // На всякий случай прибиваем старый audio processor, если он почему-то остался висеть
         // (например, если предыдущая запись завершилась через ошибку/гонку).
-        if let Some(task) = self.audio_processor_task.write().await.take() {
-            log::debug!("Aborting previous audio processor task");
-            task.abort();
-            let _ = task.await;
-        }
+        self.abort_audio_processor_task("starting a new recording")
+            .await;
 
         // Проверяем можно ли переиспользовать существующее соединение
         let config = self.config.read().await.clone();
@@ -244,6 +278,10 @@ impl TranscriptionService {
                         // Если долго не приходят чанки — захват аудио мог "отвалиться"
                         // (например, микрофон был отключён/переключён на уровне ОС).
                         let status = status_arc.read().await;
+                        if *status == RecordingStatus::Processing {
+                            log::debug!("Audio processor finished drain after recording stop");
+                            break;
+                        }
                         if *status != RecordingStatus::Recording {
                             continue;
                         }
@@ -314,11 +352,10 @@ impl TranscriptionService {
                 last_audio_at = Instant::now();
                 stall_restarts = 0;
 
-                let status = status_arc.read().await;
-                if *status != RecordingStatus::Recording {
+                let status = *status_arc.read().await;
+                if status != RecordingStatus::Recording && status != RecordingStatus::Processing {
                     continue;
                 }
-                drop(status);
 
                 // Вычисляем уровень громкости для визуализации
                 // Используем перцептивную нормализацию (корень квадратный) как в VU-метрах
@@ -610,6 +647,14 @@ impl TranscriptionService {
                         }
                     }
                 }
+
+                // При штатной остановке запись уже в Processing, capture остановлен,
+                // но processor мог держать служебный clone sender для restart-аудио.
+                // Поэтому не ждём закрытия канала бесконечно: когда очередь пуста, drain завершён.
+                if *status_arc.read().await == RecordingStatus::Processing && rx.is_empty() {
+                    log::debug!("Audio processor queue drained after recording stop");
+                    break;
+                }
             }
             log::info!(
                 "Audio chunk processor finished, total chunks: {}",
@@ -637,10 +682,8 @@ impl TranscriptionService {
             }
 
             // И прибиваем processor task, иначе он будет висеть в фоне, ожидая rx.
-            if let Some(task) = self.audio_processor_task.write().await.take() {
-                task.abort();
-                let _ = task.await;
-            }
+            self.abort_audio_processor_task("audio capture failed to start")
+                .await;
 
             return Err(anyhow::anyhow!("Failed to start audio capture: {}", e));
         }
@@ -666,16 +709,13 @@ impl TranscriptionService {
         // Stop audio capture
         let stop_capture_result = self.audio_capture.write().await.stop_capture().await;
 
-        // При остановке записи прибиваем audio processor, чтобы не оставлять висящий task между сессиями.
-        if let Some(task) = self.audio_processor_task.write().await.take() {
-            task.abort();
-            let _ = task.await;
-        }
-
         // Если не смогли остановить захват аудио — считаем это критическим сценарием:
         // лучше упасть с ошибкой, но гарантированно вернуть сервис в Idle, чем зависнуть в Processing.
         if let Err(e) = stop_capture_result {
             log::error!("Failed to stop audio capture: {}", e);
+
+            self.abort_audio_processor_task("audio capture failed to stop")
+                .await;
 
             // Закрываем провайдера, чтобы не оставлять "полуживой" WS/таски.
             if let Some(mut provider) = self.stt_provider.write().await.take() {
@@ -685,6 +725,10 @@ impl TranscriptionService {
             *self.status.write().await = RecordingStatus::Idle;
             return Err(anyhow::anyhow!("Failed to stop audio capture: {}", e));
         }
+
+        // После stop_capture sender аудио-чанков должен закрыться. Не abort'им processor сразу:
+        // в очереди могли остаться последние чанки речи, и именно они дают "обрезанный хвост".
+        self.drain_audio_processor_task("stopping recording").await;
 
         // Проверяем нужно ли держать соединение открытым (keep-alive режим)
         let config = self.config.read().await.clone();
@@ -812,14 +856,11 @@ impl TranscriptionService {
         // Stop audio capture
         let stop_capture_result = self.audio_capture.write().await.stop_capture().await;
 
-        // При остановке записи прибиваем audio processor, чтобы он гарантированно не жил в фоне.
-        if let Some(task) = self.audio_processor_task.write().await.take() {
-            task.abort();
-            let _ = task.await;
-        }
-
         if let Err(e) = stop_capture_result {
             log::error!("Failed to stop audio capture: {}", e);
+
+            self.abort_audio_processor_task("audio capture failed to stop during hard stop")
+                .await;
 
             // Жёсткий фоллбек: закрываем провайдера, чтобы гарантировать чистое состояние.
             if let Some(mut provider) = self.stt_provider.write().await.take() {
@@ -829,6 +870,11 @@ impl TranscriptionService {
             *self.status.write().await = RecordingStatus::Idle;
             return Err(anyhow::anyhow!("Failed to stop audio capture: {}", e));
         }
+
+        // Даже при hard-stop сначала досылаем уже принятый хвост аудио в STT,
+        // потом закрываем stream. Иначе последние слова могут не попасть в финализацию.
+        self.drain_audio_processor_task("hard-stopping recording")
+            .await;
 
         // Отменяем таймер неактивности, если он был запущен (на всякий случай)
         if let Some(timer) = self.inactivity_timer_task.write().await.take() {
@@ -1136,6 +1182,173 @@ mod tests {
                 aborted: self.aborted.clone(),
             }))
         }
+    }
+
+    struct ManualAudioCapture {
+        config: AudioConfig,
+        is_capturing: Arc<AtomicBool>,
+        on_chunk: Arc<std::sync::Mutex<Option<crate::domain::AudioChunkCallback>>>,
+    }
+
+    impl ManualAudioCapture {
+        fn new(on_chunk: Arc<std::sync::Mutex<Option<crate::domain::AudioChunkCallback>>>) -> Self {
+            Self {
+                config: AudioConfig::default(),
+                is_capturing: Arc::new(AtomicBool::new(false)),
+                on_chunk,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AudioCapture for ManualAudioCapture {
+        async fn initialize(&mut self, config: AudioConfig) -> AudioResult<()> {
+            self.config = config;
+            Ok(())
+        }
+
+        async fn start_capture(
+            &mut self,
+            on_chunk: crate::domain::AudioChunkCallback,
+        ) -> AudioResult<()> {
+            self.is_capturing.store(true, Ordering::SeqCst);
+            *self.on_chunk.lock().expect("callback mutex poisoned") = Some(on_chunk);
+            Ok(())
+        }
+
+        async fn stop_capture(&mut self) -> AudioResult<()> {
+            self.is_capturing.store(false, Ordering::SeqCst);
+            *self.on_chunk.lock().expect("callback mutex poisoned") = None;
+            Ok(())
+        }
+
+        fn is_capturing(&self) -> bool {
+            self.is_capturing.load(Ordering::SeqCst)
+        }
+
+        fn config(&self) -> AudioConfig {
+            self.config
+        }
+    }
+
+    struct CountingProvider {
+        sent_chunks: Arc<AtomicUsize>,
+        stopped: Arc<AtomicBool>,
+        delay_per_chunk: Duration,
+    }
+
+    #[async_trait]
+    impl SttProvider for CountingProvider {
+        async fn initialize(&mut self, _config: &SttConfig) -> SttResult<()> {
+            Ok(())
+        }
+
+        async fn start_stream(
+            &mut self,
+            _on_partial: TranscriptionCallback,
+            _on_final: TranscriptionCallback,
+            _on_error: ErrorCallback,
+            _on_connection_quality: ConnectionQualityCallback,
+        ) -> SttResult<()> {
+            Ok(())
+        }
+
+        async fn send_audio(&mut self, _chunk: &crate::domain::AudioChunk) -> SttResult<()> {
+            tokio::time::sleep(self.delay_per_chunk).await;
+            self.sent_chunks.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_stream(&mut self) -> SttResult<()> {
+            self.stopped.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn abort(&mut self) -> SttResult<()> {
+            Ok(())
+        }
+
+        fn name(&self) -> &str {
+            "counting_provider"
+        }
+
+        fn is_online(&self) -> bool {
+            true
+        }
+    }
+
+    struct CountingFactory {
+        sent_chunks: Arc<AtomicUsize>,
+        stopped: Arc<AtomicBool>,
+        delay_per_chunk: Duration,
+    }
+
+    impl SttProviderFactory for CountingFactory {
+        fn create(&self, _config: &SttConfig) -> SttResult<Box<dyn SttProvider>> {
+            Ok(Box::new(CountingProvider {
+                sent_chunks: self.sent_chunks.clone(),
+                stopped: self.stopped.clone(),
+                delay_per_chunk: self.delay_per_chunk,
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_recording_drains_queued_audio_chunks_before_stopping_provider() {
+        let on_chunk_slot: Arc<std::sync::Mutex<Option<crate::domain::AudioChunkCallback>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let sent_chunks = Arc::new(AtomicUsize::new(0));
+        let provider_stopped = Arc::new(AtomicBool::new(false));
+
+        let audio_capture = ManualAudioCapture::new(on_chunk_slot.clone());
+        let factory = Arc::new(CountingFactory {
+            sent_chunks: sent_chunks.clone(),
+            stopped: provider_stopped.clone(),
+            delay_per_chunk: Duration::from_millis(5),
+        });
+        let service = TranscriptionService::new(Box::new(audio_capture), factory);
+
+        let on_partial: TranscriptionCallback = Arc::new(|_t| {});
+        let on_final: TranscriptionCallback = Arc::new(|_t| {});
+        let on_audio_level: AudioLevelCallback = Arc::new(|_l| {});
+        let on_audio_spectrum: AudioSpectrumCallback = Arc::new(|_b| {});
+        let on_error: ErrorCallback = Arc::new(|_err: SttError| {});
+        let on_quality: ConnectionQualityCallback = Arc::new(|_q, _r| {});
+
+        service
+            .start_recording(
+                on_partial,
+                on_final,
+                on_audio_level,
+                on_audio_spectrum,
+                on_error,
+                on_quality,
+            )
+            .await
+            .expect("recording must start");
+
+        const CHUNKS: usize = 48;
+        {
+            let callback = on_chunk_slot
+                .lock()
+                .expect("callback mutex poisoned")
+                .clone()
+                .expect("capture callback must be registered");
+
+            for i in 0..CHUNKS {
+                let sample = 1000 + i as i16;
+                callback(crate::domain::AudioChunk::new(vec![sample; 480], 16_000, 1));
+            }
+        }
+
+        service
+            .stop_recording()
+            .await
+            .expect("recording must stop cleanly");
+
+        assert_eq!(sent_chunks.load(Ordering::SeqCst), CHUNKS);
+        assert!(provider_stopped.load(Ordering::SeqCst));
+        assert_eq!(service.get_status().await, RecordingStatus::Idle);
     }
 
     #[tokio::test]

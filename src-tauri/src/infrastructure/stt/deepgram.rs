@@ -32,6 +32,7 @@ const DEEPGRAM_WS_URL: &str = "wss://api.deepgram.com/v1/listen";
 // Deepgram default endpointing is aggressive for conversational speech.
 // Keep this aligned with the backend stream config.
 const DEEPGRAM_ENDPOINTING_MS: u32 = 300;
+const DEEPGRAM_FINALIZE_SETTLE_TIMEOUT_MS: u64 = 900;
 
 fn build_keyterms_query(keyterms: &Option<String>) -> String {
     let Some(raw) = keyterms.as_deref() else {
@@ -833,9 +834,52 @@ impl SttProvider for DeepgramProvider {
             return Ok(());
         }
 
+        // Досылаем остаток локального буфера перед Finalize, иначе последние миллисекунды речи
+        // могут остаться только в памяти клиента.
+        if !self.audio_buffer.is_empty() {
+            if let Some(write) = self.ws_write.as_ref() {
+                let bytes: Vec<u8> = self
+                    .audio_buffer
+                    .iter()
+                    .flat_map(|&sample| sample.to_le_bytes())
+                    .collect();
+
+                let mut write_guard = write.lock().await;
+                match write_guard.send(Message::Binary(bytes)).await {
+                    Ok(_) => {
+                        log::debug!("Flushed remaining audio buffer before Deepgram pause");
+                    }
+                    Err(e) => {
+                        log::debug!("Could not flush final buffer before Deepgram pause: {}", e);
+                    }
+                }
+            }
+            self.audio_buffer.clear();
+        }
+
+        // По документации Deepgram Finalize форсирует обработку уже отправленного аудио.
+        // Receiver ещё не ставим на pause, чтобы не проигнорировать финальный Results.
+        if let Some(write) = self.ws_write.as_ref() {
+            let finalize_msg = json!({"type": "Finalize"});
+            let mut write_guard = write.lock().await;
+            match write_guard
+                .send(Message::Text(finalize_msg.to_string()))
+                .await
+            {
+                Ok(_) => {
+                    log::debug!("Finalize sent before Deepgram pause");
+                    drop(write_guard);
+                    tokio::time::sleep(Duration::from_millis(DEEPGRAM_FINALIZE_SETTLE_TIMEOUT_MS))
+                        .await;
+                }
+                Err(e) => {
+                    log::debug!("Could not send Finalize before Deepgram pause: {}", e);
+                }
+            }
+        }
+
         self.is_paused = true;
         *self.is_paused_flag.lock().await = true; // устанавливаем флаг для receiver_task
-        self.audio_buffer.clear(); // Очищаем буфер при паузе
 
         // Очищаем reconnect state
         self.is_reconnecting = false;
