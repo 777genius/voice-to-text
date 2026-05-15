@@ -161,6 +161,61 @@ describe('transcription connect-retry reliability', () => {
     expect(store.error).toContain('Микрофон недоступен');
   });
 
+  it('не залипает в Processing если stop завершился, но Idle event не дошёл', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'stop_recording') return Promise.resolve('Recording stopped');
+      if (cmd === 'get_recording_status') return Promise.resolve('Idle');
+      return Promise.resolve(null);
+    });
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 21, status: 'Recording', stopped_via_hotkey: false },
+    });
+    expect(store.status).toBe('Recording');
+
+    await store.stopRecording();
+
+    expect(store.status).toBe('Idle');
+    expect(store.error).toBeNull();
+  });
+
+  it('не показывает ложную stop-ошибку если backend уже восстановился в Idle', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'stop_recording') return Promise.reject('Failed to stop audio capture');
+      if (cmd === 'get_recording_status') return Promise.resolve('Idle');
+      return Promise.resolve(null);
+    });
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 22, status: 'Recording', stopped_via_hotkey: false },
+    });
+
+    await store.stopRecording();
+
+    expect(store.status).toBe('Idle');
+    expect(store.error).toBeNull();
+  });
+
   it('не показывает finalized и cumulative interim дублем', async () => {
     const handlers = new Map<string, any>();
 

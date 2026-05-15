@@ -1749,8 +1749,20 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       status.value = RecordingStatus.Processing;
       const result = await invoke<string>('stop_recording');
       console.log('Recording stopped:', result);
+      const backendStatus = await reconcileBackendStatus('stop_recording_success');
+      if (backendStatus === RecordingStatus.Idle) {
+        error.value = null;
+        errorType.value = null;
+      }
     } catch (err) {
       console.error('Failed to stop recording:', err);
+      const backendStatus = await reconcileBackendStatus('stop_recording_error');
+      if (backendStatus === RecordingStatus.Idle) {
+        console.warn('[STT] Stop command failed, but backend is already Idle:', err);
+        error.value = null;
+        errorType.value = null;
+        return;
+      }
       error.value = String(err);
       status.value = RecordingStatus.Error;
     }
