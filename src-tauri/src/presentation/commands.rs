@@ -42,13 +42,9 @@ fn error_details_from_stt(err: &SttError) -> Option<TranscriptionErrorDetailsPay
 }
 
 fn take_active_transcription_session_id(state: &AppState) -> u64 {
-    let session_id = state
-        .active_transcription_session_id
-        .load(Ordering::Relaxed);
     state
         .active_transcription_session_id
-        .store(0, Ordering::Relaxed);
-    session_id
+        .swap(0, Ordering::Relaxed)
 }
 
 /// Start recording voice

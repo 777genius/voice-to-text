@@ -389,6 +389,7 @@ impl AppState {
         let task = tauri::async_runtime::spawn(async move {
             const REFRESH_BUFFER_MS: i64 = 2 * 60 * 1000; // 2 minutes before access expiry
             const ERROR_RETRY_DELAY_SECS: u64 = 30;
+            const RATE_LIMIT_RETRY_DELAY_SECS: u64 = 2 * 60;
             const MIN_SUCCESS_REFRESH_INTERVAL_SECS: u64 = 30;
 
             #[derive(serde::Serialize)]
@@ -594,12 +595,23 @@ impl AppState {
                 }
 
                 if !resp.status().is_success() {
+                    let status = resp.status();
+                    let retry_delay_secs = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                        resp.headers()
+                            .get(reqwest::header::RETRY_AFTER)
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .unwrap_or(RATE_LIMIT_RETRY_DELAY_SECS)
+                            .clamp(ERROR_RETRY_DELAY_SECS, RATE_LIMIT_RETRY_DELAY_SECS)
+                    } else {
+                        ERROR_RETRY_DELAY_SECS
+                    };
                     log::warn!(
-                        "[auth-refresh] refresh failed: status={}",
-                        resp.status().as_u16()
+                        "[auth-refresh] refresh failed: status={}, retry_in={}s",
+                        status.as_u16(),
+                        retry_delay_secs
                     );
-                    tokio::time::sleep(tokio::time::Duration::from_secs(ERROR_RETRY_DELAY_SECS))
-                        .await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(retry_delay_secs)).await;
                     continue;
                 }
 
@@ -730,13 +742,9 @@ impl AppState {
                         // Эмитим событие в UI
                         use tauri::Emitter;
                         let session_id = if let Some(state) = app_handle.try_state::<AppState>() {
-                            let session_id = state
-                                .active_transcription_session_id
-                                .load(Ordering::Relaxed);
                             state
                                 .active_transcription_session_id
-                                .store(0, Ordering::Relaxed);
-                            session_id
+                                .swap(0, Ordering::Relaxed)
                         } else {
                             0
                         };
