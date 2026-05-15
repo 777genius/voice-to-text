@@ -47,6 +47,15 @@ fn take_active_transcription_session_id(state: &AppState) -> u64 {
         .swap(0, Ordering::Relaxed)
 }
 
+fn clear_active_transcription_session_id_if_current(state: &AppState, session_id: u64) {
+    let _ = state.active_transcription_session_id.compare_exchange(
+        session_id,
+        0,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    );
+}
+
 /// Start recording voice
 #[tauri::command]
 pub async fn start_recording(
@@ -100,6 +109,7 @@ pub async fn start_recording(
                         stopped_via_hotkey: false,
                     },
                 );
+                clear_active_transcription_session_id_if_current(state.inner(), session_id);
                 return Err(error_msg);
             }
         }
@@ -220,6 +230,10 @@ pub async fn start_recording(
                     stopped_via_hotkey: false,
                 },
             );
+
+            if let Some(state) = app_handle.try_state::<AppState>() {
+                clear_active_transcription_session_id_if_current(state.inner(), session_id);
+            }
         });
     });
 
@@ -294,6 +308,7 @@ pub async fn start_recording(
                 stopped_via_hotkey: false,
             },
         );
+        clear_active_transcription_session_id_if_current(state.inner(), session_id);
         return Err(error_msg);
     }
 
