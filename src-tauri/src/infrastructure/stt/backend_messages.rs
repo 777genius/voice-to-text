@@ -70,6 +70,7 @@ pub enum ServerMessage {
         #[serde(default)]
         start_ms: Option<u64>,
         /// Длительность обработанного аудио в мс
+        #[serde(default)]
         duration_ms: u64,
     },
 
@@ -170,6 +171,27 @@ mod tests {
                 assert_eq!(duration_ms, Some(980));
             }
             _ => panic!("Expected Partial message"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_final_without_duration_defaults_to_zero() {
+        let json = r#"{"type":"final","text":"готово","confidence":0.9,"start_ms":120}"#;
+        let msg: ServerMessage = serde_json::from_str(json).unwrap();
+
+        match msg {
+            ServerMessage::Final {
+                text,
+                confidence,
+                start_ms,
+                duration_ms,
+            } => {
+                assert_eq!(text, "готово");
+                assert_eq!(confidence, Some(0.9));
+                assert_eq!(start_ms, Some(120));
+                assert_eq!(duration_ms, 0);
+            }
+            _ => panic!("Expected Final message"),
         }
     }
 
