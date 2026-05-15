@@ -762,6 +762,28 @@ impl AppState {
                     }
                     Err(e) => {
                         log::error!("Failed to stop recording on VAD timeout: {}", e);
+                        if service.get_status().await == crate::domain::RecordingStatus::Idle {
+                            log::warn!(
+                                "VAD stop failed after service recovered to Idle; emitting Idle status"
+                            );
+                            use tauri::Emitter;
+                            let session_id = if let Some(state) = app_handle.try_state::<AppState>()
+                            {
+                                state
+                                    .active_transcription_session_id
+                                    .swap(0, Ordering::Relaxed)
+                            } else {
+                                0
+                            };
+                            let _ = app_handle.emit(
+                                crate::presentation::events::EVENT_RECORDING_STATUS,
+                                crate::presentation::RecordingStatusPayload {
+                                    session_id,
+                                    status: crate::domain::RecordingStatus::Idle,
+                                    stopped_via_hotkey: false,
+                                },
+                            );
+                        }
                     }
                 }
             }

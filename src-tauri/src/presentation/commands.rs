@@ -56,6 +56,49 @@ fn clear_active_transcription_session_id_if_current(state: &AppState, session_id
     );
 }
 
+fn emit_idle_recording_status(app_handle: &AppHandle, session_id: u64, stopped_via_hotkey: bool) {
+    log::debug!(
+        "Emitting status: Idle (stopped_via_hotkey: {})",
+        stopped_via_hotkey
+    );
+    let _ = app_handle.emit(
+        EVENT_RECORDING_STATUS,
+        RecordingStatusPayload {
+            session_id,
+            status: RecordingStatus::Idle,
+            stopped_via_hotkey,
+        },
+    );
+}
+
+async fn stop_recording_and_emit_idle(
+    state: &AppState,
+    app_handle: &AppHandle,
+    stopped_via_hotkey: bool,
+) -> Result<String, String> {
+    match state.transcription_service.stop_recording().await {
+        Ok(result) => {
+            let session_id = take_active_transcription_session_id(state);
+            emit_idle_recording_status(app_handle, session_id, stopped_via_hotkey);
+            Ok(result)
+        }
+        Err(err) => {
+            let current_status = state.transcription_service.get_status().await;
+            if current_status == RecordingStatus::Idle {
+                let session_id = take_active_transcription_session_id(state);
+                log::warn!(
+                    "Recording stop returned error after service recovered to Idle; emitting Idle status: {}",
+                    err
+                );
+                emit_idle_recording_status(app_handle, session_id, stopped_via_hotkey);
+                Ok("Recording stopped".to_string())
+            } else {
+                Err(err.to_string())
+            }
+        }
+    }
+}
+
 /// Start recording voice
 #[tauri::command]
 pub async fn start_recording(
@@ -372,26 +415,7 @@ pub async fn stop_recording(
 ) -> Result<String, String> {
     log::info!("Command: stop_recording");
 
-    let result = state
-        .transcription_service
-        .stop_recording()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let session_id = take_active_transcription_session_id(state.inner());
-
-    // Emit status change
-    log::debug!("Emitting status: Idle (stopped_via_hotkey: false)");
-    let _ = app_handle.emit(
-        EVENT_RECORDING_STATUS,
-        RecordingStatusPayload {
-            session_id,
-            status: RecordingStatus::Idle,
-            stopped_via_hotkey: false,
-        },
-    );
-
-    Ok(result)
+    stop_recording_and_emit_idle(state.inner(), &app_handle, false).await
 }
 
 /// Get current recording status
@@ -860,26 +884,9 @@ pub async fn toggle_recording_with_window(
         }
         RecordingStatus::Recording => {
             // Останавливаем запись
-            let _result = state
-                .transcription_service
-                .stop_recording()
-                .await
-                .map_err(|e| e.to_string())?;
+            let _result = stop_recording_and_emit_idle(state.inner(), &app_handle, true).await?;
 
             log::info!("Recording stopped via hotkey");
-
-            // Эмитируем статус Idle с флагом stopped_via_hotkey
-            // Frontend скроет окно когда получит этот статус
-            let session_id = take_active_transcription_session_id(state.inner());
-            log::info!("Emitting status: Idle (stopped_via_hotkey: TRUE) - window will auto-hide");
-            let _ = app_handle.emit(
-                EVENT_RECORDING_STATUS,
-                RecordingStatusPayload {
-                    session_id,
-                    status: RecordingStatus::Idle,
-                    stopped_via_hotkey: true,
-                },
-            );
         }
         RecordingStatus::Processing => {
             // Игнорируем - запись уже останавливается
@@ -963,22 +970,9 @@ pub async fn toggle_recording_with_window_internal(
             log::debug!("Ignoring toggle - recording is starting");
         }
         RecordingStatus::Recording => {
-            let _result = state
-                .transcription_service
-                .stop_recording()
-                .await
-                .map_err(|e| e.to_string())?;
+            let _result = stop_recording_and_emit_idle(state, &app_handle, true).await?;
 
             log::info!("Recording stopped via hotkey");
-            let session_id = take_active_transcription_session_id(state);
-            let _ = app_handle.emit(
-                EVENT_RECORDING_STATUS,
-                RecordingStatusPayload {
-                    session_id,
-                    status: RecordingStatus::Idle,
-                    stopped_via_hotkey: true,
-                },
-            );
         }
         RecordingStatus::Processing => {
             log::debug!("Ignoring toggle - recording is processing");
