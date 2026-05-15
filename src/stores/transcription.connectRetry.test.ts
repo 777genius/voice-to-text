@@ -245,6 +245,48 @@ describe('transcription connect-retry reliability', () => {
     expect(store.displayText).toBe('да да');
   });
 
+  it('не удаляет повторяющиеся слова на границе finalized segment и live partial', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 17, status: 'Recording', stopped_via_hotkey: false },
+    });
+
+    await handlers.get('transcription:partial')({
+      payload: {
+        session_id: 17,
+        text: 'two two',
+        timestamp: 1,
+        is_segment_final: true,
+        start: 0,
+        duration: 3.26,
+      },
+    });
+
+    await handlers.get('transcription:partial')({
+      payload: {
+        session_id: 17,
+        text: 'two two three three',
+        timestamp: 2,
+        is_segment_final: false,
+        start: 3.26,
+        duration: 2.24,
+      },
+    });
+
+    expect(store.displayText).toBe('two two two two three three');
+  });
+
   it('не переносит live segment в finalText до speech_final при смене start', async () => {
     const handlers = new Map<string, any>();
 

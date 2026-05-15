@@ -172,7 +172,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         continue;
       }
 
-      combined = mergeTranscriptText(combined, next);
+      // Across visible finalized/current chunks, do not remove suffix-prefix overlap.
+      // Deepgram can split one long utterance into several finalized ranges where
+      // repeated words at the boundary are real speech ("two two" + "two two three").
+      combined = `${combined} ${next}`.trim();
     }
 
     return combined.trim();
