@@ -72,8 +72,11 @@ fn emit_idle_recording_status(app_handle: &AppHandle, session_id: u64, stopped_v
     );
 }
 
-fn should_hide_recording_window_immediately_on_hotkey_stop(config: &AppConfig) -> bool {
-    config.show_mini_recording_window || config.hide_recording_window_on_hotkey
+fn should_hide_recording_window_immediately_on_hotkey_stop(
+    config: &AppConfig,
+    window_visible: bool,
+) -> bool {
+    window_visible || config.show_mini_recording_window || config.hide_recording_window_on_hotkey
 }
 
 fn should_show_recording_window_on_processing_hotkey(
@@ -817,23 +820,26 @@ mod snapshot_contract_tests {
         config.hide_recording_window_on_hotkey = false;
 
         assert!(should_hide_recording_window_immediately_on_hotkey_stop(
-            &config
+            &config, false
         ));
     }
 
     #[test]
-    fn hotkey_stop_does_not_hide_regular_window_unless_configured() {
+    fn hotkey_stop_hides_visible_regular_window_before_finalize_drain() {
         let mut config = AppConfig::default();
         config.show_mini_recording_window = false;
         config.hide_recording_window_on_hotkey = false;
 
         assert!(!should_hide_recording_window_immediately_on_hotkey_stop(
-            &config
+            &config, false
+        ));
+        assert!(should_hide_recording_window_immediately_on_hotkey_stop(
+            &config, true
         ));
 
         config.hide_recording_window_on_hotkey = true;
         assert!(should_hide_recording_window_immediately_on_hotkey_stop(
-            &config
+            &config, false
         ));
     }
 
@@ -1046,15 +1052,13 @@ pub async fn toggle_recording_with_window(
         }
         RecordingStatus::Recording => {
             let config = state.config.read().await.clone();
+            let window_visible = window.is_visible().map_err(|e| e.to_string())?;
             let hidden_for_hotkey_stop =
-                if should_hide_recording_window_immediately_on_hotkey_stop(&config) {
-                    let window_visible = window.is_visible().map_err(|e| e.to_string())?;
-                    if window_visible {
-                        window.hide().map_err(|e| e.to_string())?;
-                        true
-                    } else {
-                        false
-                    }
+                if should_hide_recording_window_immediately_on_hotkey_stop(&config, window_visible)
+                    && window_visible
+                {
+                    window.hide().map_err(|e| e.to_string())?;
+                    true
                 } else {
                     false
                 };
@@ -1168,15 +1172,13 @@ pub async fn toggle_recording_with_window_internal(
         }
         RecordingStatus::Recording => {
             let config = state.config.read().await.clone();
+            let window_visible = window.is_visible().map_err(|e| e.to_string())?;
             let hidden_for_hotkey_stop =
-                if should_hide_recording_window_immediately_on_hotkey_stop(&config) {
-                    let window_visible = window.is_visible().map_err(|e| e.to_string())?;
-                    if window_visible {
-                        window.hide().map_err(|e| e.to_string())?;
-                        true
-                    } else {
-                        false
-                    }
+                if should_hide_recording_window_immediately_on_hotkey_stop(&config, window_visible)
+                    && window_visible
+                {
+                    window.hide().map_err(|e| e.to_string())?;
+                    true
                 } else {
                     false
                 };

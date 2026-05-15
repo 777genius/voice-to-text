@@ -5,15 +5,18 @@ import { useAudioVisualizer, type AudioVisualizerSource } from '../../composable
 const props = defineProps<{
   active: boolean;
   source?: AudioVisualizerSource;
+  variant?: 'default' | 'mini';
 }>();
 
 const { active } = toRefs(props);
+const visualBarCount = props.variant === 'mini' ? 32 : 48;
+const isMiniVariant = props.variant === 'mini';
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const containerRef = ref<HTMLElement | null>(null);
 
 const { bars } = useAudioVisualizer(active, {
-  barCount: 48,
+  barCount: visualBarCount,
   source: props.source,
   // Чуть спокойнее: вверх реагирует быстро, но без "перекача"
   attackSmoothing: 0.85,
@@ -32,8 +35,7 @@ let lastSizeLogAt = 0;
 type Size = { width: number; height: number };
 const size = ref<Size>({ width: 0, height: 0 });
 
-const BAR_COUNT = 48;
-const barPhases = Array.from({ length: BAR_COUNT }, () => Math.random() * Math.PI * 2);
+const barPhases = Array.from({ length: visualBarCount }, () => Math.random() * Math.PI * 2);
 let gain = 1;
 
 function clamp(v: number, min: number, max: number): number {
@@ -43,22 +45,22 @@ function clamp(v: number, min: number, max: number): number {
 function computeVisualBars(input: number[]): number[] {
   // Вход ожидаем как "частота слева → частота справа".
   // Для красивого визуала кладём низкие частоты в центр, высокие — к краям.
-  const out = Array.from({ length: BAR_COUNT }, () => 0);
-  const centerLeft = BAR_COUNT / 2 - 1; // 23
-  const centerRight = BAR_COUNT / 2; // 24
+  const out = Array.from({ length: visualBarCount }, () => 0);
+  const centerLeft = visualBarCount / 2 - 1;
+  const centerRight = visualBarCount / 2;
 
-  for (let i = 0; i < BAR_COUNT; i++) {
+  for (let i = 0; i < visualBarCount; i++) {
     const raw = Number(input[i] ?? 0);
     const v = Number.isFinite(raw) ? clamp(raw, 0, 1) : 0;
 
     // Лёгкая "эквализация": немного усиливаем верх, чтобы справа не было "пусто".
-    const t = i / (BAR_COUNT - 1);
+    const t = i / (visualBarCount - 1);
     const tilt = 0.9 + Math.pow(t, 0.9) * 0.35; // 0.90..1.25
     const shaped = clamp(v * tilt, 0, 1);
 
     const k = Math.floor(i / 2);
     const pos = i % 2 === 0 ? centerLeft - k : centerRight + k;
-    if (pos >= 0 && pos < BAR_COUNT) {
+    if (pos >= 0 && pos < visualBarCount) {
       out[pos] = shaped;
     }
   }
@@ -178,41 +180,41 @@ function render() {
 
   // Чуть-чуть "дышим" даже в тишине, чтобы фон не выглядел мёртвым.
   // Важно: без random() — иначе кончики будут дергаться каждый кадр.
-  const base = 0.02;
-  const noiseAmp = 0.04;
+  const base = isMiniVariant ? 0.015 : 0.02;
+  const noiseAmp = isMiniVariant ? 0.025 : 0.04;
   const t = performance.now() / 1000;
 
   // Размеры баров
   let gap = Math.max(1, Math.round(width * 0.004)); // ~0.4% ширины
-  let barW = (width - gap * (BAR_COUNT - 1)) / BAR_COUNT;
+  let barW = (width - gap * (visualBarCount - 1)) / visualBarCount;
   if (barW < 2) {
     gap = 1;
-    barW = (width - gap * (BAR_COUNT - 1)) / BAR_COUNT;
+    barW = (width - gap * (visualBarCount - 1)) / visualBarCount;
   }
   if (barW < 1) {
     gap = 0;
-    barW = width / BAR_COUNT;
+    barW = width / visualBarCount;
   }
 
-  const totalWidth = BAR_COUNT * barW + (BAR_COUNT - 1) * gap;
+  const totalWidth = visualBarCount * barW + (visualBarCount - 1) * gap;
   const offsetX = (width - totalWidth) / 2;
 
-  const minAlpha = 0.08;
-  const maxAlpha = 0.55;
-  const radius = 3;
+  const minAlpha = isMiniVariant ? 0.04 : 0.08;
+  const maxAlpha = isMiniVariant ? 0.34 : 0.55;
+  const radius = isMiniVariant ? 2 : 3;
 
   const visualBars = computeVisualBars(bars.value);
 
   // AGC: подстраиваем коэффициент так, чтобы пики доходили выше (но без "прыжков").
   let maxV = 0;
-  for (let i = 0; i < BAR_COUNT; i++) {
+  for (let i = 0; i < visualBarCount; i++) {
     maxV = Math.max(maxV, visualBars[i] ?? 0);
   }
   const desiredGain = maxV > 0 ? 0.85 / maxV : 1;
   // Медленнее подстраиваем и сильнее ограничиваем, чтобы не было "пампинга"
   gain = gain * 0.96 + clamp(desiredGain, 0.85, 3.2) * 0.04;
 
-  for (let i = 0; i < BAR_COUNT; i++) {
+  for (let i = 0; i < visualBarCount; i++) {
     const v = (visualBars[i] ?? 0) * gain;
     // Делаем "больше" визуально: речь обычно даёт небольшие значения, поэтому усиливаем.
     // pow(<1) поднимает низкие значения, clamp не даёт уйти в 1 постоянно.
@@ -349,4 +351,3 @@ canvas {
   display: block;
 }
 </style>
-

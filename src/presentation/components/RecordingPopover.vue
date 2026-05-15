@@ -491,6 +491,11 @@ const minimizeWindow = async () => {
   <div class="popover-container" :class="{ mini: useMiniLayout, 'mini-closing': isMiniClosing }">
     <div class="popover" :class="{ mini: useMiniLayout, 'mini-closing': isMiniClosing }">
       <template v-if="useMiniLayout">
+        <AudioVisualizer
+          variant="mini"
+          class="mini-audio-visualizer"
+          :active="store.isStarting || store.isRecording"
+        />
         <div class="mini-popover-content" data-tauri-drag-region @mousedown="onDragMouseDown">
           <span
             class="mini-status-dot"
@@ -720,6 +725,8 @@ const minimizeWindow = async () => {
 }
 
 .mini-popover-content {
+  position: relative;
+  z-index: 1;
   width: 100%;
   height: 100%;
   box-sizing: border-box;
@@ -777,6 +784,17 @@ const minimizeWindow = async () => {
   text-overflow: ellipsis;
   direction: rtl;
   text-align: left;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+.popover .mini-audio-visualizer {
+  inset: 1px;
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+:global(.theme-light) .mini-transcription-text {
+  text-shadow: 0 1px 2px rgba(255, 255, 255, 0.65);
 }
 
 .mini-transcription-text.recording {
