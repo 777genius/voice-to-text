@@ -3,6 +3,7 @@ import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useUpdater } from '../../composables/useUpdater';
 import { renderMarkdownToSafeHtml } from '@/utils/markdown';
+import { normalizeAppUpdateNotes } from '@/utils/updateNotes';
 
 const props = defineProps<{
   modelValue: boolean;
@@ -15,10 +16,15 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const { store, installUpdate } = useUpdater();
 
-const releaseNotesHtml = computed(() => {
+const appReleaseNotes = computed(() => {
   const notes = store.releaseNotes;
   if (!notes) return '';
-  return renderMarkdownToSafeHtml(notes);
+  return normalizeAppUpdateNotes(notes);
+});
+
+const releaseNotesHtml = computed(() => {
+  if (!appReleaseNotes.value) return '';
+  return renderMarkdownToSafeHtml(appReleaseNotes.value);
 });
 
 const isOpen = computed({
@@ -50,7 +56,7 @@ async function handleInstall() {
           <span class="version-label">v{{ store.availableVersion }}</span>
         </div>
 
-        <div v-if="store.releaseNotes" class="release-notes" v-html="releaseNotesHtml">
+        <div v-if="appReleaseNotes" class="release-notes" v-html="releaseNotesHtml">
         </div>
 
         <p class="update-hint">
@@ -129,8 +135,9 @@ async function handleInstall() {
 }
 
 .release-notes {
-  padding: 12px;
-  background: rgba(var(--v-theme-surface-variant), 0.5);
+  padding: 10px 12px;
+  background: rgba(34, 197, 94, 0.05);
+  border: 1px solid rgba(34, 197, 94, 0.16);
   border-radius: 8px;
   font-size: 14px;
   line-height: 1.5;
@@ -139,9 +146,18 @@ async function handleInstall() {
   overflow-y: auto;
 }
 
+:global(.theme-light) .release-notes {
+  background: rgba(22, 163, 74, 0.06);
+  border-color: rgba(22, 163, 74, 0.18);
+}
+
 .release-notes :deep(.md-h3) {
   font-weight: 700;
-  margin: 8px 0 6px;
+  margin: 10px 0 6px;
+}
+
+.release-notes :deep(.md-h3:first-child) {
+  margin-top: 0;
 }
 
 .release-notes :deep(.md-p) {
