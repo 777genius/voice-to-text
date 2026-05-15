@@ -41,6 +41,16 @@ fn error_details_from_stt(err: &SttError) -> Option<TranscriptionErrorDetailsPay
     }
 }
 
+fn take_active_transcription_session_id(state: &AppState) -> u64 {
+    let session_id = state
+        .active_transcription_session_id
+        .load(Ordering::Relaxed);
+    state
+        .active_transcription_session_id
+        .store(0, Ordering::Relaxed);
+    session_id
+}
+
 /// Start recording voice
 #[tauri::command]
 pub async fn start_recording(
@@ -350,15 +360,13 @@ pub async fn stop_recording(
 ) -> Result<String, String> {
     log::info!("Command: stop_recording");
 
-    let session_id = state
-        .active_transcription_session_id
-        .load(Ordering::Relaxed);
-
     let result = state
         .transcription_service
         .stop_recording()
         .await
         .map_err(|e| e.to_string())?;
+
+    let session_id = take_active_transcription_session_id(state.inner());
 
     // Emit status change
     log::debug!("Emitting status: Idle (stopped_via_hotkey: false)");
@@ -850,9 +858,7 @@ pub async fn toggle_recording_with_window(
 
             // Эмитируем статус Idle с флагом stopped_via_hotkey
             // Frontend скроет окно когда получит этот статус
-            let session_id = state
-                .active_transcription_session_id
-                .load(Ordering::Relaxed);
+            let session_id = take_active_transcription_session_id(state.inner());
             log::info!("Emitting status: Idle (stopped_via_hotkey: TRUE) - window will auto-hide");
             let _ = app_handle.emit(
                 EVENT_RECORDING_STATUS,
@@ -952,9 +958,7 @@ pub async fn toggle_recording_with_window_internal(
                 .map_err(|e| e.to_string())?;
 
             log::info!("Recording stopped via hotkey");
-            let session_id = state
-                .active_transcription_session_id
-                .load(Ordering::Relaxed);
+            let session_id = take_active_transcription_session_id(state);
             let _ = app_handle.emit(
                 EVENT_RECORDING_STATUS,
                 RecordingStatusPayload {

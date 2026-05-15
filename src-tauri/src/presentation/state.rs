@@ -729,10 +729,17 @@ impl AppState {
 
                         // Эмитим событие в UI
                         use tauri::Emitter;
-                        let session_id = app_handle
-                            .try_state::<AppState>()
-                            .map(|s| s.active_transcription_session_id.load(Ordering::Relaxed))
-                            .unwrap_or(0);
+                        let session_id = if let Some(state) = app_handle.try_state::<AppState>() {
+                            let session_id = state
+                                .active_transcription_session_id
+                                .load(Ordering::Relaxed);
+                            state
+                                .active_transcription_session_id
+                                .store(0, Ordering::Relaxed);
+                            session_id
+                        } else {
+                            0
+                        };
                         let _ = app_handle.emit(
                             crate::presentation::events::EVENT_RECORDING_STATUS,
                             crate::presentation::RecordingStatusPayload {
