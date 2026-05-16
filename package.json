@@ -11,6 +11,7 @@
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "vue-tsc --noEmit",
+    "release:notes": "node scripts/prepare-release-notes.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",

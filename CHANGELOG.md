@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.14] - 2026-05-16
+
+### Changed
+- Extended frontend backend keepalive settings so long pauses are less likely to trigger reconnects before the next recording.
+
+---
+
+## [0.10.13] - 2026-05-16
+
+### Fixed
+- Improved the mini recording visualizer and the hidden hotkey recording flow.
+
+---
+
+## [0.10.12] - 2026-05-15
+
+### Fixed
+- Open update details in a dedicated update window instead of relying only on the settings screen.
+
+---
+
+## [0.10.11] - 2026-05-15
+
+### Fixed
+- Cleaned up in-app release notes so installation instructions do not replace the actual update details.
+
+---
+
+## [0.10.10] - 2026-05-15
+
+### Fixed
+- Fixed update badge handling and hotkey restart behavior after recording stops.
+
+---
+
+## [0.10.9] - 2026-05-15
+
+### Fixed
+- Restored runtime handling for automatic copy and automatic paste actions.
+
+---
+
+## [0.10.8] - 2026-05-15
+
+### Fixed
+- Restored the settings toggles for automatic copy and automatic paste.
+
+---
+
+## [0.10.7] - 2026-05-15
+
+### Changed
+- Clarified Deepgram multilingual mode behavior in settings.
+- Documented the Deepgram transcription workflow.
+
+### Fixed
+- Improved transcription recovery after connection issues, stop cleanup errors, and failed starts.
+- Preserved repeated words across live transcription segments.
+- Handled Deepgram finalize markers, endpoint finals, and speech-final events more reliably.
+- Reconciled manual stop status and final audio draining before finalize.
+- Respected auth refresh rate-limit backoff during transcription reconnects.
+
+---
+
 ## [0.10.6] - 2026-05-12
 
 ### Changed

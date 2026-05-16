@@ -102,6 +102,17 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install
 
+      - name: Prepare release notes
+        id: release_notes
+        shell: bash
+        run: |
+          pnpm --silent release:notes "$GITHUB_REF_NAME" > release-notes.md
+          {
+            echo 'body<<EOF'
+            cat release-notes.md
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -117,23 +128,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'VoicetextAI v__VERSION__'
-          releaseBody: |
-            See CHANGELOG for details.
-
-            ## Installation
-
-            **macOS:**
-            - Download the `.dmg` file
-            - Drag to Applications
-            - On first launch: System Settings → Privacy → Allow
-
-            **Windows:**
-            - Download the `.msi` file
-            - Run the installer
-
-            **Linux:**
-            - `.deb` for Debian/Ubuntu: `sudo dpkg -i voicetextai_*.deb`
-            - `.AppImage` for other distros: make executable and run
+          releaseBody: ${{ steps.release_notes.outputs.body }}
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
