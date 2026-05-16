@@ -443,9 +443,8 @@ pub fn run() {
                             stt.backend_auth_token = store.session.as_ref().map(|s| s.access_token.clone());
                             if stt.provider == crate::domain::SttProviderType::Backend {
                                 stt.keep_connection_alive = true;
-                                const BACKEND_KEEPALIVE_TTL_SECS: u64 = 105;
-                                if stt.keep_alive_ttl_secs != BACKEND_KEEPALIVE_TTL_SECS {
-                                    stt.keep_alive_ttl_secs = BACKEND_KEEPALIVE_TTL_SECS;
+                                if stt.keep_alive_ttl_secs != crate::domain::BACKEND_KEEPALIVE_TTL_SECS {
+                                    stt.keep_alive_ttl_secs = crate::domain::BACKEND_KEEPALIVE_TTL_SECS;
                                 }
                             }
                             // Если не смогли прочитать с диска — не перезаписываем файл дефолтами.
@@ -492,13 +491,12 @@ pub fn run() {
                             );
                         }
 
-                        // UX: keep-alive должен быть заметно полезным для частых hotkey-сессий,
-                        // но idle Deepgram streams не должны занимать concurrency slots надолго.
-                        const BACKEND_KEEPALIVE_TTL_SECS: u64 = 105;
+                        // UX: keep-alive должен быть полезным для hotkey-пауз, но клиентский TTL
+                        // остаётся чуть ниже backend audio idle timeout.
                         if saved_config.provider == crate::domain::SttProviderType::Backend
-                            && saved_config.keep_alive_ttl_secs != BACKEND_KEEPALIVE_TTL_SECS
+                            && saved_config.keep_alive_ttl_secs != crate::domain::BACKEND_KEEPALIVE_TTL_SECS
                         {
-                            saved_config.keep_alive_ttl_secs = BACKEND_KEEPALIVE_TTL_SECS;
+                            saved_config.keep_alive_ttl_secs = crate::domain::BACKEND_KEEPALIVE_TTL_SECS;
                             config_migrated = true;
                             log::info!(
                                 "Migrated keep_alive_ttl_secs for backend provider to {}s",

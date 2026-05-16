@@ -1290,7 +1290,7 @@ pub async fn update_stt_config(
     // Иначе локальный keep-alive может попытаться переиспользовать WS на границе серверного закрытия.
     config.keep_connection_alive = true;
     if config.provider == crate::domain::SttProviderType::Backend {
-        config.keep_alive_ttl_secs = 105;
+        config.keep_alive_ttl_secs = crate::domain::BACKEND_KEEPALIVE_TTL_SECS;
     }
 
     log::debug!(
