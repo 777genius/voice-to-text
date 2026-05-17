@@ -2,7 +2,11 @@
 #![allow(unexpected_cfgs)]
 
 use anyhow::{Context, Result};
-use enigo::{Enigo, Keyboard, Settings};
+use arboard::Clipboard;
+use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+use std::{thread, time::Duration};
+
+const PASTE_SETTLE_MS: u64 = 140;
 
 /// Проверяет, есть ли у приложения разрешение Accessibility на macOS
 /// На других платформах всегда возвращает true (разрешение не требуется)
@@ -145,10 +149,10 @@ pub fn activate_app_by_bundle_id(_bundle_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Вставляет текст в активное окно используя симуляцию клавиатуры
+/// Вставляет текст в активное окно через системный clipboard и paste shortcut
 ///
 /// Логика:
-/// Вводит текст в текущую позицию курсора (как печатает человек)
+/// Кладёт текст в clipboard, нажимает Cmd/Ctrl+V, затем best-effort восстанавливает clipboard
 ///
 /// Требует разрешения Accessibility на macOS
 pub fn paste_text(text: &str) -> Result<()> {
@@ -178,14 +182,20 @@ pub fn paste_text(text: &str) -> Result<()> {
         }
     }
 
+    log::info!("📋 Preparing clipboard paste...");
+    let mut clipboard = Clipboard::new().context("Failed to initialize clipboard")?;
+    let previous_clipboard_text = clipboard.get_text().ok();
+    clipboard
+        .set_text(text.to_string())
+        .context("Failed to write text to clipboard")?;
+
     log::info!("⌨️ Initializing Enigo keyboard controller...");
     let mut enigo = Enigo::new(&Settings::default())
         .context("Failed to initialize Enigo keyboard controller")?;
     log::info!("✅ Enigo initialized successfully");
 
-    // Вводим текст в текущую позицию курсора (как человек)
     log::info!(
-        "⌨️ Typing text at cursor position ({} chars): '{}'...",
+        "⌨️ Pasting text at cursor position ({} chars): '{}'...",
         text.len(),
         if text.len() > 30 {
             format!("{}...", text.chars().take(30).collect::<String>())
@@ -194,10 +204,34 @@ pub fn paste_text(text: &str) -> Result<()> {
         }
     );
 
-    log::debug!("   Starting text input...");
-    enigo.text(text).context("Failed to type text")?;
-    log::debug!("   ✓ Text input completed");
+    log::debug!("   Starting paste shortcut...");
+    paste_shortcut(&mut enigo)?;
+    thread::sleep(Duration::from_millis(PASTE_SETTLE_MS));
+    log::debug!("   ✓ Paste shortcut completed");
 
-    log::info!("✅ Text typed successfully at cursor position!");
+    if let Some(previous_text) = previous_clipboard_text {
+        if let Err(err) = clipboard.set_text(previous_text) {
+            log::warn!("Failed to restore previous clipboard text: {}", err);
+        }
+    }
+
+    log::info!("✅ Text pasted successfully at cursor position!");
+    Ok(())
+}
+
+fn paste_shortcut(enigo: &mut Enigo) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    let modifier = Key::Meta;
+    #[cfg(not(target_os = "macos"))]
+    let modifier = Key::Control;
+
+    enigo
+        .key(modifier, Direction::Press)
+        .context("Failed to press paste shortcut modifier")?;
+    let paste_result = enigo.key(Key::Unicode('v'), Direction::Click);
+    let release_result = enigo.key(modifier, Direction::Release);
+
+    paste_result.context("Failed to press paste shortcut key")?;
+    release_result.context("Failed to release paste shortcut modifier")?;
     Ok(())
 }

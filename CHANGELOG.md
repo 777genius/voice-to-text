@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.21] - 2026-05-17
+
+### Fixed
+- Switched auto-paste from per-character synthetic typing to clipboard paste, preventing pasted Russian text from triggering the recording hotkey.
+- Shortened auto-paste hotkey suppression so intentional hotkey presses are not swallowed for several seconds after live paste.
+- Kept hotkey-stopped sessions open briefly for late STT final events so the last spoken phrase is not dropped before paste/copy.
+
+---
+
 ## [0.10.20] - 2026-05-17
 
 ### Fixed

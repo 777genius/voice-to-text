@@ -207,9 +207,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   let autoPasteGeneration = 0;
   let transcriptSilenceAutoStopTimer: ReturnType<typeof setTimeout> | null = null;
   let transcriptSilenceAutoStopGeneration = 0;
+  let hotkeyStopFinalizeTimer: ReturnType<typeof setTimeout> | null = null;
 
   const TRANSCRIPT_SILENCE_AUTO_STOP_MS = 5_000;
   const NO_TRANSCRIPT_AUTO_STOP_MS = 15_000;
+  const HOTKEY_STOP_LATE_FINAL_GRACE_MS = 1_500;
 
   // Listeners
   type UnlistenFn = () => void;
@@ -642,6 +644,57 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     transcriptSilenceAutoStopGeneration++;
   }
 
+  function clearHotkeyStopFinalizeTimer(): void {
+    if (hotkeyStopFinalizeTimer) {
+      clearTimeout(hotkeyStopFinalizeTimer);
+      hotkeyStopFinalizeTimer = null;
+    }
+  }
+
+  async function processCurrentTextAfterStop(reason: string): Promise<boolean> {
+    const currentText = buildCurrentTranscriptionText();
+    if (!currentText) {
+      console.log('[STT] No transcription text to process after stop:', { reason });
+      return false;
+    }
+
+    console.log('📝 Текущий текст для обработки:', currentText);
+
+    if (autoCopyEnabled.value) {
+      try {
+        await invoke('copy_to_clipboard_native', { text: currentText });
+        console.log('📋 Auto-copied full transcription to clipboard');
+      } catch (err) {
+        console.error('❌ Failed to auto-copy transcription:', err);
+      }
+    }
+
+    if (autoPasteEnabled.value) {
+      await autoPasteCurrentText(reason, currentText);
+    }
+
+    return true;
+  }
+
+  function scheduleHotkeyStopFinalize(payloadSessionId: number): void {
+    clearHotkeyStopFinalizeTimer();
+
+    hotkeyStopFinalizeTimer = setTimeout(async () => {
+      hotkeyStopFinalizeTimer = null;
+
+      if (sessionId.value !== payloadSessionId) {
+        return;
+      }
+
+      await processCurrentTextAfterStop('hotkey_stop_grace');
+
+      markSessionsClosed(payloadSessionId, 'stopped_via_hotkey:grace');
+      sessionId.value = null;
+      awaitingSessionStart.value = false;
+      resetTextStateBeforeStart();
+    }, HOTKEY_STOP_LATE_FINAL_GRACE_MS);
+  }
+
   function scheduleTranscriptSilenceAutoStop(
     reason: string,
     timeoutMs = TRANSCRIPT_SILENCE_AUTO_STOP_MS,
@@ -1049,41 +1102,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             clearTranscriptSilenceAutoStop();
             console.log('🔄 Запись остановлена - обрабатываем текущий текст');
 
-            // Собираем весь видимый текст (final + accumulated + partial)
-            const currentText = [finalText.value, accumulatedText.value, partialText.value]
-              .filter(Boolean)
-              .join(' ')
-              .trim();
+            await processCurrentTextAfterStop('idle');
 
-            // Если остановка была через hotkey — для UX важнее "чистый лист" на следующем открытии,
-            // поэтому закрываем сессию сразу (поздние partial/final не должны оживлять UI).
             if (event.payload.stopped_via_hotkey) {
-              markSessionsClosed(payloadSessionId, 'stopped_via_hotkey:Idle');
-              sessionId.value = null;
-              awaitingSessionStart.value = false;
-            }
-
-            if (currentText) {
-              console.log('📝 Текущий текст для обработки:', currentText);
-
-              if (autoCopyEnabled.value) {
-                try {
-                  await invoke('copy_to_clipboard_native', { text: currentText });
-                  console.log('📋 Auto-copied full transcription to clipboard');
-                } catch (err) {
-                  console.error('❌ Failed to auto-copy transcription:', err);
-                }
-              }
-
-              if (autoPasteEnabled.value) {
-                await autoPasteCurrentText('idle', currentText);
-              }
-            }
-
-            // UX: после остановки через hotkey окно сразу скрывается.
-            // Следующее открытие должно начинаться с "чистого листа", без текста прошлой сессии.
-            if (event.payload.stopped_via_hotkey) {
-              resetTextStateBeforeStart();
+              // Final/partial события могут прийти чуть позже Idle из другой async-задачи.
+              // Не закрываем session_id сразу, иначе потеряем хвост фразы при ручной остановке.
+              scheduleHotkeyStopFinalize(payloadSessionId);
             }
           }
 
@@ -1729,6 +1753,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   function resetTextStateBeforeStart(): void {
     clearTranscriptSilenceAutoStop();
+    clearHotkeyStopFinalizeTimer();
 
     // Очищаем весь предыдущий текст перед новой записью
     error.value = null;
@@ -2015,6 +2040,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
 
     clearTranscriptSilenceAutoStop();
+    clearHotkeyStopFinalizeTimer();
 
     // Очищаем таймеры анимации
     if (partialAnimationTimer) {

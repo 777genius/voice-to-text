@@ -1969,18 +1969,12 @@ pub async fn stop_microphone_test(state: State<'_, AppState>) -> Result<Vec<i16>
 
 const RECORDING_HOTKEY_DEBOUNCE_MS: u64 = 450;
 const RECORDING_HOTKEY_STALE_PRESS_MS: u64 = 10_000;
-const RECORDING_HOTKEY_RELEASE_GRACE_MS: u64 = 2_500;
-const AUTO_PASTE_HOTKEY_SUPPRESSION_BASE_MS: u64 = 1_200;
-const AUTO_PASTE_HOTKEY_SUPPRESSION_PER_CHAR_MS: u64 = 25;
-const AUTO_PASTE_HOTKEY_SUPPRESSION_MAX_MS: u64 = 8_000;
-const AUTO_PASTE_HOTKEY_SUPPRESSION_TAIL_MS: u64 = 700;
+const RECORDING_HOTKEY_RELEASE_GRACE_MS: u64 = 700;
+const AUTO_PASTE_HOTKEY_SUPPRESSION_MS: u64 = 450;
+const AUTO_PASTE_HOTKEY_SUPPRESSION_TAIL_MS: u64 = 150;
 
-fn auto_paste_hotkey_suppression_duration(text: &str) -> Duration {
-    let estimated_ms = AUTO_PASTE_HOTKEY_SUPPRESSION_BASE_MS.saturating_add(
-        (text.chars().count() as u64).saturating_mul(AUTO_PASTE_HOTKEY_SUPPRESSION_PER_CHAR_MS),
-    );
-
-    Duration::from_millis(estimated_ms.min(AUTO_PASTE_HOTKEY_SUPPRESSION_MAX_MS))
+fn auto_paste_hotkey_suppression_duration(_text: &str) -> Duration {
+    Duration::from_millis(AUTO_PASTE_HOTKEY_SUPPRESSION_MS)
 }
 
 /// Register or update recording hotkey
@@ -2157,8 +2151,10 @@ pub async fn register_recording_hotkey(
                         + 1;
 
                     let _ = tauri::async_runtime::spawn(async move {
-                        tokio::time::sleep(Duration::from_millis(RECORDING_HOTKEY_RELEASE_GRACE_MS))
-                            .await;
+                        tokio::time::sleep(Duration::from_millis(
+                            RECORDING_HOTKEY_RELEASE_GRACE_MS,
+                        ))
+                        .await;
 
                         let Some(state) =
                             app_clone.try_state::<crate::presentation::state::AppState>()
@@ -2558,9 +2554,9 @@ pub async fn auto_paste_text(
     let paste_result = tokio::task::spawn_blocking(move || {
         crate::infrastructure::auto_paste::paste_text(&text_clone)
     })
-        .await
-        .map_err(|e| format!("Failed to join blocking task: {}", e))?
-        .map_err(|e| format!("Failed to paste text: {}", e));
+    .await
+    .map_err(|e| format!("Failed to join blocking task: {}", e))?
+    .map_err(|e| format!("Failed to paste text: {}", e));
     state.suppress_recording_hotkey_for(Duration::from_millis(
         AUTO_PASTE_HOTKEY_SUPPRESSION_TAIL_MS,
     ));
