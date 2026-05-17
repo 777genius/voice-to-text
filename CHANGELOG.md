@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.19] - 2026-05-17
+
+### Fixed
+- Fixed live auto-paste firing on Deepgram segment finals while the speaker is still talking, which could refocus the target app mid-recording and race the single-key recording hotkey.
+- Added release-level logging for recording hotkey suppression during auto-paste.
+
+---
+
 ## [0.10.18] - 2026-05-17
 
 ### Fixed

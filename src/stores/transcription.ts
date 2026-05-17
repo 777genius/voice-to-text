@@ -205,6 +205,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   let accumulatedAnimationTimer: ReturnType<typeof setInterval> | null = null;
   let autoPasteQueue: Promise<void> = Promise.resolve();
   let autoPasteGeneration = 0;
+  let transcriptSilenceAutoStopTimer: ReturnType<typeof setTimeout> | null = null;
+  let transcriptSilenceAutoStopGeneration = 0;
+
+  const TRANSCRIPT_SILENCE_AUTO_STOP_MS = 5_000;
+  const NO_TRANSCRIPT_AUTO_STOP_MS = 15_000;
 
   // Listeners
   type UnlistenFn = () => void;
@@ -629,6 +634,49 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     autoPasteGeneration++;
   }
 
+  function clearTranscriptSilenceAutoStop(): void {
+    if (transcriptSilenceAutoStopTimer) {
+      clearTimeout(transcriptSilenceAutoStopTimer);
+      transcriptSilenceAutoStopTimer = null;
+    }
+    transcriptSilenceAutoStopGeneration++;
+  }
+
+  function scheduleTranscriptSilenceAutoStop(
+    reason: string,
+    timeoutMs = TRANSCRIPT_SILENCE_AUTO_STOP_MS,
+    requireTranscript = true
+  ): void {
+    if (appConfig.keepRecordingUntilManualStop || status.value !== RecordingStatus.Recording) {
+      return;
+    }
+
+    const activeSessionId = sessionId.value;
+    if (!activeSessionId) return;
+
+    if (transcriptSilenceAutoStopTimer) {
+      clearTimeout(transcriptSilenceAutoStopTimer);
+    }
+
+    const generation = ++transcriptSilenceAutoStopGeneration;
+    transcriptSilenceAutoStopTimer = setTimeout(async () => {
+      transcriptSilenceAutoStopTimer = null;
+
+      if (generation !== transcriptSilenceAutoStopGeneration) return;
+      if (appConfig.keepRecordingUntilManualStop) return;
+      if (status.value !== RecordingStatus.Recording) return;
+      if (sessionId.value !== activeSessionId) return;
+      if (requireTranscript && !buildCurrentTranscriptionText()) return;
+
+      console.log('[STT] Auto-stopping after transcript silence:', {
+        reason,
+        timeoutMs,
+        sessionId: activeSessionId,
+      });
+      await stopRecording();
+    }, timeoutMs);
+  }
+
   // Actions
   async function initialize() {
     console.log('Initializing transcription store');
@@ -653,6 +701,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         async (event) => {
           if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:partial')) {
             return;
+          }
+          if (event.payload.text.trim()) {
+            scheduleTranscriptSilenceAutoStop(
+              event.payload.is_segment_final ? 'segment_final' : 'partial'
+            );
           }
 
           // Детальное логирование для отладки
@@ -684,8 +737,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             console.log('🔒 [BEFORE ACCUMULATE] accumulated:', oldAccumulated);
             console.log('🔒 [BEFORE ACCUMULATE] newText:', newText);
 
-            // Deepgram `is_final=true` chunks cover finalized audio ranges.
-            // Append them verbatim; overlap removal is only for live/interim display.
+            // Deepgram can send segment finals before the utterance ends.
+            // Keep them in the transcript buffer, but auto-paste only on speech_final/Idle.
             accumulatedText.value = appendTranscriptText(accumulatedText.value, newText);
 
             lastFinalizedSegmentKey.value = segKey;
@@ -710,10 +763,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             if (partialAnimationTimer) {
               clearInterval(partialAnimationTimer);
               partialAnimationTimer = null;
-            }
-
-            if (autoPasteEnabled.value && newText.trim()) {
-              await autoPasteCurrentText('segment_final');
             }
 
           } else {
@@ -811,6 +860,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               : event.payload.text
                 ? appendTranscriptText(accumulatedText.value, event.payload.text).trim()
                 : mergeTranscriptText(accumulatedText.value, partialText.value).trim();
+            if (currentUtteranceText) {
+              scheduleTranscriptSilenceAutoStop('speech_final');
+            }
 
             console.log('🔗 [SPEECH_FINAL] Combining utterance:', {
               accumulated: accumulatedText.value,
@@ -966,6 +1018,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             errorType.value = null;
             isDeviceNotFoundError.value = false;
             resetAutoPasteProgress();
+            clearTranscriptSilenceAutoStop();
 
             // Очищаем анимированный текст
             animatedPartialText.value = '';
@@ -989,6 +1042,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           // Пользователь закончил говорить → текст должен скопироваться и вставиться автоматически.
           // Проверка `stopped_via_hotkey` убрана, чтобы auto-paste работал в обоих случаях.
           if (nextStatus === RecordingStatus.Idle) {
+            clearTranscriptSilenceAutoStop();
             console.log('🔄 Запись остановлена - обрабатываем текущий текст');
 
             // Собираем весь видимый текст (final + accumulated + partial)
@@ -1057,6 +1111,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
 
           status.value = nextStatus;
+          if (nextStatus === RecordingStatus.Recording) {
+            scheduleTranscriptSilenceAutoStop(
+              'recording_start',
+              NO_TRANSCRIPT_AUTO_STOP_MS,
+              false
+            );
+          }
 
           // Если упали в Error — закрываем сессию, чтобы поздние события не перетёрли UI.
           if (nextStatus === RecordingStatus.Error) {
@@ -1663,6 +1724,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   }
 
   function resetTextStateBeforeStart(): void {
+    clearTranscriptSilenceAutoStop();
+
     // Очищаем весь предыдущий текст перед новой записью
     error.value = null;
     errorType.value = null;
@@ -1885,6 +1948,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   async function stopRecording() {
     try {
+      clearTranscriptSilenceAutoStop();
       status.value = RecordingStatus.Processing;
       const result = await invoke<string>('stop_recording');
       console.log('Recording stopped:', result);
@@ -1945,6 +2009,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       unlistenConnectionQuality();
       unlistenConnectionQuality = null;
     }
+
+    clearTranscriptSilenceAutoStop();
 
     // Очищаем таймеры анимации
     if (partialAnimationTimer) {

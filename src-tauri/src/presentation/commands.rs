@@ -2221,8 +2221,14 @@ pub async fn register_recording_hotkey(
 
             let state_inner = state.inner();
             let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+            let suppressed_until_ms = state_inner
+                .recording_hotkey_suppressed_until_ms
+                .load(Ordering::SeqCst);
             if state_inner.should_suppress_recording_hotkey(now_ms) {
-                log::debug!("Hotkey ignored (suppressed during auto-paste)");
+                log::info!(
+                    "Recording hotkey ignored: suppressed during auto-paste (remaining_ms={})",
+                    suppressed_until_ms.saturating_sub(now_ms)
+                );
                 return;
             }
 
@@ -2533,7 +2539,7 @@ pub async fn auto_paste_text(
 
     let suppression_duration = auto_paste_hotkey_suppression_duration(&text);
     state.suppress_recording_hotkey_for(suppression_duration);
-    log::debug!(
+    log::info!(
         "Recording hotkey suppressed for {}ms during auto-paste",
         suppression_duration.as_millis()
     );
