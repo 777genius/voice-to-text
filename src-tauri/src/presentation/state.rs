@@ -103,6 +103,10 @@ pub struct AppState {
     /// Нужен из‑за key repeat / случайных двойных срабатываний, которые выглядят как "мигание" окна.
     pub last_recording_hotkey_ms: AtomicU64,
 
+    /// Latch для глобального hotkey записи.
+    /// Не даёт key repeat повторно переключать запись, пока пользователь физически не отпустил клавишу.
+    pub recording_hotkey_is_pressed: AtomicBool,
+
     /// One-shot restart request for the case when the user presses hotkey while stop/finalize is
     /// still draining and the service is temporarily in Processing.
     pub restart_recording_after_processing_requested: AtomicBool,
@@ -161,6 +165,7 @@ impl AppState {
                     auth_refresh_task_guard: Arc::new(tokio::sync::Mutex::new(())),
                     stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
                     last_recording_hotkey_ms: AtomicU64::new(0),
+                    recording_hotkey_is_pressed: AtomicBool::new(false),
                     restart_recording_after_processing_requested: AtomicBool::new(false),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
@@ -212,6 +217,7 @@ impl AppState {
                     auth_refresh_task_guard: Arc::new(tokio::sync::Mutex::new(())),
                     stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
                     last_recording_hotkey_ms: AtomicU64::new(0),
+                    recording_hotkey_is_pressed: AtomicBool::new(false),
                     restart_recording_after_processing_requested: AtomicBool::new(false),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
@@ -276,6 +282,7 @@ impl AppState {
             auth_refresh_task_guard: Arc::new(tokio::sync::Mutex::new(())),
             stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
             last_recording_hotkey_ms: AtomicU64::new(0),
+            recording_hotkey_is_pressed: AtomicBool::new(false),
             restart_recording_after_processing_requested: AtomicBool::new(false),
             transcription_session_seq: AtomicU64::new(0),
             active_transcription_session_id: AtomicU64::new(0),

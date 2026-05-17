@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.16] - 2026-05-17
+
+### Fixed
+- Fixed repeated recording toggles from hotkey key-repeat events that could look like constant reconnecting.
+
+---
+
 ## [0.10.15] - 2026-05-17
 
 ### Fixed

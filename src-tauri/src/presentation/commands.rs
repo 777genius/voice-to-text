@@ -2033,6 +2033,9 @@ pub async fn stop_microphone_test(state: State<'_, AppState>) -> Result<Vec<i16>
 // Hotkey Management Commands
 //
 
+const RECORDING_HOTKEY_DEBOUNCE_MS: u64 = 450;
+const RECORDING_HOTKEY_STALE_PRESS_MS: u64 = 10_000;
+
 /// Register or update recording hotkey
 #[tauri::command]
 pub async fn register_recording_hotkey(
@@ -2177,51 +2180,84 @@ pub async fn register_recording_hotkey(
         log::warn!("Failed to unregister all shortcuts: {}", e);
     }
 
-    // Создаем обработчик - вызываем toggle напрямую вместо события
-    // Важно: фильтруем только Pressed события, иначе срабатывает и на key down, и на key up
+    state
+        .recording_hotkey_is_pressed
+        .store(false, Ordering::SeqCst);
+
+    // Создаем обработчик - вызываем toggle напрямую вместо события.
+    // Важно: key repeat может присылать несколько Pressed при удержании клавиши.
+    // Поэтому используем latch: один toggle на физическое нажатие, сброс только на Released.
     app_handle
         .global_shortcut()
         .on_shortcut(shortcut, move |app, _shortcut, event| {
             use tauri_plugin_global_shortcut::ShortcutState;
-            if event.state != ShortcutState::Pressed {
+
+            let Some(state) = app.try_state::<crate::presentation::state::AppState>() else {
+                return;
+            };
+
+            match event.state {
+                ShortcutState::Released => {
+                    state
+                        .inner()
+                        .recording_hotkey_is_pressed
+                        .store(false, Ordering::SeqCst);
+                    return;
+                }
+                ShortcutState::Pressed => {}
+            }
+
+            let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+            let last_ms = state
+                .inner()
+                .last_recording_hotkey_ms
+                .load(Ordering::Relaxed);
+            let delta = now_ms.saturating_sub(last_ms);
+
+            if state
+                .inner()
+                .recording_hotkey_is_pressed
+                .swap(true, Ordering::SeqCst)
+            {
+                if delta < RECORDING_HOTKEY_STALE_PRESS_MS {
+                    log::debug!("Hotkey ignored (key repeat while still pressed)");
+                    return;
+                }
+                log::warn!("Hotkey press latch looked stale; accepting new press");
+            }
+
+            // Дополнительный debounce оставляем для настоящих двойных событий press/release/press.
+            if delta < RECORDING_HOTKEY_DEBOUNCE_MS {
+                log::debug!("Hotkey ignored (debounced): {}ms since last trigger", delta);
                 return;
             }
+            state
+                .inner()
+                .last_recording_hotkey_ms
+                .store(now_ms, Ordering::Relaxed);
+
             log::debug!("Recording hotkey pressed");
             let app_clone = app.clone();
             let _ = tauri::async_runtime::spawn(async move {
-                let state_opt = app_clone.try_state::<crate::presentation::state::AppState>();
-                let window_opt = app_clone.get_webview_window("main");
+                let Some(state) = app_clone.try_state::<crate::presentation::state::AppState>()
+                else {
+                    log::warn!("Recording hotkey ignored: AppState is unavailable");
+                    return;
+                };
+                let Some(window) = app_clone.get_webview_window("main") else {
+                    log::warn!("Recording hotkey ignored: main window is unavailable");
+                    return;
+                };
 
-                if let (Some(state), Some(window)) = (state_opt, window_opt) {
-                    let app_for_call = app_clone.clone();
-
-                    // Дебаунс: защищаемся от key repeat / двойных срабатываний.
-                    // Иначе окно может "мигать" (показ/скрытие несколько раз подряд).
-                    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
-                    let last_ms = state
-                        .inner()
-                        .last_recording_hotkey_ms
-                        .load(Ordering::Relaxed);
-                    let delta = now_ms.saturating_sub(last_ms);
-                    if delta < 450 {
-                        log::debug!("Hotkey ignored (debounced): {}ms since last trigger", delta);
-                        return;
-                    }
-                    state
-                        .inner()
-                        .last_recording_hotkey_ms
-                        .store(now_ms, Ordering::Relaxed);
-
-                    if let Err(e) =
-                        crate::presentation::commands::toggle_recording_with_window_internal(
-                            state.inner(),
-                            window,
-                            app_for_call,
-                        )
-                        .await
-                    {
-                        log::error!("Failed to toggle recording: {}", e);
-                    }
+                if let Err(e) =
+                    crate::presentation::commands::toggle_recording_with_window_internal(
+                        state.inner(),
+                        window,
+                        app_clone.clone(),
+                    )
+                    .await
+                {
+                    log::error!("Failed to toggle recording: {}", e);
                 }
             });
         })
@@ -2234,9 +2270,16 @@ pub async fn register_recording_hotkey(
 /// Временно снять регистрацию горячей клавиши (пока пользователь настраивает новую)
 #[tauri::command]
 pub async fn unregister_recording_hotkey(app_handle: AppHandle) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
     log::info!("Command: unregister_recording_hotkey - временно снимаем хоткей");
+
+    if let Some(state) = app_handle.try_state::<AppState>() {
+        state
+            .recording_hotkey_is_pressed
+            .store(false, Ordering::SeqCst);
+    }
 
     if let Err(e) = app_handle.global_shortcut().unregister_all() {
         log::warn!("Failed to unregister all shortcuts: {}", e);
