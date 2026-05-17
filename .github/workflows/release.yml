@@ -5,41 +5,143 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag, for example v0.10.15'
+        required: true
+        type: string
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
 jobs:
-  release:
+  create-release:
+    runs-on: ubuntu-24.04
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      release_commit: ${{ steps.resolve.outputs.release_commit }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${RELEASE_TAG}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Release tag must look like v0.10.15, got '$tag'."
+            exit 1
+          fi
+
+          git fetch --force --tags origin "refs/tags/${tag}:refs/tags/${tag}"
+          commit="$(git rev-list -n 1 "$tag")"
+
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release_commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: lts/*
+
+      - name: Prepare release notes
+        shell: bash
+        run: node scripts/prepare-release-notes.mjs "${{ steps.resolve.outputs.release_tag }}" > release-notes.md
+
+      - name: Create or update GitHub release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.resolve.outputs.release_tag }}
+          RELEASE_COMMIT: ${{ steps.resolve.outputs.release_commit }}
+        run: |
+          set -euo pipefail
+
+          version="${RELEASE_TAG#v}"
+          title="VoicetextAI v${version}"
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --title "$title" \
+              --notes-file release-notes.md \
+              --draft=false \
+              --prerelease=false \
+              --latest \
+              --verify-tag \
+              --target "$RELEASE_COMMIT"
+          else
+            gh release create "$RELEASE_TAG" \
+              --title "$title" \
+              --notes-file release-notes.md \
+              --draft=false \
+              --prerelease=false \
+              --latest \
+              --verify-tag \
+              --target "$RELEASE_COMMIT"
+          fi
+
+          release_id="$(gh release view "$RELEASE_TAG" --json databaseId --jq .databaseId)"
+          if [[ -z "$release_id" || "$release_id" == "null" ]]; then
+            echo "::error::Failed to resolve GitHub release id for $RELEASE_TAG."
+            exit 1
+          fi
+
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+
+  build-release:
+    needs: create-release
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
+          - platform: 'ubuntu-24.04'
+            args: ''
+
+          - platform: 'windows-latest'
+            args: ''
+
           - platform: 'macos-latest'
             args: '--target x86_64-apple-darwin'
 
           - platform: 'macos-latest'
             args: '--target aarch64-apple-darwin'
 
-          - platform: 'windows-latest'
-            args: ''
-
-          - platform: 'ubuntu-24.04'
-            args: ''
-
     runs-on: ${{ matrix.platform }}
+    env:
+      RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+      RELEASE_TAG: ${{ needs.create-release.outputs.release_tag }}
+      RELEASE_COMMIT: ${{ needs.create-release.outputs.release_commit }}
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6.4.0
         with:
           node-version: lts/*
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6.0.8
         with:
           version: 9
 
@@ -56,7 +158,7 @@ jobs:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Rust cache
-        uses: swatinem/rust-cache@v2
+        uses: swatinem/rust-cache@v2.9.1
         with:
           workspaces: './src-tauri -> target'
 
@@ -102,19 +204,8 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install
 
-      - name: Prepare release notes
-        id: release_notes
-        shell: bash
-        run: |
-          pnpm --silent release:notes "$GITHUB_REF_NAME" > release-notes.md
-          {
-            echo 'body<<EOF'
-            cat release-notes.md
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
       - name: Build and release
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -126,9 +217,80 @@ jobs:
           VITE_API_URL: https://api.voicetext.site
           VOICE_TO_TEXT_BACKEND_URL: wss://api.voicetext.site
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'VoicetextAI v__VERSION__'
-          releaseBody: ${{ steps.release_notes.outputs.body }}
-          releaseDraft: false
-          prerelease: false
+          releaseId: ${{ env.RELEASE_ID }}
+          releaseCommitish: ${{ env.RELEASE_COMMIT }}
+          tagName: ${{ env.RELEASE_TAG }}
+          retryAttempts: 3
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
           args: ${{ matrix.args }}
+
+  verify-release:
+    needs:
+      - create-release
+      - build-release
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ needs.create-release.outputs.release_tag }}
+
+    steps:
+      - name: Verify GitHub release assets and updater manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${RELEASE_TAG#v}"
+          latest_tag="$(gh release view --json tagName --jq .tagName)"
+          if [[ "$latest_tag" != "$RELEASE_TAG" ]]; then
+            echo "::error::Latest GitHub release is $latest_tag, expected $RELEASE_TAG."
+            exit 1
+          fi
+
+          assets="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
+          required_assets=(
+            latest.json
+            "VoicetextAI_${version}_aarch64.dmg"
+            "VoicetextAI_aarch64.app.tar.gz"
+            "VoicetextAI_aarch64.app.tar.gz.sig"
+            "VoicetextAI_${version}_x64.dmg"
+            "VoicetextAI_x64.app.tar.gz"
+            "VoicetextAI_x64.app.tar.gz.sig"
+            "VoicetextAI_${version}_x64_en-US.msi"
+            "VoicetextAI_${version}_x64_en-US.msi.sig"
+            "VoicetextAI_${version}_amd64.deb"
+            "VoicetextAI_${version}_amd64.deb.sig"
+            "VoicetextAI_${version}_amd64.AppImage"
+            "VoicetextAI_${version}_amd64.AppImage.sig"
+          )
+
+          for asset in "${required_assets[@]}"; do
+            if ! grep -Fxq "$asset" <<< "$assets"; then
+              echo "::error::Release asset is missing: $asset"
+              exit 1
+            fi
+          done
+
+          curl --fail --location --silent --show-error \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/latest.json" \
+            --output latest.json
+
+          jq -e --arg version "$version" '.version == $version' latest.json >/dev/null
+
+          required_platforms=(
+            darwin-aarch64
+            darwin-aarch64-app
+            darwin-x86_64
+            darwin-x86_64-app
+            linux-x86_64
+            linux-x86_64-appimage
+            linux-x86_64-deb
+            windows-x86_64
+            windows-x86_64-msi
+          )
+
+          for platform in "${required_platforms[@]}"; do
+            jq -e --arg platform "$platform" \
+              '.platforms[$platform].url and .platforms[$platform].signature' \
+              latest.json >/dev/null
+          done
