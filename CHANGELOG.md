@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.17] - 2026-05-17
+
+### Fixed
+- Fixed recording hotkey self-triggering while auto-paste types text that contains the same physical key as the configured hotkey, such as `Backquote` on Russian layouts.
+
+---
+
 ## [0.10.16] - 2026-05-17
 
 ### Fixed

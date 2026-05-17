@@ -2035,6 +2035,18 @@ pub async fn stop_microphone_test(state: State<'_, AppState>) -> Result<Vec<i16>
 
 const RECORDING_HOTKEY_DEBOUNCE_MS: u64 = 450;
 const RECORDING_HOTKEY_STALE_PRESS_MS: u64 = 10_000;
+const AUTO_PASTE_HOTKEY_SUPPRESSION_BASE_MS: u64 = 1_200;
+const AUTO_PASTE_HOTKEY_SUPPRESSION_PER_CHAR_MS: u64 = 25;
+const AUTO_PASTE_HOTKEY_SUPPRESSION_MAX_MS: u64 = 8_000;
+const AUTO_PASTE_HOTKEY_SUPPRESSION_TAIL_MS: u64 = 700;
+
+fn auto_paste_hotkey_suppression_duration(text: &str) -> Duration {
+    let estimated_ms = AUTO_PASTE_HOTKEY_SUPPRESSION_BASE_MS.saturating_add(
+        (text.chars().count() as u64).saturating_mul(AUTO_PASTE_HOTKEY_SUPPRESSION_PER_CHAR_MS),
+    );
+
+    Duration::from_millis(estimated_ms.min(AUTO_PASTE_HOTKEY_SUPPRESSION_MAX_MS))
+}
 
 /// Register or update recording hotkey
 #[tauri::command]
@@ -2207,15 +2219,17 @@ pub async fn register_recording_hotkey(
                 ShortcutState::Pressed => {}
             }
 
+            let state_inner = state.inner();
             let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
-            let last_ms = state
-                .inner()
-                .last_recording_hotkey_ms
-                .load(Ordering::Relaxed);
+            if state_inner.should_suppress_recording_hotkey(now_ms) {
+                log::debug!("Hotkey ignored (suppressed during auto-paste)");
+                return;
+            }
+
+            let last_ms = state_inner.last_recording_hotkey_ms.load(Ordering::Relaxed);
             let delta = now_ms.saturating_sub(last_ms);
 
-            if state
-                .inner()
+            if state_inner
                 .recording_hotkey_is_pressed
                 .swap(true, Ordering::SeqCst)
             {
@@ -2231,8 +2245,7 @@ pub async fn register_recording_hotkey(
                 log::debug!("Hotkey ignored (debounced): {}ms since last trigger", delta);
                 return;
             }
-            state
-                .inner()
+            state_inner
                 .last_recording_hotkey_ms
                 .store(now_ms, Ordering::Relaxed);
 
@@ -2555,11 +2568,24 @@ pub async fn auto_paste_text(
     }
 
     // Вставляем текст в blocking thread (enigo работает с синхронными нативными API)
+    let suppression_duration = auto_paste_hotkey_suppression_duration(&text);
+    state.suppress_recording_hotkey_for(suppression_duration);
+    log::debug!(
+        "Recording hotkey suppressed for {}ms during auto-paste",
+        suppression_duration.as_millis()
+    );
+
     let text_clone = text.clone();
-    tokio::task::spawn_blocking(move || crate::infrastructure::auto_paste::paste_text(&text_clone))
+    let paste_result = tokio::task::spawn_blocking(move || {
+        crate::infrastructure::auto_paste::paste_text(&text_clone)
+    })
         .await
         .map_err(|e| format!("Failed to join blocking task: {}", e))?
-        .map_err(|e| format!("Failed to paste text: {}", e))?;
+        .map_err(|e| format!("Failed to paste text: {}", e));
+    state.suppress_recording_hotkey_for(Duration::from_millis(
+        AUTO_PASTE_HOTKEY_SUPPRESSION_TAIL_MS,
+    ));
+    paste_result?;
 
     // Возвращаем окно VoicetextAI поверх всех окон (но без фокуса)
     if let Some(window) = app_handle.get_webview_window("main") {

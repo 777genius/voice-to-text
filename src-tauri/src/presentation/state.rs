@@ -107,6 +107,10 @@ pub struct AppState {
     /// Не даёт key repeat повторно переключать запись, пока пользователь физически не отпустил клавишу.
     pub recording_hotkey_is_pressed: AtomicBool,
 
+    /// До какого момента игнорировать Pressed от recording hotkey.
+    /// Нужно на время auto-paste, потому что synthetic text input может совпасть с выбранной клавишей.
+    pub recording_hotkey_suppressed_until_ms: AtomicU64,
+
     /// One-shot restart request for the case when the user presses hotkey while stop/finalize is
     /// still draining and the service is temporarily in Processing.
     pub restart_recording_after_processing_requested: AtomicBool,
@@ -166,6 +170,7 @@ impl AppState {
                     stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
                     last_recording_hotkey_ms: AtomicU64::new(0),
                     recording_hotkey_is_pressed: AtomicBool::new(false),
+                    recording_hotkey_suppressed_until_ms: AtomicU64::new(0),
                     restart_recording_after_processing_requested: AtomicBool::new(false),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
@@ -218,6 +223,7 @@ impl AppState {
                     stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
                     last_recording_hotkey_ms: AtomicU64::new(0),
                     recording_hotkey_is_pressed: AtomicBool::new(false),
+                    recording_hotkey_suppressed_until_ms: AtomicU64::new(0),
                     restart_recording_after_processing_requested: AtomicBool::new(false),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
@@ -283,10 +289,39 @@ impl AppState {
             stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
             last_recording_hotkey_ms: AtomicU64::new(0),
             recording_hotkey_is_pressed: AtomicBool::new(false),
+            recording_hotkey_suppressed_until_ms: AtomicU64::new(0),
             restart_recording_after_processing_requested: AtomicBool::new(false),
             transcription_session_seq: AtomicU64::new(0),
             active_transcription_session_id: AtomicU64::new(0),
         }
+    }
+
+    pub(crate) fn suppress_recording_hotkey_for(&self, duration: std::time::Duration) {
+        let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        let duration_ms = duration.as_millis().min(u64::MAX as u128) as u64;
+        let until_ms = now_ms.saturating_add(duration_ms);
+
+        let mut current = self
+            .recording_hotkey_suppressed_until_ms
+            .load(Ordering::SeqCst);
+        while until_ms > current {
+            match self.recording_hotkey_suppressed_until_ms.compare_exchange(
+                current,
+                until_ms,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(next) => current = next,
+            }
+        }
+    }
+
+    pub(crate) fn should_suppress_recording_hotkey(&self, now_ms: u64) -> bool {
+        now_ms
+            <= self
+                .recording_hotkey_suppressed_until_ms
+                .load(Ordering::SeqCst)
     }
 
     /// Инкрементирует ревизию и возвращает её строковое представление
