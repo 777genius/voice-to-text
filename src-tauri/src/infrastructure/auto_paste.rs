@@ -286,7 +286,7 @@ fn paste_shortcut(enigo: &mut Enigo) -> Result<()> {
     enigo
         .key(modifier, Direction::Press)
         .context("Failed to press paste shortcut modifier")?;
-    let paste_result = enigo.key(Key::Unicode('v'), Direction::Click);
+    let paste_result = enigo.key(Key::V, Direction::Click);
     let release_result = enigo.key(modifier, Direction::Release);
 
     paste_result.context("Failed to press paste shortcut key")?;
