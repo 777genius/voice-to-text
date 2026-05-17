@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.22] - 2026-05-17
+
+### Fixed
+- Fixed a macOS crash during clipboard auto-paste by replacing Enigo's layout-dependent `Cmd+V` event with a direct CoreGraphics physical `Cmd+V` key event.
+- Fixed paste sometimes selecting/focusing text instead of inserting when the active keyboard layout was not English.
+- Increased the paste settle delay before restoring clipboard text so target apps have more time to consume the inserted transcript.
+
+---
+
 ## [0.10.21] - 2026-05-17
 
 ### Fixed

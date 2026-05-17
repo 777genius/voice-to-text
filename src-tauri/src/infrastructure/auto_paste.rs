@@ -3,10 +3,13 @@
 
 use anyhow::{Context, Result};
 use arboard::Clipboard;
+#[cfg(not(target_os = "macos"))]
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use std::{thread, time::Duration};
 
-const PASTE_SETTLE_MS: u64 = 140;
+const PASTE_SETTLE_MS: u64 = 300;
+#[cfg(target_os = "macos")]
+const MACOS_PASTE_KEY_SETTLE_MS: u64 = 20;
 
 /// Проверяет, есть ли у приложения разрешение Accessibility на macOS
 /// На других платформах всегда возвращает true (разрешение не требуется)
@@ -189,11 +192,6 @@ pub fn paste_text(text: &str) -> Result<()> {
         .set_text(text.to_string())
         .context("Failed to write text to clipboard")?;
 
-    log::info!("⌨️ Initializing Enigo keyboard controller...");
-    let mut enigo = Enigo::new(&Settings::default())
-        .context("Failed to initialize Enigo keyboard controller")?;
-    log::info!("✅ Enigo initialized successfully");
-
     log::info!(
         "⌨️ Pasting text at cursor position ({} chars): '{}'...",
         text.len(),
@@ -205,7 +203,7 @@ pub fn paste_text(text: &str) -> Result<()> {
     );
 
     log::debug!("   Starting paste shortcut...");
-    paste_shortcut(&mut enigo)?;
+    send_paste_shortcut()?;
     thread::sleep(Duration::from_millis(PASTE_SETTLE_MS));
     log::debug!("   ✓ Paste shortcut completed");
 
@@ -219,12 +217,72 @@ pub fn paste_text(text: &str) -> Result<()> {
     Ok(())
 }
 
-fn paste_shortcut(enigo: &mut Enigo) -> Result<()> {
-    #[cfg(target_os = "macos")]
-    let modifier = Key::Meta;
-    #[cfg(not(target_os = "macos"))]
-    let modifier = Key::Control;
+#[cfg(target_os = "macos")]
+fn send_paste_shortcut() -> Result<()> {
+    use std::{ffi::c_void, ptr};
 
+    type CGEventRef = *mut c_void;
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn CGEventCreateKeyboardEvent(
+            source: *const c_void,
+            virtual_key: u16,
+            key_down: bool,
+        ) -> CGEventRef;
+        fn CGEventSetFlags(event: CGEventRef, flags: u64);
+        fn CGEventPost(tap: u32, event: CGEventRef);
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFRelease(cf: *const c_void);
+    }
+
+    const KCG_HID_EVENT_TAP: u32 = 0;
+    const KCG_EVENT_FLAG_MASK_COMMAND: u64 = 0x0010_0000;
+    const KEY_CODE_V: u16 = 0x09;
+
+    unsafe {
+        let key_down = CGEventCreateKeyboardEvent(ptr::null(), KEY_CODE_V, true);
+        let key_up = CGEventCreateKeyboardEvent(ptr::null(), KEY_CODE_V, false);
+
+        if key_down.is_null() || key_up.is_null() {
+            if !key_down.is_null() {
+                CFRelease(key_down.cast_const());
+            }
+            if !key_up.is_null() {
+                CFRelease(key_up.cast_const());
+            }
+            anyhow::bail!("Failed to create macOS paste keyboard event");
+        }
+
+        CGEventSetFlags(key_down, KCG_EVENT_FLAG_MASK_COMMAND);
+        CGEventSetFlags(key_up, KCG_EVENT_FLAG_MASK_COMMAND);
+        CGEventPost(KCG_HID_EVENT_TAP, key_down);
+        thread::sleep(Duration::from_millis(MACOS_PASTE_KEY_SETTLE_MS));
+        CGEventPost(KCG_HID_EVENT_TAP, key_up);
+
+        CFRelease(key_down.cast_const());
+        CFRelease(key_up.cast_const());
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn send_paste_shortcut() -> Result<()> {
+    log::info!("⌨️ Initializing Enigo keyboard controller...");
+    let mut enigo = Enigo::new(&Settings::default())
+        .context("Failed to initialize Enigo keyboard controller")?;
+    log::info!("✅ Enigo initialized successfully");
+
+    paste_shortcut(&mut enigo)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn paste_shortcut(enigo: &mut Enigo) -> Result<()> {
+    let modifier = Key::Control;
     enigo
         .key(modifier, Direction::Press)
         .context("Failed to press paste shortcut modifier")?;
