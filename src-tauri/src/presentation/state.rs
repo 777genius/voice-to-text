@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::RwLock;
@@ -9,6 +9,8 @@ use crate::infrastructure::{
     audio::{SystemAudioCapture, VadCaptureWrapper, VadProcessor},
     AuthSession, AuthStore, AuthStoreData, AuthUser, ConfigStore, DefaultSttProviderFactory,
 };
+
+const RECORDING_WINDOW_POSITION_SAVE_SUPPRESSION_MS: i64 = 800;
 
 /// State for microphone testing
 pub struct MicrophoneTestState {
@@ -107,13 +109,13 @@ pub struct AppState {
     /// Не даёт key repeat повторно переключать запись, пока пользователь физически не отпустил клавишу.
     pub recording_hotkey_is_pressed: AtomicBool,
 
+    /// Поколение отложенного сброса hotkey latch.
+    /// Нужен, потому что на macOS bare-key shortcuts могут присылать Released между repeat Pressed.
+    pub recording_hotkey_release_generation: AtomicU64,
+
     /// До какого момента игнорировать Pressed от recording hotkey.
     /// Нужно на время auto-paste, потому что synthetic text input может совпасть с выбранной клавишей.
     pub recording_hotkey_suppressed_until_ms: AtomicU64,
-
-    /// One-shot restart request for the case when the user presses hotkey while stop/finalize is
-    /// still draining and the service is temporarily in Processing.
-    pub restart_recording_after_processing_requested: AtomicBool,
 
     /// Счётчик сессий записи. Нужен, чтобы маркировать события transcription:* и не смешивать сессии.
     pub transcription_session_seq: AtomicU64,
@@ -121,6 +123,10 @@ pub struct AppState {
     /// Активная (последняя запущенная) сессия записи.
     /// Используется для маркировки статусов Idle/Error, которые эмитятся "в обход" start_recording callbacks.
     pub active_transcription_session_id: AtomicU64,
+
+    /// До какого момента игнорировать WindowEvent::Moved для main окна.
+    /// Нужно, чтобы программные resize/show/fit не перезаписывали пользовательскую mini-позицию.
+    pub recording_window_position_save_suppressed_until_ms: AtomicI64,
 }
 
 impl AppState {
@@ -170,10 +176,11 @@ impl AppState {
                     stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
                     last_recording_hotkey_ms: AtomicU64::new(0),
                     recording_hotkey_is_pressed: AtomicBool::new(false),
+                    recording_hotkey_release_generation: AtomicU64::new(0),
                     recording_hotkey_suppressed_until_ms: AtomicU64::new(0),
-                    restart_recording_after_processing_requested: AtomicBool::new(false),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
+                    recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),
                 };
             }
         };
@@ -223,10 +230,11 @@ impl AppState {
                     stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
                     last_recording_hotkey_ms: AtomicU64::new(0),
                     recording_hotkey_is_pressed: AtomicBool::new(false),
+                    recording_hotkey_release_generation: AtomicU64::new(0),
                     recording_hotkey_suppressed_until_ms: AtomicU64::new(0),
-                    restart_recording_after_processing_requested: AtomicBool::new(false),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
+                    recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),
                 };
             }
         };
@@ -251,11 +259,12 @@ impl AppState {
         let audio_capture = Box::new(vad_wrapper);
         let stt_factory = Arc::new(DefaultSttProviderFactory::new());
 
-        let transcription_service = Arc::new(TranscriptionService::new_with_microphone_sensitivity(
-            audio_capture,
-            stt_factory,
-            microphone_sensitivity,
-        ));
+        let transcription_service =
+            Arc::new(TranscriptionService::new_with_microphone_sensitivity(
+                audio_capture,
+                stt_factory,
+                microphone_sensitivity,
+            ));
 
         log::info!(
             "AppState initialized with SystemAudioCapture + VAD (timeout: {}ms)",
@@ -289,11 +298,26 @@ impl AppState {
             stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
             last_recording_hotkey_ms: AtomicU64::new(0),
             recording_hotkey_is_pressed: AtomicBool::new(false),
+            recording_hotkey_release_generation: AtomicU64::new(0),
             recording_hotkey_suppressed_until_ms: AtomicU64::new(0),
-            restart_recording_after_processing_requested: AtomicBool::new(false),
             transcription_session_seq: AtomicU64::new(0),
             active_transcription_session_id: AtomicU64::new(0),
+            recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),
         }
+    }
+
+    pub(crate) fn suppress_recording_window_position_save(&self) {
+        let until =
+            chrono::Utc::now().timestamp_millis() + RECORDING_WINDOW_POSITION_SAVE_SUPPRESSION_MS;
+        self.recording_window_position_save_suppressed_until_ms
+            .store(until, Ordering::SeqCst);
+    }
+
+    pub(crate) fn should_skip_recording_window_position_save(&self) -> bool {
+        chrono::Utc::now().timestamp_millis()
+            <= self
+                .recording_window_position_save_suppressed_until_ms
+                .load(Ordering::SeqCst)
     }
 
     pub(crate) fn suppress_recording_hotkey_for(&self, duration: std::time::Duration) {

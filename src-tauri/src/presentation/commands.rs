@@ -87,101 +87,6 @@ fn should_show_recording_window_on_processing_hotkey(
         || (!window_visible && !config.hide_recording_window_on_hotkey)
 }
 
-const HOTKEY_PROCESSING_RESTART_WAIT: Duration = Duration::from_millis(2_500);
-const HOTKEY_PROCESSING_RESTART_POLL: Duration = Duration::from_millis(50);
-
-fn queue_recording_restart_after_processing(app_handle: AppHandle) {
-    let Some(state) = app_handle.try_state::<AppState>() else {
-        log::warn!("Cannot queue hotkey restart after Processing: AppState is unavailable");
-        return;
-    };
-
-    if state
-        .restart_recording_after_processing_requested
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        log::debug!("Hotkey restart after Processing is already queued");
-        return;
-    }
-
-    tauri::async_runtime::spawn(async move {
-        let max_attempts = (HOTKEY_PROCESSING_RESTART_WAIT.as_millis()
-            / HOTKEY_PROCESSING_RESTART_POLL.as_millis())
-        .max(1);
-        let mut should_start = false;
-
-        for _ in 0..max_attempts {
-            tokio::time::sleep(HOTKEY_PROCESSING_RESTART_POLL).await;
-
-            let Some(state) = app_handle.try_state::<AppState>() else {
-                log::warn!("Cannot continue queued hotkey restart: AppState is unavailable");
-                return;
-            };
-
-            match state.transcription_service.get_status().await {
-                RecordingStatus::Idle => {
-                    should_start = true;
-                    break;
-                }
-                RecordingStatus::Processing => {}
-                RecordingStatus::Starting | RecordingStatus::Recording | RecordingStatus::Error => {
-                    break;
-                }
-            }
-        }
-
-        let Some(state) = app_handle.try_state::<AppState>() else {
-            log::warn!("Cannot finish queued hotkey restart: AppState is unavailable");
-            return;
-        };
-
-        state
-            .restart_recording_after_processing_requested
-            .store(false, Ordering::SeqCst);
-
-        if !should_start {
-            log::debug!("Queued hotkey restart expired before service returned to Idle");
-            return;
-        }
-
-        if !*state.is_authenticated.read().await {
-            log::info!("Queued hotkey restart skipped: user is not authenticated");
-            return;
-        }
-
-        let Some(window) = app_handle.get_webview_window("main") else {
-            log::warn!("Queued hotkey restart skipped: main window is unavailable");
-            return;
-        };
-
-        let config = state.config.read().await.clone();
-        save_active_app_bundle_id_for_auto_paste(state.inner()).await;
-
-        let hide_window_on_hotkey =
-            config.hide_recording_window_on_hotkey && !config.show_mini_recording_window;
-        if !hide_window_on_hotkey {
-            if let Err(err) = show_webview_window_with_recording_config(&window, &config) {
-                log::warn!(
-                    "Queued hotkey restart failed to show recording window: {}",
-                    err
-                );
-                return;
-            }
-            let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
-        }
-
-        let Some(state_for_start) = app_handle.try_state::<AppState>() else {
-            log::warn!("Queued hotkey restart cannot start: AppState is unavailable");
-            return;
-        };
-
-        if let Err(err) = start_recording(state_for_start, app_handle.clone()).await {
-            log::error!("Queued hotkey restart failed to start recording: {}", err);
-        }
-    });
-}
-
 async fn stop_recording_and_emit_idle(
     state: &AppState,
     app_handle: &AppHandle,
@@ -642,7 +547,9 @@ async fn save_active_app_bundle_id_for_auto_paste(_state: &AppState) {
 pub fn show_window_with_recording_config(
     window: &Window,
     config: &AppConfig,
+    state: &AppState,
 ) -> Result<(), String> {
+    state.suppress_recording_window_position_save();
     window
         .set_size(recording_window_size_from_config(config))
         .map_err(|e| format!("Failed to set recording window size: {}", e))?;
@@ -675,7 +582,9 @@ pub fn show_webview_window_on_active_monitor<R: tauri::Runtime>(
 pub fn show_webview_window_with_recording_config<R: tauri::Runtime>(
     window: &WebviewWindow<R>,
     config: &AppConfig,
+    state: &AppState,
 ) -> Result<(), String> {
+    state.suppress_recording_window_position_save();
     window
         .set_size(recording_window_size_from_config(config))
         .map_err(|e| format!("Failed to set recording window size: {}", e))?;
@@ -692,7 +601,10 @@ pub fn show_webview_window_with_recording_config<R: tauri::Runtime>(
 
 /// Удерживает recording окно внутри видимой области текущего монитора после resize.
 #[tauri::command]
-pub fn fit_recording_window_to_visible_area(window: Window) -> Result<(), String> {
+pub fn fit_recording_window_to_visible_area(
+    state: State<'_, AppState>,
+    window: Window,
+) -> Result<(), String> {
     let current_monitor = window
         .current_monitor()
         .map_err(|e| format!("Failed to get current monitor: {}", e))?
@@ -718,12 +630,32 @@ pub fn fit_recording_window_to_visible_area(window: Window) -> Result<(), String
     );
 
     if next_position != current_position {
+        state.suppress_recording_window_position_save();
         window
             .set_position(Position::Physical(next_position))
             .map_err(|e| format!("Failed to set window position: {}", e))?;
     }
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn set_recording_window_size(
+    state: State<'_, AppState>,
+    window: Window,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+        return Err("Invalid recording window size".to_string());
+    }
+
+    state.suppress_recording_window_position_save();
+    window
+        .set_size(LogicalSize::new(width, height))
+        .map_err(|e| format!("Failed to set recording window size: {}", e))?;
+
+    fit_recording_window_to_visible_area(state, window)
 }
 
 /// Общая реализация для позиционирования окна на текущем мониторе
@@ -973,7 +905,7 @@ pub async fn toggle_window(state: State<'_, AppState>, window: Window) -> Result
         }
 
         let config = state.config.read().await.clone();
-        show_window_with_recording_config(&window, &config)?;
+        show_window_with_recording_config(&window, &config, state.inner())?;
 
         // Сообщаем фронту, что окно показано (для надёжного reset UI).
         // Не используем focus, т.к. main на macOS может быть nonactivating NSPanel.
@@ -1024,7 +956,7 @@ pub async fn toggle_recording_with_window(
                 // Перед показом окна сохраняем bundle ID текущего активного приложения.
                 save_active_app_bundle_id_for_auto_paste(state.inner()).await;
 
-                show_window_with_recording_config(&window, &config)?;
+                show_window_with_recording_config(&window, &config, state.inner())?;
 
                 // Сообщаем фронту, что окно показано (для надёжного reset UI).
                 let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
@@ -1033,7 +965,9 @@ pub async fn toggle_recording_with_window(
             // Запускаем запись
             if let Err(err) = start_recording(state.clone(), app_handle).await {
                 if hide_window_on_hotkey {
-                    if let Err(show_err) = show_window_with_recording_config(&window, &config) {
+                    if let Err(show_err) =
+                        show_window_with_recording_config(&window, &config, state.inner())
+                    {
                         log::warn!(
                             "Failed to show recording window after hotkey start error: {}",
                             show_err
@@ -1066,7 +1000,9 @@ pub async fn toggle_recording_with_window(
             // Останавливаем запись
             if let Err(err) = stop_recording_and_emit_idle(state.inner(), &app_handle, true).await {
                 if hidden_for_hotkey_stop {
-                    if let Err(show_err) = show_window_with_recording_config(&window, &config) {
+                    if let Err(show_err) =
+                        show_window_with_recording_config(&window, &config, state.inner())
+                    {
                         log::warn!(
                             "Failed to restore recording window after hotkey stop error: {}",
                             show_err
@@ -1086,12 +1022,11 @@ pub async fn toggle_recording_with_window(
 
             if should_show_recording_window_on_processing_hotkey(&config, window_visible) {
                 save_active_app_bundle_id_for_auto_paste(state.inner()).await;
-                show_window_with_recording_config(&window, &config)?;
+                show_window_with_recording_config(&window, &config, state.inner())?;
                 let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
             }
 
-            queue_recording_restart_after_processing(app_handle.clone());
-            log::debug!("Queued hotkey restart while recording stop/finalize is processing");
+            log::info!("Recording hotkey ignored: stop/finalize is still processing");
         }
         RecordingStatus::Error => {
             log::warn!("Cannot toggle recording - system is in error state");
@@ -1138,7 +1073,7 @@ pub async fn toggle_recording_with_window_internal(
                 }
             } else if force_show_window || !window_visible {
                 save_active_app_bundle_id_for_auto_paste(state).await;
-                show_webview_window_with_recording_config(&window, &config)?;
+                show_webview_window_with_recording_config(&window, &config, state)?;
 
                 // Сообщаем фронту, что окно показано (для надёжного reset UI).
                 let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
@@ -1153,7 +1088,7 @@ pub async fn toggle_recording_with_window_internal(
             if let Err(err) = start_recording(state_handle, app_handle.clone()).await {
                 if hide_window_on_hotkey {
                     if let Err(show_err) =
-                        show_webview_window_with_recording_config(&window, &config)
+                        show_webview_window_with_recording_config(&window, &config, state)
                     {
                         log::warn!(
                             "Failed to show recording window after hotkey start error: {}",
@@ -1186,7 +1121,7 @@ pub async fn toggle_recording_with_window_internal(
             if let Err(err) = stop_recording_and_emit_idle(state, &app_handle, true).await {
                 if hidden_for_hotkey_stop {
                     if let Err(show_err) =
-                        show_webview_window_with_recording_config(&window, &config)
+                        show_webview_window_with_recording_config(&window, &config, state)
                     {
                         log::warn!(
                             "Failed to restore recording window after hotkey stop error: {}",
@@ -1207,12 +1142,11 @@ pub async fn toggle_recording_with_window_internal(
 
             if should_show_recording_window_on_processing_hotkey(&config, window_visible) {
                 save_active_app_bundle_id_for_auto_paste(state).await;
-                show_webview_window_with_recording_config(&window, &config)?;
+                show_webview_window_with_recording_config(&window, &config, state)?;
                 let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
             }
 
-            queue_recording_restart_after_processing(app_handle.clone());
-            log::debug!("Queued hotkey restart while recording stop/finalize is processing");
+            log::info!("Recording hotkey ignored: stop/finalize is still processing");
         }
         RecordingStatus::Error => {
             log::warn!("Cannot toggle recording - error state");
@@ -2035,6 +1969,7 @@ pub async fn stop_microphone_test(state: State<'_, AppState>) -> Result<Vec<i16>
 
 const RECORDING_HOTKEY_DEBOUNCE_MS: u64 = 450;
 const RECORDING_HOTKEY_STALE_PRESS_MS: u64 = 10_000;
+const RECORDING_HOTKEY_RELEASE_GRACE_MS: u64 = 2_500;
 const AUTO_PASTE_HOTKEY_SUPPRESSION_BASE_MS: u64 = 1_200;
 const AUTO_PASTE_HOTKEY_SUPPRESSION_PER_CHAR_MS: u64 = 25;
 const AUTO_PASTE_HOTKEY_SUPPRESSION_MAX_MS: u64 = 8_000;
@@ -2195,10 +2130,14 @@ pub async fn register_recording_hotkey(
     state
         .recording_hotkey_is_pressed
         .store(false, Ordering::SeqCst);
+    state
+        .recording_hotkey_release_generation
+        .fetch_add(1, Ordering::SeqCst);
 
     // Создаем обработчик - вызываем toggle напрямую вместо события.
-    // Важно: key repeat может присылать несколько Pressed при удержании клавиши.
-    // Поэтому используем latch: один toggle на физическое нажатие, сброс только на Released.
+    // Важно: key repeat может присылать несколько Pressed при удержании клавиши,
+    // а на macOS bare-key hotkeys иногда дают Released между repeat Pressed.
+    // Поэтому Released сбрасывает latch только после небольшой паузы без новых Pressed.
     app_handle
         .global_shortcut()
         .on_shortcut(shortcut, move |app, _shortcut, event| {
@@ -2210,10 +2149,34 @@ pub async fn register_recording_hotkey(
 
             match event.state {
                 ShortcutState::Released => {
-                    state
-                        .inner()
-                        .recording_hotkey_is_pressed
-                        .store(false, Ordering::SeqCst);
+                    let app_clone = app.clone();
+                    let state_inner = state.inner();
+                    let release_generation = state_inner
+                        .recording_hotkey_release_generation
+                        .fetch_add(1, Ordering::SeqCst)
+                        + 1;
+
+                    let _ = tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(RECORDING_HOTKEY_RELEASE_GRACE_MS))
+                            .await;
+
+                        let Some(state) =
+                            app_clone.try_state::<crate::presentation::state::AppState>()
+                        else {
+                            return;
+                        };
+                        let state_inner = state.inner();
+                        if state_inner
+                            .recording_hotkey_release_generation
+                            .load(Ordering::SeqCst)
+                            == release_generation
+                        {
+                            state_inner
+                                .recording_hotkey_is_pressed
+                                .store(false, Ordering::SeqCst);
+                            log::debug!("Recording hotkey latch cleared after release grace");
+                        }
+                    });
                     return;
                 }
                 ShortcutState::Pressed => {}
@@ -2232,6 +2195,10 @@ pub async fn register_recording_hotkey(
                 return;
             }
 
+            state_inner
+                .recording_hotkey_release_generation
+                .fetch_add(1, Ordering::SeqCst);
+
             let last_ms = state_inner.last_recording_hotkey_ms.load(Ordering::Relaxed);
             let delta = now_ms.saturating_sub(last_ms);
 
@@ -2240,7 +2207,10 @@ pub async fn register_recording_hotkey(
                 .swap(true, Ordering::SeqCst)
             {
                 if delta < RECORDING_HOTKEY_STALE_PRESS_MS {
-                    log::debug!("Hotkey ignored (key repeat while still pressed)");
+                    log::info!(
+                        "Recording hotkey ignored: key repeat while latch is active (delta_ms={})",
+                        delta
+                    );
                     return;
                 }
                 log::warn!("Hotkey press latch looked stale; accepting new press");
@@ -2298,6 +2268,9 @@ pub async fn unregister_recording_hotkey(app_handle: AppHandle) -> Result<(), St
         state
             .recording_hotkey_is_pressed
             .store(false, Ordering::SeqCst);
+        state
+            .recording_hotkey_release_generation
+            .fetch_add(1, Ordering::SeqCst);
     }
 
     if let Err(e) = app_handle.global_shortcut().unregister_all() {
@@ -2694,7 +2667,7 @@ pub async fn show_recording_window(
     // Показываем recording окно (NSPanel - появляется поверх fullscreen, без фокуса)
     if let Some(window) = app_handle.get_webview_window("main") {
         let config = state.config.read().await.clone();
-        show_webview_window_with_recording_config(&window, &config)?;
+        show_webview_window_with_recording_config(&window, &config, state.inner())?;
         let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
         if let Err(e) = window.set_always_on_top(true) {
             log::warn!("Failed to enable always-on-top for main window: {}", e);

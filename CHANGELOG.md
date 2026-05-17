@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.20] - 2026-05-17
+
+### Fixed
+- Fixed repeated recording toggles from single-key hotkeys such as `Backquote` when macOS delivers release/repeat events while the key is still being held, which looked like constant reconnecting.
+- Stopped queueing an automatic restart when a repeated hotkey arrives while recording stop/finalize is still processing.
+- Restored live auto-paste on finalized transcript segments so long dictation does not wait for the final endpoint before typing.
+- Prevented programmatic mini-window resize/reposition from overwriting the user's saved mini-window position.
+
+---
+
 ## [0.10.19] - 2026-05-17
 
 ### Fixed

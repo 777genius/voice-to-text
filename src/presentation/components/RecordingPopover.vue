@@ -4,7 +4,6 @@ import { useI18n } from 'vue-i18n';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
-import { LogicalSize } from '@tauri-apps/api/dpi';
 import { getVersion } from '@tauri-apps/api/app';
 import { useTranscriptionStore } from '../../stores/transcription';
 import { useAppConfigStore } from '../../stores/appConfig';
@@ -182,8 +181,7 @@ async function setWindowSize(width: number, height: number) {
     ) {
       return;
     }
-    await win.setSize(new LogicalSize(width, height));
-    await invoke('fit_recording_window_to_visible_area');
+    await invoke('set_recording_window_size', { width, height });
   } catch {}
 }
 
@@ -496,7 +494,7 @@ const minimizeWindow = async () => {
           class="mini-audio-visualizer"
           :active="store.isStarting || store.isRecording"
         />
-        <div class="mini-popover-content" data-tauri-drag-region @mousedown="onDragMouseDown">
+        <div class="mini-popover-content" @mousedown="onDragMouseDown">
           <span
             class="mini-status-dot"
             :class="{
@@ -548,7 +546,7 @@ const minimizeWindow = async () => {
         <AudioVisualizer :active="store.isStarting || store.isRecording" />
         <div class="popover-content">
       <!-- Header -->
-      <div class="header" data-tauri-drag-region @mousedown="onDragMouseDown">
+      <div class="header" @mousedown="onDragMouseDown">
         <div class="title-row">
           <div class="title">{{ t('app.title') }}</div>
           <span v-if="appVersion" class="app-version">{{ appVersion }}</span>

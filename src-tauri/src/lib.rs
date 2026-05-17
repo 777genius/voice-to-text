@@ -41,6 +41,11 @@ fn schedule_recording_window_position_save(
             return;
         };
 
+        if state.should_skip_recording_window_position_save() {
+            log::debug!("Skipping recording window position save after programmatic move");
+            return;
+        }
+
         {
             let mut config = state.config.write().await;
             if !config.show_mini_recording_window {
@@ -149,6 +154,7 @@ pub fn run() {
             commands::toggle_recording_with_window,
             commands::minimize_window,
             commands::fit_recording_window_to_visible_area,
+            commands::set_recording_window_size,
             commands::update_stt_config,
             commands::get_app_config_snapshot,
             commands::get_stt_config_snapshot,
@@ -357,6 +363,9 @@ pub fn run() {
                     );
 
                     if let Some(window) = app_handle.get_webview_window("main") {
+                        if let Some(state) = app_handle.try_state::<AppState>() {
+                            state.suppress_recording_window_position_save();
+                        }
                         if let Err(e) = commands::show_webview_window_on_active_monitor(&window) {
                             log::error!("Failed to show main window after update: {}", e);
                         }

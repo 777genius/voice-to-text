@@ -738,7 +738,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             console.log('🔒 [BEFORE ACCUMULATE] newText:', newText);
 
             // Deepgram can send segment finals before the utterance ends.
-            // Keep them in the transcript buffer, but auto-paste only on speech_final/Idle.
+            // Paste finalized ranges as live deltas; native hotkey suppression prevents self-toggle.
             accumulatedText.value = appendTranscriptText(accumulatedText.value, newText);
 
             lastFinalizedSegmentKey.value = segKey;
@@ -763,6 +763,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             if (partialAnimationTimer) {
               clearInterval(partialAnimationTimer);
               partialAnimationTimer = null;
+            }
+
+            if (autoPasteEnabled.value && newText.trim()) {
+              await autoPasteCurrentText('segment_final');
             }
 
           } else {
