@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::RwLock;
@@ -125,7 +125,12 @@ impl AppState {
                 // Fallback to mock if no audio device
                 let mock = crate::infrastructure::audio::MockAudioCapture::new();
                 let stt_factory = Arc::new(DefaultSttProviderFactory::new());
-                let service = Arc::new(TranscriptionService::new(Box::new(mock), stt_factory));
+                let microphone_sensitivity = Arc::new(AtomicU8::new(100));
+                let service = Arc::new(TranscriptionService::new_with_microphone_sensitivity(
+                    Box::new(mock),
+                    stt_factory,
+                    microphone_sensitivity,
+                ));
 
                 // Создаем dummy channel для VAD (не будет использоваться с mock)
                 let (vad_tx, vad_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -165,15 +170,17 @@ impl AppState {
 
         // Initialize VAD processor с timeout из конфигурации
         let app_config = AppConfig::default();
+        let microphone_sensitivity = Arc::new(AtomicU8::new(app_config.microphone_sensitivity));
         let vad = match VadProcessor::new(Some(app_config.vad_silence_timeout_ms), None) {
             Ok(processor) => processor,
             Err(e) => {
                 log::error!("Failed to initialize VAD: {}. Proceeding without VAD.", e);
                 // Fallback: use system audio without VAD
                 let stt_factory = Arc::new(DefaultSttProviderFactory::new());
-                let service = Arc::new(TranscriptionService::new(
+                let service = Arc::new(TranscriptionService::new_with_microphone_sensitivity(
                     Box::new(system_audio),
                     stt_factory,
+                    microphone_sensitivity,
                 ));
 
                 // Создаем dummy channel для VAD (не будет использоваться без VAD)
@@ -216,7 +223,11 @@ impl AppState {
         let (vad_tx, vad_rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Wrap system audio with VAD
-        let mut vad_wrapper = VadCaptureWrapper::new(Box::new(system_audio), vad);
+        let mut vad_wrapper = VadCaptureWrapper::new_with_microphone_sensitivity(
+            Box::new(system_audio),
+            vad,
+            microphone_sensitivity.clone(),
+        );
 
         // Устанавливаем callback который отправляет событие в channel
         let vad_tx_for_cb = vad_tx.clone();
@@ -228,7 +239,11 @@ impl AppState {
         let audio_capture = Box::new(vad_wrapper);
         let stt_factory = Arc::new(DefaultSttProviderFactory::new());
 
-        let transcription_service = Arc::new(TranscriptionService::new(audio_capture, stt_factory));
+        let transcription_service = Arc::new(TranscriptionService::new_with_microphone_sensitivity(
+            audio_capture,
+            stt_factory,
+            microphone_sensitivity,
+        ));
 
         log::info!(
             "AppState initialized with SystemAudioCapture + VAD (timeout: {}ms)",
@@ -880,7 +895,11 @@ impl AppState {
             .map_err(|e| format!("Failed to create VAD processor: {}", e))?;
 
         // Wrap system audio with VAD
-        let mut vad_wrapper = VadCaptureWrapper::new(Box::new(system_audio), vad);
+        let mut vad_wrapper = VadCaptureWrapper::new_with_microphone_sensitivity(
+            Box::new(system_audio),
+            vad,
+            self.transcription_service.microphone_sensitivity_source(),
+        );
 
         // Используем общий VAD timeout sender, чтобы избежать гонок/дедлоков при смене устройства.
         // Receiver слушается единственным обработчиком, а при смене устройства меняется только callback.

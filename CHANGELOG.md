@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.15] - 2026-05-17
+
+### Fixed
+- Fixed premature recording auto-stop when local VAD treated quiet speech as silence while Deepgram was still receiving amplified audio.
+
+---
+
 ## [0.10.14] - 2026-05-16
 
 ### Changed

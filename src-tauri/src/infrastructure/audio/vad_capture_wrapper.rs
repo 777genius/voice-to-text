@@ -1,8 +1,11 @@
 use async_trait::async_trait;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::domain::{AudioCapture, AudioChunk, AudioChunkCallback, AudioConfig, AudioResult};
+use crate::domain::{
+    amplify_i16_samples, limited_microphone_gain, AudioCapture, AudioChunk, AudioChunkCallback,
+    AudioConfig, AudioResult,
+};
 use crate::infrastructure::audio::{VadProcessor, VadResult};
 
 /// Callback type for silence timeout events
@@ -26,6 +29,7 @@ pub struct VadCaptureWrapper {
     audio_config: AudioConfig,
     silence_timeout_triggered: Arc<Mutex<bool>>, // Флаг для одноразового вызова callback
     running: Arc<AtomicBool>,                    // Защита от "хвостов" callback после stop_capture
+    microphone_sensitivity: Arc<AtomicU8>,
 }
 
 impl VadCaptureWrapper {
@@ -35,6 +39,14 @@ impl VadCaptureWrapper {
     /// * `inner` - Underlying audio capture (must output 16kHz mono)
     /// * `vad` - VAD processor instance
     pub fn new(inner: Box<dyn AudioCapture>, vad: VadProcessor) -> Self {
+        Self::new_with_microphone_sensitivity(inner, vad, Arc::new(AtomicU8::new(100)))
+    }
+
+    pub fn new_with_microphone_sensitivity(
+        inner: Box<dyn AudioCapture>,
+        vad: VadProcessor,
+        microphone_sensitivity: Arc<AtomicU8>,
+    ) -> Self {
         Self {
             inner,
             vad: Arc::new(Mutex::new(vad)),
@@ -42,6 +54,7 @@ impl VadCaptureWrapper {
             audio_config: AudioConfig::default(),
             silence_timeout_triggered: Arc::new(Mutex::new(false)),
             running: Arc::new(AtomicBool::new(false)),
+            microphone_sensitivity,
         }
     }
 
@@ -79,6 +92,7 @@ impl AudioCapture for VadCaptureWrapper {
         let silence_callback = self.on_silence_timeout.clone();
         let timeout_flag = self.silence_timeout_triggered.clone();
         let running = self.running.clone();
+        let microphone_sensitivity = self.microphone_sensitivity.clone();
 
         // Frame buffer for accumulating exactly 480 samples (30ms @ 16kHz)
         // Shared between callback invocations via Arc<Mutex<>>
@@ -128,6 +142,19 @@ impl AudioCapture for VadCaptureWrapper {
 
             while buffer.len() >= VAD_FRAME_SIZE {
                 let frame: Vec<i16> = buffer.drain(..VAD_FRAME_SIZE).collect();
+                let raw_max = max_abs_i16(&frame);
+                let sensitivity = microphone_sensitivity.load(Ordering::Relaxed);
+                let vad_gain = limited_microphone_gain(sensitivity, raw_max);
+                let vad_frame = if (vad_gain - 1.0).abs() < f32::EPSILON {
+                    frame.clone()
+                } else {
+                    amplify_i16_samples(&frame, vad_gain)
+                };
+                let vad_max = if (vad_gain - 1.0).abs() < f32::EPSILON {
+                    raw_max
+                } else {
+                    max_abs_i16(&vad_frame)
+                };
 
                 // Run VAD on this frame (защита от poisoned mutex)
                 let mut vad_guard = match vad.lock() {
@@ -140,7 +167,7 @@ impl AudioCapture for VadCaptureWrapper {
                     }
                 };
 
-                let vad_result = match vad_guard.process_samples(&frame) {
+                let vad_result = match vad_guard.process_samples(&vad_frame) {
                     Ok(result) => result,
                     Err(e) => {
                         log::error!("VAD processing error: {}", e);
@@ -183,7 +210,14 @@ impl AudioCapture for VadCaptureWrapper {
                                 }
                             };
 
-                            log::info!("VAD: Silence timeout reached ({}ms)", timeout_ms);
+                            log::info!(
+                                "VAD: Silence timeout reached ({}ms, sensitivity={}%, vad_gain={:.2}x, raw_max={}, vad_max={})",
+                                timeout_ms,
+                                sensitivity,
+                                vad_gain,
+                                raw_max,
+                                vad_max
+                            );
 
                             // Emit silence timeout event ОДИН РАЗ
                             if let Some(ref callback) = silence_callback {
@@ -226,6 +260,14 @@ impl AudioCapture for VadCaptureWrapper {
     fn config(&self) -> AudioConfig {
         self.audio_config.clone()
     }
+}
+
+fn max_abs_i16(samples: &[i16]) -> i32 {
+    samples
+        .iter()
+        .map(|&s| (s as i32).abs())
+        .max()
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

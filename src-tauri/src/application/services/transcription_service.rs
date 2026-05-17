@@ -1,12 +1,13 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, Instant};
 
 use crate::domain::{
-    AudioCapture, AudioConfig, AudioLevelCallback, AudioSpectrumCallback,
-    ConnectionQualityCallback, ErrorCallback, RecordingStatus, SttConfig, SttError, SttProvider,
-    SttProviderFactory, SttProviderType, TranscriptionCallback,
+    amplify_i16_samples, limited_microphone_gain, microphone_sensitivity_gain, AudioCapture,
+    AudioConfig, AudioLevelCallback, AudioSpectrumCallback, ConnectionQualityCallback,
+    ErrorCallback, RecordingStatus, SttConfig, SttError, SttProvider, SttProviderFactory,
+    SttProviderType, TranscriptionCallback,
 };
 
 use crate::application::AudioSpectrumAnalyzer;
@@ -25,7 +26,7 @@ pub struct TranscriptionService {
     stt_provider: Arc<RwLock<Option<Box<dyn SttProvider>>>>,
     status: Arc<RwLock<RecordingStatus>>,
     config: Arc<RwLock<SttConfig>>,
-    microphone_sensitivity: Arc<RwLock<u8>>, // 0-200, default 100
+    microphone_sensitivity: Arc<AtomicU8>, // 0-200, default 100
     inactivity_timer_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>, // таймер для автоочистки соединения
     audio_processor_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>, // обработчик аудио-чанков → STT
 }
@@ -35,13 +36,25 @@ impl TranscriptionService {
         audio_capture: Box<dyn AudioCapture>,
         stt_factory: Arc<dyn SttProviderFactory>,
     ) -> Self {
+        Self::new_with_microphone_sensitivity(
+            audio_capture,
+            stt_factory,
+            Arc::new(AtomicU8::new(100)),
+        )
+    }
+
+    pub fn new_with_microphone_sensitivity(
+        audio_capture: Box<dyn AudioCapture>,
+        stt_factory: Arc<dyn SttProviderFactory>,
+        microphone_sensitivity: Arc<AtomicU8>,
+    ) -> Self {
         Self {
             audio_capture: Arc::new(RwLock::new(audio_capture)),
             stt_factory,
             stt_provider: Arc::new(RwLock::new(None)),
             status: Arc::new(RwLock::new(RecordingStatus::Idle)),
             config: Arc::new(RwLock::new(SttConfig::default())),
-            microphone_sensitivity: Arc::new(RwLock::new(100)), // Default 100% (без усиления)
+            microphone_sensitivity,
             inactivity_timer_task: Arc::new(RwLock::new(None)),
             audio_processor_task: Arc::new(RwLock::new(None)),
         }
@@ -49,7 +62,12 @@ impl TranscriptionService {
 
     /// Update microphone sensitivity (0-200)
     pub async fn set_microphone_sensitivity(&self, sensitivity: u8) {
-        *self.microphone_sensitivity.write().await = sensitivity.min(200);
+        self.microphone_sensitivity
+            .store(sensitivity.min(200), Ordering::Relaxed);
+    }
+
+    pub fn microphone_sensitivity_source(&self) -> Arc<AtomicU8> {
+        self.microphone_sensitivity.clone()
     }
 
     async fn abort_audio_processor_task(&self, reason: &str) {
@@ -406,26 +424,14 @@ impl TranscriptionService {
                 //   0%   = gain 0.0x (полная тишина)
                 //   100% = gain 1.0x (без изменений, как записывает микрофон)
                 //   200% = gain 5.0x (максимальное усиление для тихих микрофонов)
-                let sensitivity = *sensitivity_arc.read().await;
+                let sensitivity = sensitivity_arc.load(Ordering::Relaxed);
 
                 // Простая линейная формула усиления
-                let requested_gain = if sensitivity <= 100 {
-                    // 0-100% → 0.0x-1.0x (приглушение/нормальный уровень)
-                    sensitivity as f32 / 100.0
-                } else {
-                    // 100-200% → 1.0x-5.0x (усиление для тихих микрофонов)
-                    1.0 + (sensitivity - 100) as f32 / 100.0 * 4.0
-                };
+                let requested_gain = microphone_sensitivity_gain(sensitivity);
 
                 // Простой limiter: если requested_gain приводит к клиппингу — уменьшаем gain для этого чанка.
                 // Это сохраняет "помощь" тихим микрофонам и не ухудшает распознавание на нормальных уровнях.
-                let effective_gain = if max_amplitude <= 0 {
-                    requested_gain
-                } else {
-                    let headroom = 0.98_f32;
-                    let limiter_gain = (32767.0 * headroom) / (max_amplitude as f32);
-                    requested_gain.min(limiter_gain)
-                };
+                let effective_gain = limited_microphone_gain(sensitivity, max_amplitude);
 
                 if chunk_count == 1 {
                     if effective_gain < requested_gain {
@@ -446,14 +452,7 @@ impl TranscriptionService {
                 }
 
                 // Применяем gain к каждому сэмплу с защитой от clipping
-                let amplified_data: Vec<i16> = chunk
-                    .data
-                    .iter()
-                    .map(|&sample| {
-                        let amplified = (sample as f32 * effective_gain).clamp(-32767.0, 32767.0);
-                        amplified as i16
-                    })
-                    .collect();
+                let amplified_data = amplify_i16_samples(&chunk.data, effective_gain);
 
                 // Создаем новый чанк с усиленным аудио
                 let amplified_chunk = crate::domain::AudioChunk {
