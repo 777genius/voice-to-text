@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.18] - 2026-05-17
+
+### Fixed
+- Fixed recording hotkey self-triggering during the focus switch that happens before auto-paste starts typing.
+
+---
+
 ## [0.10.17] - 2026-05-17
 
 ### Fixed

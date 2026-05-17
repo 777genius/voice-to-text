@@ -2531,6 +2531,13 @@ pub async fn auto_paste_text(
 ) -> Result<(), String> {
     log::info!("Command: auto_paste_text - text length: {}", text.len());
 
+    let suppression_duration = auto_paste_hotkey_suppression_duration(&text);
+    state.suppress_recording_hotkey_for(suppression_duration);
+    log::debug!(
+        "Recording hotkey suppressed for {}ms during auto-paste",
+        suppression_duration.as_millis()
+    );
+
     // Проверяем разрешение Accessibility на macOS
     #[cfg(target_os = "macos")]
     {
@@ -2568,13 +2575,6 @@ pub async fn auto_paste_text(
     }
 
     // Вставляем текст в blocking thread (enigo работает с синхронными нативными API)
-    let suppression_duration = auto_paste_hotkey_suppression_duration(&text);
-    state.suppress_recording_hotkey_for(suppression_duration);
-    log::debug!(
-        "Recording hotkey suppressed for {}ms during auto-paste",
-        suppression_duration.as_millis()
-    );
-
     let text_clone = text.clone();
     let paste_result = tokio::task::spawn_blocking(move || {
         crate::infrastructure::auto_paste::paste_text(&text_clone)
