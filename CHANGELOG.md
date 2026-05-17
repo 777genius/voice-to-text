@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.24] - 2026-05-17
+
+### Fixed
+- Restored direct Enigo text input for auto-paste, removing the clipboard-based paste path and preserving the user's clipboard contents.
+
+---
+
 ## [0.10.23] - 2026-05-17
 
 ### Fixed
