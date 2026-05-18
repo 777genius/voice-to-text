@@ -4,8 +4,8 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
 
 use crate::domain::{
-    AppConfig, AudioCapture, RecordingStatus, RecordingWindowPosition, SttConnectionCategory,
-    SttError, SttProviderType,
+    AppConfig, AudioCapture, AudioError, RecordingStatus, RecordingWindowPosition,
+    SttConnectionCategory, SttError, SttProviderType,
 };
 use crate::infrastructure::{AuthSession, AuthStore, AuthUser, ConfigStore};
 use crate::presentation::{
@@ -40,6 +40,10 @@ fn error_details_from_stt(err: &SttError) -> Option<TranscriptionErrorDetailsPay
         SttError::Connection(conn) => Some(conn.details.clone().into()),
         _ => None,
     }
+}
+
+fn is_audio_capture_start_failure(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| cause.is::<AudioError>())
 }
 
 fn take_active_transcription_session_id(state: &AppState) -> u64 {
@@ -244,12 +248,12 @@ fn should_show_recording_window_on_processing_hotkey(
         || (!window_visible && !config.hide_recording_window_on_hotkey)
 }
 
-async fn show_recording_window_for_hotkey_start(
+async fn prepare_recording_hotkey_start(
     state: &AppState,
     app_handle: &AppHandle,
     source: &'static str,
     stop_suppression_press_seq: Option<u64>,
-) -> Result<bool, String> {
+) -> AppConfig {
     let config = state.config.read().await.clone();
     let (can_resume_keep_alive, warm_start_expected) =
         get_hotkey_start_connection_hint(state, &config).await;
@@ -263,6 +267,14 @@ async fn show_recording_window_for_hotkey_start(
         suppress_immediate_hotkey_stop_after_start(state, accepted_press_seq);
     }
 
+    config
+}
+
+async fn apply_recording_window_for_hotkey_start(
+    state: &AppState,
+    app_handle: &AppHandle,
+    config: &AppConfig,
+) -> Result<bool, String> {
     let Some(window) = app_handle.get_webview_window("main") else {
         return Err("main window is unavailable".to_string());
     };
@@ -286,6 +298,17 @@ async fn show_recording_window_for_hotkey_start(
     }
 
     Ok(false)
+}
+
+async fn show_recording_window_for_hotkey_start(
+    state: &AppState,
+    app_handle: &AppHandle,
+    source: &'static str,
+    stop_suppression_press_seq: Option<u64>,
+) -> Result<bool, String> {
+    let config =
+        prepare_recording_hotkey_start(state, app_handle, source, stop_suppression_press_seq).await;
+    apply_recording_window_for_hotkey_start(state, app_handle, &config).await
 }
 
 fn emit_recording_window_shown(app_handle: &AppHandle) {
@@ -577,12 +600,11 @@ pub async fn start_recording(
         );
     }
 
-    // Если в настройках выбран "Default" (selected_audio_device=None), то при подключении/смене микрофона
-    // системное устройство по умолчанию может измениться, а захват останется привязанным к старому девайсу.
-    // Поэтому перед стартом записи пересоздаём audio capture по текущему конфигу.
+    // Пересоздаём audio capture только когда выбранное устройство реально изменилось.
+    // Если cached capture сломался/устройство исчезло, ниже будет forced recreate + один retry.
     let selected_device = state.config.read().await.selected_audio_device.clone();
     if let Err(e) = state
-        .recreate_audio_capture_with_device(selected_device, app_handle.clone())
+        .ensure_audio_capture_device(selected_device.clone(), app_handle.clone(), false)
         .await
     {
         let error_msg = format!("Не удалось инициализировать устройство записи: {}", e);
@@ -611,17 +633,61 @@ pub async fn start_recording(
     }
 
     // Start recording (async - WebSocket connect, audio capture start)
-    let start_result = state
+    let mut start_result = state
         .transcription_service
         .start_recording(
-            on_partial,
-            on_final,
-            on_audio_level,
-            on_audio_spectrum,
+            on_partial.clone(),
+            on_final.clone(),
+            on_audio_level.clone(),
+            on_audio_spectrum.clone(),
             on_error.clone(),
             on_connection_quality.clone(),
         )
         .await;
+
+    if let Err(err) = &start_result {
+        if is_audio_capture_start_failure(err) {
+            log::warn!(
+                "[StartLatencyDiag] audio capture start failed; forcing capture recreate and retrying once: {}",
+                err
+            );
+            state.invalidate_audio_capture_device_cache().await;
+
+            match state
+                .ensure_audio_capture_device(selected_device.clone(), app_handle.clone(), true)
+                .await
+            {
+                Ok(_) => {
+                    start_result = state
+                        .transcription_service
+                        .start_recording(
+                            on_partial,
+                            on_final,
+                            on_audio_level,
+                            on_audio_spectrum,
+                            on_error.clone(),
+                            on_connection_quality.clone(),
+                        )
+                        .await;
+                }
+                Err(recreate_err) => {
+                    start_result = Err(anyhow::anyhow!(
+                        "Failed to recreate audio capture after start failure: {}",
+                        recreate_err
+                    ));
+                }
+            }
+        }
+    }
+
+    if start_result
+        .as_ref()
+        .err()
+        .map(is_audio_capture_start_failure)
+        .unwrap_or(false)
+    {
+        state.invalidate_audio_capture_device_cache().await;
+    }
 
     // Важно: если старт провалился ДО того, как провайдер успел вызвать on_error (например, упали на handshake/connection refused),
     // UI останется в Starting и будет ощущение "подключение идёт, но ничего не происходит".
@@ -968,11 +1034,13 @@ where
 mod snapshot_contract_tests {
     use super::{
         auto_paste_text_can_trigger_recording_hotkey, calculate_recording_window_position,
-        should_hide_recording_window_immediately_on_hotkey_stop,
+        is_audio_capture_start_failure, should_hide_recording_window_immediately_on_hotkey_stop,
         should_ignore_hotkey_stop_after_start, should_show_recording_window_on_processing_hotkey,
         AppConfigSnapshotData, RecordingWindowPlacement, SnapshotEnvelope, SttConfigSnapshotData,
     };
-    use crate::domain::{AppConfig, RecordingWindowPosition, SttProviderType};
+    use crate::domain::{
+        AppConfig, AudioError, RecordingWindowPosition, SttError, SttProviderType,
+    };
     use tauri::{PhysicalPosition, PhysicalSize};
 
     fn assert_absent(json: &str, needles: &[&str]) {
@@ -1061,6 +1129,17 @@ mod snapshot_contract_tests {
             "CmdOrCtrl+Shift+X"
         ));
         assert!(auto_paste_text_can_trigger_recording_hotkey("hello", "H"));
+    }
+
+    #[test]
+    fn start_retry_detects_audio_capture_errors_without_matching_strings() {
+        let audio_err =
+            anyhow::Error::new(AudioError::Capture("simulated start failure".to_string()))
+                .context("Failed to start audio capture");
+        assert!(is_audio_capture_start_failure(&audio_err));
+
+        let stt_err = anyhow::Error::new(SttError::Internal("simulated stt failure".to_string()));
+        assert!(!is_audio_capture_start_failure(&stt_err));
     }
 
     #[cfg(target_os = "macos")]
@@ -1411,13 +1490,13 @@ pub async fn toggle_recording_with_window_internal(
                 window_visible
             );
 
-            show_recording_window_for_hotkey_start(
+            let prepared_config = prepare_recording_hotkey_start(
                 state,
                 &app_handle,
                 "global-hotkey",
                 Some(accepted_press_seq),
             )
-            .await?;
+            .await;
 
             // ВАЖНО: стартуем запись на Rust-стороне.
             // Иначе, когда окно было скрыто, WebView/JS могут быть "усыплены" и не обработать event,
@@ -1440,6 +1519,19 @@ pub async fn toggle_recording_with_window_internal(
                 }
                 return Err(err);
             }
+
+            match apply_recording_window_for_hotkey_start(state, &app_handle, &prepared_config)
+                .await
+            {
+                Ok(_) => {}
+                Err(show_err) => {
+                    log::warn!(
+                        "Recording started, but recording window could not be updated after hotkey start: {}",
+                        show_err
+                    );
+                }
+            }
+
             if !hide_window_on_hotkey {
                 emit_recording_window_shown(&app_handle);
             }
@@ -2419,13 +2511,13 @@ async fn start_recording_after_queued_hotkey_idle(
         config.hide_recording_window_on_hotkey
     );
 
-    show_recording_window_for_hotkey_start(
+    let prepared_config = prepare_recording_hotkey_start(
         state.inner(),
         &app_handle,
         source,
         stop_suppression_press_seq,
     )
-    .await?;
+    .await;
 
     if let Err(err) = start_recording(state.clone(), app_handle.clone()).await {
         if hide_window_on_hotkey {
@@ -2443,6 +2535,18 @@ async fn start_recording_after_queued_hotkey_idle(
             }
         }
         return Err(err);
+    }
+
+    match apply_recording_window_for_hotkey_start(state.inner(), &app_handle, &prepared_config)
+        .await
+    {
+        Ok(_) => {}
+        Err(show_err) => {
+            log::warn!(
+                "Recording started, but recording window could not be updated after queued hotkey start: {}",
+                show_err
+            );
+        }
     }
 
     if !hide_window_on_hotkey {

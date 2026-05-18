@@ -182,7 +182,7 @@ impl TranscriptionService {
             // Возвращаем статус в Idle, чтобы UI мог восстановиться.
             *self.status.write().await = RecordingStatus::Idle;
 
-            return Err(anyhow::anyhow!("Failed to start audio capture: {}", e));
+            return Err(anyhow::Error::new(e).context("Failed to start audio capture"));
         }
 
         let audio_capture_started_after = startup_started_at.elapsed();

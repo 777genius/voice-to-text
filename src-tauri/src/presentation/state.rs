@@ -32,6 +32,24 @@ impl Default for MicrophoneTestState {
     }
 }
 
+fn normalize_audio_capture_device_name(device_name: Option<String>) -> Option<String> {
+    device_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn audio_capture_device_cache_matches(
+    cached_device: &Option<Option<String>>,
+    requested_device: &Option<String>,
+) -> bool {
+    cached_device
+        .as_ref()
+        .map(|active_device| active_device == requested_device)
+        .unwrap_or(false)
+}
+
 /// Global application state managed by Tauri
 ///
 /// This state is shared across all Tauri commands and can be accessed
@@ -150,6 +168,10 @@ pub struct AppState {
     /// Сериализует hotkey toggle, чтобы stop и следующий start не выполнялись параллельно.
     pub recording_hotkey_toggle_guard: Arc<tokio::sync::Mutex<()>>,
 
+    /// Какое устройство сейчас применено к audio capture.
+    /// None снаружи = неизвестно/нужно пересоздать; Some(None) = системный default input.
+    pub active_audio_capture_device: Arc<RwLock<Option<Option<String>>>>,
+
     /// Счётчик сессий записи. Нужен, чтобы маркировать события transcription:* и не смешивать сессии.
     pub transcription_session_seq: AtomicU64,
 
@@ -220,6 +242,7 @@ impl AppState {
                     recording_hotkey_stop_suppression_press_seq: AtomicU64::new(0),
                     recording_start_pending_after_stop: AtomicBool::new(false),
                     recording_hotkey_toggle_guard: Arc::new(tokio::sync::Mutex::new(())),
+                    active_audio_capture_device: Arc::new(RwLock::new(None)),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
                     recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),
@@ -283,6 +306,7 @@ impl AppState {
                     recording_hotkey_stop_suppression_press_seq: AtomicU64::new(0),
                     recording_start_pending_after_stop: AtomicBool::new(false),
                     recording_hotkey_toggle_guard: Arc::new(tokio::sync::Mutex::new(())),
+                    active_audio_capture_device: Arc::new(RwLock::new(Some(None))),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
                     recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),
@@ -360,6 +384,7 @@ impl AppState {
             recording_hotkey_stop_suppression_press_seq: AtomicU64::new(0),
             recording_start_pending_after_stop: AtomicBool::new(false),
             recording_hotkey_toggle_guard: Arc::new(tokio::sync::Mutex::new(())),
+            active_audio_capture_device: Arc::new(RwLock::new(Some(None))),
             transcription_session_seq: AtomicU64::new(0),
             active_transcription_session_id: AtomicU64::new(0),
             recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),
@@ -965,6 +990,44 @@ impl AppState {
         log::info!("VAD timeout handler restarted successfully");
     }
 
+    pub async fn invalidate_audio_capture_device_cache(&self) {
+        *self.active_audio_capture_device.write().await = None;
+    }
+
+    pub async fn ensure_audio_capture_device(
+        &self,
+        device_name: Option<String>,
+        app_handle: tauri::AppHandle,
+        force: bool,
+    ) -> Result<(), String> {
+        let normalized_device_name = normalize_audio_capture_device_name(device_name);
+        let cached_device = self.active_audio_capture_device.read().await.clone();
+
+        if !force && audio_capture_device_cache_matches(&cached_device, &normalized_device_name) {
+            log::debug!(
+                "Audio capture reuse: device unchanged ({:?})",
+                normalized_device_name
+            );
+            return Ok(());
+        }
+
+        if force {
+            log::info!(
+                "Audio capture recreate forced for device: {:?}",
+                normalized_device_name
+            );
+        } else {
+            log::info!(
+                "Audio capture recreate required: cached={:?}, requested={:?}",
+                cached_device,
+                normalized_device_name
+            );
+        }
+
+        self.recreate_audio_capture_with_device(normalized_device_name, app_handle)
+            .await
+    }
+
     /// Пересоздает audio capture с новым устройством (применяет selected_audio_device)
     /// Можно вызывать при старте приложения и при смене устройства в настройках
     pub async fn recreate_audio_capture_with_device(
@@ -972,11 +1035,7 @@ impl AppState {
         device_name: Option<String>,
         app_handle: tauri::AppHandle,
     ) -> Result<(), String> {
-        let normalized_device_name = device_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(ToOwned::to_owned);
+        let normalized_device_name = normalize_audio_capture_device_name(device_name);
 
         log::info!(
             "Recreating audio capture with device: {:?}",
@@ -986,6 +1045,7 @@ impl AppState {
         // Создаем новый SystemAudioCapture с выбранным устройством.
         // Если сохранённое имя устройства устарело или было записано криво, автоматически
         // откатываемся на системный input по умолчанию и очищаем битую привязку в конфиге.
+        let mut effective_device_name = normalized_device_name.clone();
         let system_audio = match SystemAudioCapture::with_device(normalized_device_name.clone()) {
             Ok(capture) => capture,
             Err(AudioError::DeviceNotFound(e)) if normalized_device_name.is_some() => {
@@ -993,6 +1053,7 @@ impl AppState {
                     "Requested audio device is unavailable ({}). Falling back to default input device.",
                     e
                 );
+                effective_device_name = None;
                 self.clear_invalid_selected_audio_device(
                     &app_handle,
                     normalized_device_name.as_deref(),
@@ -1041,12 +1102,14 @@ impl AppState {
             .await
             .map_err(|e| format!("Failed to replace audio capture: {}", e))?;
 
+        *self.active_audio_capture_device.write().await = Some(effective_device_name.clone());
+
         // Handler перезапускать не нужно: receiver остаётся тем же.
         let _ = app_handle;
 
         log::info!(
             "Audio capture recreated successfully with device: {:?}",
-            normalized_device_name
+            effective_device_name
         );
         Ok(())
     }
@@ -1055,5 +1118,53 @@ impl AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{audio_capture_device_cache_matches, normalize_audio_capture_device_name};
+
+    #[test]
+    fn audio_capture_device_cache_reuses_same_explicit_device() {
+        let cached = Some(Some("Studio Mic".to_string()));
+        let requested = Some("Studio Mic".to_string());
+        assert!(audio_capture_device_cache_matches(&cached, &requested));
+    }
+
+    #[test]
+    fn audio_capture_device_cache_reuses_default_device() {
+        let cached = Some(None);
+        let requested = None;
+        assert!(audio_capture_device_cache_matches(&cached, &requested));
+    }
+
+    #[test]
+    fn audio_capture_device_cache_recreates_unknown_or_changed_device() {
+        assert!(!audio_capture_device_cache_matches(
+            &None,
+            &Some("Studio Mic".to_string())
+        ));
+        assert!(!audio_capture_device_cache_matches(
+            &Some(Some("Old Mic".to_string())),
+            &Some("New Mic".to_string())
+        ));
+        assert!(!audio_capture_device_cache_matches(
+            &Some(Some("Old Mic".to_string())),
+            &None
+        ));
+    }
+
+    #[test]
+    fn normalize_audio_capture_device_name_treats_blank_as_default() {
+        assert_eq!(normalize_audio_capture_device_name(None), None);
+        assert_eq!(
+            normalize_audio_capture_device_name(Some("  Studio Mic  ".to_string())),
+            Some("Studio Mic".to_string())
+        );
+        assert_eq!(
+            normalize_audio_capture_device_name(Some("   ".to_string())),
+            None
+        );
     }
 }
