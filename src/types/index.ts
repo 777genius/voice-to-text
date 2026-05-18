@@ -94,6 +94,7 @@ export const EVENT_TRANSCRIPTION_ERROR = 'transcription:error';
 export const EVENT_CONNECTION_QUALITY = 'connection:quality';
 export const EVENT_ERROR = 'app:error';
 export const EVENT_RECORDING_WINDOW_SHOWN = 'recording:window-shown';
+export const EVENT_RECORDING_WINDOW_WILL_HIDE_FOR_HOTKEY_STOP = 'recording:window-will-hide-for-hotkey-stop';
 
 // STT Configuration types
 export enum SttProviderType {

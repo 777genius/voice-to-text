@@ -17,6 +17,8 @@ pub const EVENT_CONNECTION_QUALITY: &str = "connection:quality";
 // UI lifecycle events
 // Важно: это не "focus", потому что main окно на macOS может быть nonactivating NSPanel и не получать фокус.
 pub const EVENT_RECORDING_WINDOW_SHOWN: &str = "recording:window-shown";
+pub const EVENT_RECORDING_WINDOW_WILL_HIDE_FOR_HOTKEY_STOP: &str =
+    "recording:window-will-hide-for-hotkey-stop";
 pub const EVENT_SETTINGS_WINDOW_OPENED: &str = "settings-window-opened";
 pub const EVENT_SETTINGS_FOCUS_UPDATES: &str = "settings:focus-updates";
 pub const EVENT_UPDATE_AVAILABLE: &str = "update:available";

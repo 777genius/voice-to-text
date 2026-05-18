@@ -19,7 +19,11 @@ import AudioVisualizer from './AudioVisualizer.vue';
 import { useUpdater } from '../../composables/useUpdater';
 import { playShowSound, playDoneSound, preloadUiSounds } from '../../utils/sound';
 import { isTauriAvailable } from '../../utils/tauri';
-import { EVENT_RECORDING_WINDOW_SHOWN } from '@/types';
+import {
+  EVENT_RECORDING_WINDOW_SHOWN,
+  EVENT_RECORDING_WINDOW_WILL_HIDE_FOR_HOTKEY_STOP,
+  type RecordingStatusPayload,
+} from '@/types';
 
 // Простая поддержка перетаскивания мышью по шапке
 async function onDragMouseDown(e: MouseEvent) {
@@ -97,9 +101,9 @@ const miniDisplayText = computed(() => {
   }
 
   const latestRecognized =
-    pickLatestSpeechFragment(store.partialText) ||
-    pickLatestSpeechFragment(store.accumulatedText) ||
-    pickLatestSpeechFragment(store.finalText);
+    pickLatestSpeechFragment(store.visiblePartialText) ||
+    pickLatestSpeechFragment(store.visibleAccumulatedText) ||
+    pickLatestSpeechFragment(store.visibleFinalText);
 
   if (latestRecognized) return latestRecognized;
   if (store.isStarting || store.isConnecting) return t('main.connecting');
@@ -116,6 +120,7 @@ let unlistenHotkey: UnlistenFn | null = null;
 let unlistenAutoHide: UnlistenFn | null = null;
 let unlistenStartRequested: UnlistenFn | null = null;
 let unlistenWindowShown: UnlistenFn | null = null;
+let unlistenWindowWillHideForHotkeyStop: UnlistenFn | null = null;
 
 watch(
   () => appConfigStore.playCompletionSound,
@@ -194,6 +199,12 @@ function applyRecordingWindowSize() {
 }
 
 let hideRecordingWindowTimeout: number | null = null;
+let hotkeyStartIntentUntilMs = 0;
+const HOTKEY_START_INTENT_SUPPRESS_HIDE_MS = 5_000;
+
+function hasRecentHotkeyStartIntent() {
+  return Date.now() <= hotkeyStartIntentUntilMs;
+}
 
 function cancelPendingHideRecordingWindow() {
   if (hideRecordingWindowTimeout !== null) {
@@ -216,6 +227,7 @@ function scheduleHideRecordingWindow(reason: string) {
   hideRecordingWindowTimeout = window.setTimeout(async () => {
     hideRecordingWindowTimeout = null;
     try {
+      store.suppressPreviousTranscriptionDisplay(`auto_hide:${reason}`);
       const window = getCurrentWebviewWindow();
       await window.hide();
       console.log(`[AutoHide] Window hidden successfully (${reason})`);
@@ -296,37 +308,65 @@ onMounted(async () => {
     }
   });
 
+  unlistenWindowWillHideForHotkeyStop = await listen(
+    EVENT_RECORDING_WINDOW_WILL_HIDE_FOR_HOTKEY_STOP,
+    () => {
+      store.suppressPreviousTranscriptionDisplay('rust_hotkey_stop_hide');
+    },
+  );
+
   // Слушаем событие нажатия горячей клавиши для записи
   unlistenHotkey = await listen('hotkey:toggle-recording', async () => {
     await handleHotkeyToggle();
   });
 
-  // Слушаем запрос на старт записи (от hotkey через Rust)
-  unlistenStartRequested = await listen('recording:start-requested', async () => {
-    console.log('[Hotkey] Received recording:start-requested');
-    console.log('[Hotkey] store.status =', store.status);
-    console.log('[Hotkey] store.isIdle =', store.isIdle);
-    // Важно: доверяем Rust-стороне, но UI может рассинхронизироваться (особенно когда окно скрыто).
-    // Поэтому сначала сверяемся с backend, а потом решаем можно ли стартовать.
-    const backendStatus = await store.reconcileBackendStatus('start_requested');
-    if (backendStatus && backendStatus !== 'Idle') {
-      console.log('[Hotkey] Skipped - backend not idle:', backendStatus);
-      return;
-    }
-
-    // Гарантируем "чистый лист" перед новым стартом.
-    store.clearText();
+  // Rust сам запускает запись по hotkey. Это событие только отменяет старый auto-hide
+  // и защищает окно от позднего Idle предыдущей сессии во время быстрого restart.
+  unlistenStartRequested = await listen<{
+    source?: string;
+    canResumeKeepAlive?: boolean;
+    warmStartExpected?: boolean;
+  }>('recording:start-requested', async (event) => {
+    hotkeyStartIntentUntilMs = Date.now() + HOTKEY_START_INTENT_SUPPRESS_HIDE_MS;
+    cancelPendingHideRecordingWindow();
+    store.prepareForRustHotkeyStart(
+      Boolean(event.payload?.warmStartExpected ?? event.payload?.canResumeKeepAlive),
+    );
+    console.log('[Hotkey] Rust-owned start requested:', event.payload);
     applyRecordingWindowSize();
-
-    console.log('[Hotkey] Starting recording...');
-    await store.startRecording();
-    console.log('[Hotkey] startRecording completed');
   });
 
   // Слушаем статус для звука и автоскрытия окна при остановке
-  unlistenAutoHide = await listen<{ status: string; stopped_via_hotkey?: boolean }>('recording:status', async (event) => {
+  unlistenAutoHide = await listen<RecordingStatusPayload>('recording:status', async (event) => {
     if (event.payload.status !== 'Idle') {
+      hotkeyStartIntentUntilMs = 0;
       cancelPendingHideRecordingWindow();
+      return;
+    }
+
+    if (hasRecentHotkeyStartIntent()) {
+      console.warn('[AutoHide] Ignoring Idle while Rust-owned hotkey start is pending:', event.payload);
+      return;
+    }
+
+    const payloadSessionId = Number(event.payload.session_id ?? 0);
+    if (
+      payloadSessionId > 0 &&
+      store.sessionId !== null &&
+      payloadSessionId !== store.sessionId
+    ) {
+      console.warn('[AutoHide] Ignoring Idle from stale session:', {
+        payloadSessionId,
+        activeSessionId: store.sessionId,
+      });
+      return;
+    }
+
+    if (payloadSessionId > 0 && payloadSessionId <= store.closedSessionIdFloor) {
+      console.warn('[AutoHide] Ignoring Idle from closed session:', {
+        payloadSessionId,
+        closedFloor: store.closedSessionIdFloor,
+      });
       return;
     }
 
@@ -360,6 +400,9 @@ onUnmounted(() => {
   }
   if (unlistenWindowShown) {
     unlistenWindowShown();
+  }
+  if (unlistenWindowWillHideForHotkeyStop) {
+    unlistenWindowWillHideForHotkeyStop();
   }
   cancelPendingHideRecordingWindow();
 });

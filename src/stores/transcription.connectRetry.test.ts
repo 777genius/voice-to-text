@@ -142,6 +142,51 @@ describe('transcription connect-retry reliability', () => {
     expect(calledShowAuth).toBe(true);
   });
 
+  it('не показывает "Подключение..." для ожидаемого warm-start после hotkey', () => {
+    const store = useTranscriptionStore();
+    store.finalText = 'старый текст';
+    store.accumulatedText = 'старый хвост';
+    store.partialText = 'старый partial';
+
+    store.prepareForRustHotkeyStart(true);
+
+    expect(store.status).toBe('Recording');
+    expect(store.isRecording).toBe(true);
+    expect(store.isStarting).toBe(false);
+    expect(store.isConnecting).toBe(false);
+    expect(store.sessionId).toBeNull();
+    expect(store.hasVisibleTranscriptionText).toBe(false);
+    expect(store.visibleFinalText).toBe('');
+    expect(store.finalText).toBe('старый текст');
+  });
+
+  it('очищает скрытый старый текст, когда приходит новая recording session', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+    store.sessionId = 61;
+    store.finalText = 'старый текст';
+
+    store.prepareForRustHotkeyStart(true);
+    expect(store.finalText).toBe('старый текст');
+    expect(store.hasVisibleTranscriptionText).toBe(false);
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 62, status: 'Recording', stopped_via_hotkey: false },
+    });
+
+    expect(store.sessionId).toBe(62);
+    expect(store.finalText).toBe('');
+    expect(store.hasVisibleTranscriptionText).toBe(false);
+  });
+
   it('не помечает текущую сессию закрытой при reconcile race (Idle во время старта)', async () => {
     const handlers = new Map<string, any>();
 
@@ -754,5 +799,59 @@ describe('transcription connect-retry reliability', () => {
       ['auto_paste_text', { text: 'Старый текст' }],
       ['auto_paste_text', { text: 'Новый текст' }],
     ]);
+  });
+
+  it('не переводит UI в Idle от позднего Idle старой сессии после нового Recording', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 41, status: 'Recording', stopped_via_hotkey: false },
+    });
+    await handlers.get('recording:status')({
+      payload: { session_id: 42, status: 'Recording', stopped_via_hotkey: false },
+    });
+    await handlers.get('recording:status')({
+      payload: { session_id: 41, status: 'Idle', stopped_via_hotkey: true },
+    });
+
+    expect(store.sessionId).toBe(42);
+    expect(store.status).toBe('Recording');
+  });
+
+  it('window_shown reconcile не закрывает новую сессию, если get_recording_status вернул устаревший Idle', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'get_recording_status') return Promise.resolve('Idle');
+      return Promise.resolve(null);
+    });
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 51, status: 'Recording', stopped_via_hotkey: false },
+    });
+
+    await store.reconcileBackendStatus('window_shown');
+
+    expect(store.sessionId).toBe(51);
+    expect(store.closedSessionIdFloor).toBeLessThan(51);
+    expect(store.status).toBe('Recording');
   });
 });

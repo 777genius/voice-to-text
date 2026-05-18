@@ -105,17 +105,46 @@ pub struct AppState {
     /// Нужен из‑за key repeat / случайных двойных срабатываний, которые выглядят как "мигание" окна.
     pub last_recording_hotkey_ms: AtomicU64,
 
+    /// Последний сырой Pressed event до фильтрации.
+    /// Нужен, чтобы отличать удержание клавиши от нового press, если Released потерялся.
+    pub recording_hotkey_last_raw_press_ms: AtomicU64,
+
     /// Latch для глобального hotkey записи.
     /// Не даёт key repeat повторно переключать запись, пока пользователь физически не отпустил клавишу.
     pub recording_hotkey_is_pressed: AtomicBool,
+
+    /// Видели Released после последнего принятого Pressed.
+    /// Позволяет принять быстрое повторное нажатие, не открывая дверь обычному key repeat.
+    pub recording_hotkey_released_since_press: AtomicBool,
+
+    /// Время последнего Released для фильтрации синтетических release/press пар от key repeat.
+    pub recording_hotkey_last_release_ms: AtomicU64,
 
     /// Поколение отложенного сброса hotkey latch.
     /// Нужен, потому что на macOS bare-key shortcuts могут присылать Released между repeat Pressed.
     pub recording_hotkey_release_generation: AtomicU64,
 
+    /// Количество реальных Released events.
+    /// Нужен, чтобы защита stop-after-start не гасила новое нажатие после отпускания клавиши.
+    pub recording_hotkey_release_count: AtomicU64,
+
     /// До какого момента игнорировать Pressed от recording hotkey.
     /// Нужно на время auto-paste, потому что synthetic text input может совпасть с выбранной клавишей.
     pub recording_hotkey_suppressed_until_ms: AtomicU64,
+
+    /// До какого момента не даём hotkey сразу остановить только что запрошенный start.
+    /// Защищает от повторного Pressed/key repeat после быстрого stop -> start.
+    pub recording_hotkey_stop_suppressed_until_ms: AtomicU64,
+
+    /// release_count на момент включения stop-after-start suppression.
+    pub recording_hotkey_stop_suppression_release_count: AtomicU64,
+
+    /// Пользователь нажал hotkey ещё раз, пока предыдущая запись завершалась.
+    /// После перехода Recording -> Processing -> Idle стартуем новую запись автоматически.
+    pub recording_start_pending_after_stop: AtomicBool,
+
+    /// Сериализует hotkey toggle, чтобы stop и следующий start не выполнялись параллельно.
+    pub recording_hotkey_toggle_guard: Arc<tokio::sync::Mutex<()>>,
 
     /// Счётчик сессий записи. Нужен, чтобы маркировать события transcription:* и не смешивать сессии.
     pub transcription_session_seq: AtomicU64,
@@ -175,9 +204,17 @@ impl AppState {
                     auth_refresh_task_guard: Arc::new(tokio::sync::Mutex::new(())),
                     stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
                     last_recording_hotkey_ms: AtomicU64::new(0),
+                    recording_hotkey_last_raw_press_ms: AtomicU64::new(0),
                     recording_hotkey_is_pressed: AtomicBool::new(false),
+                    recording_hotkey_released_since_press: AtomicBool::new(false),
+                    recording_hotkey_last_release_ms: AtomicU64::new(0),
                     recording_hotkey_release_generation: AtomicU64::new(0),
+                    recording_hotkey_release_count: AtomicU64::new(0),
                     recording_hotkey_suppressed_until_ms: AtomicU64::new(0),
+                    recording_hotkey_stop_suppressed_until_ms: AtomicU64::new(0),
+                    recording_hotkey_stop_suppression_release_count: AtomicU64::new(0),
+                    recording_start_pending_after_stop: AtomicBool::new(false),
+                    recording_hotkey_toggle_guard: Arc::new(tokio::sync::Mutex::new(())),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
                     recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),
@@ -229,9 +266,17 @@ impl AppState {
                     auth_refresh_task_guard: Arc::new(tokio::sync::Mutex::new(())),
                     stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
                     last_recording_hotkey_ms: AtomicU64::new(0),
+                    recording_hotkey_last_raw_press_ms: AtomicU64::new(0),
                     recording_hotkey_is_pressed: AtomicBool::new(false),
+                    recording_hotkey_released_since_press: AtomicBool::new(false),
+                    recording_hotkey_last_release_ms: AtomicU64::new(0),
                     recording_hotkey_release_generation: AtomicU64::new(0),
+                    recording_hotkey_release_count: AtomicU64::new(0),
                     recording_hotkey_suppressed_until_ms: AtomicU64::new(0),
+                    recording_hotkey_stop_suppressed_until_ms: AtomicU64::new(0),
+                    recording_hotkey_stop_suppression_release_count: AtomicU64::new(0),
+                    recording_start_pending_after_stop: AtomicBool::new(false),
+                    recording_hotkey_toggle_guard: Arc::new(tokio::sync::Mutex::new(())),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
                     recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),
@@ -297,9 +342,17 @@ impl AppState {
             auth_refresh_task_guard: Arc::new(tokio::sync::Mutex::new(())),
             stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
             last_recording_hotkey_ms: AtomicU64::new(0),
+            recording_hotkey_last_raw_press_ms: AtomicU64::new(0),
             recording_hotkey_is_pressed: AtomicBool::new(false),
+            recording_hotkey_released_since_press: AtomicBool::new(false),
+            recording_hotkey_last_release_ms: AtomicU64::new(0),
             recording_hotkey_release_generation: AtomicU64::new(0),
+            recording_hotkey_release_count: AtomicU64::new(0),
             recording_hotkey_suppressed_until_ms: AtomicU64::new(0),
+            recording_hotkey_stop_suppressed_until_ms: AtomicU64::new(0),
+            recording_hotkey_stop_suppression_release_count: AtomicU64::new(0),
+            recording_start_pending_after_stop: AtomicBool::new(false),
+            recording_hotkey_toggle_guard: Arc::new(tokio::sync::Mutex::new(())),
             transcription_session_seq: AtomicU64::new(0),
             active_transcription_session_id: AtomicU64::new(0),
             recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),

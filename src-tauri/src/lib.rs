@@ -150,6 +150,7 @@ pub fn run() {
             commands::start_recording,
             commands::stop_recording,
             commands::get_recording_status,
+            commands::log_client_event,
             commands::toggle_window,
             commands::toggle_recording_with_window,
             commands::minimize_window,
@@ -364,9 +365,25 @@ pub fn run() {
 
                     if let Some(window) = app_handle.get_webview_window("main") {
                         if let Some(state) = app_handle.try_state::<AppState>() {
-                            state.suppress_recording_window_position_save();
-                        }
-                        if let Err(e) = commands::show_webview_window_on_active_monitor(&window) {
+                            let config = match ConfigStore::load_app_config().await {
+                                Ok(mut config) => {
+                                    config.stt = state.transcription_service.get_config().await;
+                                    *state.config.write().await = config.clone();
+                                    config
+                                }
+                                Err(e) => {
+                                    log::warn!("Failed to load app config for post-update window placement: {}", e);
+                                    state.config.read().await.clone()
+                                }
+                            };
+                            if let Err(e) = commands::show_webview_window_with_recording_config(
+                                &window,
+                                &config,
+                                state.inner(),
+                            ) {
+                                log::error!("Failed to show main window after update: {}", e);
+                            }
+                        } else if let Err(e) = commands::show_webview_window_on_active_monitor(&window) {
                             log::error!("Failed to show main window after update: {}", e);
                         }
                         let _ = window.emit(crate::presentation::events::EVENT_RECORDING_WINDOW_SHOWN, ());
@@ -733,7 +750,19 @@ pub fn run() {
             if let tauri::RunEvent::Reopen { has_visible_windows, .. } = _event {
                 if !has_visible_windows {
                     if let Some(window) = _app.get_webview_window("main") {
-                        if let Err(e) = crate::presentation::commands::show_webview_window_on_active_monitor(&window) {
+                        let show_result = if let Some(state) = _app.try_state::<AppState>() {
+                            let config = tauri::async_runtime::block_on(async {
+                                state.config.read().await.clone()
+                            });
+                            crate::presentation::commands::show_webview_window_with_recording_config(
+                                &window,
+                                &config,
+                                state.inner(),
+                            )
+                        } else {
+                            crate::presentation::commands::show_webview_window_on_active_monitor(&window)
+                        };
+                        if let Err(e) = show_result {
                             log::error!("Failed to show window on Dock click: {}", e);
                             let _ = window.show();
                         }

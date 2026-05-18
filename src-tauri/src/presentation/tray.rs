@@ -5,7 +5,9 @@ use tauri::{
 };
 
 use crate::infrastructure::config_store::ConfigStore;
-use crate::presentation::commands::show_webview_window_on_active_monitor;
+use crate::presentation::commands::{
+    show_webview_window_on_active_monitor, show_webview_window_with_recording_config,
+};
 use crate::presentation::events::{
     EVENT_RECORDING_WINDOW_SHOWN, EVENT_SETTINGS_FOCUS_UPDATES, EVENT_SETTINGS_WINDOW_OPENED,
 };
@@ -29,7 +31,14 @@ async fn show_main_window_from_tray<R: Runtime>(app: &AppHandle<R>) {
         let _ = settings.hide();
     }
     if let Some(window) = app.get_webview_window("main") {
-        if let Err(e) = show_webview_window_on_active_monitor(&window) {
+        let show_result =
+            if let Some(state) = app.try_state::<crate::presentation::state::AppState>() {
+                let config = state.config.read().await.clone();
+                show_webview_window_with_recording_config(&window, &config, state.inner())
+            } else {
+                show_webview_window_on_active_monitor(&window)
+            };
+        if let Err(e) = show_result {
             log::error!("Failed to show window: {}", e);
         }
         let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());

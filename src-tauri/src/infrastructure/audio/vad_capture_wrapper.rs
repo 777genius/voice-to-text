@@ -263,11 +263,7 @@ impl AudioCapture for VadCaptureWrapper {
 }
 
 fn max_abs_i16(samples: &[i16]) -> i32 {
-    samples
-        .iter()
-        .map(|&s| (s as i32).abs())
-        .max()
-        .unwrap_or(0)
+    samples.iter().map(|&s| (s as i32).abs()).max().unwrap_or(0)
 }
 
 #[cfg(test)]

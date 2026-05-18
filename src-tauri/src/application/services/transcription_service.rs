@@ -139,20 +139,46 @@ impl TranscriptionService {
 
         // Проверяем можно ли переиспользовать существующее соединение
         let config = self.config.read().await.clone();
-        let mut can_reuse_connection = {
+        let (mut can_reuse_connection, mut reuse_decision_reason) = {
             let provider_opt = self.stt_provider.read().await;
             if let Some(provider) = provider_opt.as_ref() {
-                provider.supports_keep_alive()
-                    && provider.is_connection_alive()
-                    // Backend-only режим: keep-alive обязателен для UX (частые hotkey-сессии).
-                    && (config.keep_connection_alive || config.provider == SttProviderType::Backend)
+                let supports_keep_alive = provider.supports_keep_alive();
+                let is_connection_alive = provider.is_connection_alive();
+                let keep_alive_enabled =
+                    config.keep_connection_alive || config.provider == SttProviderType::Backend;
+                log::info!(
+                    "[ReconnectDiag] start probe: provider={}, supports_keep_alive={}, is_connection_alive={}, keep_alive_enabled={}, config_keep_alive={}, provider_type={:?}, ttl_secs={}",
+                    provider.name(),
+                    supports_keep_alive,
+                    is_connection_alive,
+                    keep_alive_enabled,
+                    config.keep_connection_alive,
+                    config.provider,
+                    config.keep_alive_ttl_secs
+                );
+                (
+                    supports_keep_alive && is_connection_alive && keep_alive_enabled,
+                    format!(
+                        "provider={}, supports_keep_alive={}, is_connection_alive={}, keep_alive_enabled={}",
+                        provider.name(),
+                        supports_keep_alive,
+                        is_connection_alive,
+                        keep_alive_enabled
+                    ),
+                )
             } else {
-                false
+                log::info!(
+                    "[ReconnectDiag] start probe: no existing provider, provider_type={:?}, config_keep_alive={}, ttl_secs={}",
+                    config.provider,
+                    config.keep_connection_alive,
+                    config.keep_alive_ttl_secs
+                );
+                (false, "no_existing_provider".to_string())
             }
         };
 
         if can_reuse_connection {
-            log::info!("Attempting to reuse existing keep-alive connection");
+            log::info!("[ReconnectDiag] attempting keep-alive resume");
 
             let resume_result = {
                 let mut provider_opt = self.stt_provider.write().await;
@@ -172,13 +198,14 @@ impl TranscriptionService {
 
             match resume_result {
                 Ok(_) => {
-                    log::info!("Successfully resumed keep-alive connection (instant start)");
+                    log::info!("[ReconnectDiag] keep-alive resume succeeded (instant start)");
                 }
                 Err(e) => {
                     log::warn!(
-                        "Failed to resume connection: {} - creating new connection as fallback",
+                        "[ReconnectDiag] keep-alive resume failed: {} - creating new connection as fallback",
                         e
                     );
+                    reuse_decision_reason = format!("resume_failed: {}", e);
 
                     // Важно: перед тем как выкинуть провайдер, аккуратно закрываем его.
                     // Иначе есть риск оставить "висящий" WebSocket/таски в фоне.
@@ -192,7 +219,13 @@ impl TranscriptionService {
 
         if !can_reuse_connection {
             // Создаем новое соединение (обычный старт с задержкой)
-            log::info!("Creating new STT connection");
+            log::info!(
+                "[ReconnectDiag] creating new STT connection: reason={}, provider_type={:?}, config_keep_alive={}, ttl_secs={}",
+                reuse_decision_reason,
+                config.provider,
+                config.keep_connection_alive,
+                config.keep_alive_ttl_secs
+            );
 
             let mut provider = match self.stt_factory.create(&config) {
                 Ok(p) => p,
@@ -731,20 +764,49 @@ impl TranscriptionService {
 
         // Проверяем нужно ли держать соединение открытым (keep-alive режим)
         let config = self.config.read().await.clone();
-        let should_keep_alive = {
+        let (should_keep_alive, keep_alive_reason) = {
             let provider_opt = self.stt_provider.read().await;
             if let Some(provider) = provider_opt.as_ref() {
-                provider.supports_keep_alive()
-                    // Backend-only режим: keep-alive обязателен (иначе пользователь видит "Подключение..." каждый раз).
-                    && (config.keep_connection_alive || config.provider == SttProviderType::Backend)
+                let supports_keep_alive = provider.supports_keep_alive();
+                let keep_alive_enabled =
+                    config.keep_connection_alive || config.provider == SttProviderType::Backend;
+                let is_connection_alive_before_pause = provider.is_connection_alive();
+                log::info!(
+                    "[ReconnectDiag] stop probe: provider={}, supports_keep_alive={}, is_connection_alive_before_pause={}, keep_alive_enabled={}, config_keep_alive={}, provider_type={:?}, ttl_secs={}",
+                    provider.name(),
+                    supports_keep_alive,
+                    is_connection_alive_before_pause,
+                    keep_alive_enabled,
+                    config.keep_connection_alive,
+                    config.provider,
+                    config.keep_alive_ttl_secs
+                );
+                (
+                    supports_keep_alive && keep_alive_enabled,
+                    format!(
+                        "provider={}, supports_keep_alive={}, keep_alive_enabled={}, alive_before_pause={}",
+                        provider.name(),
+                        supports_keep_alive,
+                        keep_alive_enabled,
+                        is_connection_alive_before_pause
+                    ),
+                )
             } else {
-                false
+                log::info!(
+                    "[ReconnectDiag] stop probe: no provider, provider_type={:?}, config_keep_alive={}",
+                    config.provider,
+                    config.keep_connection_alive
+                );
+                (false, "no_provider".to_string())
             }
         };
 
         if should_keep_alive {
             // Ставим на паузу вместо полной остановки (keep-alive режим)
-            log::info!("Pausing STT stream (keep-alive mode)");
+            log::info!(
+                "[ReconnectDiag] pausing STT stream (keep-alive mode): {}",
+                keep_alive_reason
+            );
 
             // Важно: остановка записи должна быть максимально надёжной.
             // Даже если pause_stream фейлится (например, сеть отвалилась в момент stop),
@@ -760,7 +822,7 @@ impl TranscriptionService {
 
             if let Err(e) = provider.pause_stream().await {
                 log::warn!(
-                    "Failed to pause STT stream (keep-alive). Falling back to hard close: {}",
+                    "[ReconnectDiag] failed to pause STT stream (keep-alive). Falling back to hard close: {}",
                     e
                 );
 
@@ -770,6 +832,11 @@ impl TranscriptionService {
                 *self.status.write().await = RecordingStatus::Idle;
                 return Ok("Recording stopped".to_string());
             }
+
+            log::info!(
+                "[ReconnectDiag] pause_stream succeeded: is_connection_alive_after_pause={}",
+                provider.is_connection_alive()
+            );
 
             // Возвращаем провайдера назад в состояние сервиса (keep-alive продолжается)
             *self.stt_provider.write().await = Some(provider);
@@ -897,6 +964,24 @@ impl TranscriptionService {
     /// Get current recording status
     pub async fn get_status(&self) -> RecordingStatus {
         *self.status.read().await
+    }
+
+    /// Returns true when the next start can resume an already-open keep-alive stream
+    /// without creating a new WebSocket connection.
+    pub async fn can_resume_keep_alive_connection(&self) -> bool {
+        let config = self.config.read().await.clone();
+        let keep_alive_enabled =
+            config.keep_connection_alive || config.provider == SttProviderType::Backend;
+
+        if !keep_alive_enabled {
+            return false;
+        }
+
+        let provider_opt = self.stt_provider.read().await;
+        provider_opt
+            .as_ref()
+            .map(|provider| provider.supports_keep_alive() && provider.is_connection_alive())
+            .unwrap_or(false)
     }
 
     /// Update STT configuration

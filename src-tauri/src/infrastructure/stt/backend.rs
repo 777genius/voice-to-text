@@ -216,6 +216,13 @@ impl BackendProvider {
     async fn send_json(&self, msg: &ClientMessage) -> SttResult<()> {
         // Не пытаемся отправить если соединение уже закрыто
         if self.is_closed.load(Ordering::SeqCst) {
+            log::warn!(
+                "[ReconnectDiag] BackendProvider::send_json skipped because connection is closed: msg={:?}, streaming={}, paused={}, has_ws={}",
+                msg,
+                self.is_streaming,
+                self.is_paused,
+                self.ws_write.is_some()
+            );
             return Ok(()); // Игнорируем — соединение уже закрыто
         }
 
@@ -335,6 +342,16 @@ impl SttProvider for BackendProvider {
         on_connection_quality: ConnectionQualityCallback,
     ) -> SttResult<()> {
         log::info!("BackendProvider: Starting stream");
+        log::info!(
+            "[ReconnectDiag] BackendProvider start_stream: streaming={}, paused={}, closed={}, has_ws={}, receiver_finished={:?}, keepalive_finished={:?}, backend_url={}",
+            self.is_streaming,
+            self.is_paused,
+            self.is_closed.load(Ordering::SeqCst),
+            self.ws_write.is_some(),
+            self.receiver_task.as_ref().map(|t| t.is_finished()),
+            self.keepalive_task.as_ref().map(|t| t.is_finished()),
+            self.backend_url
+        );
 
         if self.is_streaming {
             return Err(SttError::Processing("Stream already active".to_string()));
@@ -832,6 +849,12 @@ impl SttProvider for BackendProvider {
 
                     Ok(Message::Close(frame)) => {
                         log::info!("WebSocket closed by server: {:?}", frame);
+                        log::warn!(
+                            "[ReconnectDiag] Backend receiver saw close frame: frame={:?}, local_closed={}, server_error_reported={}",
+                            frame,
+                            is_closed_flag.load(Ordering::SeqCst),
+                            server_error_reported
+                        );
                         // Если мы сами инициировали закрытие или уже отдали точную ServerMessage::Error,
                         // не эмитим вторую обобщённую ошибку в UI.
                         if is_closed_flag.load(Ordering::SeqCst) || server_error_reported {
@@ -892,6 +915,12 @@ impl SttProvider for BackendProvider {
 
                     Err(e) => {
                         log::error!("WebSocket error: {}", e);
+                        log::warn!(
+                            "[ReconnectDiag] Backend receiver saw websocket error: {}, local_closed={}, server_error_reported={}",
+                            e,
+                            is_closed_flag.load(Ordering::SeqCst),
+                            server_error_reported
+                        );
                         // Если закрытие инициировано нами или уже отдали точную ServerMessage::Error,
                         // не поднимаем вторую обобщённую ошибку в UI.
                         if is_closed_flag.load(Ordering::SeqCst) || server_error_reported {
@@ -981,6 +1010,7 @@ impl SttProvider for BackendProvider {
 
             // На выходе из loop всегда помечаем соединение закрытым
             is_closed_flag.store(true, Ordering::SeqCst);
+            log::info!("[ReconnectDiag] Backend receiver task finished, marking connection closed");
             log::info!("Backend receiver task finished");
         });
 
@@ -1012,6 +1042,9 @@ impl SttProvider for BackendProvider {
                     .is_none()
                 {
                     // Пинг не смогли отправить → считаем соединение закрытым/битым.
+                    log::warn!(
+                        "[ReconnectDiag] Backend keepalive ping failed, marking connection closed"
+                    );
                     is_closed_for_keepalive.store(true, Ordering::SeqCst);
                     break;
                 }
@@ -1266,6 +1299,17 @@ impl SttProvider for BackendProvider {
     }
 
     async fn pause_stream(&mut self) -> SttResult<()> {
+        log::info!(
+            "[ReconnectDiag] BackendProvider pause_stream requested: streaming={}, paused={}, closed={}, has_ws={}, sent_chunks={}, sent_bytes={}, receiver_finished={:?}, keepalive_finished={:?}",
+            self.is_streaming,
+            self.is_paused,
+            self.is_closed.load(Ordering::SeqCst),
+            self.ws_write.is_some(),
+            self.sent_chunks_count,
+            self.sent_bytes_total,
+            self.receiver_task.as_ref().map(|t| t.is_finished()),
+            self.keepalive_task.as_ref().map(|t| t.is_finished())
+        );
         if !self.is_streaming {
             return Err(SttError::Processing("Stream not active".to_string()));
         }
@@ -1286,8 +1330,26 @@ impl SttProvider for BackendProvider {
                     let mut guard = ws_write.lock().await;
                     guard.send(Message::Binary(bytes)).await
                 };
-                let _ = tokio::time::timeout(Duration::from_secs(WS_SEND_TIMEOUT_SECS), flush_fut)
-                    .await;
+                match tokio::time::timeout(Duration::from_secs(WS_SEND_TIMEOUT_SECS), flush_fut)
+                    .await
+                {
+                    Ok(Ok(())) => {
+                        log::debug!(
+                            "[ReconnectDiag] BackendProvider pause flushed pending audio batch"
+                        );
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!(
+                            "[ReconnectDiag] BackendProvider pause failed to flush pending audio batch: {}",
+                            e
+                        );
+                    }
+                    Err(_) => {
+                        log::warn!(
+                            "[ReconnectDiag] BackendProvider pause timed out flushing pending audio batch"
+                        );
+                    }
+                }
             }
         }
 
@@ -1299,9 +1361,17 @@ impl SttProvider for BackendProvider {
 
         // Просим сервер форсировать финализацию провайдера (Deepgram Finalize) и ждём
         // backend-level drain ack. На старом backend ack не придёт, поэтому есть bounded fallback.
+        log::info!(
+            "[ReconnectDiag] BackendProvider sending Finalize on pause: closed_before_finalize={}, sent_chunks={}",
+            self.is_closed.load(Ordering::SeqCst),
+            self.sent_chunks_count
+        );
         if let Err(e) = self.send_json(&ClientMessage::Finalize).await {
             let _ = self.finalize_waiter.lock().await.take();
-            log::warn!("BackendProvider: finalize failed on pause: {}", e);
+            log::warn!(
+                "[ReconnectDiag] BackendProvider finalize failed on pause: {}",
+                e
+            );
         } else {
             match tokio::time::timeout(
                 Duration::from_millis(FINALIZE_DRAIN_ACK_TIMEOUT_MS),
@@ -1310,23 +1380,30 @@ impl SttProvider for BackendProvider {
             .await
             {
                 Ok(Ok(done)) => {
-                    log::debug!(
-                        "BackendProvider: finalize drain ack received: status={}, saw_result={}",
+                    log::info!(
+                        "[ReconnectDiag] BackendProvider finalize drain ack received: status={}, saw_result={}",
                         done.status,
                         done.saw_result
                     );
                 }
                 Ok(Err(_)) => {
-                    log::debug!("BackendProvider: finalize drain waiter dropped");
+                    log::warn!("[ReconnectDiag] BackendProvider finalize drain waiter dropped");
                 }
                 Err(_) => {
                     let _ = self.finalize_waiter.lock().await.take();
-                    log::debug!("BackendProvider: finalize drain ack timeout");
+                    log::warn!("[ReconnectDiag] BackendProvider finalize drain ack timeout");
                 }
             }
         }
 
         self.is_paused = true;
+        log::info!(
+            "[ReconnectDiag] BackendProvider pause_stream completed: streaming={}, paused={}, closed={}, alive={}",
+            self.is_streaming,
+            self.is_paused,
+            self.is_closed.load(Ordering::SeqCst),
+            self.is_connection_alive()
+        );
         Ok(())
     }
 
@@ -1337,6 +1414,16 @@ impl SttProvider for BackendProvider {
         on_error: ErrorCallback,
         on_connection_quality: ConnectionQualityCallback,
     ) -> SttResult<()> {
+        log::info!(
+            "[ReconnectDiag] BackendProvider resume_stream requested: streaming={}, paused={}, closed={}, has_ws={}, sent_chunks={}, receiver_finished={:?}, keepalive_finished={:?}",
+            self.is_streaming,
+            self.is_paused,
+            self.is_closed.load(Ordering::SeqCst),
+            self.ws_write.is_some(),
+            self.sent_chunks_count,
+            self.receiver_task.as_ref().map(|t| t.is_finished()),
+            self.keepalive_task.as_ref().map(|t| t.is_finished())
+        );
         if !self.is_streaming {
             return Err(SttError::Processing("Stream not active".to_string()));
         }
@@ -1362,6 +1449,12 @@ impl SttProvider for BackendProvider {
         }
 
         self.is_paused = false;
+        log::info!(
+            "[ReconnectDiag] BackendProvider resume_stream accepted: swap_after_seq={}, closed={}, alive_after_resume={}",
+            self.sent_chunks_count,
+            self.is_closed.load(Ordering::SeqCst),
+            self.is_connection_alive()
+        );
         Ok(())
     }
 
@@ -1379,18 +1472,33 @@ impl SttProvider for BackendProvider {
 
     fn is_connection_alive(&self) -> bool {
         if !(self.is_streaming && self.is_paused && self.ws_write.is_some()) {
+            log::debug!(
+                "[ReconnectDiag] BackendProvider is_connection_alive=false: streaming={}, paused={}, has_ws={}",
+                self.is_streaming,
+                self.is_paused,
+                self.ws_write.is_some()
+            );
             return false;
         }
         if self.is_closed.load(Ordering::SeqCst) {
+            log::debug!(
+                "[ReconnectDiag] BackendProvider is_connection_alive=false: is_closed=true"
+            );
             return false;
         }
         if let Some(task) = &self.receiver_task {
             if task.is_finished() {
+                log::debug!(
+                    "[ReconnectDiag] BackendProvider is_connection_alive=false: receiver_task finished"
+                );
                 return false;
             }
         }
         if let Some(task) = &self.keepalive_task {
             if task.is_finished() {
+                log::debug!(
+                    "[ReconnectDiag] BackendProvider is_connection_alive=false: keepalive_task finished"
+                );
                 return false;
             }
         }

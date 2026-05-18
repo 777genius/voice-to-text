@@ -44,6 +44,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const partialText = ref<string>(''); // текущий промежуточный сегмент
   const accumulatedText = ref<string>(''); // накопленные финализированные сегменты
   const finalText = ref<string>(''); // полный финальный результат (для копирования)
+  const previousTranscriptionDisplaySuppressed = ref<boolean>(false);
+  const suppressedPreviousSessionId = ref<number | null>(null);
   const error = ref<string | null>(null);
   const errorType = ref<TranscriptionErrorPayload['error_type'] | null>(null);
   const lastFinalizedSegmentKey = ref<string>(''); // последний finalized range (для дедупликации)
@@ -213,6 +215,21 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const NO_TRANSCRIPT_AUTO_STOP_MS = 15_000;
   const HOTKEY_STOP_LATE_FINAL_GRACE_MS = 1_500;
 
+  function clientLog(
+    event: string,
+    data: Record<string, unknown> = {},
+    level: 'debug' | 'info' | 'warn' | 'error' = 'info'
+  ): void {
+    if (!isTauriAvailable()) return;
+
+    try {
+      const result = invoke('log_client_event', { level, event, data });
+      if (result && typeof (result as Promise<unknown>).catch === 'function') {
+        void (result as Promise<unknown>).catch(() => undefined);
+      }
+    } catch {}
+  }
+
   // Listeners
   type UnlistenFn = () => void;
   let unlistenPartial: UnlistenFn | null = null;
@@ -241,6 +258,20 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     if (sessionId.value !== null && sessionId.value <= closedSessionIdFloor.value) {
       sessionId.value = null;
     }
+  }
+
+  function isStartOrActiveFlow(): boolean {
+    return (
+      awaitingSessionStart.value ||
+      isConnecting.value ||
+      status.value === RecordingStatus.Starting ||
+      status.value === RecordingStatus.Recording ||
+      status.value === RecordingStatus.Processing
+    );
+  }
+
+  function shouldPreserveActiveFlowOnIdleReconcile(reason: string): boolean {
+    return reason === 'window_shown' || reason === 'start_requested';
   }
 
   function ensureActiveSessionForIncomingEvent(payloadSessionId: number, source: string): boolean {
@@ -276,6 +307,18 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         closedFloor: closedSessionIdFloor.value,
       });
 
+      if (
+        previousTranscriptionDisplaySuppressed.value &&
+        payloadSessionId !== suppressedPreviousSessionId.value
+      ) {
+        console.warn('[STT] Clearing hidden previous transcript on first event from new session:', {
+          source,
+          payloadSessionId,
+          suppressedPreviousSessionId: suppressedPreviousSessionId.value,
+        });
+        resetTranscriptionBuffersForNewSession();
+      }
+
       sessionId.value = payloadSessionId;
       awaitingSessionStart.value = false;
 
@@ -294,12 +337,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
     try {
       const backendStatus = await invoke<RecordingStatus>('get_recording_status');
-      if (backendStatus === RecordingStatus.Idle) {
-        const uiIsStartingFlow =
-          awaitingSessionStart.value ||
-          isConnecting.value ||
-          status.value === RecordingStatus.Starting;
+      const uiLooksLikeStartRace =
+        status.value === RecordingStatus.Starting &&
+        (awaitingSessionStart.value || isConnecting.value || sessionId.value !== null);
+      const preserveActiveFlowOnIdle =
+        backendStatus === RecordingStatus.Idle &&
+        (uiLooksLikeStartRace ||
+          (shouldPreserveActiveFlowOnIdleReconcile(reason) && isStartOrActiveFlow()));
 
+      if (backendStatus === RecordingStatus.Idle) {
         // ВАЖНО: иногда get_recording_status может на короткое время вернуть Idle
         // в момент старта записи (race: окно показано → reconcile успел спросить backend
         // до того как сервис обновил статус, но events уже летят/полетят).
@@ -307,12 +353,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         // Если здесь "жёстко закрыть" сессию (markSessionsClosed) — мы можем случайно
         // пометить ТЕКУЩУЮ session_id как закрытую, и потом навсегда игнорировать
         // recording:status=Recording для этой же сессии → UI залипнет на "Подключение...".
-        if (!uiIsStartingFlow) {
+        if (!preserveActiveFlowOnIdle) {
           // Backend говорит что мы точно не пишем — значит можно жёстко закрыть последнюю сессию,
           // чтобы никакие "поздние" события не вернули UI назад.
           markSessionsClosed(lastSeenSessionId.value, `backend_idle:${reason}`);
         } else {
-          console.warn('[STT] Reconcile: backend reports Idle during start flow, skipping close floor update', {
+          console.warn('[STT] Reconcile: backend reports Idle while UI is in active/start flow, skipping close floor update', {
             reason,
             backendStatus,
             uiStatus: status.value,
@@ -329,8 +375,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         // бэкенд ещё обрабатывает команду (race condition: window_shown эмитится
         // ДО start_recording в toggle_recording_with_window_internal).
         // Пропускаем только перезапись status, cleanup ниже выполняется всегда.
-        if (status.value === RecordingStatus.Starting && backendStatus === RecordingStatus.Idle) {
-          console.warn('[STT] Reconcile: keeping Starting (backend reports Idle, likely race with start_recording)');
+        if (preserveActiveFlowOnIdle) {
+          console.warn('[STT] Reconcile: keeping active UI status (backend reports Idle, likely race with Rust-side start)', {
+            reason,
+            backendStatus,
+            uiStatus: status.value,
+            uiSessionId: sessionId.value,
+            closedFloor: closedSessionIdFloor.value,
+            lastSeenSessionId: lastSeenSessionId.value,
+          });
         } else {
           console.warn('[STT] Reconcile status:', {
             reason,
@@ -348,11 +401,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       if (backendStatus === RecordingStatus.Idle) {
         // В start-flow не сбрасываем sessionId/awaitingSessionStart — иначе можем
         // "оторвать" UI от реальной записи при гонке статусов.
-        const uiIsStartingFlow =
-          awaitingSessionStart.value ||
-          isConnecting.value ||
-          status.value === RecordingStatus.Starting;
-        if (!uiIsStartingFlow) {
+        if (!preserveActiveFlowOnIdle) {
           sessionId.value = null;
           awaitingSessionStart.value = false;
         }
@@ -401,18 +450,25 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   }
 
   const visibleAccumulatedText = computed(() => {
+    if (previousTranscriptionDisplaySuppressed.value) return '';
     return animatedAccumulatedText.value || accumulatedText.value;
   });
 
   const visiblePartialText = computed(() => {
+    if (previousTranscriptionDisplaySuppressed.value) return '';
     return animatedPartialText.value || partialText.value;
+  });
+
+  const visibleFinalText = computed(() => {
+    if (previousTranscriptionDisplaySuppressed.value) return '';
+    return finalText.value;
   });
 
   const hasVisibleTranscriptionText = computed(() => {
     // В UI обычно показываем final + анимированный accumulated + анимированный partial.
-    // Но на некоторых переходах (или если анимация временно выключена/сброшена) реальные данные могут быть в raw полях.
-    // Поэтому считаем "есть текст" по обоим источникам — так UI-стили не зависят от анимационного слоя.
-    const visible = `${finalText.value} ${visibleAccumulatedText.value} ${visiblePartialText.value}`.trim();
+    // При hotkey restart старые raw buffers могут ещё понадобиться для stop/finalize,
+    // поэтому UI считает только visible-поля.
+    const visible = `${visibleFinalText.value} ${visibleAccumulatedText.value} ${visiblePartialText.value}`.trim();
     return visible.length > 0;
   });
 
@@ -427,7 +483,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const displayText = computed(() => {
     const t = i18n.global.t;
     // Показываем: финальный текст + анимированный накопленный + анимированный промежуточный
-    const final = finalText.value;
+    const final = visibleFinalText.value;
     const accumulated = visibleAccumulatedText.value;
     const partial = visiblePartialText.value;
 
@@ -638,6 +694,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   function clearTranscriptSilenceAutoStop(): void {
     if (transcriptSilenceAutoStopTimer) {
+      clientLog('transcript_silence_auto_stop_cleared', {
+        status: status.value,
+        sessionId: sessionId.value,
+        generation: transcriptSilenceAutoStopGeneration,
+      }, 'debug');
       clearTimeout(transcriptSilenceAutoStopTimer);
       transcriptSilenceAutoStopTimer = null;
     }
@@ -649,6 +710,48 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       clearTimeout(hotkeyStopFinalizeTimer);
       hotkeyStopFinalizeTimer = null;
     }
+  }
+
+  function clearTranscriptionAnimationTimers(): void {
+    if (partialAnimationTimer) {
+      clearInterval(partialAnimationTimer);
+      partialAnimationTimer = null;
+    }
+    if (accumulatedAnimationTimer) {
+      clearInterval(accumulatedAnimationTimer);
+      accumulatedAnimationTimer = null;
+    }
+  }
+
+  function resetTranscriptionBuffersForNewSession(): void {
+    partialText.value = '';
+    accumulatedText.value = '';
+    finalText.value = '';
+    lastFinalizedSegmentKey.value = '';
+    lastSpeechFinalRangeKey.value = '';
+    currentUtteranceStart.value = -1;
+    resetAutoPasteProgress();
+    previousTranscriptionDisplaySuppressed.value = false;
+    suppressedPreviousSessionId.value = null;
+    animatedPartialText.value = '';
+    animatedAccumulatedText.value = '';
+    clearTranscriptionAnimationTimers();
+  }
+
+  function suppressPreviousTranscriptionDisplay(reason = 'window_hide'): void {
+    if (!buildCurrentTranscriptionText() && !hasVisibleTranscriptionText.value) return;
+
+    previousTranscriptionDisplaySuppressed.value = true;
+    suppressedPreviousSessionId.value = sessionId.value;
+    animatedPartialText.value = '';
+    animatedAccumulatedText.value = '';
+    clearTranscriptionAnimationTimers();
+    clientLog('previous_transcript_display_suppressed', {
+      reason,
+      sessionId: sessionId.value,
+      status: status.value,
+      textLength: buildCurrentTranscriptionText().length,
+    }, 'debug');
   }
 
   async function processCurrentTextAfterStop(reason: string): Promise<boolean> {
@@ -701,32 +804,114 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     requireTranscript = true
   ): void {
     if (appConfig.keepRecordingUntilManualStop || status.value !== RecordingStatus.Recording) {
+      clientLog('transcript_silence_auto_stop_not_scheduled', {
+        reason,
+        timeoutMs,
+        requireTranscript,
+        status: status.value,
+        keepRecordingUntilManualStop: appConfig.keepRecordingUntilManualStop,
+      }, 'debug');
       return;
     }
 
     const activeSessionId = sessionId.value;
-    if (!activeSessionId) return;
+    if (!activeSessionId) {
+      clientLog('transcript_silence_auto_stop_not_scheduled', {
+        reason,
+        timeoutMs,
+        requireTranscript,
+        status: status.value,
+        sessionId: activeSessionId,
+        cause: 'missing_session_id',
+      }, 'debug');
+      return;
+    }
 
     if (transcriptSilenceAutoStopTimer) {
       clearTimeout(transcriptSilenceAutoStopTimer);
     }
 
     const generation = ++transcriptSilenceAutoStopGeneration;
+    clientLog('transcript_silence_auto_stop_scheduled', {
+      reason,
+      timeoutMs,
+      requireTranscript,
+      sessionId: activeSessionId,
+      generation,
+      textLength: buildCurrentTranscriptionText().length,
+    }, 'debug');
     transcriptSilenceAutoStopTimer = setTimeout(async () => {
       transcriptSilenceAutoStopTimer = null;
 
-      if (generation !== transcriptSilenceAutoStopGeneration) return;
-      if (appConfig.keepRecordingUntilManualStop) return;
-      if (status.value !== RecordingStatus.Recording) return;
-      if (sessionId.value !== activeSessionId) return;
-      if (requireTranscript && !buildCurrentTranscriptionText()) return;
+      if (generation !== transcriptSilenceAutoStopGeneration) {
+        clientLog('transcript_silence_auto_stop_skipped', {
+          reason,
+          timeoutMs,
+          sessionId: activeSessionId,
+          generation,
+          currentGeneration: transcriptSilenceAutoStopGeneration,
+          cause: 'stale_generation',
+        }, 'debug');
+        return;
+      }
+      if (appConfig.keepRecordingUntilManualStop) {
+        clientLog('transcript_silence_auto_stop_skipped', {
+          reason,
+          timeoutMs,
+          sessionId: activeSessionId,
+          generation,
+          cause: 'manual_stop_only',
+        }, 'debug');
+        return;
+      }
+      if (status.value !== RecordingStatus.Recording) {
+        clientLog('transcript_silence_auto_stop_skipped', {
+          reason,
+          timeoutMs,
+          sessionId: activeSessionId,
+          generation,
+          status: status.value,
+          cause: 'not_recording',
+        }, 'debug');
+        return;
+      }
+      if (sessionId.value !== activeSessionId) {
+        clientLog('transcript_silence_auto_stop_skipped', {
+          reason,
+          timeoutMs,
+          sessionId: activeSessionId,
+          currentSessionId: sessionId.value,
+          generation,
+          cause: 'session_changed',
+        }, 'debug');
+        return;
+      }
+
+      const currentText = buildCurrentTranscriptionText();
+      if (requireTranscript && !currentText) {
+        clientLog('transcript_silence_auto_stop_skipped', {
+          reason,
+          timeoutMs,
+          sessionId: activeSessionId,
+          generation,
+          cause: 'empty_transcript',
+        }, 'debug');
+        return;
+      }
 
       console.log('[STT] Auto-stopping after transcript silence:', {
         reason,
         timeoutMs,
         sessionId: activeSessionId,
       });
-      await stopRecording();
+      clientLog('transcript_silence_auto_stop_triggered', {
+        reason,
+        timeoutMs,
+        sessionId: activeSessionId,
+        generation,
+        textLength: currentText.length,
+      }, 'warn');
+      await stopRecording(`transcript_silence:${reason}`);
     }, timeoutMs);
   }
 
@@ -998,9 +1183,23 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           console.log('Recording status changed:', event.payload);
           const nextStatus = event.payload.status;
           const payloadSessionId = event.payload.session_id;
+          const previousStatus = status.value;
           const isStartLike =
             nextStatus === RecordingStatus.Starting ||
             nextStatus === RecordingStatus.Recording;
+
+          clientLog('recording_status_event_received', {
+            previousStatus,
+            nextStatus,
+            payloadSessionId,
+            activeSessionId: sessionId.value,
+            stoppedViaHotkey: event.payload.stopped_via_hotkey,
+            awaitingSessionStart: awaitingSessionStart.value,
+            isConnecting: isConnecting.value,
+            connectAttempt: connectAttempt.value,
+            connectMaxAttempts: connectMaxAttempts.value,
+            closedSessionIdFloor: closedSessionIdFloor.value,
+          }, 'info');
 
           bumpLastSeenSessionId(payloadSessionId);
 
@@ -1012,15 +1211,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               closedFloor: closedSessionIdFloor.value,
               nextStatus,
             });
+            clientLog('recording_status_event_ignored', {
+              reason: 'closed_session',
+              nextStatus,
+              payloadSessionId,
+              closedSessionIdFloor: closedSessionIdFloor.value,
+            }, 'warn');
             return;
-          }
-
-          // Важно: статус Idle выставляем максимально рано, чтобы UI не мог "залипнуть" в Recording
-          // из-за долгих await внутри обработчика (например copy_to_clipboard) перед автоскрытием окна.
-          //
-          // Для Error так делать нельзя — иначе сломаем suppression во время connect-retry.
-          if (nextStatus === RecordingStatus.Idle) {
-            status.value = RecordingStatus.Idle;
           }
 
           // Звук теперь воспроизводится раньше - в handleHotkeyToggle
@@ -1034,9 +1231,19 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           // Любые Idle/Error от старой сессии здесь ломают UX (окно открыли → а UI внезапно "Idle").
           if (awaitingSessionStart.value) {
             if (!isStartLike) {
+              clientLog('recording_status_event_ignored', {
+                reason: 'awaiting_session_start_non_start_status',
+                nextStatus,
+                payloadSessionId,
+                activeSessionId: sessionId.value,
+              }, 'warn');
               return;
             }
             awaitingSessionStart.value = false;
+            clientLog('recording_session_start_accepted', {
+              nextStatus,
+              payloadSessionId,
+            }, 'info');
           }
 
           // Если пришёл статус НЕ от текущей сессии — игнорируем (особенно важно для позднего Idle).
@@ -1047,7 +1254,21 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               activeSessionId: sessionId.value,
               nextStatus,
             });
+            clientLog('recording_status_event_ignored', {
+              reason: 'stale_session',
+              nextStatus,
+              payloadSessionId,
+              activeSessionId: sessionId.value,
+            }, 'warn');
             return;
+          }
+
+          // Важно: статус Idle выставляем рано, но только после session guards.
+          // Иначе поздний Idle от старой сессии может перевести UI в Idle уже после нового Recording.
+          //
+          // Для Error так делать нельзя — иначе сломаем suppression во время connect-retry.
+          if (nextStatus === RecordingStatus.Idle) {
+            status.value = RecordingStatus.Idle;
           }
 
           // Начало новой сессии: фиксируем sessionId и чистим текст/ошибки.
@@ -1065,31 +1286,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               (status.value !== RecordingStatus.Starting && status.value !== RecordingStatus.Recording))
           ) {
             console.log('Recording starting/started - clearing all text');
-            partialText.value = '';
-            accumulatedText.value = '';
-            finalText.value = '';
-            lastFinalizedSegmentKey.value = '';
-            lastSpeechFinalRangeKey.value = '';
-            currentUtteranceStart.value = -1;
             error.value = null;
             errorType.value = null;
             isDeviceNotFoundError.value = false;
-            resetAutoPasteProgress();
+            resetTranscriptionBuffersForNewSession();
             clearTranscriptSilenceAutoStop();
-
-            // Очищаем анимированный текст
-            animatedPartialText.value = '';
-            animatedAccumulatedText.value = '';
-
-            // Очищаем таймеры анимации
-            if (partialAnimationTimer) {
-              clearInterval(partialAnimationTimer);
-              partialAnimationTimer = null;
-            }
-            if (accumulatedAnimationTimer) {
-              clearInterval(accumulatedAnimationTimer);
-              accumulatedAnimationTimer = null;
-            }
           }
 
           // Если статус стал Idle - обрабатываем текущий текст при ЛЮБОЙ остановке
@@ -1101,6 +1302,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           if (nextStatus === RecordingStatus.Idle) {
             clearTranscriptSilenceAutoStop();
             console.log('🔄 Запись остановлена - обрабатываем текущий текст');
+            clientLog('recording_idle_processing_started', {
+              payloadSessionId,
+              stoppedViaHotkey: event.payload.stopped_via_hotkey,
+              textLength: buildCurrentTranscriptionText().length,
+              previousStatus,
+            }, 'info');
 
             await processCurrentTextAfterStop('idle');
 
@@ -1117,6 +1324,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           // (Раньше ставили Idle, что вызывало мигание "Подключение → Нажмите кнопку → Подключение".)
           if (nextStatus === RecordingStatus.Error && suppressNextErrorStatus) {
             suppressNextErrorStatus = false;
+            clientLog('recording_error_status_suppressed', {
+              reason: 'auth_error_suppression',
+              payloadSessionId,
+              previousStatus,
+            }, 'warn');
             return;
           }
 
@@ -1124,6 +1336,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           // Решение о показе ошибки принимает retry-цикл, чтобы не мигала красная плашка.
           if (nextStatus === RecordingStatus.Error && isConnecting.value) {
             console.warn('[ConnectRetry] Got RecordingStatus.Error during connect attempt - waiting for retry decision');
+            clientLog('recording_error_status_suppressed', {
+              reason: 'connect_retry_active',
+              payloadSessionId,
+              previousStatus,
+              connectAttempt: connectAttempt.value,
+              connectMaxAttempts: connectMaxAttempts.value,
+            }, 'warn');
             return;
           }
 
@@ -1134,11 +1353,24 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             if (current === RecordingStatus.Idle || current === RecordingStatus.Processing) {
               console.warn('[STT] Ignoring background Error status while not recording:', event.payload);
               status.value = RecordingStatus.Idle;
+              clientLog('recording_error_status_suppressed', {
+                reason: 'background_error_after_stop',
+                payloadSessionId,
+                previousStatus,
+                currentStatus: current,
+              }, 'warn');
               return;
             }
           }
 
           status.value = nextStatus;
+          clientLog('recording_status_applied', {
+            previousStatus,
+            nextStatus,
+            payloadSessionId,
+            activeSessionId: sessionId.value,
+            isConnecting: isConnecting.value,
+          }, 'info');
           if (nextStatus === RecordingStatus.Recording) {
             scheduleTranscriptSilenceAutoStop(
               'recording_start',
@@ -1759,27 +1991,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     error.value = null;
     errorType.value = null;
     isDeviceNotFoundError.value = false;
-    partialText.value = '';
-    accumulatedText.value = '';
-    finalText.value = '';
-    lastFinalizedSegmentKey.value = '';
-    lastSpeechFinalRangeKey.value = '';
-    currentUtteranceStart.value = -1;
-    resetAutoPasteProgress();
-
-    // Очищаем анимированный текст
-    animatedPartialText.value = '';
-    animatedAccumulatedText.value = '';
-
-    // Очищаем таймеры анимации
-    if (partialAnimationTimer) {
-      clearInterval(partialAnimationTimer);
-      partialAnimationTimer = null;
-    }
-    if (accumulatedAnimationTimer) {
-      clearInterval(accumulatedAnimationTimer);
-      accumulatedAnimationTimer = null;
-    }
+    resetTranscriptionBuffersForNewSession();
   }
 
   async function startRecordingOnce(): Promise<void> {
@@ -1797,6 +2009,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     lastConnectFailureDetails.value = null;
 
     console.log('[ConnectRetry] Starting recording (single attempt)');
+    clientLog('recording_start_requested', {
+      connectAttempt: connectAttempt.value,
+      connectMaxAttempts: connectMaxAttempts.value,
+      awaitingSessionStart: awaitingSessionStart.value,
+    }, 'info');
     await invoke<string>('start_recording');
   }
 
@@ -1844,6 +2061,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           await waitForConnectOutcome(12_000);
 
           console.log('[ConnectRetry] Connected successfully');
+          clientLog('recording_connect_success', {
+            attempt,
+            maxAttempts: connectMaxAttempts.value,
+            sessionId: sessionId.value,
+            status: status.value,
+          }, 'info');
           rateLimitRetryCount = 0;
           return;
     } catch (err) {
@@ -1916,6 +2139,17 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             isLastAttempt,
             raw,
           });
+          clientLog('recording_connect_attempt_failed', {
+            attempt,
+            maxAttempts: connectMaxAttempts.value,
+            detected,
+            isRetriable,
+            isLastAttempt,
+            isRateLimited,
+            httpStatus,
+            serverCode,
+            raw,
+          }, isLastAttempt || !isRetriable ? 'error' : 'warn');
 
           if (!isRetriable || isLastAttempt) {
             errorType.value = detected;
@@ -1970,18 +2204,48 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     await startRecordingWithRetry(3);
   }
 
+  function prepareForRustHotkeyStart(warmStartExpected = false): void {
+    clearTranscriptSilenceAutoStop();
+    clearHotkeyStopFinalizeTimer();
+
+    suppressPreviousTranscriptionDisplay('rust_hotkey_start');
+    awaitingSessionStart.value = true;
+    sessionId.value = null;
+    status.value = warmStartExpected ? RecordingStatus.Recording : RecordingStatus.Starting;
+    error.value = null;
+    errorType.value = null;
+    isDeviceNotFoundError.value = false;
+    lastConnectFailure.value = null;
+    lastConnectFailureRaw.value = '';
+    lastConnectFailureDetails.value = null;
+  }
+
   async function reconnect(): Promise<void> {
     rateLimitRetryCount = 0;
     await startRecordingWithRetry(3);
   }
 
-  async function stopRecording() {
+  async function stopRecording(reason = 'manual') {
     try {
+      clientLog('recording_stop_requested', {
+        reason,
+        status: status.value,
+        sessionId: sessionId.value,
+        textLength: buildCurrentTranscriptionText().length,
+        isConnecting: isConnecting.value,
+      }, 'warn');
       clearTranscriptSilenceAutoStop();
       status.value = RecordingStatus.Processing;
       const result = await invoke<string>('stop_recording');
       console.log('Recording stopped:', result);
       const backendStatus = await reconcileBackendStatus('stop_recording_success');
+      clientLog('recording_stop_completed', {
+        reason,
+        result,
+        backendStatus,
+        status: status.value,
+        sessionId: sessionId.value,
+      }, 'info');
       if (backendStatus === RecordingStatus.Idle) {
         error.value = null;
         errorType.value = null;
@@ -1989,6 +2253,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     } catch (err) {
       console.error('Failed to stop recording:', err);
       const backendStatus = await reconcileBackendStatus('stop_recording_error');
+      clientLog('recording_stop_failed', {
+        reason,
+        error: String(err),
+        backendStatus,
+        status: status.value,
+        sessionId: sessionId.value,
+      }, 'error');
       if (backendStatus === RecordingStatus.Idle) {
         console.warn('[STT] Stop command failed, but backend is already Idle:', err);
         error.value = null;
@@ -2011,7 +2282,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   async function toggleRecording() {
     if (isRecording.value) {
-      await stopRecording();
+      await stopRecording('manual_toggle');
     } else {
       await startRecording();
     }
@@ -2056,6 +2327,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   return {
     // State
     status,
+    sessionId,
+    closedSessionIdFloor,
     partialText,
     accumulatedText,
     finalText,
@@ -2077,6 +2350,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     isConnecting,
     connectAttempt,
     connectMaxAttempts,
+    visibleFinalText,
+    visibleAccumulatedText,
+    visiblePartialText,
     hasVisibleTranscriptionText,
     isListeningPlaceholder,
     isConnectingPlaceholder,
@@ -2086,6 +2362,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     initialize,
     startRecording,
     reconnect,
+    prepareForRustHotkeyStart,
+    suppressPreviousTranscriptionDisplay,
     openLicenseActivation,
     stopRecording,
     clearText,
