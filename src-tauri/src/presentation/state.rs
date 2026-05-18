@@ -7,6 +7,7 @@ use crate::application::TranscriptionService;
 use crate::domain::{AppConfig, AudioCapture, AudioError, Transcription, UiPreferences};
 use crate::infrastructure::{
     audio::{SystemAudioCapture, VadCaptureWrapper, VadProcessor},
+    auto_paste::AutoPasteTarget,
     AuthSession, AuthStore, AuthStoreData, AuthUser, ConfigStore, DefaultSttProviderFactory,
 };
 
@@ -90,9 +91,9 @@ pub struct AppState {
     /// VAD timeout handler task (для перезапуска при смене устройства)
     vad_handler_task: Arc<RwLock<Option<tauri::async_runtime::JoinHandle<()>>>>,
 
-    /// Bundle ID последнего активного приложения (перед показом VoicetextAI окна)
+    /// Последнее активное приложение (перед показом VoicetextAI окна)
     /// Используется для автоматической вставки текста в правильное окно
-    pub last_focused_app_bundle_id: Arc<RwLock<Option<String>>>,
+    pub last_focused_app_target: Arc<RwLock<Option<AutoPasteTarget>>>,
 
     /// Флаг авторизации пользователя (синхронизируется из frontend)
     /// Используется для определения какое окно показывать при нажатии hotkey
@@ -219,7 +220,7 @@ impl AppState {
                     vad_timeout_tx: vad_tx,
                     vad_timeout_rx: Arc::new(tokio::sync::Mutex::new(vad_rx)),
                     vad_handler_task: Arc::new(RwLock::new(None)),
-                    last_focused_app_bundle_id: Arc::new(RwLock::new(None)),
+                    last_focused_app_target: Arc::new(RwLock::new(None)),
                     is_authenticated: Arc::new(RwLock::new(false)),
                     auth_store: Arc::new(RwLock::new(AuthStoreData {
                         device_id: format!("desktop-{}", uuid::Uuid::new_v4()),
@@ -283,7 +284,7 @@ impl AppState {
                     vad_timeout_tx: vad_tx,
                     vad_timeout_rx: Arc::new(tokio::sync::Mutex::new(vad_rx)),
                     vad_handler_task: Arc::new(RwLock::new(None)),
-                    last_focused_app_bundle_id: Arc::new(RwLock::new(None)),
+                    last_focused_app_target: Arc::new(RwLock::new(None)),
                     is_authenticated: Arc::new(RwLock::new(false)),
                     auth_store: Arc::new(RwLock::new(AuthStoreData {
                         device_id: format!("desktop-{}", uuid::Uuid::new_v4()),
@@ -361,7 +362,7 @@ impl AppState {
             vad_timeout_tx: vad_tx,
             vad_timeout_rx: Arc::new(tokio::sync::Mutex::new(vad_rx)),
             vad_handler_task: Arc::new(RwLock::new(None)),
-            last_focused_app_bundle_id: Arc::new(RwLock::new(None)),
+            last_focused_app_target: Arc::new(RwLock::new(None)),
             is_authenticated: Arc::new(RwLock::new(false)),
             auth_store: Arc::new(RwLock::new(AuthStoreData {
                 device_id: format!("desktop-{}", uuid::Uuid::new_v4()),

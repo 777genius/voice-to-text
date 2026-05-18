@@ -7,7 +7,9 @@ use crate::domain::{
     AppConfig, AudioCapture, AudioError, RecordingStatus, RecordingWindowPosition,
     SttConnectionCategory, SttError, SttProviderType,
 };
-use crate::infrastructure::{AuthSession, AuthStore, AuthUser, ConfigStore};
+use crate::infrastructure::{
+    auto_paste::AutoPasteTarget, AuthSession, AuthStore, AuthUser, ConfigStore,
+};
 use crate::presentation::{
     events::*, AppState, AudioLevelPayload, ConnectionQualityPayload, FinalTranscriptionPayload,
     MicrophoneTestLevelPayload, PartialTranscriptionPayload, RecordingStatusPayload,
@@ -286,13 +288,13 @@ async fn apply_recording_window_for_hotkey_start(
         if window_visible {
             window.hide().map_err(|e| e.to_string())?;
         } else {
-            save_active_app_bundle_id_for_auto_paste(state).await;
+            save_active_app_target_for_auto_paste(state).await;
         }
         return Ok(false);
     }
 
     if config.show_mini_recording_window || !window_visible {
-        save_active_app_bundle_id_for_auto_paste(state).await;
+        save_active_app_target_for_auto_paste(state).await;
         show_webview_window_with_recording_config(&window, &config, state)?;
         return Ok(true);
     }
@@ -838,12 +840,22 @@ fn calculate_recording_window_position(
     }
 }
 
-async fn save_active_app_bundle_id_for_auto_paste(_state: &AppState) {
+async fn save_active_app_target_for_auto_paste(_state: &AppState) {
     #[cfg(target_os = "macos")]
     {
-        if let Some(bundle_id) = crate::infrastructure::auto_paste::get_active_app_bundle_id() {
-            *_state.last_focused_app_bundle_id.write().await = Some(bundle_id.clone());
-            log::info!("Saved last focused app bundle ID: {}", bundle_id);
+        match crate::infrastructure::auto_paste::get_active_app_target() {
+            Some(target) => {
+                *_state.last_focused_app_target.write().await = Some(target.clone());
+                log::info!(
+                    "Saved last focused auto-paste target: bundle_id={}, pid={}",
+                    target.bundle_id,
+                    target.pid
+                );
+            }
+            None => {
+                *_state.last_focused_app_target.write().await = None;
+                log::warn!("No valid frontmost app target saved for auto-paste");
+            }
         }
     }
 }
@@ -1036,11 +1048,13 @@ mod snapshot_contract_tests {
         auto_paste_text_can_trigger_recording_hotkey, calculate_recording_window_position,
         is_audio_capture_start_failure, should_hide_recording_window_immediately_on_hotkey_stop,
         should_ignore_hotkey_stop_after_start, should_show_recording_window_on_processing_hotkey,
-        AppConfigSnapshotData, RecordingWindowPlacement, SnapshotEnvelope, SttConfigSnapshotData,
+        validate_auto_paste_target_for_focus, AppConfigSnapshotData, RecordingWindowPlacement,
+        SnapshotEnvelope, SttConfigSnapshotData,
     };
     use crate::domain::{
         AppConfig, AudioError, RecordingWindowPosition, SttError, SttProviderType,
     };
+    use crate::infrastructure::auto_paste::{AutoPasteTarget, VOICETEXT_BUNDLE_ID};
     use tauri::{PhysicalPosition, PhysicalSize};
 
     fn assert_absent(json: &str, needles: &[&str]) {
@@ -1129,6 +1143,30 @@ mod snapshot_contract_tests {
             "CmdOrCtrl+Shift+X"
         ));
         assert!(auto_paste_text_can_trigger_recording_hotkey("hello", "H"));
+    }
+
+    #[test]
+    fn auto_paste_focus_target_validation_rejects_missing_or_invalid_target() {
+        assert!(validate_auto_paste_target_for_focus(None).is_err());
+        assert!(validate_auto_paste_target_for_focus(Some(AutoPasteTarget {
+            bundle_id: VOICETEXT_BUNDLE_ID.to_string(),
+            pid: 123,
+        }))
+        .is_err());
+        assert!(validate_auto_paste_target_for_focus(Some(AutoPasteTarget {
+            bundle_id: "com.example.App".to_string(),
+            pid: 0,
+        }))
+        .is_err());
+
+        let target = validate_auto_paste_target_for_focus(Some(AutoPasteTarget {
+            bundle_id: "com.example.App".to_string(),
+            pid: 123,
+        }))
+        .expect("target must be valid");
+
+        assert_eq!(target.bundle_id, "com.example.App");
+        assert_eq!(target.pid, 123);
     }
 
     #[test]
@@ -1303,15 +1341,9 @@ pub async fn toggle_window(state: State<'_, AppState>, window: Window) -> Result
     if window.is_visible().map_err(|e| e.to_string())? {
         window.hide().map_err(|e| e.to_string())?;
     } else {
-        // Перед показом окна сохраняем bundle ID текущего активного приложения
+        // Перед показом окна сохраняем текущее активное приложение
         // (чтобы потом вставлять текст в правильное окно)
-        #[cfg(target_os = "macos")]
-        {
-            if let Some(bundle_id) = crate::infrastructure::auto_paste::get_active_app_bundle_id() {
-                *state.last_focused_app_bundle_id.write().await = Some(bundle_id.clone());
-                log::info!("Saved last focused app bundle ID: {}", bundle_id);
-            }
-        }
+        save_active_app_target_for_auto_paste(state.inner()).await;
 
         let config = state.config.read().await.clone();
         show_window_with_recording_config(&window, &config, state.inner())?;
@@ -2480,6 +2512,8 @@ const HOTKEY_PENDING_START_TIMEOUT_MS: u64 = 3_000;
 const HOTKEY_PENDING_START_POLL_MS: u64 = 25;
 const AUTO_PASTE_HOTKEY_SUPPRESSION_MS: u64 = 450;
 const AUTO_PASTE_HOTKEY_SUPPRESSION_TAIL_MS: u64 = 150;
+const AUTO_PASTE_FOCUS_VERIFY_TIMEOUT_MS: u64 = 300;
+const AUTO_PASTE_FOCUS_VERIFY_POLL_MS: u64 = 50;
 
 async fn start_recording_after_queued_hotkey_idle(
     state: State<'_, AppState>,
@@ -2729,6 +2763,52 @@ fn auto_paste_hotkey_suppression_duration(text: &str, hotkey: &str) -> Duration 
     } else {
         Duration::from_millis(0)
     }
+}
+
+fn validate_auto_paste_target_for_focus(
+    target: Option<AutoPasteTarget>,
+) -> Result<AutoPasteTarget, String> {
+    let Some(target) = target else {
+        return Err(
+            "Auto-paste target is unavailable; refusing to paste into current focus".to_string(),
+        );
+    };
+
+    let Some(normalized_target) = crate::infrastructure::auto_paste::normalize_auto_paste_target(
+        target.bundle_id.clone(),
+        target.pid,
+    ) else {
+        return Err(format!(
+            "Invalid auto-paste target; refusing to paste: bundle_id={}, pid={}",
+            target.bundle_id, target.pid
+        ));
+    };
+
+    Ok(normalized_target)
+}
+
+#[cfg(target_os = "macos")]
+async fn wait_for_auto_paste_target_focus(target: &AutoPasteTarget) -> bool {
+    let max_attempts =
+        (AUTO_PASTE_FOCUS_VERIFY_TIMEOUT_MS / AUTO_PASTE_FOCUS_VERIFY_POLL_MS).max(1);
+
+    for attempt in 0..=max_attempts {
+        if crate::infrastructure::auto_paste::frontmost_app_matches_target(target) {
+            log::info!(
+                "Auto-paste target focused: bundle_id={}, pid={}, attempt={}",
+                target.bundle_id,
+                target.pid,
+                attempt
+            );
+            return true;
+        }
+
+        if attempt < max_attempts {
+            tokio::time::sleep(Duration::from_millis(AUTO_PASTE_FOCUS_VERIFY_POLL_MS)).await;
+        }
+    }
+
+    false
 }
 
 #[cfg(target_os = "macos")]
@@ -3778,32 +3858,46 @@ pub async fn auto_paste_text(
         }
     }
 
-    // Получаем bundle ID последнего активного окна
-    let last_bundle_id = state.last_focused_app_bundle_id.read().await.clone();
+    #[cfg(target_os = "macos")]
+    {
+        let target = validate_auto_paste_target_for_focus(
+            state.last_focused_app_target.read().await.clone(),
+        )
+        .map_err(|message| {
+            log::warn!("{}", message);
+            message
+        })?;
 
-    // Не скрываем окно VoicetextAI - оставляем его видимым поверх всех
-    // (оно уже настроено с alwaysOnTop: true в tauri.conf.json)
+        log::info!(
+            "Attempting to focus auto-paste target: bundle_id={}, pid={}",
+            target.bundle_id,
+            target.pid
+        );
 
-    // Если есть сохраненное окно - пытаемся активировать его
-    if let Some(bundle_id) = last_bundle_id {
-        log::info!("Attempting to activate last focused app: {}", bundle_id);
+        crate::infrastructure::auto_paste::activate_running_app_by_target(&target).map_err(
+            |e| {
+                let message = format!(
+                    "Failed to activate auto-paste target without launching app: {}",
+                    e
+                );
+                log::warn!("{}", message);
+                message
+            },
+        )?;
 
-        match crate::infrastructure::auto_paste::activate_app_by_bundle_id(&bundle_id) {
-            Ok(_) => {
-                log::info!("✅ Successfully activated app: {}", bundle_id);
-                // Даем время окну активироваться
-                tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
-            }
-            Err(e) => {
-                log::warn!("⚠️ Failed to activate app '{}': {}", bundle_id, e);
-                log::info!("💡 Will paste to currently active window instead");
-                // Не критично - просто вставим в текущее активное окно
-                // Даем небольшую паузу для переключения фокуса вручную если нужно
-                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-            }
+        if !wait_for_auto_paste_target_focus(&target).await {
+            let message = format!(
+                "Auto-paste target did not become frontmost; refusing to paste: bundle_id={}, pid={}",
+                target.bundle_id, target.pid
+            );
+            log::warn!("{}", message);
+            return Err(message);
         }
-    } else {
-        log::info!("ℹ️ No saved window - pasting to currently active window");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        log::info!("Auto-paste target activation is not required on this platform");
     }
 
     // Вставляем текст в blocking thread (enigo работает с синхронными нативными API)
