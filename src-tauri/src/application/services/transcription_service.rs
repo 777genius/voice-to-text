@@ -137,6 +137,60 @@ impl TranscriptionService {
         self.abort_audio_processor_task("starting a new recording")
             .await;
 
+        let startup_started_at = Instant::now();
+
+        // Канал для передачи аудио чанков из нативного потока в async контекст.
+        //
+        // Важно: канал ДОЛЖЕН быть bounded. Иначе при плохой сети/подвисшем WS send()
+        // мы можем накопить гигабайты аудио в памяти и уронить приложение.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+
+        let dropped_chunks = Arc::new(AtomicUsize::new(0));
+        let dropped_chunks_for_cb = dropped_chunks.clone();
+        let dropped_chunks_for_processor = dropped_chunks.clone();
+        let on_chunk = Arc::new(move |chunk: crate::domain::AudioChunk| {
+            // Не блокируем захват аудио: если бэкенд не успевает принимать,
+            // просто дропаем чанки. Пользователь всё равно в этот момент получит
+            // либо деградацию качества, либо ошибку/остановку записи.
+            match tx.try_send(chunk) {
+                Ok(_) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_chunk)) => {
+                    let dropped = dropped_chunks_for_cb.fetch_add(1, Ordering::Relaxed) + 1;
+                    // Логируем редко, чтобы не спамить.
+                    if dropped == 1 || dropped % 100 == 0 {
+                        log::warn!(
+                            "Audio queue is full (dropping chunks) - likely network/WS stall (dropped so far: {})",
+                            dropped
+                        );
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_chunk)) => {
+                    // Запись уже остановлена/перезапущена - молча игнорируем.
+                }
+            }
+        });
+
+        if let Err(e) = self
+            .audio_capture
+            .write()
+            .await
+            .start_capture(on_chunk.clone())
+            .await
+        {
+            log::error!("Failed to start audio capture: {}", e);
+
+            // Возвращаем статус в Idle, чтобы UI мог восстановиться.
+            *self.status.write().await = RecordingStatus::Idle;
+
+            return Err(anyhow::anyhow!("Failed to start audio capture: {}", e));
+        }
+
+        let audio_capture_started_after = startup_started_at.elapsed();
+        log::info!(
+            "[StartLatencyDiag] audio capture started before STT setup (after_ms={})",
+            audio_capture_started_after.as_millis()
+        );
+
         // Проверяем можно ли переиспользовать существующее соединение
         let config = self.config.read().await.clone();
         let (mut can_reuse_connection, mut reuse_decision_reason) = {
@@ -232,6 +286,7 @@ impl TranscriptionService {
                 Err(e) => {
                     // Важно: статус откатываем СИНХРОННО. Иначе возможен race:
                     // UI уже увидел Starting, но хоткей/команды будут думать что всё ещё Starting и игнорировать toggle.
+                    let _ = self.audio_capture.write().await.stop_capture().await;
                     *self.status.write().await = RecordingStatus::Idle;
                     return Err(anyhow::Error::new(e).context("Failed to create STT provider"));
                 }
@@ -239,6 +294,7 @@ impl TranscriptionService {
 
             if let Err(e) = provider.initialize(&config).await {
                 log::error!("Failed to initialize STT provider: {}", e);
+                let _ = self.audio_capture.write().await.stop_capture().await;
                 *self.status.write().await = RecordingStatus::Idle;
                 let _ = provider.abort().await;
                 return Err(anyhow::Error::new(e).context("Failed to initialize STT provider"));
@@ -253,6 +309,7 @@ impl TranscriptionService {
                 )
                 .await
             {
+                let _ = self.audio_capture.write().await.stop_capture().await;
                 *self.status.write().await = RecordingStatus::Idle;
                 let _ = provider.abort().await;
                 return Err(anyhow::Error::new(e).context("Failed to start STT stream"));
@@ -261,36 +318,9 @@ impl TranscriptionService {
             *self.stt_provider.write().await = Some(provider);
         }
 
-        // Канал для передачи аудио чанков из нативного потока в async контекст.
-        //
-        // Важно: канал ДОЛЖЕН быть bounded. Иначе при плохой сети/подвисшем WS send()
-        // мы можем накопить гигабайты аудио в памяти и уронить приложение.
-        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
-
-        let dropped_chunks = Arc::new(AtomicUsize::new(0));
-        let dropped_chunks_for_cb = dropped_chunks.clone();
-        let dropped_chunks_for_processor = dropped_chunks.clone();
-        let on_chunk = Arc::new(move |chunk: crate::domain::AudioChunk| {
-            // Не блокируем захват аудио: если бэкенд не успевает принимать,
-            // просто дропаем чанки. Пользователь всё равно в этот момент получит
-            // либо деградацию качества, либо ошибку/остановку записи.
-            match tx.try_send(chunk) {
-                Ok(_) => {}
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_chunk)) => {
-                    let dropped = dropped_chunks_for_cb.fetch_add(1, Ordering::Relaxed) + 1;
-                    // Логируем редко, чтобы не спамить.
-                    if dropped == 1 || dropped % 100 == 0 {
-                        log::warn!(
-                            "Audio queue is full (dropping chunks) — likely network/WS stall (dropped so far: {})",
-                            dropped
-                        );
-                    }
-                }
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(_chunk)) => {
-                    // Запись уже остановлена/перезапущена — молча игнорируем.
-                }
-            }
-        });
+        // Теперь STT готов принимать аудио. Переводим статус в Recording до запуска processor task,
+        // чтобы предзахваченные чанки из очереди не были отброшены как "ещё Starting".
+        *self.status.write().await = RecordingStatus::Recording;
 
         // Запускаем обработчик чанков в async контексте
         let stt_provider = self.stt_provider.clone();
@@ -696,34 +726,12 @@ impl TranscriptionService {
 
         *self.audio_processor_task.write().await = Some(processor_task);
 
-        if let Err(e) = self
-            .audio_capture
-            .write()
-            .await
-            .start_capture(on_chunk)
-            .await
-        {
-            log::error!("Failed to start audio capture: {}", e);
-
-            // Возвращаем статус в Idle, чтобы UI мог восстановиться.
-            *self.status.write().await = RecordingStatus::Idle;
-
-            // Если audio capture не стартанул — STT соединение держать смысла нет.
-            if let Some(mut provider) = self.stt_provider.write().await.take() {
-                let _ = provider.abort().await;
-            }
-
-            // И прибиваем processor task, иначе он будет висеть в фоне, ожидая rx.
-            self.abort_audio_processor_task("audio capture failed to start")
-                .await;
-
-            return Err(anyhow::anyhow!("Failed to start audio capture: {}", e));
-        }
-
-        // Только после успешного запуска audio capture устанавливаем статус Recording
-        *self.status.write().await = RecordingStatus::Recording;
-
-        log::info!("Recording started");
+        log::info!(
+            "Recording started (audio_capture_started_after_ms={}, total_start_ms={}, prebuffer_dropped_chunks={})",
+            audio_capture_started_after.as_millis(),
+            startup_started_at.elapsed().as_millis(),
+            dropped_chunks.load(Ordering::Relaxed)
+        );
         Ok(())
     }
 
@@ -1314,10 +1322,59 @@ mod tests {
         }
     }
 
+    struct ImmediateAudioCapture {
+        config: AudioConfig,
+        is_capturing: Arc<AtomicBool>,
+    }
+
+    impl ImmediateAudioCapture {
+        fn new() -> Self {
+            Self {
+                config: AudioConfig::default(),
+                is_capturing: Arc::new(AtomicBool::new(false)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AudioCapture for ImmediateAudioCapture {
+        async fn initialize(&mut self, config: AudioConfig) -> AudioResult<()> {
+            self.config = config;
+            Ok(())
+        }
+
+        async fn start_capture(
+            &mut self,
+            on_chunk: crate::domain::AudioChunkCallback,
+        ) -> AudioResult<()> {
+            self.is_capturing.store(true, Ordering::SeqCst);
+            on_chunk(crate::domain::AudioChunk::new(
+                vec![1200i16; 480],
+                self.config.sample_rate,
+                self.config.channels,
+            ));
+            Ok(())
+        }
+
+        async fn stop_capture(&mut self) -> AudioResult<()> {
+            self.is_capturing.store(false, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_capturing(&self) -> bool {
+            self.is_capturing.load(Ordering::SeqCst)
+        }
+
+        fn config(&self) -> AudioConfig {
+            self.config
+        }
+    }
+
     struct CountingProvider {
         sent_chunks: Arc<AtomicUsize>,
         stopped: Arc<AtomicBool>,
         delay_per_chunk: Duration,
+        start_stream_delay: Duration,
     }
 
     #[async_trait]
@@ -1333,6 +1390,9 @@ mod tests {
             _on_error: ErrorCallback,
             _on_connection_quality: ConnectionQualityCallback,
         ) -> SttResult<()> {
+            if !self.start_stream_delay.is_zero() {
+                tokio::time::sleep(self.start_stream_delay).await;
+            }
             Ok(())
         }
 
@@ -1364,6 +1424,7 @@ mod tests {
         sent_chunks: Arc<AtomicUsize>,
         stopped: Arc<AtomicBool>,
         delay_per_chunk: Duration,
+        start_stream_delay: Duration,
     }
 
     impl SttProviderFactory for CountingFactory {
@@ -1372,8 +1433,59 @@ mod tests {
                 sent_chunks: self.sent_chunks.clone(),
                 stopped: self.stopped.clone(),
                 delay_per_chunk: self.delay_per_chunk,
+                start_stream_delay: self.start_stream_delay,
             }))
         }
+    }
+
+    #[tokio::test]
+    async fn start_recording_preserves_audio_captured_while_stt_stream_starts() {
+        let sent_chunks = Arc::new(AtomicUsize::new(0));
+        let provider_stopped = Arc::new(AtomicBool::new(false));
+
+        let audio_capture = ImmediateAudioCapture::new();
+        let factory = Arc::new(CountingFactory {
+            sent_chunks: sent_chunks.clone(),
+            stopped: provider_stopped.clone(),
+            delay_per_chunk: Duration::from_millis(0),
+            start_stream_delay: Duration::from_millis(75),
+        });
+        let service = TranscriptionService::new(Box::new(audio_capture), factory);
+
+        let on_partial: TranscriptionCallback = Arc::new(|_t| {});
+        let on_final: TranscriptionCallback = Arc::new(|_t| {});
+        let on_audio_level: AudioLevelCallback = Arc::new(|_l| {});
+        let on_audio_spectrum: AudioSpectrumCallback = Arc::new(|_b| {});
+        let on_error: ErrorCallback = Arc::new(|_err: SttError| {});
+        let on_quality: ConnectionQualityCallback = Arc::new(|_q, _r| {});
+
+        service
+            .start_recording(
+                on_partial,
+                on_final,
+                on_audio_level,
+                on_audio_spectrum,
+                on_error,
+                on_quality,
+            )
+            .await
+            .expect("recording must start");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if sent_chunks.load(Ordering::SeqCst) >= 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("prebuffered audio must be sent after STT stream starts");
+
+        service
+            .stop_recording()
+            .await
+            .expect("recording must stop cleanly");
     }
 
     #[tokio::test]
@@ -1388,6 +1500,7 @@ mod tests {
             sent_chunks: sent_chunks.clone(),
             stopped: provider_stopped.clone(),
             delay_per_chunk: Duration::from_millis(5),
+            start_stream_delay: Duration::from_millis(0),
         });
         let service = TranscriptionService::new(Box::new(audio_capture), factory);
 
@@ -1515,7 +1628,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn aborts_provider_if_audio_capture_fails_to_start() {
+    async fn does_not_start_provider_if_audio_capture_fails_to_start() {
         let provider_aborted = Arc::new(AtomicBool::new(false));
 
         let audio_capture = FailingStartAudioCapture::default();
@@ -1544,7 +1657,7 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(service.get_status().await, RecordingStatus::Idle);
-        assert!(provider_aborted.load(Ordering::SeqCst));
+        assert!(!provider_aborted.load(Ordering::SeqCst));
     }
 
     struct FailingStopAudioCapture {
