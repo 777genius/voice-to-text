@@ -108,6 +108,33 @@ fn should_hide_recording_window_immediately_on_hotkey_stop(
     window_visible || config.show_mini_recording_window || config.hide_recording_window_on_hotkey
 }
 
+async fn hide_recording_window_for_hotkey_stop_if_needed(
+    window: &tauri::WebviewWindow,
+    config: &AppConfig,
+    context: &'static str,
+) -> Result<bool, String> {
+    let window_visible = window.is_visible().map_err(|e| e.to_string())?;
+    let should_hide_immediately =
+        should_hide_recording_window_immediately_on_hotkey_stop(config, window_visible);
+    log::info!(
+        "Hotkey stop hide check ({}): window_visible={}, hide_immediately={}, show_mini={}, hide_on_hotkey={}",
+        context,
+        window_visible,
+        should_hide_immediately,
+        config.show_mini_recording_window,
+        config.hide_recording_window_on_hotkey
+    );
+
+    if should_hide_immediately && window_visible {
+        let _ = window.emit(EVENT_RECORDING_WINDOW_WILL_HIDE_FOR_HOTKEY_STOP, ());
+        tokio::time::sleep(Duration::from_millis(HOTKEY_STOP_HIDE_UI_FLUSH_MS)).await;
+        window.hide().map_err(|e| e.to_string())?;
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
 fn emit_recording_start_requested(
     app_handle: &AppHandle,
     source: &'static str,
@@ -132,29 +159,46 @@ fn emit_recording_start_requested(
 
 const HOTKEY_START_STOP_SUPPRESSION_MS: u64 = 1_500;
 const HOTKEY_STOP_HIDE_UI_FLUSH_MS: u64 = 35;
+const HOTKEY_STOP_WAIT_FOR_RECORDING_MS: u64 = 12_000;
+const HOTKEY_STOP_WAIT_POLL_MS: u64 = 25;
+
+#[cfg(target_os = "macos")]
+const HOTKEY_PHYSICAL_RELEASE_POLL_MS: u64 = 16;
+#[cfg(target_os = "macos")]
+const HOTKEY_PHYSICAL_RELEASE_TIMEOUT_MS: u64 = 10_000;
+
+#[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn CGEventSourceKeyState(state_id: i32, key: u16) -> bool;
+}
 
 fn now_ms_u64() -> u64 {
     chrono::Utc::now().timestamp_millis().max(0) as u64
 }
 
-fn suppress_immediate_hotkey_stop_after_start(state: &AppState) {
+fn suppress_immediate_hotkey_stop_after_start(state: &AppState, accepted_press_seq: u64) {
     let until_ms = now_ms_u64().saturating_add(HOTKEY_START_STOP_SUPPRESSION_MS);
-    let release_count = state.recording_hotkey_release_count.load(Ordering::SeqCst);
     state
         .recording_hotkey_stop_suppressed_until_ms
         .store(until_ms, Ordering::SeqCst);
     state
-        .recording_hotkey_stop_suppression_release_count
-        .store(release_count, Ordering::SeqCst);
+        .recording_hotkey_stop_suppression_press_seq
+        .store(accepted_press_seq, Ordering::SeqCst);
+    log::debug!(
+        "[HotkeyDiag] armed start protection: accepted_press_seq={}, until_ms={}",
+        accepted_press_seq,
+        until_ms
+    );
 }
 
 fn should_ignore_hotkey_stop_after_start(
     now_ms: u64,
     suppressed_until_ms: u64,
-    suppression_release_count: u64,
-    current_release_count: u64,
+    suppression_press_seq: u64,
+    current_press_seq: u64,
 ) -> bool {
-    now_ms <= suppressed_until_ms && current_release_count <= suppression_release_count
+    now_ms <= suppressed_until_ms && current_press_seq <= suppression_press_seq
 }
 
 fn should_ignore_immediate_hotkey_stop_after_start(state: &AppState) -> bool {
@@ -165,9 +209,11 @@ fn should_ignore_immediate_hotkey_stop_after_start(state: &AppState) -> bool {
             .recording_hotkey_stop_suppressed_until_ms
             .load(Ordering::SeqCst),
         state
-            .recording_hotkey_stop_suppression_release_count
+            .recording_hotkey_stop_suppression_press_seq
             .load(Ordering::SeqCst),
-        state.recording_hotkey_release_count.load(Ordering::SeqCst),
+        state
+            .recording_hotkey_accepted_press_seq
+            .load(Ordering::SeqCst),
     )
 }
 
@@ -202,6 +248,7 @@ async fn show_recording_window_for_hotkey_start(
     state: &AppState,
     app_handle: &AppHandle,
     source: &'static str,
+    stop_suppression_press_seq: Option<u64>,
 ) -> Result<bool, String> {
     let config = state.config.read().await.clone();
     let (can_resume_keep_alive, warm_start_expected) =
@@ -212,7 +259,9 @@ async fn show_recording_window_for_hotkey_start(
         can_resume_keep_alive,
         warm_start_expected,
     );
-    suppress_immediate_hotkey_stop_after_start(state);
+    if let Some(accepted_press_seq) = stop_suppression_press_seq {
+        suppress_immediate_hotkey_stop_after_start(state, accepted_press_seq);
+    }
 
     let Some(window) = app_handle.get_webview_window("main") else {
         return Err("main window is unavailable".to_string());
@@ -918,7 +967,7 @@ where
 #[cfg(test)]
 mod snapshot_contract_tests {
     use super::{
-        calculate_recording_window_position,
+        auto_paste_text_can_trigger_recording_hotkey, calculate_recording_window_position,
         should_hide_recording_window_immediately_on_hotkey_stop,
         should_ignore_hotkey_stop_after_start, should_show_recording_window_on_processing_hotkey,
         AppConfigSnapshotData, RecordingWindowPlacement, SnapshotEnvelope, SttConfigSnapshotData,
@@ -995,6 +1044,44 @@ mod snapshot_contract_tests {
         assert!(should_ignore_hotkey_stop_after_start(1_100, 2_500, 7, 7));
         assert!(!should_ignore_hotkey_stop_after_start(1_100, 2_500, 7, 8));
         assert!(!should_ignore_hotkey_stop_after_start(2_501, 2_500, 7, 7));
+    }
+
+    #[test]
+    fn auto_paste_suppresses_bare_hotkey_only_when_text_can_type_it() {
+        assert!(!auto_paste_text_can_trigger_recording_hotkey(
+            "обычный текст",
+            "Backquote"
+        ));
+        assert!(auto_paste_text_can_trigger_recording_hotkey(
+            "text with ` code",
+            "Backquote"
+        ));
+        assert!(!auto_paste_text_can_trigger_recording_hotkey(
+            "x",
+            "CmdOrCtrl+Shift+X"
+        ));
+        assert!(auto_paste_text_can_trigger_recording_hotkey("hello", "H"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_physical_release_watch_maps_common_hotkeys() {
+        assert_eq!(
+            super::hotkey_key_code_for_physical_release_watch("Backquote"),
+            Some(50)
+        );
+        assert_eq!(
+            super::hotkey_key_code_for_physical_release_watch("CmdOrCtrl+Backquote"),
+            Some(50)
+        );
+        assert_eq!(
+            super::hotkey_key_code_for_physical_release_watch("CmdOrCtrl+Shift+X"),
+            Some(7)
+        );
+        assert_eq!(
+            super::hotkey_key_code_for_physical_release_watch("Shift+Digit1"),
+            Some(18)
+        );
     }
 
     #[test]
@@ -1193,7 +1280,8 @@ pub async fn toggle_recording_with_window(
             let config = state.config.read().await.clone();
             let hide_window_on_hotkey =
                 config.hide_recording_window_on_hotkey && !config.show_mini_recording_window;
-            show_recording_window_for_hotkey_start(state.inner(), &app_handle, "command").await?;
+            show_recording_window_for_hotkey_start(state.inner(), &app_handle, "command", None)
+                .await?;
 
             // Запускаем запись
             if let Err(err) = start_recording(state.clone(), app_handle.clone()).await {
@@ -1267,7 +1355,7 @@ pub async fn toggle_recording_with_window(
             log::info!("Recording stopped via hotkey");
         }
         RecordingStatus::Processing => {
-            queue_recording_start_after_stop(state.inner(), app_handle.clone(), "command");
+            queue_recording_start_after_stop(state.inner(), app_handle.clone(), "command", None);
         }
         RecordingStatus::Error => {
             log::warn!("Cannot toggle recording - system is in error state");
@@ -1282,6 +1370,8 @@ pub async fn toggle_recording_with_window_internal(
     state: &AppState,
     window: tauri::WebviewWindow,
     app_handle: AppHandle,
+    accepted_press_seq: u64,
+    pre_hidden_for_hotkey_stop: bool,
 ) -> Result<(), String> {
     log::info!("toggle_recording_with_window_internal (from hotkey)");
 
@@ -1321,7 +1411,13 @@ pub async fn toggle_recording_with_window_internal(
                 window_visible
             );
 
-            show_recording_window_for_hotkey_start(state, &app_handle, "global-hotkey").await?;
+            show_recording_window_for_hotkey_start(
+                state,
+                &app_handle,
+                "global-hotkey",
+                Some(accepted_press_seq),
+            )
+            .await?;
 
             // ВАЖНО: стартуем запись на Rust-стороне.
             // Иначе, когда окно было скрыто, WebView/JS могут быть "усыплены" и не обработать event,
@@ -1350,7 +1446,76 @@ pub async fn toggle_recording_with_window_internal(
             log::info!("Recording started via hotkey (internal)");
         }
         RecordingStatus::Starting => {
-            log::debug!("Ignoring toggle - recording is starting");
+            let config = state.config.read().await.clone();
+            let hidden_for_hotkey_stop = if pre_hidden_for_hotkey_stop {
+                log::info!(
+                    "[HotkeyDiag] hotkey stop during Starting: window was already hidden before guard"
+                );
+                true
+            } else {
+                hide_recording_window_for_hotkey_stop_if_needed(
+                    &window,
+                    &config,
+                    "internal-starting",
+                )
+                .await?
+            };
+
+            let deadline = tokio::time::Instant::now()
+                + Duration::from_millis(HOTKEY_STOP_WAIT_FOR_RECORDING_MS);
+            loop {
+                let status = state.transcription_service.get_status().await;
+                match status {
+                    RecordingStatus::Recording => {
+                        if let Err(err) =
+                            stop_recording_and_emit_idle(state, &app_handle, true).await
+                        {
+                            if hidden_for_hotkey_stop {
+                                if let Err(show_err) = show_webview_window_with_recording_config(
+                                    &window, &config, state,
+                                ) {
+                                    log::warn!(
+                                        "Failed to restore recording window after delayed hotkey stop error: {}",
+                                        show_err
+                                    );
+                                } else {
+                                    let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
+                                }
+                            }
+                            return Err(err);
+                        }
+                        log::info!(
+                            "[HotkeyDiag] recording stopped via hotkey after Starting completed"
+                        );
+                        return Ok(());
+                    }
+                    RecordingStatus::Starting => {
+                        if tokio::time::Instant::now() >= deadline {
+                            log::warn!(
+                                "[HotkeyDiag] hotkey stop during Starting timed out waiting for Recording"
+                            );
+                            return Ok(());
+                        }
+                        tokio::time::sleep(Duration::from_millis(HOTKEY_STOP_WAIT_POLL_MS)).await;
+                    }
+                    RecordingStatus::Processing => {
+                        log::info!(
+                            "[HotkeyDiag] hotkey stop during Starting: service is already Processing"
+                        );
+                        return Ok(());
+                    }
+                    RecordingStatus::Idle => {
+                        log::info!("[HotkeyDiag] hotkey stop during Starting: service became Idle");
+                        return Ok(());
+                    }
+                    RecordingStatus::Error => {
+                        log::info!(
+                            "[HotkeyDiag] hotkey stop during Starting: service entered Error"
+                        );
+                        return Ok(());
+                    }
+                }
+            }
         }
         RecordingStatus::Recording => {
             if should_ignore_immediate_hotkey_stop_after_start(state) {
@@ -1360,23 +1525,12 @@ pub async fn toggle_recording_with_window_internal(
                 return Ok(());
             }
             let config = state.config.read().await.clone();
-            let window_visible = window.is_visible().map_err(|e| e.to_string())?;
-            let should_hide_immediately =
-                should_hide_recording_window_immediately_on_hotkey_stop(&config, window_visible);
-            log::info!(
-                "Hotkey stop requested (internal): window_visible={}, hide_immediately={}, show_mini={}, hide_on_hotkey={}",
-                window_visible,
-                should_hide_immediately,
-                config.show_mini_recording_window,
-                config.hide_recording_window_on_hotkey
-            );
-            let hidden_for_hotkey_stop = if should_hide_immediately && window_visible {
-                let _ = window.emit(EVENT_RECORDING_WINDOW_WILL_HIDE_FOR_HOTKEY_STOP, ());
-                tokio::time::sleep(Duration::from_millis(HOTKEY_STOP_HIDE_UI_FLUSH_MS)).await;
-                window.hide().map_err(|e| e.to_string())?;
+            let hidden_for_hotkey_stop = if pre_hidden_for_hotkey_stop {
+                log::info!("[HotkeyDiag] hotkey stop window was already hidden before guard");
                 true
             } else {
-                false
+                hide_recording_window_for_hotkey_stop_if_needed(&window, &config, "internal")
+                    .await?
             };
 
             if let Err(err) = stop_recording_and_emit_idle(state, &app_handle, true).await {
@@ -1398,7 +1552,12 @@ pub async fn toggle_recording_with_window_internal(
             log::info!("Recording stopped via hotkey");
         }
         RecordingStatus::Processing => {
-            queue_recording_start_after_stop(state, app_handle.clone(), "global-hotkey");
+            queue_recording_start_after_stop(
+                state,
+                app_handle.clone(),
+                "global-hotkey",
+                Some(accepted_press_seq),
+            );
         }
         RecordingStatus::Error => {
             log::warn!("Cannot toggle recording - error state");
@@ -2220,7 +2379,8 @@ pub async fn stop_microphone_test(state: State<'_, AppState>) -> Result<Vec<i16>
 const RECORDING_HOTKEY_DEBOUNCE_MS: u64 = 450;
 const RECORDING_HOTKEY_MIN_REPRESS_MS: u64 = 120;
 const RECORDING_HOTKEY_MIN_RELEASE_TO_REPRESS_MS: u64 = 50;
-const RECORDING_HOTKEY_MISSED_RELEASE_ACCEPT_MS: u64 = 900;
+const RECORDING_HOTKEY_MISSED_RELEASE_ACCEPT_MS: u64 = 300;
+const RECORDING_HOTKEY_MISSED_RELEASE_CONFIRM_MS: u64 = 220;
 const RECORDING_HOTKEY_RAW_REPEAT_GAP_MS: u64 = 250;
 const RECORDING_HOTKEY_STALE_PRESS_MS: u64 = 10_000;
 const RECORDING_HOTKEY_RELEASE_GRACE_MS: u64 = 700;
@@ -2233,6 +2393,7 @@ async fn start_recording_after_queued_hotkey_idle(
     state: State<'_, AppState>,
     app_handle: AppHandle,
     source: &'static str,
+    stop_suppression_press_seq: Option<u64>,
 ) -> Result<(), String> {
     let toggle_guard = state.recording_hotkey_toggle_guard.clone();
     let _toggle_guard = toggle_guard.lock().await;
@@ -2258,7 +2419,13 @@ async fn start_recording_after_queued_hotkey_idle(
         config.hide_recording_window_on_hotkey
     );
 
-    show_recording_window_for_hotkey_start(state.inner(), &app_handle, source).await?;
+    show_recording_window_for_hotkey_start(
+        state.inner(),
+        &app_handle,
+        source,
+        stop_suppression_press_seq,
+    )
+    .await?;
 
     if let Err(err) = start_recording(state.clone(), app_handle.clone()).await {
         if hide_window_on_hotkey {
@@ -2285,7 +2452,12 @@ async fn start_recording_after_queued_hotkey_idle(
     Ok(())
 }
 
-fn queue_recording_start_after_stop(state: &AppState, app_handle: AppHandle, source: &'static str) {
+fn queue_recording_start_after_stop(
+    state: &AppState,
+    app_handle: AppHandle,
+    source: &'static str,
+    stop_suppression_press_seq: Option<u64>,
+) {
     if state
         .recording_start_pending_after_stop
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -2361,8 +2533,13 @@ fn queue_recording_start_after_stop(state: &AppState, app_handle: AppHandle, sou
             .recording_start_pending_after_stop
             .store(false, Ordering::SeqCst);
 
-        if let Err(err) =
-            start_recording_after_queued_hotkey_idle(state, app_handle.clone(), source).await
+        if let Err(err) = start_recording_after_queued_hotkey_idle(
+            state,
+            app_handle.clone(),
+            source,
+            stop_suppression_press_seq,
+        )
+        .await
         {
             log::error!(
                 "[HotkeyDiag] queued start after stop failed (source={}): {}",
@@ -2373,8 +2550,487 @@ fn queue_recording_start_after_stop(state: &AppState, app_handle: AppHandle, sou
     });
 }
 
-fn auto_paste_hotkey_suppression_duration(_text: &str) -> Duration {
-    Duration::from_millis(AUTO_PASTE_HOTKEY_SUPPRESSION_MS)
+fn hotkey_modifier_blocks_text_input_trigger(part: &str) -> bool {
+    hotkey_part_is_modifier(part) && !part.eq_ignore_ascii_case("shift")
+}
+
+fn hotkey_part_to_text_char(part: &str, shifted: bool) -> Option<char> {
+    let normalized = part.trim();
+    match normalized {
+        "`" | "Backquote" => Some(if shifted { '~' } else { '`' }),
+        "-" | "Minus" => Some(if shifted { '_' } else { '-' }),
+        "=" | "Equal" => Some(if shifted { '+' } else { '=' }),
+        "[" | "BracketLeft" => Some(if shifted { '{' } else { '[' }),
+        "]" | "BracketRight" => Some(if shifted { '}' } else { ']' }),
+        "\\" | "Backslash" | "IntlBackslash" => Some(if shifted { '|' } else { '\\' }),
+        ";" | "Semicolon" => Some(if shifted { ':' } else { ';' }),
+        "'" | "Quote" => Some(if shifted { '"' } else { '\'' }),
+        "," | "Comma" => Some(if shifted { '<' } else { ',' }),
+        "." | "Period" => Some(if shifted { '>' } else { '.' }),
+        "/" | "Slash" => Some(if shifted { '?' } else { '/' }),
+        "Space" => Some(' '),
+        _ if normalized.len() == 1 => normalized.chars().next(),
+        _ if normalized.starts_with("Digit") && normalized.len() == 6 => normalized.chars().last(),
+        _ => None,
+    }
+}
+
+fn text_contains_hotkey_char(text: &str, hotkey_char: char) -> bool {
+    if hotkey_char.is_ascii_alphabetic() {
+        text.chars().any(|ch| ch.eq_ignore_ascii_case(&hotkey_char))
+    } else {
+        text.contains(hotkey_char)
+    }
+}
+
+fn auto_paste_text_can_trigger_recording_hotkey(text: &str, hotkey: &str) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+
+    let parts: Vec<&str> = hotkey
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return true;
+    }
+
+    if parts
+        .iter()
+        .any(|part| hotkey_modifier_blocks_text_input_trigger(part))
+    {
+        return false;
+    }
+
+    let shifted = parts.iter().any(|part| part.eq_ignore_ascii_case("shift"));
+    let key_parts: Vec<&str> = parts
+        .iter()
+        .copied()
+        .filter(|part| !part.eq_ignore_ascii_case("shift"))
+        .collect();
+    if key_parts.len() != 1 {
+        return true;
+    }
+
+    hotkey_part_to_text_char(key_parts[0], shifted)
+        .map(|hotkey_char| text_contains_hotkey_char(text, hotkey_char))
+        .unwrap_or(true)
+}
+
+fn auto_paste_hotkey_suppression_duration(text: &str, hotkey: &str) -> Duration {
+    if auto_paste_text_can_trigger_recording_hotkey(text, hotkey) {
+        Duration::from_millis(AUTO_PASTE_HOTKEY_SUPPRESSION_MS)
+    } else {
+        Duration::from_millis(0)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_letter_key_code(ch: char) -> Option<u16> {
+    match ch.to_ascii_uppercase() {
+        'A' => Some(0),
+        'S' => Some(1),
+        'D' => Some(2),
+        'F' => Some(3),
+        'H' => Some(4),
+        'G' => Some(5),
+        'Z' => Some(6),
+        'X' => Some(7),
+        'C' => Some(8),
+        'V' => Some(9),
+        'B' => Some(11),
+        'Q' => Some(12),
+        'W' => Some(13),
+        'E' => Some(14),
+        'R' => Some(15),
+        'Y' => Some(16),
+        'T' => Some(17),
+        'O' => Some(31),
+        'U' => Some(32),
+        'I' => Some(34),
+        'P' => Some(35),
+        'L' => Some(37),
+        'J' => Some(38),
+        'K' => Some(40),
+        'N' => Some(45),
+        'M' => Some(46),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_digit_key_code(ch: char) -> Option<u16> {
+    match ch {
+        '1' => Some(18),
+        '2' => Some(19),
+        '3' => Some(20),
+        '4' => Some(21),
+        '6' => Some(22),
+        '5' => Some(23),
+        '9' => Some(25),
+        '7' => Some(26),
+        '8' => Some(28),
+        '0' => Some(29),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_hotkey_part_key_code(part: &str) -> Option<u16> {
+    let normalized = part.trim();
+    let upper = normalized.to_ascii_uppercase();
+
+    if upper.len() == 1 {
+        let ch = upper.chars().next()?;
+        return macos_letter_key_code(ch).or_else(|| macos_digit_key_code(ch));
+    }
+
+    if upper.starts_with("KEY") && upper.len() == 4 {
+        return upper.chars().last().and_then(macos_letter_key_code);
+    }
+
+    if upper.starts_with("DIGIT") && upper.len() == 6 {
+        return upper.chars().last().and_then(macos_digit_key_code);
+    }
+
+    match upper.as_str() {
+        "`" | "BACKQUOTE" | "GRAVE" | "GRAVEACCENT" => Some(50),
+        "-" | "MINUS" => Some(27),
+        "=" | "EQUAL" => Some(24),
+        "[" | "BRACKETLEFT" | "LEFTBRACKET" => Some(33),
+        "]" | "BRACKETRIGHT" | "RIGHTBRACKET" => Some(30),
+        "\\" | "BACKSLASH" | "INTLBACKSLASH" => Some(42),
+        ";" | "SEMICOLON" => Some(41),
+        "'" | "QUOTE" => Some(39),
+        "," | "COMMA" => Some(43),
+        "." | "PERIOD" => Some(47),
+        "/" | "SLASH" => Some(44),
+        "SPACE" => Some(49),
+        "TAB" => Some(48),
+        "ENTER" | "RETURN" => Some(36),
+        "ESC" | "ESCAPE" => Some(53),
+        "BACKSPACE" | "DELETE" => Some(51),
+        "ARROWLEFT" | "LEFT" => Some(123),
+        "ARROWRIGHT" | "RIGHT" => Some(124),
+        "ARROWDOWN" | "DOWN" => Some(125),
+        "ARROWUP" | "UP" => Some(126),
+        "F1" => Some(122),
+        "F2" => Some(120),
+        "F3" => Some(99),
+        "F4" => Some(118),
+        "F5" => Some(96),
+        "F6" => Some(97),
+        "F7" => Some(98),
+        "F8" => Some(100),
+        "F9" => Some(101),
+        "F10" => Some(109),
+        "F11" => Some(103),
+        "F12" => Some(111),
+        _ => None,
+    }
+}
+
+fn hotkey_part_is_modifier(part: &str) -> bool {
+    matches!(
+        part.to_ascii_lowercase().as_str(),
+        "shift"
+            | "cmd"
+            | "command"
+            | "cmdorctrl"
+            | "ctrl"
+            | "control"
+            | "alt"
+            | "option"
+            | "super"
+            | "meta"
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn hotkey_key_code_for_physical_release_watch(hotkey: &str) -> Option<u16> {
+    let key_parts: Vec<&str> = hotkey
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty() && !hotkey_part_is_modifier(part))
+        .collect();
+
+    if key_parts.len() != 1 {
+        return None;
+    }
+
+    macos_hotkey_part_key_code(key_parts[0])
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hotkey_key_code_for_physical_release_watch(_hotkey: &str) -> Option<u16> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn macos_physical_key_is_pressed(key_code: u16) -> bool {
+    unsafe {
+        // 0 is kCGEventSourceStateCombinedSessionState.
+        CGEventSourceKeyState(0, key_code)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn schedule_recording_hotkey_physical_release_watch(
+    app_clone: AppHandle,
+    accepted_press_seq: u64,
+    key_code: Option<u16>,
+) {
+    let Some(key_code) = key_code else {
+        return;
+    };
+
+    let _ = tauri::async_runtime::spawn(async move {
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_millis(HOTKEY_PHYSICAL_RELEASE_TIMEOUT_MS);
+
+        loop {
+            tokio::time::sleep(Duration::from_millis(HOTKEY_PHYSICAL_RELEASE_POLL_MS)).await;
+
+            if macos_physical_key_is_pressed(key_code) {
+                if tokio::time::Instant::now() < deadline {
+                    continue;
+                }
+                log::debug!(
+                    "[HotkeyDiag] physical release watch timed out (accepted_press_seq={}, key_code={})",
+                    accepted_press_seq,
+                    key_code
+                );
+                return;
+            }
+
+            let Some(state) = app_clone.try_state::<crate::presentation::state::AppState>() else {
+                return;
+            };
+            let state_inner = state.inner();
+            let current_press_seq = state_inner
+                .recording_hotkey_accepted_press_seq
+                .load(Ordering::SeqCst);
+            if current_press_seq != accepted_press_seq {
+                log::debug!(
+                    "[HotkeyDiag] physical release watch ignored stale press seq (watch={}, current={})",
+                    accepted_press_seq,
+                    current_press_seq
+                );
+                return;
+            }
+
+            let release_ms = now_ms_u64();
+            state_inner
+                .recording_hotkey_released_since_press
+                .store(true, Ordering::SeqCst);
+            state_inner
+                .recording_hotkey_last_release_ms
+                .store(release_ms, Ordering::SeqCst);
+            state_inner
+                .recording_hotkey_release_generation
+                .fetch_add(1, Ordering::SeqCst);
+            state_inner
+                .recording_hotkey_is_pressed
+                .store(false, Ordering::SeqCst);
+            log::debug!(
+                "[HotkeyDiag] hotkey latch cleared by physical key release watch (accepted_press_seq={}, key_code={})",
+                accepted_press_seq,
+                key_code
+            );
+            return;
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn schedule_recording_hotkey_physical_release_watch(
+    _app_clone: AppHandle,
+    _accepted_press_seq: u64,
+    _key_code: Option<u16>,
+) {
+}
+
+fn accept_recording_hotkey_press(state: &AppState, accepted_at_ms: u64) -> u64 {
+    state
+        .recording_hotkey_released_since_press
+        .store(false, Ordering::SeqCst);
+    state
+        .last_recording_hotkey_ms
+        .store(accepted_at_ms, Ordering::Relaxed);
+    state
+        .recording_hotkey_accepted_press_seq
+        .fetch_add(1, Ordering::SeqCst)
+        + 1
+}
+
+fn dispatch_recording_hotkey_toggle(app_clone: AppHandle, accepted_press_seq: u64) {
+    let _ = tauri::async_runtime::spawn(async move {
+        let Some(state) = app_clone.try_state::<crate::presentation::state::AppState>() else {
+            log::warn!("Recording hotkey ignored: AppState is unavailable");
+            return;
+        };
+        let toggle_guard = state.recording_hotkey_toggle_guard.clone();
+        let mut pre_hidden_for_hotkey_stop = false;
+        let _toggle_guard = match toggle_guard.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                let status_before_lock = state.transcription_service.get_status().await;
+                if status_before_lock == RecordingStatus::Processing {
+                    if let Err(err) = show_recording_window_for_hotkey_start(
+                        state.inner(),
+                        &app_clone,
+                        "global-hotkey-waiting-for-stop",
+                        Some(accepted_press_seq),
+                    )
+                    .await
+                    {
+                        log::warn!(
+                            "[HotkeyDiag] failed to show window while waiting for previous hotkey action: {}",
+                            err
+                        );
+                    }
+                } else if matches!(
+                    status_before_lock,
+                    RecordingStatus::Starting | RecordingStatus::Recording
+                ) {
+                    if should_ignore_immediate_hotkey_stop_after_start(state.inner()) {
+                        log::info!(
+                            "[HotkeyDiag] waiting for hotkey guard; stop hide skipped because start protection is active (status={:?})",
+                            status_before_lock
+                        );
+                    } else if let Some(window) = app_clone.get_webview_window("main") {
+                        let config = state.config.read().await.clone();
+                        match hide_recording_window_for_hotkey_stop_if_needed(
+                            &window,
+                            &config,
+                            "pre-guard-stop",
+                        )
+                        .await
+                        {
+                            Ok(hidden) => {
+                                pre_hidden_for_hotkey_stop = hidden;
+                                log::info!(
+                                    "[HotkeyDiag] waiting for hotkey guard before stop; status={:?}, pre_hidden={}",
+                                    status_before_lock,
+                                    hidden
+                                );
+                            }
+                            Err(err) => {
+                                log::warn!(
+                                    "[HotkeyDiag] failed to pre-hide window while waiting for hotkey guard: {}",
+                                    err
+                                );
+                            }
+                        }
+                    } else {
+                        log::warn!(
+                            "[HotkeyDiag] cannot pre-hide window while waiting for hotkey guard: main window is unavailable"
+                        );
+                    }
+                }
+                toggle_guard.lock().await
+            }
+        };
+
+        let Some(window) = app_clone.get_webview_window("main") else {
+            log::warn!("Recording hotkey ignored: main window is unavailable");
+            return;
+        };
+        let status_before = state.transcription_service.get_status().await;
+        let window_visible = window.is_visible().ok();
+        log::info!(
+            "[HotkeyDiag] dispatch toggle: status_before={:?}, window_visible={:?}, accepted_press_seq={}",
+            status_before,
+            window_visible,
+            accepted_press_seq
+        );
+
+        if let Err(e) = crate::presentation::commands::toggle_recording_with_window_internal(
+            state.inner(),
+            window,
+            app_clone.clone(),
+            accepted_press_seq,
+            pre_hidden_for_hotkey_stop,
+        )
+        .await
+        {
+            log::error!("Failed to toggle recording: {}", e);
+        }
+    });
+}
+
+fn schedule_missed_release_hotkey_confirmation(
+    app_clone: AppHandle,
+    press_generation: u64,
+    candidate_press_ms: u64,
+    previous_accepted_press_ms: u64,
+    raw_press_delta_ms: u64,
+    physical_release_key_code: Option<u16>,
+) {
+    let _ = tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(
+            RECORDING_HOTKEY_MISSED_RELEASE_CONFIRM_MS,
+        ))
+        .await;
+
+        let Some(state) = app_clone.try_state::<crate::presentation::state::AppState>() else {
+            log::warn!(
+                "Recording hotkey missed-release confirmation cancelled: AppState is unavailable"
+            );
+            return;
+        };
+        let state_inner = state.inner();
+
+        let current_press_generation = state_inner
+            .recording_hotkey_press_generation
+            .load(Ordering::SeqCst);
+        let last_raw_press_ms = state_inner
+            .recording_hotkey_last_raw_press_ms
+            .load(Ordering::SeqCst);
+        let last_accepted_press_ms = state_inner.last_recording_hotkey_ms.load(Ordering::Relaxed);
+
+        if current_press_generation != press_generation
+            || last_raw_press_ms != candidate_press_ms
+            || last_accepted_press_ms != previous_accepted_press_ms
+        {
+            log::debug!(
+                "[HotkeyDiag] missed-release confirmation cancelled: press_generation={}->{}, raw_ms={}->{}, accepted_ms={}->{}",
+                press_generation,
+                current_press_generation,
+                candidate_press_ms,
+                last_raw_press_ms,
+                previous_accepted_press_ms,
+                last_accepted_press_ms
+            );
+            return;
+        }
+
+        let delta_ms = candidate_press_ms.saturating_sub(previous_accepted_press_ms);
+        if delta_ms < RECORDING_HOTKEY_MISSED_RELEASE_ACCEPT_MS {
+            log::debug!(
+                "[HotkeyDiag] missed-release confirmation cancelled by debounce: delta_ms={}",
+                delta_ms
+            );
+            return;
+        }
+
+        let accepted_press_seq = accept_recording_hotkey_press(state_inner, candidate_press_ms);
+        schedule_recording_hotkey_physical_release_watch(
+            app_clone.clone(),
+            accepted_press_seq,
+            physical_release_key_code,
+        );
+        log::warn!(
+            "[HotkeyDiag] accepting hotkey press after missed release confirmation (delta_ms={}, raw_press_delta_ms={}, confirm_ms={}, accepted_press_seq={})",
+            delta_ms,
+            raw_press_delta_ms,
+            RECORDING_HOTKEY_MISSED_RELEASE_CONFIRM_MS,
+            accepted_press_seq
+        );
+        dispatch_recording_hotkey_toggle(app_clone, accepted_press_seq);
+    });
 }
 
 /// Register or update recording hotkey
@@ -2537,14 +3193,24 @@ pub async fn register_recording_hotkey(
         .recording_hotkey_stop_suppressed_until_ms
         .store(0, Ordering::SeqCst);
     state
-        .recording_hotkey_release_count
+        .recording_hotkey_accepted_press_seq
         .store(0, Ordering::SeqCst);
     state
-        .recording_hotkey_stop_suppression_release_count
+        .recording_hotkey_stop_suppression_press_seq
+        .store(0, Ordering::SeqCst);
+    state
+        .recording_hotkey_press_generation
         .store(0, Ordering::SeqCst);
     state
         .recording_hotkey_release_generation
         .fetch_add(1, Ordering::SeqCst);
+    let physical_release_key_code = hotkey_key_code_for_physical_release_watch(&effective_hotkey);
+    if let Some(key_code) = physical_release_key_code {
+        log::info!(
+            "[HotkeyDiag] physical release watch enabled for recording hotkey (key_code={})",
+            key_code
+        );
+    }
 
     // Создаем обработчик - вызываем toggle напрямую вместо события.
     // Важно: key repeat может присылать несколько Pressed при удержании клавиши,
@@ -2570,9 +3236,6 @@ pub async fn register_recording_hotkey(
                     state_inner
                         .recording_hotkey_last_release_ms
                         .store(now_ms, Ordering::SeqCst);
-                    state_inner
-                        .recording_hotkey_release_count
-                        .fetch_add(1, Ordering::SeqCst);
                     let release_generation = state_inner
                         .recording_hotkey_release_generation
                         .fetch_add(1, Ordering::SeqCst)
@@ -2629,6 +3292,10 @@ pub async fn register_recording_hotkey(
                 .recording_hotkey_last_raw_press_ms
                 .swap(now_ms, Ordering::SeqCst);
             let raw_press_delta = now_ms.saturating_sub(previous_raw_press_ms);
+            let press_generation = state_inner
+                .recording_hotkey_press_generation
+                .fetch_add(1, Ordering::SeqCst)
+                + 1;
 
             let mut accepted_despite_active_latch = false;
             if state_inner
@@ -2658,12 +3325,21 @@ pub async fn register_recording_hotkey(
                     && delta >= RECORDING_HOTKEY_MISSED_RELEASE_ACCEPT_MS
                     && raw_press_delta >= RECORDING_HOTKEY_RAW_REPEAT_GAP_MS
                 {
-                    accepted_despite_active_latch = true;
-                    log::warn!(
-                        "[HotkeyDiag] accepting hotkey press after likely missed release (delta_ms={}, raw_press_delta_ms={})",
+                    log::info!(
+                        "[HotkeyDiag] scheduling missed-release confirmation (delta_ms={}, raw_press_delta_ms={}, press_generation={})",
                         delta,
-                        raw_press_delta
+                        raw_press_delta,
+                        press_generation
                     );
+                    schedule_missed_release_hotkey_confirmation(
+                        app.clone(),
+                        press_generation,
+                        now_ms,
+                        last_ms,
+                        raw_press_delta,
+                        physical_release_key_code,
+                    );
+                    return;
                 } else if delta < RECORDING_HOTKEY_STALE_PRESS_MS {
                     log::info!(
                         "Recording hotkey ignored: key repeat while latch is active (delta_ms={}, raw_press_delta_ms={}, saw_release={}, release_to_press_ms={})",
@@ -2683,70 +3359,15 @@ pub async fn register_recording_hotkey(
                 log::debug!("Hotkey ignored (debounced): {}ms since last trigger", delta);
                 return;
             }
-            state_inner
-                .recording_hotkey_released_since_press
-                .store(false, Ordering::SeqCst);
-            state_inner
-                .last_recording_hotkey_ms
-                .store(now_ms, Ordering::Relaxed);
+            let accepted_press_seq = accept_recording_hotkey_press(state_inner, now_ms);
+            schedule_recording_hotkey_physical_release_watch(
+                app.clone(),
+                accepted_press_seq,
+                physical_release_key_code,
+            );
 
             log::debug!("Recording hotkey pressed");
-            let app_clone = app.clone();
-            let _ = tauri::async_runtime::spawn(async move {
-                let Some(state) = app_clone.try_state::<crate::presentation::state::AppState>()
-                else {
-                    log::warn!("Recording hotkey ignored: AppState is unavailable");
-                    return;
-                };
-                let toggle_guard = state.recording_hotkey_toggle_guard.clone();
-                let _toggle_guard = match toggle_guard.try_lock() {
-                    Ok(guard) => guard,
-                    Err(_) => {
-                        let status_before_lock = state.transcription_service.get_status().await;
-                        if matches!(
-                            status_before_lock,
-                            RecordingStatus::Recording | RecordingStatus::Processing
-                        ) {
-                            if let Err(err) = show_recording_window_for_hotkey_start(
-                                state.inner(),
-                                &app_clone,
-                                "global-hotkey-waiting-for-stop",
-                            )
-                            .await
-                            {
-                                log::warn!(
-                                    "[HotkeyDiag] failed to show window while waiting for previous hotkey action: {}",
-                                    err
-                                );
-                            }
-                        }
-                        toggle_guard.lock().await
-                    }
-                };
-
-                let Some(window) = app_clone.get_webview_window("main") else {
-                    log::warn!("Recording hotkey ignored: main window is unavailable");
-                    return;
-                };
-                let status_before = state.transcription_service.get_status().await;
-                let window_visible = window.is_visible().ok();
-                log::info!(
-                    "[HotkeyDiag] dispatch toggle: status_before={:?}, window_visible={:?}",
-                    status_before,
-                    window_visible
-                );
-
-                if let Err(e) =
-                    crate::presentation::commands::toggle_recording_with_window_internal(
-                        state.inner(),
-                        window,
-                        app_clone.clone(),
-                    )
-                    .await
-                {
-                    log::error!("Failed to toggle recording: {}", e);
-                }
-            });
+            dispatch_recording_hotkey_toggle(app.clone(), accepted_press_seq);
         })
         .map_err(|e| format!("Failed to register hotkey '{}': {}", effective_hotkey, e))?;
 
@@ -2779,10 +3400,13 @@ pub async fn unregister_recording_hotkey(app_handle: AppHandle) -> Result<(), St
             .recording_hotkey_stop_suppressed_until_ms
             .store(0, Ordering::SeqCst);
         state
-            .recording_hotkey_release_count
+            .recording_hotkey_accepted_press_seq
             .store(0, Ordering::SeqCst);
         state
-            .recording_hotkey_stop_suppression_release_count
+            .recording_hotkey_stop_suppression_press_seq
+            .store(0, Ordering::SeqCst);
+        state
+            .recording_hotkey_press_generation
             .store(0, Ordering::SeqCst);
         state
             .recording_hotkey_release_generation
@@ -3026,12 +3650,21 @@ pub async fn auto_paste_text(
 ) -> Result<(), String> {
     log::info!("Command: auto_paste_text - text length: {}", text.len());
 
-    let suppression_duration = auto_paste_hotkey_suppression_duration(&text);
-    state.suppress_recording_hotkey_for(suppression_duration);
-    log::info!(
-        "Recording hotkey suppressed for {}ms during auto-paste",
-        suppression_duration.as_millis()
-    );
+    let recording_hotkey = state.config.read().await.recording_hotkey.clone();
+    let suppression_duration = auto_paste_hotkey_suppression_duration(&text, &recording_hotkey);
+    if suppression_duration.as_millis() > 0 {
+        state.suppress_recording_hotkey_for(suppression_duration);
+        log::info!(
+            "Recording hotkey suppressed for {}ms during auto-paste (hotkey={})",
+            suppression_duration.as_millis(),
+            recording_hotkey
+        );
+    } else {
+        log::debug!(
+            "Recording hotkey suppression skipped during auto-paste (hotkey={} cannot be produced by text)",
+            recording_hotkey
+        );
+    }
 
     // Проверяем разрешение Accessibility на macOS
     #[cfg(target_os = "macos")]
@@ -3077,9 +3710,11 @@ pub async fn auto_paste_text(
     .await
     .map_err(|e| format!("Failed to join blocking task: {}", e))?
     .map_err(|e| format!("Failed to paste text: {}", e));
-    state.suppress_recording_hotkey_for(Duration::from_millis(
-        AUTO_PASTE_HOTKEY_SUPPRESSION_TAIL_MS,
-    ));
+    if suppression_duration.as_millis() > 0 {
+        state.suppress_recording_hotkey_for(Duration::from_millis(
+            AUTO_PASTE_HOTKEY_SUPPRESSION_TAIL_MS,
+        ));
+    }
     paste_result?;
 
     // Возвращаем окно VoicetextAI поверх всех окон (но без фокуса)

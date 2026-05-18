@@ -124,9 +124,13 @@ pub struct AppState {
     /// Нужен, потому что на macOS bare-key shortcuts могут присылать Released между repeat Pressed.
     pub recording_hotkey_release_generation: AtomicU64,
 
-    /// Количество реальных Released events.
-    /// Нужен, чтобы защита stop-after-start не гасила новое нажатие после отпускания клавиши.
-    pub recording_hotkey_release_count: AtomicU64,
+    /// Поколение сырых Pressed events.
+    /// Нужно, чтобы отличать удержанный key repeat от нового нажатия, если Released потерялся.
+    pub recording_hotkey_press_generation: AtomicU64,
+
+    /// Количество принятых Pressed events после latch/debounce фильтров.
+    /// Нужен, чтобы stop-after-start suppression не зависел от Released, который macOS может потерять.
+    pub recording_hotkey_accepted_press_seq: AtomicU64,
 
     /// До какого момента игнорировать Pressed от recording hotkey.
     /// Нужно на время auto-paste, потому что synthetic text input может совпасть с выбранной клавишей.
@@ -136,8 +140,8 @@ pub struct AppState {
     /// Защищает от повторного Pressed/key repeat после быстрого stop -> start.
     pub recording_hotkey_stop_suppressed_until_ms: AtomicU64,
 
-    /// release_count на момент включения stop-after-start suppression.
-    pub recording_hotkey_stop_suppression_release_count: AtomicU64,
+    /// accepted_press_seq на момент включения stop-after-start suppression.
+    pub recording_hotkey_stop_suppression_press_seq: AtomicU64,
 
     /// Пользователь нажал hotkey ещё раз, пока предыдущая запись завершалась.
     /// После перехода Recording -> Processing -> Idle стартуем новую запись автоматически.
@@ -209,10 +213,11 @@ impl AppState {
                     recording_hotkey_released_since_press: AtomicBool::new(false),
                     recording_hotkey_last_release_ms: AtomicU64::new(0),
                     recording_hotkey_release_generation: AtomicU64::new(0),
-                    recording_hotkey_release_count: AtomicU64::new(0),
+                    recording_hotkey_press_generation: AtomicU64::new(0),
+                    recording_hotkey_accepted_press_seq: AtomicU64::new(0),
                     recording_hotkey_suppressed_until_ms: AtomicU64::new(0),
                     recording_hotkey_stop_suppressed_until_ms: AtomicU64::new(0),
-                    recording_hotkey_stop_suppression_release_count: AtomicU64::new(0),
+                    recording_hotkey_stop_suppression_press_seq: AtomicU64::new(0),
                     recording_start_pending_after_stop: AtomicBool::new(false),
                     recording_hotkey_toggle_guard: Arc::new(tokio::sync::Mutex::new(())),
                     transcription_session_seq: AtomicU64::new(0),
@@ -271,10 +276,11 @@ impl AppState {
                     recording_hotkey_released_since_press: AtomicBool::new(false),
                     recording_hotkey_last_release_ms: AtomicU64::new(0),
                     recording_hotkey_release_generation: AtomicU64::new(0),
-                    recording_hotkey_release_count: AtomicU64::new(0),
+                    recording_hotkey_press_generation: AtomicU64::new(0),
+                    recording_hotkey_accepted_press_seq: AtomicU64::new(0),
                     recording_hotkey_suppressed_until_ms: AtomicU64::new(0),
                     recording_hotkey_stop_suppressed_until_ms: AtomicU64::new(0),
-                    recording_hotkey_stop_suppression_release_count: AtomicU64::new(0),
+                    recording_hotkey_stop_suppression_press_seq: AtomicU64::new(0),
                     recording_start_pending_after_stop: AtomicBool::new(false),
                     recording_hotkey_toggle_guard: Arc::new(tokio::sync::Mutex::new(())),
                     transcription_session_seq: AtomicU64::new(0),
@@ -347,10 +353,11 @@ impl AppState {
             recording_hotkey_released_since_press: AtomicBool::new(false),
             recording_hotkey_last_release_ms: AtomicU64::new(0),
             recording_hotkey_release_generation: AtomicU64::new(0),
-            recording_hotkey_release_count: AtomicU64::new(0),
+            recording_hotkey_press_generation: AtomicU64::new(0),
+            recording_hotkey_accepted_press_seq: AtomicU64::new(0),
             recording_hotkey_suppressed_until_ms: AtomicU64::new(0),
             recording_hotkey_stop_suppressed_until_ms: AtomicU64::new(0),
-            recording_hotkey_stop_suppression_release_count: AtomicU64::new(0),
+            recording_hotkey_stop_suppression_press_seq: AtomicU64::new(0),
             recording_start_pending_after_stop: AtomicBool::new(false),
             recording_hotkey_toggle_guard: Arc::new(tokio::sync::Mutex::new(())),
             transcription_session_seq: AtomicU64::new(0),
