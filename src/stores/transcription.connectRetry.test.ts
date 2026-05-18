@@ -420,7 +420,7 @@ describe('transcription connect-retry reliability', () => {
     expect(store.displayText).toBe('two two two two three three');
   });
 
-  it('не переносит live segment в finalText до speech_final при смене start', async () => {
+  it('не переносит is_final=false partial в stable text при смене start', async () => {
     const handlers = new Map<string, any>();
 
     listenMock.mockImplementation(async (eventName: string, handler: any) => {
@@ -460,7 +460,7 @@ describe('transcription connect-retry reliability', () => {
     });
 
     expect(store.finalText).toBe('');
-    expect(store.displayText).toBe('первая часть вторая часть');
+    expect(store.displayText).toBe('вторая часть');
 
     await handlers.get('transcription:final')({
       payload: {
@@ -470,7 +470,76 @@ describe('transcription connect-retry reliability', () => {
       },
     });
 
-    expect(store.finalText).toBe('первая часть вторая часть');
+    expect(store.finalText).toBe('вторая часть');
+  });
+
+  it('auto-paste не коммитит устаревший interim при corrected segment-final', async () => {
+    const handlers = new Map<string, any>();
+    appConfigMock.autoPasteText = true;
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 18, status: 'Recording', stopped_via_hotkey: false },
+    });
+
+    await handlers.get('transcription:partial')({
+      payload: {
+        session_id: 18,
+        text: 'Ты уверен, что так будет надёжно фокусировать',
+        timestamp: 1,
+        is_segment_final: false,
+        start: 0,
+        duration: 2.1,
+      },
+    });
+
+    await handlers.get('transcription:partial')({
+      payload: {
+        session_id: 18,
+        text: 'Ты уверен, что так будет надёжно,',
+        timestamp: 2,
+        is_segment_final: false,
+        start: 2.1,
+        duration: 0.4,
+      },
+    });
+
+    await handlers.get('transcription:partial')({
+      payload: {
+        session_id: 18,
+        text: 'Ты уверен, что так будет надёжно,',
+        timestamp: 3,
+        is_segment_final: true,
+        start: 0,
+        duration: 2.5,
+      },
+    });
+
+    await handlers.get('transcription:final')({
+      payload: {
+        session_id: 18,
+        text: 'фокусироваться и не сломается?',
+        timestamp: 4,
+        start: 2.5,
+        duration: 2.53,
+      },
+    });
+
+    const pasteCalls = invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text');
+    expect(pasteCalls).toEqual([
+      ['auto_paste_text', { text: 'Ты уверен, что так будет надёжно,' }],
+      ['auto_paste_text', { text: ' фокусироваться и не сломается?' }],
+    ]);
+    expect(store.finalText).toBe('Ты уверен, что так будет надёжно, фокусироваться и не сломается?');
   });
 
   it('append-ит finalized chunks по Deepgram, даже если слова повторяются на границе', async () => {

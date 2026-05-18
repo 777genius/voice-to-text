@@ -7,6 +7,7 @@ import { computed, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { invoke } from '@tauri-apps/api/core';
 import { isTauriAvailable } from '@/utils/tauri';
+import { formatHotkeyForDisplay } from '@/utils/hotkeyDisplay';
 import SettingGroup from '../shared/SettingGroup.vue';
 import { useSettings } from '../../composables/useSettings';
 
@@ -180,26 +181,6 @@ function cleanupWindowListener() {
   if (!windowKeydownListener) return;
   window.removeEventListener('keydown', windowKeydownListener, { capture: true } as any);
   windowKeydownListener = null;
-}
-
-function formatHotkeyForDisplay(raw: string): string {
-  const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
-  const mapped = String(raw ?? '')
-    .replace(/Backquote/g, '`')
-    .replace(/Minus/g, '-')
-    .replace(/Equal/g, '=')
-    .replace(/BracketLeft/g, '[')
-    .replace(/BracketRight/g, ']')
-    .replace(/Backslash/g, '\\')
-    .replace(/IntlBackslash/g, '\\')
-    .replace(/Semicolon/g, ';')
-    .replace(/Quote/g, "'")
-    .replace(/Comma/g, ',')
-    .replace(/Period/g, '.')
-    .replace(/Slash/g, '/');
-
-  if (!mapped) return '';
-  return isMac ? mapped.replace(/CmdOrCtrl/g, 'Cmd') : mapped.replace(/CmdOrCtrl/g, 'Ctrl');
 }
 
 function startCapture() {

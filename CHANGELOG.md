@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.25] - 2026-05-18
+
+### Added
+- Show a concise hotkey prompt in the mini recording window when it is idle and empty.
+- Reuse one shared hotkey display formatter across the recording window and settings.
+
+### Fixed
+- Prevent auto-paste from launching or reopening target apps while restoring focus, avoiding duplicate Electron instances.
+- Refuse auto-paste when the original target app cannot be safely focused, instead of typing into a random active window.
+- Avoid committing stale interim Deepgram text to the stable paste baseline when later segment corrections arrive.
+
+---
+
 ## [0.10.24] - 2026-05-17
 
 ### Fixed

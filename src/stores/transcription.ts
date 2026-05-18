@@ -1034,11 +1034,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
                 accumulated_text: accumulatedText.value
               });
 
-              // Не создаём final до `speech_final`: Deepgram может начать новый segment
-              // внутри того же utterance. Сохраняем прошлый interim как live accumulated.
+              // Не переносим старый interim в stable buffer: `is_final=false`
+              // может быть исправлен Deepgram следующим segment-final.
+              // Старый текст был только live-гипотезой и не должен попадать в paste baseline.
               if (partialText.value) {
-                accumulatedText.value = mergeTranscriptText(accumulatedText.value, partialText.value);
-                animateAccumulatedText(accumulatedText.value);
+                console.info('[STT] Dropping unfinalized partial after start change:', {
+                  old_start: currentUtteranceStart.value,
+                  new_start: event.payload.start,
+                  dropped_partial: partialText.value,
+                });
               }
 
               // Начинаем новый segment

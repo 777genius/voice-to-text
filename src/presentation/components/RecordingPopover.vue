@@ -19,6 +19,7 @@ import AudioVisualizer from './AudioVisualizer.vue';
 import { useUpdater } from '../../composables/useUpdater';
 import { playShowSound, playDoneSound, preloadUiSounds } from '../../utils/sound';
 import { isTauriAvailable } from '../../utils/tauri';
+import { formatHotkeyForDisplay } from '../../utils/hotkeyDisplay';
 import {
   EVENT_RECORDING_WINDOW_SHOWN,
   EVENT_RECORDING_WINDOW_WILL_HIDE_FOR_HOTKEY_STOP,
@@ -55,30 +56,24 @@ const showUpdateDialog = ref(false);
 const appVersion = ref('');
 const glowColor = ref<'blue' | 'red' | null>(null);
 const isMiniClosing = ref(false);
-const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
 const isMiniWindow = computed(() => appConfigStore.showMiniRecordingWindow);
 const useMiniLayout = computed(() => isMiniWindow.value && !showUpdateDialog.value);
 
-// Для отображения заменяем CmdOrCtrl на понятное пользователю название
-const recordingHotkey = computed(() => {
-  const raw = String(appConfigStore.recordingHotkey ?? '');
-  const mapped = raw
-    .replace(/Backquote/g, '`')
-    .replace(/Minus/g, '-')
-    .replace(/Equal/g, '=')
-    .replace(/BracketLeft/g, '[')
-    .replace(/BracketRight/g, ']')
-    .replace(/Backslash/g, '\\')
-    .replace(/IntlBackslash/g, '\\')
-    .replace(/Semicolon/g, ';')
-    .replace(/Quote/g, "'")
-    .replace(/Comma/g, ',')
-    .replace(/Period/g, '.')
-    .replace(/Slash/g, '/');
+const recordingHotkey = computed(() => formatHotkeyForDisplay(appConfigStore.recordingHotkey));
 
-  if (!isMac) return mapped.replace(/CmdOrCtrl/g, 'Ctrl');
-  return mapped.replace(/CmdOrCtrl/g, 'Cmd');
-});
+const shouldShowMiniHotkeyPrompt = computed(() =>
+  store.isIdle &&
+  !store.hasVisibleTranscriptionText &&
+  !store.error &&
+  !store.hasError &&
+  recordingHotkey.value.length > 0
+);
+
+const miniHotkeyPrompt = computed(() =>
+  shouldShowMiniHotkeyPrompt.value
+    ? t('main.miniHotkeyPrompt', { hotkey: recordingHotkey.value })
+    : ''
+);
 
 function pickLatestSpeechFragment(text: string): string {
   const lines = text
@@ -553,11 +548,12 @@ const minimizeWindow = async () => {
             :class="{
               recording: store.hasVisibleTranscriptionText,
               placeholder: !store.hasVisibleTranscriptionText,
+              prompt: shouldShowMiniHotkeyPrompt,
               error: store.hasError || Boolean(store.error),
             }"
-            :title="miniDisplayText"
+            :title="miniDisplayText || miniHotkeyPrompt"
           >
-            {{ miniDisplayText }}
+            {{ miniDisplayText || miniHotkeyPrompt }}
           </div>
 
           <div class="mini-actions no-drag">
@@ -823,7 +819,8 @@ const minimizeWindow = async () => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  direction: rtl;
+  direction: ltr;
+  unicode-bidi: plaintext;
   text-align: left;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
 }
@@ -848,6 +845,14 @@ const minimizeWindow = async () => {
 
 .mini-transcription-text.placeholder {
   color: var(--color-text-secondary);
+}
+
+.mini-transcription-text.prompt {
+  direction: ltr;
+  text-align: left;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  opacity: 0.78;
 }
 
 .mini-actions {

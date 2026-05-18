@@ -21,6 +21,7 @@ const messages = {
       stopRecording: 'Stop Recording',
       processing: 'Processing...',
       hotkeyHint: '{hotkey} to start/stop recording',
+      miniHotkeyPrompt: 'Press {hotkey}',
     },
     settings: {
       title: 'Settings',
@@ -378,6 +379,7 @@ const messages = {
       stopRecording: 'Остановить запись',
       processing: 'Обработка...',
       hotkeyHint: '{hotkey} для старта/остановки записи',
+      miniHotkeyPrompt: 'Нажмите {hotkey}',
     },
     settings: {
       title: 'Настройки',
@@ -735,6 +737,7 @@ const messages = {
       stopRecording: 'Detener grabación',
       processing: 'Procesando...',
       hotkeyHint: '{hotkey} para iniciar/detener la grabación',
+      miniHotkeyPrompt: 'Pulsa {hotkey}',
     },
     settings: {
       title: 'Ajustes',
@@ -1092,6 +1095,7 @@ const messages = {
       stopRecording: 'Arrêter l’enregistrement',
       processing: 'Traitement...',
       hotkeyHint: '{hotkey} pour démarrer/arrêter l’enregistrement',
+      miniHotkeyPrompt: 'Appuyez sur {hotkey}',
     },
     settings: {
       title: 'Paramètres',
@@ -1449,6 +1453,7 @@ const messages = {
       stopRecording: 'Aufnahme stoppen',
       processing: 'Verarbeiten...',
       hotkeyHint: '{hotkey} zum Starten/Stoppen der Aufnahme',
+      miniHotkeyPrompt: 'Drücken Sie {hotkey}',
     },
     settings: {
       title: 'Einstellungen',
@@ -1806,6 +1811,7 @@ const messages = {
       stopRecording: 'Зупинити запис',
       processing: 'Обробка...',
       hotkeyHint: '{hotkey} для старту/зупинки запису',
+      miniHotkeyPrompt: 'Натисніть {hotkey}',
     },
     settings: {
       title: 'Налаштування',
