@@ -16,7 +16,7 @@ export const useAppConfigStore = defineStore('appConfig', () => {
 
   const recordingHotkey = ref('CmdOrCtrl+Shift+X');
   const autoCopyToClipboard = ref(false);
-  const autoPasteText = ref(false);
+  const autoPasteText = ref(true);
   const playCompletionSound = ref(false);
   const hideRecordingWindowOnHotkey = ref(false);
   const showMiniRecordingWindow = ref(true);

@@ -107,6 +107,31 @@ const miniDisplayText = computed(() => {
   return '';
 });
 
+const miniTranscriptionTextRef = ref<HTMLElement | null>(null);
+const isMiniTextOverflowing = ref(false);
+let miniTextAlignRaf: number | null = null;
+
+function alignMiniTextToEnd() {
+  if (miniTextAlignRaf !== null) {
+    window.cancelAnimationFrame(miniTextAlignRaf);
+  }
+
+  miniTextAlignRaf = window.requestAnimationFrame(() => {
+    miniTextAlignRaf = null;
+    const el = miniTranscriptionTextRef.value;
+    if (!el) return;
+
+    const shouldShowTail =
+      useMiniLayout.value &&
+      !shouldShowMiniHotkeyPrompt.value &&
+      Boolean(miniDisplayText.value);
+    const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
+
+    isMiniTextOverflowing.value = shouldShowTail && maxScroll > 1;
+    el.scrollLeft = shouldShowTail ? maxScroll : 0;
+  });
+}
+
 // Debouncing для hotkey - блокирует повторные вызовы в течение 500ms
 let hotkeyDebounceTimeout: number | null = null;
 let isHotkeyProcessing = false;
@@ -238,6 +263,7 @@ function scheduleHideRecordingWindow(reason: string) {
 watch(() => store.displayText, () => {
   nextTick(() => {
     if (useMiniLayout.value) {
+      alignMiniTextToEnd();
       applyRecordingWindowSize();
       return;
     }
@@ -260,8 +286,20 @@ watch(() => store.displayText, () => {
 watch([isMiniWindow, showUpdateDialog], () => {
   nextTick(() => {
     applyRecordingWindowSize();
+    alignMiniTextToEnd();
   });
 });
+
+watch(
+  () => [
+    miniDisplayText.value,
+    miniHotkeyPrompt.value,
+    useMiniLayout.value,
+    shouldShowMiniHotkeyPrompt.value,
+  ],
+  () => nextTick(alignMiniTextToEnd),
+  { flush: 'post' },
+);
 
 onMounted(async () => {
   if (!isTauriAvailable()) {
@@ -279,11 +317,14 @@ onMounted(async () => {
   await sttConfigStore.startSync();
   await nextTick();
   applyRecordingWindowSize();
+  alignMiniTextToEnd();
 
   // Очищаем UI при фактическом показе окна (НЕ через focus: main может быть nonactivating NSPanel).
   // Важно: не очищаем посреди активной записи — иначе можно потерять текст если пользователь скрыл и снова показал окно.
   unlistenWindowShown = await listen(EVENT_RECORDING_WINDOW_SHOWN, async () => {
     cancelPendingHideRecordingWindow();
+    await nextTick();
+    alignMiniTextToEnd();
     // Подтягиваем актуальную auth session из Rust SoT (important when WebView was "frozen").
     // Best-effort: не блокируем UI на сетевых/IPC проблемах.
     void auth.initialize({ silent: true });
@@ -298,6 +339,7 @@ onMounted(async () => {
       if (!store.isRecording && !store.isStarting && !store.isProcessing) {
         store.clearText();
         applyRecordingWindowSize();
+        alignMiniTextToEnd();
       }
       return;
     }
@@ -329,6 +371,7 @@ onMounted(async () => {
     );
     console.log('[Hotkey] Rust-owned start requested:', event.payload);
     applyRecordingWindowSize();
+    alignMiniTextToEnd();
   });
 
   // Слушаем статус для звука и автоскрытия окна при остановке
@@ -398,6 +441,10 @@ onUnmounted(() => {
   }
   if (unlistenWindowWillHideForHotkeyStop) {
     unlistenWindowWillHideForHotkeyStop();
+  }
+  if (miniTextAlignRaf !== null) {
+    window.cancelAnimationFrame(miniTextAlignRaf);
+    miniTextAlignRaf = null;
   }
   cancelPendingHideRecordingWindow();
 });
@@ -544,16 +591,20 @@ const minimizeWindow = async () => {
           ></span>
 
           <div
+            ref="miniTranscriptionTextRef"
             class="mini-transcription-text"
             :class="{
               recording: store.hasVisibleTranscriptionText,
               placeholder: !store.hasVisibleTranscriptionText,
               prompt: shouldShowMiniHotkeyPrompt,
               error: store.hasError || Boolean(store.error),
+              overflowing: isMiniTextOverflowing,
             }"
             :title="miniDisplayText || miniHotkeyPrompt"
           >
-            {{ miniDisplayText || miniHotkeyPrompt }}
+            <span class="mini-transcription-text-inner">
+              {{ miniDisplayText || miniHotkeyPrompt }}
+            </span>
           </div>
 
           <div class="mini-actions no-drag">
@@ -818,11 +869,24 @@ const minimizeWindow = async () => {
   line-height: 1.1;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
+  text-overflow: clip;
   direction: ltr;
   unicode-bidi: plaintext;
   text-align: left;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+.mini-transcription-text.overflowing:not(.prompt) {
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 14px, #000 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 14px, #000 100%);
+}
+
+.mini-transcription-text-inner {
+  display: inline-block;
+  min-width: max-content;
+  direction: ltr;
+  unicode-bidi: plaintext;
+  white-space: nowrap;
 }
 
 .popover .mini-audio-visualizer {

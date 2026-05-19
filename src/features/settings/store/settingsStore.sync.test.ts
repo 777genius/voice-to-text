@@ -17,6 +17,13 @@ describe('settingsStore cross-window UI sync', () => {
     localStorage.clear();
   });
 
+  it('создает новый store с продуктовыми дефолтами', () => {
+    const store = useSettingsStore();
+
+    expect(store.autoPasteText).toBe(true);
+    expect(store.showMiniRecordingWindow).toBe(true);
+  });
+
   it('setTheme вызывает update_ui_preferences через invoke', () => {
     const store = useSettingsStore();
     store.setTheme('light');

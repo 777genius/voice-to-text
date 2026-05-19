@@ -144,10 +144,10 @@ export function useSettings() {
           store.setMicrophoneSensitivity(95, { persist: false });
           store.setRecordingHotkey('CmdOrCtrl+Shift+X');
           store.setAutoCopyToClipboard(true);
-          store.setAutoPasteText(false);
+          store.setAutoPasteText(true);
           store.setPlayCompletionSound(false);
           store.setHideRecordingWindowOnHotkey(false);
-          store.setShowMiniRecordingWindow(false);
+          store.setShowMiniRecordingWindow(true);
           store.setKeepRecordingUntilManualStop(false);
           store.setSelectedAudioDevice('');
         }
@@ -217,7 +217,7 @@ export function useSettings() {
           store.setMicrophoneSensitivity(appConfig.microphone_sensitivity ?? 100, { persist: false });
           store.setRecordingHotkey(appConfig.recording_hotkey ?? 'CmdOrCtrl+Shift+X');
           store.setAutoCopyToClipboard(appConfig.auto_copy_to_clipboard ?? false);
-          store.setAutoPasteText(appConfig.auto_paste_text ?? false);
+          store.setAutoPasteText(appConfig.auto_paste_text ?? true);
           store.setPlayCompletionSound(appConfig.play_completion_sound ?? false);
           store.setHideRecordingWindowOnHotkey(appConfig.hide_recording_window_on_hotkey ?? false);
           store.setShowMiniRecordingWindow(appConfig.show_mini_recording_window ?? true);

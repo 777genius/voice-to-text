@@ -45,6 +45,11 @@ fn audio_capture_device_cache_matches(
     cached_device: &Option<Option<String>>,
     requested_device: &Option<String>,
 ) -> bool {
+    // System default can resolve to another physical device after hotplug/default changes.
+    if requested_device.is_none() {
+        return false;
+    }
+
     cached_device
         .as_ref()
         .map(|active_device| active_device == requested_device)
@@ -470,40 +475,6 @@ impl AppState {
         if let Err(e) = self.transcription_service.update_config(config).await {
             log::warn!("Failed to update transcription service config token: {}", e);
         }
-    }
-
-    pub(crate) async fn clear_invalid_selected_audio_device(
-        &self,
-        app_handle: &AppHandle,
-        invalid_device_name: Option<&str>,
-    ) {
-        let next_config = {
-            let mut config = self.config.write().await;
-            let selected = config.selected_audio_device.as_deref();
-            let should_clear = match (selected, invalid_device_name) {
-                (Some(current), Some(invalid)) => current.trim() == invalid.trim(),
-                (Some(_), None) => true,
-                _ => false,
-            };
-
-            if !should_clear {
-                return;
-            }
-
-            log::warn!(
-                "Clearing unavailable audio input device from config: {:?}",
-                config.selected_audio_device
-            );
-            config.selected_audio_device = None;
-            config.clone()
-        };
-
-        if let Err(e) = ConfigStore::save_app_config(&next_config).await {
-            log::warn!("Failed to persist cleared audio device selection: {}", e);
-        }
-
-        let revision = AppState::bump_revision(&self.app_config_revision).await;
-        AppState::emit_invalidation(app_handle, "app-config", revision, None).await;
     }
 
     async fn emit_invalidation(
@@ -1044,8 +1015,9 @@ impl AppState {
         );
 
         // Создаем новый SystemAudioCapture с выбранным устройством.
-        // Если сохранённое имя устройства устарело или было записано криво, автоматически
-        // откатываемся на системный input по умолчанию и очищаем битую привязку в конфиге.
+        // Если сохранённое имя устройства временно недоступно, автоматически
+        // откатываемся на системный input по умолчанию, но не стираем выбор пользователя:
+        // после переподключения следующий старт снова попробует выбранный микрофон.
         let mut effective_device_name = normalized_device_name.clone();
         let system_audio = match SystemAudioCapture::with_device(normalized_device_name.clone()) {
             Ok(capture) => capture,
@@ -1055,11 +1027,6 @@ impl AppState {
                     e
                 );
                 effective_device_name = None;
-                self.clear_invalid_selected_audio_device(
-                    &app_handle,
-                    normalized_device_name.as_deref(),
-                )
-                .await;
                 SystemAudioCapture::new().map_err(|fallback_err| {
                     format!(
                         "Failed to create audio capture with fallback to default input device: {}",
@@ -1134,10 +1101,10 @@ mod tests {
     }
 
     #[test]
-    fn audio_capture_device_cache_reuses_default_device() {
+    fn audio_capture_device_cache_recreates_default_device() {
         let cached = Some(None);
         let requested = None;
-        assert!(audio_capture_device_cache_matches(&cached, &requested));
+        assert!(!audio_capture_device_cache_matches(&cached, &requested));
     }
 
     #[test]

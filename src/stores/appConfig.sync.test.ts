@@ -37,6 +37,13 @@ describe('useAppConfigStore sync', () => {
     listenMock.mockReset();
   });
 
+  it('создает новый store с продуктовыми дефолтами', () => {
+    const store = useAppConfigStore();
+
+    expect(store.autoPasteText).toBe(true);
+    expect(store.showMiniRecordingWindow).toBe(true);
+  });
+
   it('startSync: подписывается и загружает snapshot', async () => {
     const unlistenFn = vi.fn();
     listenMock.mockResolvedValue(unlistenFn);

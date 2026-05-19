@@ -207,12 +207,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   let accumulatedAnimationTimer: ReturnType<typeof setInterval> | null = null;
   let autoPasteQueue: Promise<void> = Promise.resolve();
   let autoPasteGeneration = 0;
-  let transcriptSilenceAutoStopTimer: ReturnType<typeof setTimeout> | null = null;
-  let transcriptSilenceAutoStopGeneration = 0;
   let hotkeyStopFinalizeTimer: ReturnType<typeof setTimeout> | null = null;
 
-  const TRANSCRIPT_SILENCE_AUTO_STOP_MS = 5_000;
-  const NO_TRANSCRIPT_AUTO_STOP_MS = 15_000;
   const HOTKEY_STOP_LATE_FINAL_GRACE_MS = 1_500;
 
   function clientLog(
@@ -692,19 +688,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     autoPasteGeneration++;
   }
 
-  function clearTranscriptSilenceAutoStop(): void {
-    if (transcriptSilenceAutoStopTimer) {
-      clientLog('transcript_silence_auto_stop_cleared', {
-        status: status.value,
-        sessionId: sessionId.value,
-        generation: transcriptSilenceAutoStopGeneration,
-      }, 'debug');
-      clearTimeout(transcriptSilenceAutoStopTimer);
-      transcriptSilenceAutoStopTimer = null;
-    }
-    transcriptSilenceAutoStopGeneration++;
-  }
-
   function clearHotkeyStopFinalizeTimer(): void {
     if (hotkeyStopFinalizeTimer) {
       clearTimeout(hotkeyStopFinalizeTimer);
@@ -798,123 +781,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }, HOTKEY_STOP_LATE_FINAL_GRACE_MS);
   }
 
-  function scheduleTranscriptSilenceAutoStop(
-    reason: string,
-    timeoutMs = TRANSCRIPT_SILENCE_AUTO_STOP_MS,
-    requireTranscript = true
-  ): void {
-    if (appConfig.keepRecordingUntilManualStop || status.value !== RecordingStatus.Recording) {
-      clientLog('transcript_silence_auto_stop_not_scheduled', {
-        reason,
-        timeoutMs,
-        requireTranscript,
-        status: status.value,
-        keepRecordingUntilManualStop: appConfig.keepRecordingUntilManualStop,
-      }, 'debug');
-      return;
-    }
-
-    const activeSessionId = sessionId.value;
-    if (!activeSessionId) {
-      clientLog('transcript_silence_auto_stop_not_scheduled', {
-        reason,
-        timeoutMs,
-        requireTranscript,
-        status: status.value,
-        sessionId: activeSessionId,
-        cause: 'missing_session_id',
-      }, 'debug');
-      return;
-    }
-
-    if (transcriptSilenceAutoStopTimer) {
-      clearTimeout(transcriptSilenceAutoStopTimer);
-    }
-
-    const generation = ++transcriptSilenceAutoStopGeneration;
-    clientLog('transcript_silence_auto_stop_scheduled', {
-      reason,
-      timeoutMs,
-      requireTranscript,
-      sessionId: activeSessionId,
-      generation,
-      textLength: buildCurrentTranscriptionText().length,
-    }, 'debug');
-    transcriptSilenceAutoStopTimer = setTimeout(async () => {
-      transcriptSilenceAutoStopTimer = null;
-
-      if (generation !== transcriptSilenceAutoStopGeneration) {
-        clientLog('transcript_silence_auto_stop_skipped', {
-          reason,
-          timeoutMs,
-          sessionId: activeSessionId,
-          generation,
-          currentGeneration: transcriptSilenceAutoStopGeneration,
-          cause: 'stale_generation',
-        }, 'debug');
-        return;
-      }
-      if (appConfig.keepRecordingUntilManualStop) {
-        clientLog('transcript_silence_auto_stop_skipped', {
-          reason,
-          timeoutMs,
-          sessionId: activeSessionId,
-          generation,
-          cause: 'manual_stop_only',
-        }, 'debug');
-        return;
-      }
-      if (status.value !== RecordingStatus.Recording) {
-        clientLog('transcript_silence_auto_stop_skipped', {
-          reason,
-          timeoutMs,
-          sessionId: activeSessionId,
-          generation,
-          status: status.value,
-          cause: 'not_recording',
-        }, 'debug');
-        return;
-      }
-      if (sessionId.value !== activeSessionId) {
-        clientLog('transcript_silence_auto_stop_skipped', {
-          reason,
-          timeoutMs,
-          sessionId: activeSessionId,
-          currentSessionId: sessionId.value,
-          generation,
-          cause: 'session_changed',
-        }, 'debug');
-        return;
-      }
-
-      const currentText = buildCurrentTranscriptionText();
-      if (requireTranscript && !currentText) {
-        clientLog('transcript_silence_auto_stop_skipped', {
-          reason,
-          timeoutMs,
-          sessionId: activeSessionId,
-          generation,
-          cause: 'empty_transcript',
-        }, 'debug');
-        return;
-      }
-
-      console.log('[STT] Auto-stopping after transcript silence:', {
-        reason,
-        timeoutMs,
-        sessionId: activeSessionId,
-      });
-      clientLog('transcript_silence_auto_stop_triggered', {
-        reason,
-        timeoutMs,
-        sessionId: activeSessionId,
-        generation,
-        textLength: currentText.length,
-      }, 'warn');
-      await stopRecording(`transcript_silence:${reason}`);
-    }, timeoutMs);
-  }
-
   // Actions
   async function initialize() {
     console.log('Initializing transcription store');
@@ -940,12 +806,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:partial')) {
             return;
           }
-          if (event.payload.text.trim()) {
-            scheduleTranscriptSilenceAutoStop(
-              event.payload.is_segment_final ? 'segment_final' : 'partial'
-            );
-          }
-
           // Детальное логирование для отладки
           console.log('📝 PARTIAL EVENT:', {
             text: event.payload.text,
@@ -1075,7 +935,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             current_partial: partialText.value
           });
 
-          // Deepgram отправляет финальный сегмент когда вся речь завершена (speech_final=true)
+          // `speech_final=true` закрывает текущий utterance/диапазон транскрипта, но не запись.
+          // Жизненным циклом записи владеет Rust/VAD или явная команда пользователя.
           //
           // БАГ-ФИКС (2025-10-30): Deepgram может разбивать речь на несколько utterances с разными start временами.
           // Если между SEGMENT FINAL и следующим Partial приходит другой FINAL - currentUtteranceStart
@@ -1106,10 +967,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               : event.payload.text
                 ? appendTranscriptText(accumulatedText.value, event.payload.text).trim()
                 : mergeTranscriptText(accumulatedText.value, partialText.value).trim();
-            if (currentUtteranceText) {
-              scheduleTranscriptSilenceAutoStop('speech_final');
-            }
-
             console.log('🔗 [SPEECH_FINAL] Combining utterance:', {
               accumulated: accumulatedText.value,
               partial: partialText.value,
@@ -1294,7 +1151,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             errorType.value = null;
             isDeviceNotFoundError.value = false;
             resetTranscriptionBuffersForNewSession();
-            clearTranscriptSilenceAutoStop();
           }
 
           // Если статус стал Idle - обрабатываем текущий текст при ЛЮБОЙ остановке
@@ -1304,7 +1160,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           // Пользователь закончил говорить → текст должен скопироваться и вставиться автоматически.
           // Проверка `stopped_via_hotkey` убрана, чтобы auto-paste работал в обоих случаях.
           if (nextStatus === RecordingStatus.Idle) {
-            clearTranscriptSilenceAutoStop();
             console.log('🔄 Запись остановлена - обрабатываем текущий текст');
             clientLog('recording_idle_processing_started', {
               payloadSessionId,
@@ -1375,14 +1230,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             activeSessionId: sessionId.value,
             isConnecting: isConnecting.value,
           }, 'info');
-          if (nextStatus === RecordingStatus.Recording) {
-            scheduleTranscriptSilenceAutoStop(
-              'recording_start',
-              NO_TRANSCRIPT_AUTO_STOP_MS,
-              false
-            );
-          }
-
           // Если упали в Error — закрываем сессию, чтобы поздние события не перетёрли UI.
           if (nextStatus === RecordingStatus.Error) {
             sessionId.value = null;
@@ -1988,7 +1835,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   }
 
   function resetTextStateBeforeStart(): void {
-    clearTranscriptSilenceAutoStop();
     clearHotkeyStopFinalizeTimer();
 
     // Очищаем весь предыдущий текст перед новой записью
@@ -2209,7 +2055,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   }
 
   function prepareForRustHotkeyStart(warmStartExpected = false): void {
-    clearTranscriptSilenceAutoStop();
     clearHotkeyStopFinalizeTimer();
 
     suppressPreviousTranscriptionDisplay('rust_hotkey_start');
@@ -2238,7 +2083,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         textLength: buildCurrentTranscriptionText().length,
         isConnecting: isConnecting.value,
       }, 'warn');
-      clearTranscriptSilenceAutoStop();
       status.value = RecordingStatus.Processing;
       const result = await invoke<string>('stop_recording');
       console.log('Recording stopped:', result);
@@ -2314,7 +2158,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       unlistenConnectionQuality = null;
     }
 
-    clearTranscriptSilenceAutoStop();
     clearHotkeyStopFinalizeTimer();
 
     // Очищаем таймеры анимации

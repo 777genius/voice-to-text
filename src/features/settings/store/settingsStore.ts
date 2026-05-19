@@ -33,7 +33,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const microphoneSensitivity = ref(100);
   const selectedAudioDevice = ref('');
   const autoCopyToClipboard = ref(false);
-  const autoPasteText = ref(false);
+  const autoPasteText = ref(true);
   const playCompletionSound = ref(false);
   const hideRecordingWindowOnHotkey = ref(false);
   const showMiniRecordingWindow = ref(true);

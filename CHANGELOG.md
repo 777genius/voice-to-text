@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.26] - 2026-05-19
+
+### Changed
+- Enable the mini recording window and automatic text paste by default for new app/settings state.
+- Keep the mini recording text pinned to the latest visible transcript tail while dictating.
+
+### Fixed
+- Stop treating Deepgram `speech_final` as a frontend recording auto-stop signal, so long dictation keeps listening until the user stops it.
+- Preserve the selected microphone when it is temporarily unavailable, while still recreating the default capture device after system default-device changes.
+
+---
+
 ## [0.10.25] - 2026-05-18
 
 ### Added

@@ -634,6 +634,44 @@ describe('transcription connect-retry reliability', () => {
     expect(store.finalText).toBe('готово');
   });
 
+  it('не останавливает запись на frontend по speech_final timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const handlers = new Map<string, any>();
+
+      listenMock.mockImplementation(async (eventName: string, handler: any) => {
+        handlers.set(eventName, handler);
+        return () => {};
+      });
+
+      invokeMock.mockResolvedValue(null);
+
+      const store = useTranscriptionStore();
+      await store.initialize();
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 19, status: 'Recording', stopped_via_hotkey: false },
+      });
+
+      await handlers.get('transcription:final')({
+        payload: {
+          session_id: 19,
+          text: 'первая фраза',
+          timestamp: 1,
+          start: 0,
+          duration: 1,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(6_000);
+
+      expect(store.status).toBe('Recording');
+      expect(invokeMock.mock.calls.some((call) => call[0] === 'stop_recording')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('auto-copy копирует весь видимый текст при остановке записи', async () => {
     const handlers = new Map<string, any>();
     appConfigMock.autoCopyToClipboard = true;

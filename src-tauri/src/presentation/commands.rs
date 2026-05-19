@@ -2341,9 +2341,6 @@ pub async fn start_microphone_test(
                     "Microphone test requested unavailable device ({}). Falling back to default input device.",
                     e
                 );
-                state
-                    .clear_invalid_selected_audio_device(&app_handle, device_to_use.as_deref())
-                    .await;
                 SystemAudioCapture::new().map_err(|fallback_err| {
                     format!("Failed to create audio capture: {}", fallback_err)
                 })?
