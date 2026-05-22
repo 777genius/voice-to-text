@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { mdiLightningBolt, mdiTranslate, mdiMonitorMultiple } from '@mdi/js';
+import { mdiBullseye, mdiLightningBolt, mdiSpeedometer, mdiTranslate } from '@mdi/js';
 
 const { content } = useLandingContent();
 const { t, locale } = useI18n();
@@ -19,6 +19,10 @@ const releaseDate = computed(() => {
 
 <template>
   <section id="hero" class="hero-section section anchor-offset">
+    <ClientOnly>
+      <LazyHeroCanvasBackground />
+    </ClientOnly>
+
     <v-container class="hero-section__container">
       <v-row align="center" justify="space-between">
         <!-- Left: Text content -->
@@ -39,7 +43,7 @@ const releaseDate = computed(() => {
               href="#features"
               class="hero-section__btn-secondary"
             >
-              {{ t('hero.ctaSecondary') }}
+              {{ t('nav.features') }}
             </v-btn>
           </div>
 
@@ -50,6 +54,16 @@ const releaseDate = computed(() => {
           <!-- Trust indicators -->
           <div class="hero-section__trust">
             <div class="hero-section__trust-item">
+              <v-icon size="16" class="hero-section__trust-icon" :icon="mdiSpeedometer" />
+              <span>{{ t("hero.trust.fast") }}</span>
+            </div>
+            <div class="hero-section__trust-divider" />
+            <div class="hero-section__trust-item">
+              <v-icon size="16" class="hero-section__trust-icon" :icon="mdiBullseye" />
+              <span>{{ t("hero.trust.accurate") }}</span>
+            </div>
+            <div class="hero-section__trust-divider" />
+            <div class="hero-section__trust-item">
               <v-icon size="16" class="hero-section__trust-icon" :icon="mdiLightningBolt" />
               <span>{{ t("hero.trust.realtime") }}</span>
             </div>
@@ -57,11 +71,6 @@ const releaseDate = computed(() => {
             <div class="hero-section__trust-item">
               <v-icon size="16" class="hero-section__trust-icon" :icon="mdiTranslate" />
               <span>{{ t("hero.trust.multilingual") }}</span>
-            </div>
-            <div class="hero-section__trust-divider" />
-            <div class="hero-section__trust-item">
-              <v-icon size="16" class="hero-section__trust-icon" :icon="mdiMonitorMultiple" />
-              <span>{{ t("hero.trust.crossPlatform") }}</span>
             </div>
           </div>
         </v-col>
@@ -72,13 +81,20 @@ const releaseDate = computed(() => {
             <div class="hero-section__preview-glow" />
             <ClientOnly>
               <Suspense>
+                <!-- Old full-window animation is paused while the hero mirrors the real mini recording window.
                 <LazyHeroDemo />
+                -->
+                <LazyHeroMiniWindowDemo />
                 <template #fallback>
-                  <div class="hero-demo-fallback" />
+                  <div class="hero-mini-demo-fallback">
+                    <div class="hero-mini-demo-fallback__window" />
+                  </div>
                 </template>
               </Suspense>
               <template #fallback>
-                <div class="hero-demo-fallback" />
+                <div class="hero-mini-demo-fallback">
+                  <div class="hero-mini-demo-fallback__window" />
+                </div>
               </template>
             </ClientOnly>
           </div>
@@ -95,6 +111,8 @@ const releaseDate = computed(() => {
   min-height: 85vh;
   display: flex;
   align-items: center;
+  isolation: isolate;
+  overflow: hidden;
 }
 
 /* ─── Content ─── */
@@ -167,24 +185,62 @@ const releaseDate = computed(() => {
 
 /* ─── Actions ─── */
 .hero-section__actions {
-  display: flex;
-  gap: 14px;
-  flex-wrap: wrap;
+  --hero-action-width: clamp(238px, 24vw, 270px);
+  --hero-action-gap: 14px;
+
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--hero-action-gap);
+  align-items: stretch;
+  width: min(100%, calc(var(--hero-action-width) + var(--hero-action-width) + var(--hero-action-gap)));
   margin-bottom: 40px;
   animation: heroFadeIn 0.8s ease both;
   animation-delay: 0.4s;
 }
 
+.hero-section__actions :deep(.v-btn) {
+  width: 100%;
+  min-width: 0;
+  min-height: 64px !important;
+  border-radius: 7px !important;
+}
+
+.hero-section__actions :deep(.v-btn__content) {
+  width: 100%;
+  white-space: normal;
+}
+
 .hero-section__btn-secondary {
-  border-color: rgba(99, 102, 241, 0.3) !important;
-  color: #6366f1 !important;
+  border-color: rgba(165, 180, 252, 0.34) !important;
+  color: #c7d2fe !important;
+  padding-inline: 12px !important;
+  font-size: clamp(0.78rem, 1vw, 0.94rem) !important;
   font-weight: 600 !important;
-  transition: all 0.3s ease !important;
+  letter-spacing: 0.08em !important;
+  background:
+    linear-gradient(135deg, rgba(99, 102, 241, 0.08), rgba(74, 158, 255, 0.05)) !important;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.03) inset,
+    0 10px 30px rgba(15, 23, 42, 0.22);
+  transition:
+    transform 0.28s ease,
+    border-color 0.28s ease,
+    background 0.28s ease,
+    box-shadow 0.28s ease !important;
+}
+
+.hero-section__btn-secondary :deep(.v-btn__content) {
+  white-space: nowrap;
 }
 
 .hero-section__btn-secondary:hover {
-  border-color: rgba(99, 102, 241, 0.5) !important;
-  background: rgba(99, 102, 241, 0.06) !important;
+  border-color: rgba(165, 180, 252, 0.55) !important;
+  background:
+    linear-gradient(135deg, rgba(99, 102, 241, 0.14), rgba(74, 158, 255, 0.1)) !important;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.05) inset,
+    0 14px 34px rgba(15, 23, 42, 0.28);
+  transform: translateY(-1px);
 }
 
 /* ─── Release info ─── */
@@ -200,7 +256,8 @@ const releaseDate = computed(() => {
 .hero-section__trust {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
+  flex-wrap: wrap;
   animation: heroFadeIn 0.8s ease both;
   animation-delay: 0.5s;
 }
@@ -208,8 +265,8 @@ const releaseDate = computed(() => {
 .hero-section__trust-item {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 0.82rem;
+  gap: 5px;
+  font-size: 0.78rem;
   font-weight: 500;
   opacity: 0.55;
 }
@@ -250,6 +307,25 @@ const releaseDate = computed(() => {
 }
 
 /* ─── SSR Fallback ─── */
+.hero-mini-demo-fallback {
+  position: relative;
+  z-index: 1;
+  min-height: 330px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hero-mini-demo-fallback__window {
+  width: 448px;
+  max-width: 100%;
+  aspect-ratio: 236 / 38;
+  border-radius: 14px;
+  background: rgba(26, 26, 26, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.42);
+}
+
 .hero-demo-fallback {
   border-radius: 16px;
   background: #1a1a1a;
@@ -397,11 +473,19 @@ const releaseDate = computed(() => {
   }
 
   .hero-section__actions {
+    --hero-action-gap: 10px;
+
     margin-bottom: 28px;
   }
 
+  .hero-section__btn-secondary {
+    padding-inline: 8px !important;
+    font-size: 0.72rem !important;
+    letter-spacing: 0.04em !important;
+  }
+
   .hero-section__trust {
-    gap: 10px;
+    gap: 8px;
   }
 
   .hero-section__trust-divider {

@@ -34,6 +34,22 @@ const visibleAssets = computed(() =>
   })
 );
 
+const orderedVisibleAssets = computed(() => {
+  const assets = visibleAssets.value;
+  const activeIndex = assets.findIndex((asset) => asset.id === downloadStore.selectedId);
+  if (activeIndex < 0 || assets.length < 3) return assets;
+
+  const activeAsset = assets[activeIndex];
+  const sideAssets = assets.filter((asset) => asset.id !== activeAsset.id);
+  const middleIndex = Math.floor(assets.length / 2);
+
+  return [
+    ...sideAssets.slice(0, middleIndex),
+    activeAsset,
+    ...sideAssets.slice(middleIndex),
+  ];
+});
+
 // macOS скачивание — резолвим по реальному arch пользователя
 const getDownloadUrl = (asset: (typeof downloadAssets)[number]) => {
   const arch = asset.os === "macos" ? downloadStore.macArch : asset.arch;
@@ -68,7 +84,7 @@ const releaseDate = computed(() => {
       <!-- Platform cards -->
       <div class="download-section__cards">
         <div
-          v-for="(asset, index) in visibleAssets"
+          v-for="(asset, index) in orderedVisibleAssets"
           :key="asset.id"
           class="download-section__card"
           :class="{ 'download-section__card--active': downloadStore.selectedId === asset.id }"
@@ -214,18 +230,20 @@ const releaseDate = computed(() => {
   border-color: rgba(34, 197, 94, 0.4);
   background: rgba(34, 197, 94, 0.06);
   box-shadow:
-    0 8px 32px rgba(34, 197, 94, 0.12),
-    0 0 0 2px rgba(34, 197, 94, 0.2);
-  transform: scale(1.06);
+    0 18px 54px rgba(34, 197, 94, 0.2),
+    0 0 52px rgba(34, 197, 94, 0.12),
+    0 0 0 2px rgba(34, 197, 94, 0.26);
+  transform: translateY(-6px) scale(1.1);
   z-index: 2;
 }
 
 .download-section__card--active:hover {
-  transform: scale(1.08);
+  transform: translateY(-8px) scale(1.12);
   border-color: rgba(34, 197, 94, 0.5);
   box-shadow:
-    0 20px 60px rgba(34, 197, 94, 0.18),
-    0 0 0 2px rgba(34, 197, 94, 0.25);
+    0 26px 70px rgba(34, 197, 94, 0.24),
+    0 0 64px rgba(34, 197, 94, 0.16),
+    0 0 0 2px rgba(34, 197, 94, 0.3);
 }
 
 /* Card glow */
@@ -250,11 +268,11 @@ const releaseDate = computed(() => {
 }
 
 .download-section__card--active .download-section__card-glow {
-  opacity: 0.7;
+  opacity: 1;
   background: radial-gradient(
-    ellipse 80% 60% at 50% 0%,
-    rgba(34, 197, 94, 0.1),
-    transparent 70%
+    ellipse 90% 70% at 50% 12%,
+    rgba(34, 197, 94, 0.18),
+    transparent 72%
   );
 }
 
@@ -365,11 +383,11 @@ const releaseDate = computed(() => {
 @keyframes downloadFadeUp {
   from {
     opacity: 0;
-    transform: translateY(28px);
+    translate: 0 28px;
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    translate: 0 0;
   }
 }
 
@@ -413,16 +431,18 @@ const releaseDate = computed(() => {
   border-color: rgba(74, 222, 128, 0.35);
   background: rgba(34, 197, 94, 0.08);
   box-shadow:
-    0 8px 32px rgba(0, 0, 0, 0.3),
-    0 0 0 2px rgba(74, 222, 128, 0.18);
+    0 18px 54px rgba(0, 0, 0, 0.34),
+    0 0 52px rgba(74, 222, 128, 0.12),
+    0 0 0 2px rgba(74, 222, 128, 0.22);
 }
 
 .v-theme--dark .download-section__card--active:hover {
-  transform: scale(1.08);
+  transform: translateY(-8px) scale(1.12);
   border-color: rgba(74, 222, 128, 0.45);
   box-shadow:
-    0 20px 60px rgba(0, 0, 0, 0.45),
-    0 0 0 2px rgba(74, 222, 128, 0.25);
+    0 26px 70px rgba(0, 0, 0, 0.45),
+    0 0 64px rgba(74, 222, 128, 0.16),
+    0 0 0 2px rgba(74, 222, 128, 0.28);
 }
 
 .v-theme--dark .download-section__card-label {

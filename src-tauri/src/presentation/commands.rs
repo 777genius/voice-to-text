@@ -3223,6 +3223,7 @@ pub async fn register_recording_hotkey(
     use std::sync::atomic::Ordering;
     use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 
+    let _registration_guard = state.recording_hotkey_registration_guard.lock().await;
     let hotkey = state.config.read().await.recording_hotkey.clone();
     log::info!("Command: register_recording_hotkey - hotkey: {}", hotkey);
 
@@ -3558,41 +3559,43 @@ pub async fn register_recording_hotkey(
 
 /// Временно снять регистрацию горячей клавиши (пока пользователь настраивает новую)
 #[tauri::command]
-pub async fn unregister_recording_hotkey(app_handle: AppHandle) -> Result<(), String> {
+pub async fn unregister_recording_hotkey(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
     use std::sync::atomic::Ordering;
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
+    let _registration_guard = state.recording_hotkey_registration_guard.lock().await;
     log::info!("Command: unregister_recording_hotkey - временно снимаем хоткей");
 
-    if let Some(state) = app_handle.try_state::<AppState>() {
-        state
-            .recording_hotkey_is_pressed
-            .store(false, Ordering::SeqCst);
-        state
-            .recording_hotkey_last_raw_press_ms
-            .store(0, Ordering::SeqCst);
-        state
-            .recording_hotkey_released_since_press
-            .store(false, Ordering::SeqCst);
-        state
-            .recording_hotkey_last_release_ms
-            .store(0, Ordering::SeqCst);
-        state
-            .recording_hotkey_stop_suppressed_until_ms
-            .store(0, Ordering::SeqCst);
-        state
-            .recording_hotkey_accepted_press_seq
-            .store(0, Ordering::SeqCst);
-        state
-            .recording_hotkey_stop_suppression_press_seq
-            .store(0, Ordering::SeqCst);
-        state
-            .recording_hotkey_press_generation
-            .store(0, Ordering::SeqCst);
-        state
-            .recording_hotkey_release_generation
-            .fetch_add(1, Ordering::SeqCst);
-    }
+    state
+        .recording_hotkey_is_pressed
+        .store(false, Ordering::SeqCst);
+    state
+        .recording_hotkey_last_raw_press_ms
+        .store(0, Ordering::SeqCst);
+    state
+        .recording_hotkey_released_since_press
+        .store(false, Ordering::SeqCst);
+    state
+        .recording_hotkey_last_release_ms
+        .store(0, Ordering::SeqCst);
+    state
+        .recording_hotkey_stop_suppressed_until_ms
+        .store(0, Ordering::SeqCst);
+    state
+        .recording_hotkey_accepted_press_seq
+        .store(0, Ordering::SeqCst);
+    state
+        .recording_hotkey_stop_suppression_press_seq
+        .store(0, Ordering::SeqCst);
+    state
+        .recording_hotkey_press_generation
+        .store(0, Ordering::SeqCst);
+    state
+        .recording_hotkey_release_generation
+        .fetch_add(1, Ordering::SeqCst);
 
     if let Err(e) = app_handle.global_shortcut().unregister_all() {
         log::warn!("Failed to unregister all shortcuts: {}", e);

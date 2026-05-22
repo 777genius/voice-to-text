@@ -15,6 +15,8 @@
     "ctaSecondary": "Посмотреть возможности",
     "preview": "Превью продукта",
     "trust": {
+      "fast": "Быстро",
+      "accurate": "Точно",
       "realtime": "В реальном времени",
       "multilingual": "40+ языков",
       "crossPlatform": "Кроссплатформенность"

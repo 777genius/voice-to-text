@@ -18,6 +18,32 @@ body {
   padding: 64px 0;
 }
 
+.section-reveal {
+  opacity: 0;
+  transform: translate3d(0, 42px, 0) scale(0.985);
+  filter: blur(12px);
+  transition:
+    opacity 0.82s cubic-bezier(0.22, 0.72, 0.2, 1),
+    transform 0.82s cubic-bezier(0.22, 0.72, 0.2, 1),
+    filter 0.82s cubic-bezier(0.22, 0.72, 0.2, 1);
+  will-change: opacity, transform, filter;
+}
+
+.section-reveal.section-reveal--visible {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+  filter: blur(0);
+}
+
+.section-reveal > * {
+  transform: translateY(14px);
+  transition: transform 0.82s cubic-bezier(0.22, 0.72, 0.2, 1);
+}
+
+.section-reveal.section-reveal--visible > * {
+  transform: translateY(0);
+}
+
 .section-title {
   margin-bottom: 24px;
 }
@@ -28,6 +54,56 @@ body {
 
 .anchor-offset {
   scroll-margin-top: 96px;
+}
+
+.feature-card__icon-wrap,
+.providers-section__card-icon-wrap,
+.download-section__card-icon-wrap,
+.opensource-section__card-icon-wrap,
+.faq-section__panel-icon-wrap {
+  transform-style: preserve-3d;
+  perspective: 720px;
+  animation: landingIcon3dTurn 7.5s ease-in-out infinite;
+  will-change: transform;
+}
+
+.feature-card__icon,
+.providers-section__card-icon,
+.download-section__card-icon,
+.opensource-section__card-icon,
+.faq-section__panel-icon {
+  transform: translateZ(14px);
+}
+
+.feature-card:nth-child(2n) .feature-card__icon-wrap,
+.providers-section__card:nth-child(2n) .providers-section__card-icon-wrap,
+.download-section__card:nth-child(2n) .download-section__card-icon-wrap,
+.opensource-section__card:nth-child(2n) .opensource-section__card-icon-wrap,
+.faq-section__panel:nth-child(2n) .faq-section__panel-icon-wrap {
+  animation-delay: -2.4s;
+}
+
+.feature-card:nth-child(3n) .feature-card__icon-wrap,
+.providers-section__card:nth-child(3n) .providers-section__card-icon-wrap,
+.download-section__card:nth-child(3n) .download-section__card-icon-wrap,
+.opensource-section__card:nth-child(3n) .opensource-section__card-icon-wrap,
+.faq-section__panel:nth-child(3n) .faq-section__panel-icon-wrap {
+  animation-delay: -4.8s;
+}
+
+@keyframes landingIcon3dTurn {
+  0%,
+  100% {
+    transform: rotateX(0deg) rotateY(-8deg) translateY(0);
+  }
+
+  35% {
+    transform: rotateX(8deg) rotateY(9deg) translateY(-2px);
+  }
+
+  65% {
+    transform: rotateX(-6deg) rotateY(6deg) translateY(1px);
+  }
 }
 
 @media (max-width: 960px) {
@@ -66,8 +142,23 @@ body {
   }
 }
 
-.app-header {
-  backdrop-filter: blur(10px);
+@media (prefers-reduced-motion: reduce) {
+  .section-reveal,
+  .section-reveal > * {
+    opacity: 1;
+    transform: none;
+    filter: none;
+    transition: none;
+  }
+
+  .feature-card__icon-wrap,
+  .providers-section__card-icon-wrap,
+  .download-section__card-icon-wrap,
+  .opensource-section__card-icon-wrap,
+  .faq-section__panel-icon-wrap {
+    animation: none;
+    transform: none;
+  }
 }
 
 .swiper {

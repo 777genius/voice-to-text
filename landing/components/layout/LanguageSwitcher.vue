@@ -29,6 +29,7 @@ const items = computed(() =>
 const currentFlagIcon = computed(() => {
   return flagIconMap[locale.value as string] ?? "circle-flags:xx";
 });
+const currentLocaleCode = computed(() => String(locale.value).toUpperCase());
 
 const { trackLanguageSwitch } = useAnalytics();
 
@@ -91,9 +92,6 @@ const onChange = async (value: string | LocaleCode) => {
     :model-value="locale"
     density="compact"
     :variant="props.compact ? 'plain' : 'outlined'"
-    hide-details
-    auto-select-first
-    @update:model-value="onChange"
     :style="props.fullWidth ? { maxWidth: '100%', width: '100%' } : { maxWidth: '220px' }"
     :class="{
       'language-switcher--full': props.fullWidth,
@@ -101,9 +99,15 @@ const onChange = async (value: string | LocaleCode) => {
     }"
     :aria-label="t('language.label')"
     :single-line="props.compact"
+    hide-details
+    auto-select-first
+    @update:model-value="onChange"
   >
     <template #selection>
-      <Icon :name="currentFlagIcon" class="language-switcher__flag-icon" />
+      <span class="language-switcher__selection">
+        <Icon :name="currentFlagIcon" class="language-switcher__flag-icon" />
+        <span v-if="props.compact" class="language-switcher__code">{{ currentLocaleCode }}</span>
+      </span>
     </template>
     <template #item="{ item, props: itemProps }">
       <v-list-item v-bind="itemProps">
@@ -132,6 +136,20 @@ const onChange = async (value: string | LocaleCode) => {
   gap: 8px;
 }
 
+.language-switcher__selection {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.language-switcher__code {
+  font-size: 0.88rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1;
+}
+
 .language-switcher--compact :deep(.v-field) {
   min-height: 36px;
 }
@@ -140,6 +158,31 @@ const onChange = async (value: string | LocaleCode) => {
   padding-top: 6px;
   padding-bottom: 6px;
   min-height: 36px;
+  flex-wrap: nowrap;
+  align-items: center;
+}
+
+.language-switcher--compact :deep(.v-autocomplete__selection) {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  margin: 0;
+}
+
+.language-switcher--compact :deep(.v-field__append-inner) {
+  align-self: center;
+  display: flex;
+  align-items: center;
+  padding-top: 0;
+}
+
+.language-switcher--compact :deep(.v-field__input input) {
+  width: 0 !important;
+  min-width: 0 !important;
+  max-width: 0 !important;
+  flex: 0 0 0 !important;
+  padding: 0 !important;
+  opacity: 0;
 }
 
 .language-switcher--compact {

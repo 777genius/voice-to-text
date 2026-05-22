@@ -1,6 +1,7 @@
 <script setup lang="ts">
 usePageSeo("meta.homeTitle", "meta.homeDescription");
 useTrackSections();
+useRevealSections();
 const { containerRef } = useParallaxSections();
 </script>
 
@@ -14,9 +15,11 @@ const { containerRef } = useParallaxSections();
     <LazyProvidersSection />
     <SectionDivider />
     <LazySupportedLanguages />
+    <!-- Screenshots section is temporarily hidden while the visuals are refreshed.
     <SectionDivider :flip="true" />
     <LazyScreenshotsSection />
-    <SectionDivider />
+    -->
+    <SectionDivider :flip="true" />
     <LazyPricingSection />
     <SectionDivider :flip="true" />
     <LazyTestimonialsSection />

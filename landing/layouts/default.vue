@@ -11,6 +11,5 @@
 <style scoped>
 .app-layout__main {
   flex: 1;
-  padding-top: 64px;
 }
 </style>

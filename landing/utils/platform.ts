@@ -1,5 +1,21 @@
 import type { PlatformArch, PlatformOs } from "~/types/platform";
 
+type NavigatorWithUserAgentData = Navigator & {
+  userAgentData?: {
+    platform?: string;
+  };
+};
+
+export const getNavigatorPlatformSignature = (navigatorLike: Navigator): string => {
+  const nav = navigatorLike as NavigatorWithUserAgentData;
+
+  return [
+    nav.userAgent,
+    nav.platform,
+    nav.userAgentData?.platform,
+  ].filter(Boolean).join(" ");
+};
+
 export const detectPlatform = (userAgent: string): PlatformOs => {
   const ua = userAgent.toLowerCase();
   if (ua.includes("mac")) return "macos";

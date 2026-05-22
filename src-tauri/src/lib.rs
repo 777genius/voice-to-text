@@ -693,19 +693,6 @@ pub fn run() {
                 }
             });
 
-            // Регистрируем хоткей сразу (на дефолтном/текущем state.config),
-            // чтобы он работал даже до завершения загрузки конфигов.
-            // После загрузки app-config выше мы перерегистрируем хоткей еще раз (итоговое значение).
-            let app_handle_for_hotkey_init = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                if let Some(state) = app_handle_for_hotkey_init.try_state::<AppState>() {
-                    let handle = app_handle_for_hotkey_init.clone();
-                    if let Err(e) = commands::register_recording_hotkey(state, handle).await {
-                        log::error!("Failed to register recording hotkey (early init): {}", e);
-                    }
-                }
-            });
-
             // Запускаем обработчик VAD timeout событий
             if let Some(state) = app.try_state::<AppState>() {
                 state.start_vad_timeout_handler(app.handle().clone());

@@ -3,7 +3,7 @@ export const sectionOrder = [
   "features",
   "providers",
   "languages",
-  "screenshots",
+  // "screenshots",
   "pricing",
   "download",
   "opensource",

@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { downloadAssets } from "~/data/downloads";
 import type { DownloadArch, DownloadOs } from "~/data/downloads";
-import { detectMacArch, detectPlatform } from "~/utils/platform";
+import { detectMacArch, detectPlatform, getNavigatorPlatformSignature } from "~/utils/platform";
 
 export const useDownloadStore = defineStore("download", {
   state: () => ({
@@ -23,12 +23,12 @@ export const useDownloadStore = defineStore("download", {
   },
   actions: {
     init() {
-      if (!process.client) return;
-      const ua = navigator.userAgent;
-      const os = detectPlatform(ua);
+      if (!import.meta.client) return;
+      const signature = getNavigatorPlatformSignature(navigator);
+      const os = detectPlatform(signature);
       this.os = os === "unknown" ? "unknown" : os;
       if (this.os === "macos") {
-        this.arch = detectMacArch(ua) as DownloadArch;
+        this.arch = detectMacArch(signature) as DownloadArch;
       } else if (this.os !== "unknown") {
         this.arch = "x64";
       }
