@@ -1,6 +1,7 @@
 <script setup lang="ts">
 const { t } = useI18n();
 const year = new Date().getFullYear();
+const contactEmail = "quantjumppro@gmail.com";
 </script>
 
 <template>
@@ -13,6 +14,10 @@ const year = new Date().getFullYear();
         <NuxtLink class="app-footer__link" to="/privacy-policy">{{ t("footer.links.privacyPolicy") }}</NuxtLink>
         <span class="app-footer__sep">·</span>
         <NuxtLink class="app-footer__link" to="/refund-policy">{{ t("footer.links.refundPolicy") }}</NuxtLink>
+        <span class="app-footer__sep">·</span>
+        <a class="app-footer__link app-footer__contact" :href="`mailto:${contactEmail}`">
+          {{ t("footer.links.contact") }}: {{ contactEmail }}
+        </a>
       </div>
     </v-container>
   </footer>
@@ -39,6 +44,8 @@ const year = new Date().getFullYear();
   display: flex;
   align-items: center;
   gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .app-footer__link {
@@ -68,6 +75,10 @@ const year = new Date().getFullYear();
     flex-direction: column;
     gap: 10px;
     text-align: center;
+  }
+
+  .app-footer__links {
+    justify-content: center;
   }
 }
 </style>
