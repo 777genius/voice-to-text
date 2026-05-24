@@ -177,7 +177,7 @@ const releaseDate = computed(() => {
   font-size: 1.2rem;
   line-height: 1.7;
   opacity: 0.65;
-  max-width: 480px;
+  max-width: 640px;
   margin-bottom: 36px;
   animation: heroFadeIn 0.8s ease both;
   animation-delay: 0.3s;
@@ -438,6 +438,13 @@ const releaseDate = computed(() => {
 }
 
 /* ─── Responsive ─── */
+@media (min-width: 961px) {
+  .hero-section__subtitle {
+    font-size: clamp(1.05rem, 1.16vw, 1.2rem);
+    white-space: nowrap;
+  }
+}
+
 @media (max-width: 960px) {
   .hero-section {
     min-height: auto;
