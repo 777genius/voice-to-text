@@ -24,29 +24,33 @@ async fn desktop_backend_provider_reaches_live_backend_for_all_streaming_provide
 
     let audio = load_hello_fixture();
 
-    for provider in [
-        BackendStreamingProvider::Deepgram,
-        BackendStreamingProvider::ElevenLabs,
+    for (provider, language) in [
+        (BackendStreamingProvider::Deepgram, "en"),
+        (BackendStreamingProvider::ElevenLabs, "en"),
+        (BackendStreamingProvider::ElevenLabs, "multi"),
     ] {
         tokio::time::timeout(
             Duration::from_secs(75),
-            run_provider_flow(&backend_url, provider, &audio),
+            run_provider_flow(&backend_url, provider, language, &audio),
         )
         .await
-        .unwrap_or_else(|_| panic!("live desktop-backend e2e timed out for {provider:?}"));
+        .unwrap_or_else(|_| {
+            panic!("live desktop-backend e2e timed out for {provider:?}/{language}")
+        });
     }
 }
 
 async fn run_provider_flow(
     backend_url: &str,
     streaming_provider: BackendStreamingProvider,
+    language: &str,
     audio: &[u8],
 ) {
     let mut config = SttConfig::new(SttProviderType::Backend);
     config.backend_url = Some(backend_url.to_string());
     config.backend_auth_token = Some("dev-local-token".to_string());
     config.backend_streaming_provider = streaming_provider;
-    config.language = "en".to_string();
+    config.language = language.to_string();
     config.keep_connection_alive = true;
 
     let (quality_tx, mut quality_rx) = mpsc::unbounded_channel::<String>();
@@ -144,8 +148,8 @@ async fn run_provider_flow(
     );
 
     println!(
-        "live desktop-backend e2e passed for {:?}: final={:?}, partials={:?}",
-        streaming_provider, final_text, partial_texts
+        "live desktop-backend e2e passed for {:?}/{}: final={:?}, partials={:?}",
+        streaming_provider, language, final_text, partial_texts
     );
 }
 
