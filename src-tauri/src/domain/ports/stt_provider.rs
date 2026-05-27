@@ -57,6 +57,7 @@ pub enum SttConnectionCategory {
     Http,
     RateLimited,
     LimitExceeded,
+    ProviderQuotaExceeded,
     ServerUnavailable,
     Closed,
     Unknown,

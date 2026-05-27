@@ -239,6 +239,7 @@ const messages = {
       rateLimited: 'Too many active sessions. Please wait and try again.',
       limitExceeded: 'Usage limit reached. Upgrade your plan to continue.',
       limitExceededDetailed: 'Usage limit reached ({used}/{total} min, {plan}). Activate a license to continue.',
+      providerQuotaExceeded: 'STT provider quota is exhausted. Top up the provider account or update the API key.',
       authentication: 'Authentication error. Sign in again or check the keys in Settings.',
       processing: 'Audio processing error. Try restarting the recording.',
       audioDeviceUnavailable:
@@ -603,6 +604,7 @@ const messages = {
       rateLimited: 'Слишком много активных сессий. Подождите и попробуйте снова.',
       limitExceeded: 'Лимит использования исчерпан. Обновите тариф для продолжения.',
       limitExceededDetailed: 'Лимит исчерпан ({used}/{total} мин, {plan}). Активируйте лицензию для продолжения.',
+      providerQuotaExceeded: 'Квота STT-провайдера исчерпана. Пополните баланс провайдера или обновите API key.',
       authentication: 'Ошибка авторизации. Войдите заново или проверьте ключи в настройках.',
       processing: 'Ошибка обработки аудио. Попробуйте перезапустить запись.',
       audioDeviceUnavailable:
@@ -967,6 +969,7 @@ const messages = {
       rateLimited: 'Demasiadas sesiones activas. Espere e inténtelo de nuevo.',
       limitExceeded: 'Límite de uso alcanzado. Actualice su plan para continuar.',
       limitExceededDetailed: 'Límite alcanzado ({used}/{total} min, {plan}). Active una licencia para continuar.',
+      providerQuotaExceeded: 'La cuota del proveedor STT se agotó. Recargue la cuenta del proveedor o actualice la API key.',
       authentication: 'Error de autenticación. Inicie sesión de nuevo o compruebe las claves en ajustes.',
       processing: 'Error de procesamiento de audio. Reinicie la grabación.',
       audioDeviceUnavailable:
@@ -1331,6 +1334,7 @@ const messages = {
       rateLimited: 'Trop de sessions actives. Veuillez patienter et réessayer.',
       limitExceeded: 'Limite d\'utilisation atteinte. Passez à un plan supérieur pour continuer.',
       limitExceededDetailed: 'Limite atteinte ({used}/{total} min, {plan}). Activez une licence pour continuer.',
+      providerQuotaExceeded: 'Le quota du fournisseur STT est épuisé. Rechargez le compte fournisseur ou mettez à jour la clé API.',
       authentication: "Erreur d'authentification. Reconnectez-vous ou vérifiez les clés dans les paramètres.",
       processing: "Erreur de traitement audio. Redémarrez l'enregistrement.",
       audioDeviceUnavailable:
@@ -1695,6 +1699,7 @@ const messages = {
       rateLimited: 'Zu viele aktive Sitzungen. Bitte warten und erneut versuchen.',
       limitExceeded: 'Nutzungslimit erreicht. Aktualisieren Sie Ihren Tarif, um fortzufahren.',
       limitExceededDetailed: 'Limit erreicht ({used}/{total} Min, {plan}). Aktivieren Sie eine Lizenz, um fortzufahren.',
+      providerQuotaExceeded: 'Das Kontingent des STT-Anbieters ist erschöpft. Laden Sie das Anbieterkonto auf oder aktualisieren Sie den API key.',
       authentication: 'Authentifizierungsfehler. Bitte erneut anmelden oder die Schlüssel in den Einstellungen prüfen.',
       processing: 'Audioverarbeitungsfehler. Aufnahme neu starten.',
       audioDeviceUnavailable:
@@ -2059,6 +2064,7 @@ const messages = {
       rateLimited: 'Забагато активних сесій. Зачекайте і спробуйте знову.',
       limitExceeded: 'Ліміт використання вичерпано. Оновіть тариф для продовження.',
       limitExceededDetailed: 'Ліміт вичерпано ({used}/{total} хв, {plan}). Активуйте ліцензію для продовження.',
+      providerQuotaExceeded: 'Квоту STT-провайдера вичерпано. Поповніть баланс провайдера або оновіть API key.',
       authentication: 'Помилка автентифікації. Увійдіть знову або перевірте ключі в налаштуваннях.',
       processing: 'Помилка обробки аудіо. Спробуйте перезапустити запис.',
       audioDeviceUnavailable:

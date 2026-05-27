@@ -1295,6 +1295,22 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           const isLimitExceeded = event.payload.error_type === 'limit_exceeded'
             || event.payload.error_details?.category === 'limit_exceeded';
 
+          const isProviderQuotaExceeded =
+            event.payload.error_type === 'provider_quota_exceeded' ||
+            event.payload.error_details?.category === 'provider_quota_exceeded' ||
+            event.payload.error_details?.serverCode === 'PROVIDER_QUOTA_EXCEEDED';
+
+          if (isProviderQuotaExceeded) {
+            error.value = mapErrorMessage(
+              'provider_quota_exceeded',
+              event.payload.error,
+              event.payload.error_details
+            );
+            errorType.value = 'provider_quota_exceeded';
+            status.value = RecordingStatus.Error;
+            return;
+          }
+
           if (isLimitExceeded) {
             // Уже обработали — не дёргаем API повторно
             if (errorType.value === 'limit_exceeded') return;
@@ -1389,6 +1405,22 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               return;
             }
 
+            const connectIsProviderQuotaExceeded =
+              event.payload.error_type === 'provider_quota_exceeded' ||
+              event.payload.error_details?.category === 'provider_quota_exceeded' ||
+              event.payload.error_details?.serverCode === 'PROVIDER_QUOTA_EXCEEDED';
+            if (connectIsProviderQuotaExceeded) {
+              isConnecting.value = false;
+              error.value = mapErrorMessage(
+                'provider_quota_exceeded',
+                event.payload.error,
+                event.payload.error_details
+              );
+              errorType.value = 'provider_quota_exceeded';
+              status.value = RecordingStatus.Error;
+              return;
+            }
+
             // error_type может быть любым (backend иногда присылает PROVIDER_ERROR и т.п.)
             // Нормализуем к нашим типам, иначе retry-цикл может не понять, что произошло.
             lastConnectFailure.value =
@@ -1412,6 +1444,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           // добивает retry-цикл после закрытия WS сервером).
           if (errorType.value === 'limit_exceeded' && normalizedType !== 'limit_exceeded') {
             console.warn('[STT] Skipping error downgrade from limit_exceeded to', normalizedType);
+            return;
+          }
+          if (
+            errorType.value === 'provider_quota_exceeded' &&
+            normalizedType !== 'provider_quota_exceeded'
+          ) {
+            console.warn('[STT] Skipping error downgrade from provider_quota_exceeded to', normalizedType);
             return;
           }
 
@@ -1501,6 +1540,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
     if (lower.includes('timeout') || lower.includes('timed out')) return 'timeout';
     if (lower.includes('limit_exceeded') || lower.includes('limit exceeded') || lower.includes('usage limit')) return 'limit_exceeded';
+    if (lower.includes('provider_quota_exceeded') || lower.includes('quota_exceeded')) return 'provider_quota_exceeded';
     if (lower.includes('connection error') || lower.includes('websocket')) return 'connection';
     if (lower.includes('configuration error')) return 'configuration';
     if (lower.includes('processing error')) return 'processing';
@@ -1533,6 +1573,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     if (value === 'processing') return 'processing';
     if (value === 'authentication') return 'authentication';
     if (value === 'limit_exceeded') return 'limit_exceeded';
+    if (value === 'provider_quota_exceeded') return 'provider_quota_exceeded';
     return null;
   }
 
@@ -1563,6 +1604,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     details: TranscriptionErrorPayload['error_details'] | null | undefined
   ): string {
     const category = details?.category;
+    if (
+      details?.serverCode === 'PROVIDER_QUOTA_EXCEEDED' ||
+      category === 'provider_quota_exceeded'
+    ) {
+      return i18n.global.t('errors.providerQuotaExceeded');
+    }
     if (category) {
       if (category === 'offline') return i18n.global.t('errors.connectionOffline');
       if (category === 'dns') return i18n.global.t('errors.connectionDns');
@@ -1659,6 +1706,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         return mapConnectionErrorMessage(raw, details);
       case 'limit_exceeded':
         return i18n.global.t('errors.limitExceeded');
+      case 'provider_quota_exceeded':
+        return i18n.global.t('errors.providerQuotaExceeded');
       case 'processing':
         return mapProcessingErrorMessage(raw);
       case 'authentication':

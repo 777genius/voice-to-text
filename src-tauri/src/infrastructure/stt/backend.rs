@@ -171,6 +171,7 @@ fn category_for_server_error(code: &str) -> SttConnectionCategory {
             SttConnectionCategory::RateLimited
         }
         "LIMIT_EXCEEDED" => SttConnectionCategory::LimitExceeded,
+        "PROVIDER_QUOTA_EXCEEDED" => SttConnectionCategory::ProviderQuotaExceeded,
         "PROVIDER_UNAVAILABLE" | "PROVIDER_ERROR" | "INTERNAL_ERROR" => {
             SttConnectionCategory::ServerUnavailable
         }
@@ -184,6 +185,7 @@ fn server_error_closes_stream(code: &str) -> bool {
         "RATE_LIMIT_EXCEEDED"
             | "TOO_MANY_SESSIONS"
             | "LIMIT_EXCEEDED"
+            | "PROVIDER_QUOTA_EXCEEDED"
             | "PROVIDER_UNAVAILABLE"
             | "PROVIDER_ERROR"
             | "INTERNAL_ERROR"
@@ -1847,11 +1849,16 @@ mod tests {
             category_for_server_error("PROVIDER_UNAVAILABLE"),
             SttConnectionCategory::ServerUnavailable
         );
+        assert_eq!(
+            category_for_server_error("PROVIDER_QUOTA_EXCEEDED"),
+            SttConnectionCategory::ProviderQuotaExceeded
+        );
     }
 
     #[test]
     fn test_only_fatal_server_errors_suppress_following_close() {
         assert!(server_error_closes_stream("RATE_LIMIT_EXCEEDED"));
+        assert!(server_error_closes_stream("PROVIDER_QUOTA_EXCEEDED"));
         assert!(server_error_closes_stream("PROVIDER_UNAVAILABLE"));
         assert!(!server_error_closes_stream("BAD_REQUEST"));
     }

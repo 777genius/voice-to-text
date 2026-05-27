@@ -174,6 +174,7 @@ fn stt_category_to_string(cat: SttConnectionCategory) -> String {
         SttConnectionCategory::Http => "http",
         SttConnectionCategory::RateLimited => "rate_limited",
         SttConnectionCategory::LimitExceeded => "limit_exceeded",
+        SttConnectionCategory::ProviderQuotaExceeded => "provider_quota_exceeded",
         SttConnectionCategory::ServerUnavailable => "server_unavailable",
         SttConnectionCategory::Closed => "closed",
         SttConnectionCategory::Unknown => "unknown",

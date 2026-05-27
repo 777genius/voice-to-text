@@ -27,6 +27,8 @@ fn classify_transcription_error_type_from_stt(err: &SttError) -> String {
                 "timeout".to_string()
             } else if conn.details.category == Some(SttConnectionCategory::LimitExceeded) {
                 "limit_exceeded".to_string()
+            } else if conn.details.category == Some(SttConnectionCategory::ProviderQuotaExceeded) {
+                "provider_quota_exceeded".to_string()
             } else {
                 "connection".to_string()
             }

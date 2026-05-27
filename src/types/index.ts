@@ -49,7 +49,14 @@ export interface ErrorPayload {
 export interface TranscriptionErrorPayload {
   session_id: number;
   error: string;
-  error_type: 'connection' | 'configuration' | 'processing' | 'timeout' | 'authentication' | 'limit_exceeded';
+  error_type:
+    | 'connection'
+    | 'configuration'
+    | 'processing'
+    | 'timeout'
+    | 'authentication'
+    | 'limit_exceeded'
+    | 'provider_quota_exceeded';
   error_details?: TranscriptionErrorDetailsPayload;
 }
 
@@ -66,6 +73,7 @@ export interface TranscriptionErrorDetailsPayload {
     | 'closed'
     | 'rate_limited'
     | 'limit_exceeded'
+    | 'provider_quota_exceeded'
     | 'unknown';
   httpStatus?: number;
   wsCloseCode?: number;
