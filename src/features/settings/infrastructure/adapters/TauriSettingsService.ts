@@ -44,7 +44,7 @@ class TauriSettingsService {
     if ('deepgramApiKey' in config) args.deepgramApiKey = config.deepgramApiKey;
     if ('assemblyaiApiKey' in config) args.assemblyaiApiKey = config.assemblyaiApiKey;
     if ('model' in config) args.model = config.model;
-    if ('deepgramKeyterms' in config) args.deepgramKeyterms = config.deepgramKeyterms;
+    if ('streamingKeyterms' in config) args.streamingKeyterms = config.streamingKeyterms;
 
     await invokeUpdateSttConfig(args);
   }

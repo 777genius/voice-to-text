@@ -8,7 +8,7 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args: any[]) => invokeMock(...args),
 }));
 
-describe('settingsStore deepgramKeyterms persistence (debounced)', () => {
+describe('settingsStore streamingKeyterms persistence (debounced)', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     (window as any).__TAURI__ = {};
@@ -20,11 +20,11 @@ describe('settingsStore deepgramKeyterms persistence (debounced)', () => {
     vi.restoreAllMocks();
   });
 
-  it('setDeepgramKeyterms меняет только draft и не вызывает backend write', () => {
+  it('setStreamingKeyterms меняет только draft и не вызывает backend write', () => {
     const store = useSettingsStore();
 
-    store.setDeepgramKeyterms('Kubernetes, VoicetextAI');
-    expect(store.deepgramKeyterms).toBe('Kubernetes, VoicetextAI');
+    store.setStreamingKeyterms('Kubernetes, VoicetextAI');
+    expect(store.streamingKeyterms).toBe('Kubernetes, VoicetextAI');
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
@@ -41,17 +41,17 @@ describe('settingsStore deepgramKeyterms persistence (debounced)', () => {
 
     store.setLanguage('ru', { persist: false });
     store.setMicrophoneSensitivity(100, { persist: false });
-    store.setDeepgramKeyterms('Deepgram', { persist: false });
+    store.setStreamingKeyterms('Deepgram', { persist: false });
     store.capturePersistedState();
 
     store.setMicrophoneSensitivity(175);
-    store.setDeepgramKeyterms('Kubernetes, VoicetextAI');
+    store.setStreamingKeyterms('Kubernetes, VoicetextAI');
 
     const persisted = store.getPersistedState();
     expect(persisted?.microphoneSensitivity).toBe(100);
-    expect(persisted?.deepgramKeyterms).toBe('Deepgram');
+    expect(persisted?.streamingKeyterms).toBe('Deepgram');
     expect(store.microphoneSensitivity).toBe(175);
-    expect(store.deepgramKeyterms).toBe('Kubernetes, VoicetextAI');
+    expect(store.streamingKeyterms).toBe('Kubernetes, VoicetextAI');
   });
 });
 

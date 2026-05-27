@@ -61,19 +61,19 @@ describe('useSettings saveConfig', () => {
     store.setShowMiniRecordingWindow(false);
     store.setKeepRecordingUntilManualStop(false);
     store.setSelectedAudioDevice('');
-    store.setDeepgramKeyterms('', { persist: false });
+    store.setStreamingKeyterms('', { persist: false });
     store.capturePersistedState();
 
-    store.setDeepgramKeyterms('Kubernetes, VoicetextAI', { persist: false });
+    store.setStreamingKeyterms('Kubernetes, VoicetextAI', { persist: false });
 
     tauriSettingsServiceMock.getSttConfig
       .mockResolvedValueOnce({
         language: 'en',
-        deepgram_keyterms: null,
+        streaming_keyterms: null,
       })
       .mockResolvedValueOnce({
         language: 'en',
-        deepgram_keyterms: 'Kubernetes, VoicetextAI',
+        streaming_keyterms: 'Kubernetes, VoicetextAI',
       });
 
     tauriSettingsServiceMock.getAppConfig.mockResolvedValueOnce({
@@ -97,7 +97,7 @@ describe('useSettings saveConfig', () => {
       provider: 'backend',
       language: 'en',
       backendStreamingProvider: 'deepgram',
-      deepgramKeyterms: 'Kubernetes, VoicetextAI',
+      streamingKeyterms: 'Kubernetes, VoicetextAI',
     });
     expect(tauriSettingsServiceMock.updateAppConfig).not.toHaveBeenCalled();
   });
@@ -114,7 +114,7 @@ describe('useSettings saveConfig', () => {
     store.setShowMiniRecordingWindow(false);
     store.setKeepRecordingUntilManualStop(false);
     store.setSelectedAudioDevice('');
-    store.setDeepgramKeyterms('', { persist: false });
+    store.setStreamingKeyterms('', { persist: false });
     store.capturePersistedState();
 
     store.setBackendStreamingProvider(BackendStreamingProviderType.ElevenLabs);
@@ -123,12 +123,12 @@ describe('useSettings saveConfig', () => {
       .mockResolvedValueOnce({
         language: 'ru',
         backend_streaming_provider: 'deepgram',
-        deepgram_keyterms: null,
+        streaming_keyterms: null,
       })
       .mockResolvedValueOnce({
         language: 'ru',
         backend_streaming_provider: 'elevenlabs',
-        deepgram_keyterms: null,
+        streaming_keyterms: null,
       });
 
     tauriSettingsServiceMock.getAppConfig.mockResolvedValueOnce({
@@ -167,14 +167,14 @@ describe('useSettings saveConfig', () => {
     store.setShowMiniRecordingWindow(false);
     store.setKeepRecordingUntilManualStop(false);
     store.setSelectedAudioDevice('');
-    store.setDeepgramKeyterms('', { persist: false });
+    store.setStreamingKeyterms('', { persist: false });
     store.capturePersistedState();
 
     store.setMicrophoneSensitivity(175, { persist: false });
 
     tauriSettingsServiceMock.getSttConfig.mockResolvedValueOnce({
       language: 'ru',
-      deepgram_keyterms: null,
+      streaming_keyterms: null,
     });
 
     tauriSettingsServiceMock.getAppConfig
@@ -224,14 +224,14 @@ describe('useSettings saveConfig', () => {
     store.setShowMiniRecordingWindow(false);
     store.setKeepRecordingUntilManualStop(false);
     store.setSelectedAudioDevice('');
-    store.setDeepgramKeyterms('', { persist: false });
+    store.setStreamingKeyterms('', { persist: false });
     store.capturePersistedState();
 
     store.setHideRecordingWindowOnHotkey(true);
 
     tauriSettingsServiceMock.getSttConfig.mockResolvedValueOnce({
       language: 'ru',
-      deepgram_keyterms: null,
+      streaming_keyterms: null,
     });
 
     tauriSettingsServiceMock.getAppConfig.mockResolvedValueOnce({
@@ -269,7 +269,7 @@ describe('useSettings saveConfig', () => {
     store.setShowMiniRecordingWindow(false);
     store.setKeepRecordingUntilManualStop(false);
     store.setSelectedAudioDevice('');
-    store.setDeepgramKeyterms('', { persist: false });
+    store.setStreamingKeyterms('', { persist: false });
     store.capturePersistedState();
 
     store.setShowMiniRecordingWindow(true);
@@ -277,7 +277,7 @@ describe('useSettings saveConfig', () => {
 
     tauriSettingsServiceMock.getSttConfig.mockResolvedValueOnce({
       language: 'ru',
-      deepgram_keyterms: null,
+      streaming_keyterms: null,
     });
 
     tauriSettingsServiceMock.getAppConfig.mockResolvedValueOnce({
@@ -316,7 +316,7 @@ describe('useSettings saveConfig', () => {
     store.setShowMiniRecordingWindow(false);
     store.setKeepRecordingUntilManualStop(false);
     store.setSelectedAudioDevice('');
-    store.setDeepgramKeyterms('', { persist: false });
+    store.setStreamingKeyterms('', { persist: false });
     store.capturePersistedState();
 
     store.setAutoCopyToClipboard(true);
@@ -324,7 +324,7 @@ describe('useSettings saveConfig', () => {
 
     tauriSettingsServiceMock.getSttConfig.mockResolvedValueOnce({
       language: 'ru',
-      deepgram_keyterms: null,
+      streaming_keyterms: null,
     });
 
     tauriSettingsServiceMock.getAppConfig.mockResolvedValueOnce({

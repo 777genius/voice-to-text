@@ -1046,7 +1046,8 @@ where
 mod snapshot_contract_tests {
     use super::{
         auto_paste_text_can_trigger_recording_hotkey, calculate_recording_window_position,
-        is_audio_capture_start_failure, should_hide_recording_window_immediately_on_hotkey_stop,
+        is_audio_capture_start_failure, resolve_streaming_keyterms_update,
+        should_hide_recording_window_immediately_on_hotkey_stop,
         should_ignore_hotkey_stop_after_start, should_show_recording_window_on_processing_hotkey,
         validate_auto_paste_target_for_focus, AppConfigSnapshotData, RecordingWindowPlacement,
         SnapshotEnvelope, SttConfigSnapshotData,
@@ -1295,6 +1296,26 @@ mod snapshot_contract_tests {
     }
 
     #[test]
+    fn streaming_keyterms_update_prefers_new_field_over_legacy_alias() {
+        assert_eq!(
+            resolve_streaming_keyterms_update(
+                Some(Some("new terms".to_string())),
+                Some(Some("old terms".to_string()))
+            ),
+            Some(Some("new terms".to_string()))
+        );
+        assert_eq!(
+            resolve_streaming_keyterms_update(Some(None), Some(Some("old terms".to_string()))),
+            Some(None)
+        );
+        assert_eq!(
+            resolve_streaming_keyterms_update(None, Some(Some("old terms".to_string()))),
+            Some(Some("old terms".to_string()))
+        );
+        assert_eq!(resolve_streaming_keyterms_update(None, None), None);
+    }
+
+    #[test]
     fn stt_config_snapshot_is_public_and_does_not_leak_backend_token_or_url() {
         let env = SnapshotEnvelope {
             revision: "7".to_string(),
@@ -1309,6 +1330,7 @@ mod snapshot_contract_tests {
                 assemblyai_api_key: None,
                 model: None,
                 keep_connection_alive: true,
+                streaming_keyterms: None,
                 deepgram_keyterms: None,
             },
         };
@@ -1334,6 +1356,8 @@ mod snapshot_contract_tests {
         assert!(data.contains_key("backend_streaming_provider"));
         assert!(data.contains_key("language"));
         assert!(data.contains_key("keep_connection_alive"));
+        assert!(data.contains_key("streaming_keyterms"));
+        assert!(data.contains_key("deepgram_keyterms"));
     }
 }
 /// Toggle window visibility
@@ -1707,6 +1731,13 @@ pub async fn minimize_window(window: Window) -> Result<(), String> {
 //
 
 /// Update STT configuration
+fn resolve_streaming_keyterms_update(
+    streaming_keyterms: Option<Option<String>>,
+    legacy_deepgram_keyterms: Option<Option<String>>,
+) -> Option<Option<String>> {
+    streaming_keyterms.or(legacy_deepgram_keyterms)
+}
+
 #[tauri::command]
 pub async fn update_stt_config(
     state: State<'_, AppState>,
@@ -1721,6 +1752,8 @@ pub async fn update_stt_config(
     // Важно: двойной Option позволяет отличить "поле не прислали" (None)
     // от "поле прислали как null" (Some(None)). Это нужно, чтобы
     // частичные обновления (например, только language) не затирали keyterms.
+    streaming_keyterms: Option<Option<String>>,
+    // Deprecated IPC alias. Оставляем на один миграционный период для старых окон/сборок.
     deepgram_keyterms: Option<Option<String>>,
 ) -> Result<(), String> {
     log::info!(
@@ -1783,8 +1816,8 @@ pub async fn update_stt_config(
     // - None: не меняем существующее значение
     // - Some(None): очищаем
     // - Some(Some(v)): устанавливаем v
-    if let Some(next) = deepgram_keyterms {
-        config.deepgram_keyterms = next;
+    if let Some(next) = resolve_streaming_keyterms_update(streaming_keyterms, deepgram_keyterms) {
+        config.streaming_keyterms = next;
     }
 
     // Обновляем конфигурацию в сервисе
@@ -1809,7 +1842,7 @@ pub async fn update_stt_config(
     // Синхронизация между окнами — бампим ревизию при любых изменениях STT конфига,
     // чтобы state-sync корректно подтягивал актуальный snapshot (включая keyterms и т.д.)
     let stt_changed = config.language != old_stt.language
-        || config.deepgram_keyterms != old_stt.deepgram_keyterms
+        || config.streaming_keyterms != old_stt.streaming_keyterms
         || config.backend_streaming_provider != old_stt.backend_streaming_provider
         || config.provider != old_stt.provider;
     if stt_changed {
@@ -1893,6 +1926,7 @@ pub struct SttConfigSnapshotData {
     pub assemblyai_api_key: Option<String>,
     pub model: Option<String>,
     pub keep_connection_alive: bool,
+    pub streaming_keyterms: Option<String>,
     pub deepgram_keyterms: Option<String>,
 }
 
@@ -1914,7 +1948,8 @@ pub async fn get_stt_config_snapshot(
         assemblyai_api_key: config.assemblyai_api_key,
         model: config.model,
         keep_connection_alive: config.keep_connection_alive,
-        deepgram_keyterms: config.deepgram_keyterms,
+        streaming_keyterms: config.streaming_keyterms.clone(),
+        deepgram_keyterms: config.streaming_keyterms,
     };
     let revision = state.stt_config_revision.read().await.to_string();
     Ok(SnapshotEnvelope { revision, data })

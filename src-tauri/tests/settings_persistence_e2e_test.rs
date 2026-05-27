@@ -40,7 +40,7 @@ async fn settings_persist_across_restart_like_flow() {
     let mut stt = SttConfig::default();
     stt.provider = SttProviderType::Backend;
     stt.language = "ru".to_string();
-    stt.deepgram_keyterms = Some(keyterms.to_string());
+    stt.streaming_keyterms = Some(keyterms.to_string());
     ConfigStore::save_config(&stt).await.unwrap();
 
     // 2) "Пользователь выставил чувствительность" → сохраняем app_config.json
@@ -58,6 +58,6 @@ async fn settings_persist_across_restart_like_flow() {
     let app_after = ConfigStore::load_app_config().await.unwrap();
 
     assert_eq!(stt_after.language, "en");
-    assert_eq!(stt_after.deepgram_keyterms.as_deref(), Some(keyterms));
+    assert_eq!(stt_after.streaming_keyterms.as_deref(), Some(keyterms));
     assert_eq!(app_after.microphone_sensitivity, 135);
 }

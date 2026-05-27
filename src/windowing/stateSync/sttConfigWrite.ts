@@ -16,7 +16,7 @@ export type UpdateSttConfigInvokeArgs = {
   deepgramApiKey?: string | null;
   assemblyaiApiKey?: string | null;
   model?: string | null;
-  deepgramKeyterms?: string | null;
+  streamingKeyterms?: string | null;
 };
 
 const ALLOWED_KEYS = new Set([
@@ -26,7 +26,7 @@ const ALLOWED_KEYS = new Set([
   'deepgramApiKey',
   'assemblyaiApiKey',
   'model',
-  'deepgramKeyterms',
+  'streamingKeyterms',
 ]);
 
 function assertValidUpdateSttConfigArgs(args: Record<string, unknown>): void {

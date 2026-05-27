@@ -21,14 +21,14 @@ describe('invokeUpdateSttConfig', () => {
       provider: 'backend',
       language: 'en',
       backendStreamingProvider: 'elevenlabs',
-      deepgramKeyterms: 'VoicetextAI, ElevenLabs',
+      streamingKeyterms: 'VoicetextAI, ElevenLabs',
     });
 
     expect(invokeMock).toHaveBeenCalledWith(CMD_UPDATE_STT_CONFIG, {
       provider: 'backend',
       language: 'en',
       backendStreamingProvider: 'elevenlabs',
-      deepgramKeyterms: 'VoicetextAI, ElevenLabs',
+      streamingKeyterms: 'VoicetextAI, ElevenLabs',
     });
   });
 
@@ -50,6 +50,18 @@ describe('invokeUpdateSttConfig', () => {
         provider: 'backend',
         language: 'en',
         backendProvider: 'elevenlabs',
+      } as any),
+    ).rejects.toThrow('Неожиданный ключ');
+
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects deprecated deepgramKeyterms from frontend writes', async () => {
+    await expect(
+      invokeUpdateSttConfig({
+        provider: 'backend',
+        language: 'en',
+        deepgramKeyterms: 'VoicetextAI',
       } as any),
     ).rejects.toThrow('Неожиданный ключ');
 

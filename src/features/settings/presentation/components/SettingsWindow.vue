@@ -70,7 +70,7 @@ function snapshotSettingsState(): SettingsState {
     hideRecordingWindowOnHotkey: settingsStore.hideRecordingWindowOnHotkey,
     showMiniRecordingWindow: settingsStore.showMiniRecordingWindow,
     keepRecordingUntilManualStop: settingsStore.keepRecordingUntilManualStop,
-    deepgramKeyterms: settingsStore.deepgramKeyterms,
+    streamingKeyterms: settingsStore.streamingKeyterms,
   };
 }
 

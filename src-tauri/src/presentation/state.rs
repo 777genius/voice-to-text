@@ -121,7 +121,7 @@ pub struct AppState {
     pub auth_refresh_task_guard: Arc<tokio::sync::Mutex<()>>,
 
     /// Сериализует read-modify-write операции над STT конфигом.
-    /// Иначе concurrent save путями (settings/auth/startup) можно перетереть `deepgram_keyterms`
+    /// Иначе concurrent save путями (settings/auth/startup) можно перетереть `streaming_keyterms`
     /// stale-снапшотом даже если каждое место по отдельности "правильное".
     pub stt_config_guard: Arc<tokio::sync::Mutex<()>>,
 

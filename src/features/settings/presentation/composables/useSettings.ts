@@ -25,6 +25,15 @@ import { withTimeout } from '@/utils/async';
 // Кэшируем определение macOS - это не меняется во время работы
 const IS_MACOS = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
 
+function readStreamingKeyterms(config: {
+  streaming_keyterms?: string | null;
+  deepgram_keyterms?: string | null;
+}): string | null {
+  return 'streaming_keyterms' in config
+    ? config.streaming_keyterms ?? null
+    : config.deepgram_keyterms ?? null;
+}
+
 export function useSettings() {
   const { locale } = useI18n();
   const store = useSettingsStore();
@@ -107,9 +116,9 @@ export function useSettings() {
     set: (value: boolean) => store.setKeepRecordingUntilManualStop(value),
   });
 
-  const deepgramKeyterms = computed({
-    get: () => store.deepgramKeyterms,
-    set: (value: string) => store.setDeepgramKeyterms(value),
+  const streamingKeyterms = computed({
+    get: () => store.streamingKeyterms,
+    set: (value: string) => store.setStreamingKeyterms(value),
   });
 
   /**
@@ -177,6 +186,9 @@ export function useSettings() {
             sttConfigStoreInstance.backendStreamingProvider
           );
           store.setLanguage(sttLang, { persist: false });
+          store.setStreamingKeyterms(sttConfigStoreInstance.streamingKeyterms ?? '', {
+            persist: false,
+          });
           const fallbackLocale = sttLangToUiLocale(sttLang);
           locale.value = fallbackLocale;
           localStorage.setItem('uiLocale', fallbackLocale);
@@ -196,7 +208,9 @@ export function useSettings() {
           sttConfigStoreInstance.backendStreamingProvider
         );
         store.setLanguage(sttConfigStoreInstance.language, { persist: false });
-        store.setDeepgramKeyterms(sttConfigStoreInstance.deepgramKeyterms ?? '', { persist: false });
+        store.setStreamingKeyterms(sttConfigStoreInstance.streamingKeyterms ?? '', {
+          persist: false,
+        });
       } else {
         const sttConfig = await tauriSettingsService.getSttConfig();
         store.setProvider(SttProviderType.Backend);
@@ -205,7 +219,7 @@ export function useSettings() {
             BackendStreamingProviderType.Deepgram
         );
         store.setLanguage(sttConfig.language, { persist: false });
-        store.setDeepgramKeyterms(sttConfig.deepgram_keyterms ?? '', { persist: false });
+        store.setStreamingKeyterms(readStreamingKeyterms(sttConfig) ?? '', { persist: false });
       }
       // API ключи и whisper-модель больше не используются в настройках (backend-only).
       store.setDeepgramApiKey('');
@@ -317,11 +331,11 @@ export function useSettings() {
       const hasBackendStreamingProviderChange = persistedState
         ? persistedState.backendStreamingProvider !== store.backendStreamingProvider
         : latestBackendStreamingProvider !== store.backendStreamingProvider;
-      const expectedKeyterms = normalizeKeyterms(store.deepgramKeyterms);
-      const persistedKeyterms = normalizeKeyterms(persistedState?.deepgramKeyterms);
+      const expectedKeyterms = normalizeKeyterms(store.streamingKeyterms);
+      const persistedKeyterms = normalizeKeyterms(persistedState?.streamingKeyterms);
       const hasKeytermsChange = persistedState
         ? persistedKeyterms !== expectedKeyterms
-        : normalizeKeyterms(latestStt.deepgram_keyterms) !== expectedKeyterms;
+        : normalizeKeyterms(readStreamingKeyterms(latestStt)) !== expectedKeyterms;
 
       const shouldSaveStt =
         hasLanguageChange || hasKeytermsChange || hasBackendStreamingProviderChange;
@@ -337,7 +351,7 @@ export function useSettings() {
         };
 
         if (hasKeytermsChange) {
-          sttConfigData.deepgramKeyterms = expectedKeyterms;
+          sttConfigData.streamingKeyterms = expectedKeyterms;
         }
 
         await withTimeout(
@@ -355,7 +369,7 @@ export function useSettings() {
             return false;
           }
           if (hasKeytermsChange) {
-            return normalizeKeyterms(stt.deepgram_keyterms) === expectedKeyterms;
+            return normalizeKeyterms(readStreamingKeyterms(stt)) === expectedKeyterms;
           }
           return true;
         };
@@ -378,7 +392,7 @@ export function useSettings() {
           );
           if (!isSttApplied(stt2)) {
             throw new Error(
-              `STT настройки не сохранились: ожидали language=${languageForSave}, deepgram_keyterms=${hasKeytermsChange ? expectedKeyterms ?? 'null' : normalizeKeyterms(stt2.deepgram_keyterms) ?? 'null'}, получили language=${stt2.language}, deepgram_keyterms=${normalizeKeyterms(stt2.deepgram_keyterms) ?? 'null'}`,
+              `STT настройки не сохранились: ожидали language=${languageForSave}, streaming_keyterms=${hasKeytermsChange ? expectedKeyterms ?? 'null' : normalizeKeyterms(readStreamingKeyterms(stt2)) ?? 'null'}, получили language=${stt2.language}, streaming_keyterms=${normalizeKeyterms(readStreamingKeyterms(stt2)) ?? 'null'}`,
             );
           }
         }
@@ -612,7 +626,7 @@ export function useSettings() {
     hideRecordingWindowOnHotkey,
     showMiniRecordingWindow,
     keepRecordingUntilManualStop,
-    deepgramKeyterms,
+    streamingKeyterms,
 
     // Store state (через computed для корректной реактивности)
     isWhisperProvider: computed(() => store.isWhisperProvider),

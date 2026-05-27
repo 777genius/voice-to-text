@@ -21,6 +21,6 @@ export function areSettingsStatesEqual(a: SettingsState | null, b: SettingsState
     a.hideRecordingWindowOnHotkey === b.hideRecordingWindowOnHotkey &&
     a.showMiniRecordingWindow === b.showMiniRecordingWindow &&
     a.keepRecordingUntilManualStop === b.keepRecordingUntilManualStop &&
-    a.deepgramKeyterms === b.deepgramKeyterms
+    a.streamingKeyterms === b.streamingKeyterms
   );
 }

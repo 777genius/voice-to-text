@@ -625,7 +625,7 @@ impl SttProvider for BackendProvider {
         let provider_name = backend_streaming_provider_name(&config);
 
         // Парсим keyterms из конфига (строка через запятую → Vec<String>)
-        let keyterms = config.deepgram_keyterms.as_ref().and_then(|raw| {
+        let keyterms = config.streaming_keyterms.as_ref().and_then(|raw| {
             let terms: Vec<String> = raw
                 .split(',')
                 .map(|t| t.trim().to_string())
@@ -1709,7 +1709,7 @@ mod tests {
             config.backend_auth_token = Some("test-token".to_string());
             config.backend_streaming_provider = selected;
             config.language = "en".to_string();
-            config.deepgram_keyterms = Some("VoicetextAI, API".to_string());
+            config.streaming_keyterms = Some("VoicetextAI, API".to_string());
 
             let mut provider = BackendProvider::new();
             provider.initialize(&config).await.unwrap();
@@ -1748,7 +1748,7 @@ mod tests {
         config.backend_auth_token = Some("test-token".to_string());
         config.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
         config.language = "en".to_string();
-        config.deepgram_keyterms = Some("VoicetextAI, ElevenLabs".to_string());
+        config.streaming_keyterms = Some("VoicetextAI, ElevenLabs".to_string());
 
         let (quality_tx, mut quality_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let (partial_tx, mut partial_rx) = tokio::sync::mpsc::unbounded_channel::<Transcription>();

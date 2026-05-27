@@ -1015,7 +1015,7 @@ impl TranscriptionService {
         let config_requires_new_connection = prev_config.provider != config.provider
             || prev_config.backend_streaming_provider != config.backend_streaming_provider
             || prev_config.language != config.language
-            || prev_config.deepgram_keyterms != config.deepgram_keyterms;
+            || prev_config.streaming_keyterms != config.streaming_keyterms;
 
         if config_requires_new_connection {
             let status = *self.status.read().await;

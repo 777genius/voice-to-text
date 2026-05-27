@@ -207,7 +207,7 @@ impl SttProvider for DeepgramProvider {
             &self
                 .config
                 .as_ref()
-                .and_then(|c| c.deepgram_keyterms.clone()),
+                .and_then(|c| c.streaming_keyterms.clone()),
         );
 
         log::debug!("Connecting to Deepgram: {}", url);
@@ -1134,7 +1134,7 @@ impl DeepgramProvider {
             let url = build_deepgram_listen_url(
                 config.model.as_deref().unwrap_or("nova-3"),
                 &config.language,
-                &config.deepgram_keyterms,
+                &config.streaming_keyterms,
             );
 
             let request = match Request::builder()

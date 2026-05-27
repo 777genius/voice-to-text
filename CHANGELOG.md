@@ -257,8 +257,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 - Enhanced settings store to manage pending scroll actions
-- Improved keyterms normalization and persistence in Deepgram settings
-- Added tests for Deepgram keyterms persistence
+- Improved keyterms normalization and persistence in streaming STT settings
+- Added tests for streaming keyterms persistence
 
 ---
 
@@ -290,7 +290,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [0.9.6] — 2026-02-19
 
 ### Added
-- Deepgram keyterms support: custom keywords improve STT recognition accuracy
+- Streaming keyterms support: custom keywords improve STT recognition accuracy
 - Timeout handling for STT and app configuration updates
 - macOS code signing and notarization in CI/CD pipeline
 - Updated Tauri updater signing keypair

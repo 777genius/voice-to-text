@@ -27,7 +27,7 @@ export const useSttConfigStore = defineStore('sttConfig', () => {
   const assemblyaiApiKey = ref<string | null>(null);
   const model = ref<string | null>(null);
   const keepConnectionAlive = ref(false);
-  const deepgramKeyterms = ref<string | null>(null);
+  const streamingKeyterms = ref<string | null>(null);
 
   let syncHandle: RevisionSyncHandle | null = null;
 
@@ -46,7 +46,11 @@ export const useSttConfigStore = defineStore('sttConfig', () => {
     if ('assemblyai_api_key' in data) assemblyaiApiKey.value = data.assemblyai_api_key ?? null;
     if ('model' in data) model.value = data.model ?? null;
     keepConnectionAlive.value = data.keep_connection_alive ?? keepConnectionAlive.value;
-    if ('deepgram_keyterms' in data) deepgramKeyterms.value = data.deepgram_keyterms ?? null;
+    if ('streaming_keyterms' in data) {
+      streamingKeyterms.value = data.streaming_keyterms ?? null;
+    } else if ('deepgram_keyterms' in data) {
+      streamingKeyterms.value = data.deepgram_keyterms ?? null;
+    }
     isLoaded.value = true;
   }
 
@@ -105,7 +109,7 @@ export const useSttConfigStore = defineStore('sttConfig', () => {
     assemblyaiApiKey,
     model,
     keepConnectionAlive,
-    deepgramKeyterms,
+    streamingKeyterms,
 
     refresh,
     startSync,

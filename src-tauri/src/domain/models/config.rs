@@ -120,8 +120,8 @@ pub struct SttConfig {
 
     /// Ключевые термины для улучшения streaming-распознавания (через запятую).
     /// Например: "Kubernetes, VoicetextAI"
-    #[serde(default)]
-    pub deepgram_keyterms: Option<String>,
+    #[serde(default, alias = "deepgram_keyterms")]
+    pub streaming_keyterms: Option<String>,
 }
 
 pub const BACKEND_KEEPALIVE_TTL_SECS: u64 = 59 * 60;
@@ -146,7 +146,7 @@ impl Default for SttConfig {
             backend_streaming_provider: BackendStreamingProvider::default(),
             keep_connection_alive: false, // Безопасно по умолчанию для всех провайдеров
             keep_alive_ttl_secs: default_keep_alive_ttl_secs(),
-            deepgram_keyterms: None,
+            streaming_keyterms: None,
         }
     }
 }
@@ -302,6 +302,7 @@ mod tests {
         );
         assert!(!config.keep_connection_alive);
         assert_eq!(config.keep_alive_ttl_secs, BACKEND_KEEPALIVE_TTL_SECS);
+        assert!(config.streaming_keyterms.is_none());
     }
 
     #[test]
@@ -356,6 +357,35 @@ mod tests {
             config.backend_streaming_provider,
             BackendStreamingProvider::ElevenLabs
         );
+    }
+
+    #[test]
+    fn test_stt_config_deserializes_legacy_deepgram_keyterms_alias() {
+        let mut value = serde_json::to_value(SttConfig::default()).unwrap();
+        value.as_object_mut().unwrap().remove("streaming_keyterms");
+        value["deepgram_keyterms"] =
+            serde_json::Value::String("Kubernetes, VoicetextAI".to_string());
+
+        let config: SttConfig = serde_json::from_value(value).unwrap();
+
+        assert_eq!(
+            config.streaming_keyterms.as_deref(),
+            Some("Kubernetes, VoicetextAI")
+        );
+    }
+
+    #[test]
+    fn test_stt_config_serializes_streaming_keyterms_canonical_name() {
+        let mut config = SttConfig::default();
+        config.streaming_keyterms = Some("Kubernetes, VoicetextAI".to_string());
+
+        let value = serde_json::to_value(config).unwrap();
+
+        assert_eq!(
+            value.get("streaming_keyterms").and_then(|v| v.as_str()),
+            Some("Kubernetes, VoicetextAI")
+        );
+        assert!(value.get("deepgram_keyterms").is_none());
     }
 
     #[test]

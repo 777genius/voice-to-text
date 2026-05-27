@@ -11,7 +11,7 @@ import SettingGroup from '../shared/SettingGroup.vue';
 import { useSettings } from '../../composables/useSettings';
 
 const { t } = useI18n();
-const { deepgramKeyterms } = useSettings();
+const { streamingKeyterms } = useSettings();
 
 const TOKEN_LIMIT = 500;
 
@@ -23,14 +23,14 @@ function countKeytermsTokens(input: string): number {
     .reduce((sum, term) => sum + term.split(/\s+/).length, 0);
 }
 
-const tokenCount = computed(() => countKeytermsTokens(deepgramKeyterms.value));
+const tokenCount = computed(() => countKeytermsTokens(streamingKeyterms.value));
 const isOverLimit = computed(() => tokenCount.value > TOKEN_LIMIT);
 </script>
 
 <template>
   <SettingGroup :title="t('settings.keyterms.label')">
     <v-textarea
-      v-model="deepgramKeyterms"
+      v-model="streamingKeyterms"
       :placeholder="t('settings.keyterms.placeholder')"
       rows="2"
       auto-grow

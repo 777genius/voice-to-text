@@ -41,7 +41,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const hideRecordingWindowOnHotkey = ref(false);
   const showMiniRecordingWindow = ref(true);
   const keepRecordingUntilManualStop = ref(false);
-  const deepgramKeyterms = ref('');
+  const streamingKeyterms = ref('');
   const persistedState = ref<SettingsState | null>(null);
 
   // Debounce для автосохранения STT языка
@@ -95,7 +95,7 @@ export const useSettingsStore = defineStore('settings', () => {
     hideRecordingWindowOnHotkey: hideRecordingWindowOnHotkey.value,
     showMiniRecordingWindow: showMiniRecordingWindow.value,
     keepRecordingUntilManualStop: keepRecordingUntilManualStop.value,
-    deepgramKeyterms: deepgramKeyterms.value,
+    streamingKeyterms: streamingKeyterms.value,
   }));
 
   // Действия
@@ -274,9 +274,9 @@ export const useSettingsStore = defineStore('settings', () => {
     keepRecordingUntilManualStop.value = value;
   }
 
-  function setDeepgramKeyterms(value: string, _opts?: { persist?: boolean }) {
+  function setStreamingKeyterms(value: string, _opts?: { persist?: boolean }) {
     const nextRaw = String(value ?? '');
-    deepgramKeyterms.value = nextRaw;
+    streamingKeyterms.value = nextRaw;
   }
 
   function setAvailableAudioDevices(devices: string[]) {
@@ -340,15 +340,15 @@ export const useSettingsStore = defineStore('settings', () => {
       showMiniRecordingWindow.value = state.showMiniRecordingWindow;
     if (state.keepRecordingUntilManualStop !== undefined)
       keepRecordingUntilManualStop.value = state.keepRecordingUntilManualStop;
-    if (state.deepgramKeyterms !== undefined)
-      setDeepgramKeyterms(state.deepgramKeyterms, { persist: false });
+    if (state.streamingKeyterms !== undefined)
+      setStreamingKeyterms(state.streamingKeyterms, { persist: false });
   }
 
   function capturePersistedState(state?: SettingsState): void {
     const snapshot = state ?? currentState.value;
     persistedState.value = {
       ...snapshot,
-      deepgramKeyterms: snapshot.deepgramKeyterms ?? '',
+      streamingKeyterms: snapshot.streamingKeyterms ?? '',
     };
   }
 
@@ -376,7 +376,7 @@ export const useSettingsStore = defineStore('settings', () => {
     hideRecordingWindowOnHotkey,
     showMiniRecordingWindow,
     keepRecordingUntilManualStop,
-    deepgramKeyterms,
+    streamingKeyterms,
     persistedState,
     availableAudioDevices,
     hasAccessibilityPermission,
@@ -410,7 +410,7 @@ export const useSettingsStore = defineStore('settings', () => {
     setHideRecordingWindowOnHotkey,
     setShowMiniRecordingWindow,
     setKeepRecordingUntilManualStop,
-    setDeepgramKeyterms,
+    setStreamingKeyterms,
     setAvailableAudioDevices,
     setAccessibilityPermission,
     setLoading,

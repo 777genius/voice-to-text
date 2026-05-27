@@ -39,7 +39,7 @@ export interface SttConfigData {
   deepgramApiKey: string | null;
   assemblyaiApiKey: string | null;
   model: string | null;
-  deepgramKeyterms: string | null;
+  streamingKeyterms: string | null;
 }
 
 // Конфигурация приложения (соответствует бэкенду)
@@ -88,8 +88,8 @@ export interface SettingsState {
   showMiniRecordingWindow: boolean;
   keepRecordingUntilManualStop: boolean;
 
-  // Deepgram keyterms
-  deepgramKeyterms: string;
+  // Streaming keyterms
+  streamingKeyterms: string;
 }
 
 // Статус сохранения

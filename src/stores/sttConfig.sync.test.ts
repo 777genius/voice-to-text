@@ -40,7 +40,7 @@ describe('useSttConfigStore sync', () => {
         assemblyai_api_key: null,
         model: 'large',
         keep_connection_alive: true,
-        deepgram_keyterms: null,
+        streaming_keyterms: null,
       },
     });
 
@@ -76,7 +76,7 @@ describe('useSttConfigStore sync', () => {
         assemblyai_api_key: null,
         model: null,
         keep_connection_alive: false,
-        deepgram_keyterms: null,
+        streaming_keyterms: null,
       },
       '15',
     );
@@ -89,7 +89,7 @@ describe('useSttConfigStore sync', () => {
     expect(store.isLoaded).toBe(true);
   });
 
-  it('applySnapshot: если deepgram_keyterms не пришёл — не затирает текущее значение', () => {
+  it('applySnapshot: если streaming_keyterms не пришёл — не затирает текущее значение', () => {
     const store = useSttConfigStore();
 
     store.applySnapshot(
@@ -104,14 +104,14 @@ describe('useSttConfigStore sync', () => {
         assemblyai_api_key: null,
         model: null,
         keep_connection_alive: false,
-        deepgram_keyterms: 'Kubernetes, VoicetextAI',
+        streaming_keyterms: 'Kubernetes, VoicetextAI',
       },
       '1',
     );
 
-    expect(store.deepgramKeyterms).toBe('Kubernetes, VoicetextAI');
+    expect(store.streamingKeyterms).toBe('Kubernetes, VoicetextAI');
 
-    // Мокаем "partial snapshot" без deepgram_keyterms (как в scenario тестах)
+    // Мокаем "partial snapshot" без streaming_keyterms (как в scenario тестах)
     store.applySnapshot(
       {
         provider: SttProviderType.Backend,
@@ -124,13 +124,36 @@ describe('useSttConfigStore sync', () => {
         assemblyai_api_key: null,
         model: null,
         keep_connection_alive: false,
-        // deepgram_keyterms отсутствует намеренно
+        // streaming_keyterms отсутствует намеренно
       } as any,
       '2',
     );
 
     expect(store.language).toBe('en');
-    expect(store.deepgramKeyterms).toBe('Kubernetes, VoicetextAI');
+    expect(store.streamingKeyterms).toBe('Kubernetes, VoicetextAI');
+  });
+
+  it('applySnapshot: читает legacy deepgram_keyterms если нового поля нет', () => {
+    const store = useSttConfigStore();
+
+    store.applySnapshot(
+      {
+        provider: SttProviderType.Backend,
+        backend_streaming_provider: BackendStreamingProviderType.Deepgram,
+        language: 'ru',
+        auto_detect_language: false,
+        enable_punctuation: true,
+        filter_profanity: false,
+        deepgram_api_key: null,
+        assemblyai_api_key: null,
+        model: null,
+        keep_connection_alive: false,
+        deepgram_keyterms: 'Legacy, Terms',
+      } as any,
+      'legacy',
+    );
+
+    expect(store.streamingKeyterms).toBe('Legacy, Terms');
   });
 
   it('startSync: при ошибке start() — handle обнуляется и retry работает', async () => {
@@ -156,7 +179,7 @@ describe('useSttConfigStore sync', () => {
         assemblyai_api_key: null,
         model: null,
         keep_connection_alive: false,
-        deepgram_keyterms: null,
+        streaming_keyterms: null,
       },
     });
 
@@ -183,7 +206,7 @@ describe('useSttConfigStore sync', () => {
         assemblyai_api_key: null,
         model: null,
         keep_connection_alive: false,
-        deepgram_keyterms: null,
+        streaming_keyterms: null,
       },
     });
 
@@ -204,7 +227,7 @@ describe('useSttConfigStore sync', () => {
         assemblyai_api_key: null,
         model: null,
         keep_connection_alive: false,
-        deepgram_keyterms: null,
+        streaming_keyterms: null,
       },
     });
 

@@ -44,7 +44,9 @@ export type SttConfigSnapshotData = {
   model: string | null;
 
   keep_connection_alive: boolean;
-  deepgram_keyterms: string | null;
+  streaming_keyterms?: string | null;
+  /** Deprecated snapshot alias kept for one migration period. */
+  deepgram_keyterms?: string | null;
 };
 
 /** Соответствует Rust `AuthStateData`. */
