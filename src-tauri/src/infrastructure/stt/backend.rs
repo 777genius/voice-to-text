@@ -1,6 +1,6 @@
 //! Backend STT Provider
 //!
-//! Подключается к нашему API (api.voicetext.site) вместо прямого подключения к Deepgram.
+//! Подключается к нашему API (api.voicetext.site) вместо прямого подключения к STT provider.
 //! Все транскрипции идут через наш бэкенд с лицензией и usage tracking.
 
 use async_trait::async_trait;
@@ -16,8 +16,8 @@ use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, Web
 
 use crate::domain::{
     AudioChunk, ConnectionQualityCallback, ErrorCallback, SttConfig, SttConnectionCategory,
-    SttConnectionDetails, SttConnectionError, SttError, SttProvider, SttResult, Transcription,
-    TranscriptionCallback,
+    SttConnectionDetails, SttConnectionError, SttError, SttProvider, SttProviderType, SttResult,
+    Transcription, TranscriptionCallback,
 };
 
 use super::backend_messages::{ClientMessage, ServerMessage};
@@ -74,10 +74,19 @@ fn get_default_backend_url() -> String {
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+fn backend_streaming_provider_name(config: &SttConfig) -> &'static str {
+    match config.provider {
+        SttProviderType::Backend => config.backend_streaming_provider.as_protocol_name(),
+        SttProviderType::Deepgram => "deepgram",
+        SttProviderType::AssemblyAI => "assemblyai",
+        _ => "deepgram",
+    }
+}
+
 /// Callback для обновления usage (seconds_used, seconds_remaining_total_or_plan)
 pub type UsageUpdateCallback = Arc<dyn Fn(f32, f32) + Send + Sync>;
 
-/// Backend STT provider — подключается к нашему API вместо прямого Deepgram
+/// Backend STT provider — подключается к нашему API вместо прямого STT provider
 pub struct BackendProvider {
     config: Option<SttConfig>,
     is_streaming: bool,
@@ -613,11 +622,7 @@ impl SttProvider for BackendProvider {
         }
 
         // Отправляем Config message
-        let provider_name = match config.provider {
-            crate::domain::SttProviderType::Deepgram => "deepgram",
-            crate::domain::SttProviderType::AssemblyAI => "assemblyai",
-            _ => "deepgram", // fallback
-        };
+        let provider_name = backend_streaming_provider_name(&config);
 
         // Парсим keyterms из конфига (строка через запятую → Vec<String>)
         let keyterms = config.deepgram_keyterms.as_ref().and_then(|raw| {
@@ -1513,7 +1518,13 @@ impl SttProvider for BackendProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use tokio::net::TcpListener;
+    use tokio::task::JoinHandle;
+    use tokio_tungstenite::accept_async;
 
     #[test]
     fn test_backend_provider_new() {
@@ -1543,6 +1554,283 @@ mod tests {
     fn test_backend_provider_supports_streaming() {
         let provider = BackendProvider::new();
         assert!(provider.supports_streaming());
+    }
+
+    #[test]
+    fn test_backend_provider_uses_configured_backend_streaming_provider() {
+        let mut config = SttConfig::new(SttProviderType::Backend);
+        config.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
+
+        assert_eq!(backend_streaming_provider_name(&config), "elevenlabs");
+
+        config.backend_streaming_provider = crate::domain::BackendStreamingProvider::Deepgram;
+        assert_eq!(backend_streaming_provider_name(&config), "deepgram");
+    }
+
+    #[test]
+    fn test_legacy_direct_provider_mapping_stays_backward_compatible() {
+        let config = SttConfig::new(SttProviderType::Deepgram);
+        assert_eq!(backend_streaming_provider_name(&config), "deepgram");
+
+        let config = SttConfig::new(SttProviderType::AssemblyAI);
+        assert_eq!(backend_streaming_provider_name(&config), "assemblyai");
+    }
+
+    async fn spawn_config_capture_server() -> (String, JoinHandle<serde_json::Value>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local websocket listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept websocket tcp");
+            let mut ws = accept_async(stream).await.expect("accept websocket");
+
+            while let Some(next) = ws.next().await {
+                let msg = next.expect("websocket message");
+                if let Message::Text(text) = msg {
+                    let value: serde_json::Value =
+                        serde_json::from_str(&text).expect("config json");
+                    if value.get("type").and_then(|v| v.as_str()) == Some("config") {
+                        return value;
+                    }
+                }
+            }
+
+            panic!("BackendProvider did not send Config message");
+        });
+
+        (format!("ws://{addr}"), task)
+    }
+
+    #[derive(Debug)]
+    struct LifecycleCapture {
+        config: serde_json::Value,
+        binary_lengths: Vec<usize>,
+        saw_finalize: bool,
+    }
+
+    async fn spawn_lifecycle_mock_backend() -> (String, JoinHandle<LifecycleCapture>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local websocket listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept websocket tcp");
+            let mut ws = accept_async(stream).await.expect("accept websocket");
+            let mut config: Option<serde_json::Value> = None;
+            let mut binary_lengths = Vec::new();
+            let mut saw_finalize = false;
+
+            while let Some(next) = ws.next().await {
+                let msg = next.expect("websocket message");
+                match msg {
+                    Message::Text(text) => {
+                        let value: serde_json::Value =
+                            serde_json::from_str(&text).expect("client json message");
+                        match value.get("type").and_then(|v| v.as_str()) {
+                            Some("config") => {
+                                config = Some(value);
+                                ws.send(Message::Text(
+                                    r#"{"type":"ready","session_id":"mock-session"}"#.to_string(),
+                                ))
+                                .await
+                                .expect("send ready");
+                            }
+                            Some("finalize") => {
+                                saw_finalize = true;
+                                ws.send(Message::Text(
+                                    r#"{"type":"finalize_complete","status":"drained","saw_result":true}"#
+                                        .to_string(),
+                                ))
+                                .await
+                                .expect("send finalize_complete");
+                            }
+                            Some("close") => break,
+                            _ => {}
+                        }
+                    }
+                    Message::Binary(bytes) => {
+                        binary_lengths.push(bytes.len());
+                        let seq = binary_lengths.len();
+                        ws.send(Message::Text(format!(r#"{{"type":"ack","seq":{seq}}}"#)))
+                            .await
+                            .expect("send ack");
+                        ws.send(Message::Text(
+                            r#"{"type":"partial","text":"hello","confidence":0.52,"is_segment_final":false,"start_ms":0,"duration_ms":300}"#
+                                .to_string(),
+                        ))
+                        .await
+                        .expect("send partial");
+                        ws.send(Message::Text(
+                            r#"{"type":"usage_update","seconds_used":0.3,"seconds_remaining_plan":59.7,"seconds_remaining_total":59.7}"#
+                                .to_string(),
+                        ))
+                        .await
+                        .expect("send usage_update");
+                        ws.send(Message::Text(
+                            r#"{"type":"final","text":"hello world","confidence":0.91,"start_ms":0,"duration_ms":420}"#
+                                .to_string(),
+                        ))
+                        .await
+                        .expect("send final");
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+
+            LifecycleCapture {
+                config: config.expect("client config"),
+                binary_lengths,
+                saw_finalize,
+            }
+        });
+
+        (format!("ws://{addr}"), task)
+    }
+
+    #[tokio::test]
+    async fn test_backend_provider_sends_selected_streaming_provider_in_config_message() {
+        for (selected, expected) in [
+            (
+                crate::domain::BackendStreamingProvider::Deepgram,
+                "deepgram",
+            ),
+            (
+                crate::domain::BackendStreamingProvider::ElevenLabs,
+                "elevenlabs",
+            ),
+        ] {
+            let (backend_url, config_task) = spawn_config_capture_server().await;
+            let mut config = SttConfig::new(SttProviderType::Backend);
+            config.backend_url = Some(backend_url);
+            config.backend_auth_token = Some("test-token".to_string());
+            config.backend_streaming_provider = selected;
+            config.language = "en".to_string();
+            config.deepgram_keyterms = Some("VoicetextAI, API".to_string());
+
+            let mut provider = BackendProvider::new();
+            provider.initialize(&config).await.unwrap();
+            provider
+                .start_stream(
+                    Arc::new(|_| {}),
+                    Arc::new(|_| {}),
+                    Arc::new(|_| {}),
+                    Arc::new(|_, _| {}),
+                )
+                .await
+                .unwrap();
+
+            let config_msg = tokio::time::timeout(Duration::from_secs(3), config_task)
+                .await
+                .expect("config capture timeout")
+                .expect("config capture task");
+
+            let _ = provider.abort().await;
+
+            assert_eq!(config_msg["type"], "config");
+            assert_eq!(config_msg["provider"], expected);
+            assert_eq!(config_msg["language"], "en");
+            assert_eq!(config_msg["sample_rate"], 16000);
+            assert_eq!(config_msg["encoding"], "pcm_s16le");
+            assert_eq!(config_msg["keyterms"][0], "VoicetextAI");
+            assert_eq!(config_msg["keyterms"][1], "API");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_backend_provider_elevenlabs_full_mock_stream_lifecycle() {
+        let (backend_url, server_task) = spawn_lifecycle_mock_backend().await;
+        let mut config = SttConfig::new(SttProviderType::Backend);
+        config.backend_url = Some(backend_url);
+        config.backend_auth_token = Some("test-token".to_string());
+        config.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
+        config.language = "en".to_string();
+        config.deepgram_keyterms = Some("VoicetextAI, ElevenLabs".to_string());
+
+        let (quality_tx, mut quality_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (partial_tx, mut partial_rx) = tokio::sync::mpsc::unbounded_channel::<Transcription>();
+        let (final_tx, mut final_rx) = tokio::sync::mpsc::unbounded_channel::<Transcription>();
+        let (usage_tx, mut usage_rx) = tokio::sync::mpsc::unbounded_channel::<(f32, f32)>();
+
+        let mut provider = BackendProvider::new();
+        provider.set_usage_callback(Arc::new(move |used, remaining| {
+            let _ = usage_tx.send((used, remaining));
+        }));
+        provider.initialize(&config).await.unwrap();
+        provider
+            .start_stream(
+                Arc::new(move |t| {
+                    let _ = partial_tx.send(t);
+                }),
+                Arc::new(move |t| {
+                    let _ = final_tx.send(t);
+                }),
+                Arc::new(|err| panic!("unexpected backend provider error: {err}")),
+                Arc::new(move |quality, _reason| {
+                    let _ = quality_tx.send(quality);
+                }),
+            )
+            .await
+            .unwrap();
+
+        let quality = tokio::time::timeout(Duration::from_secs(3), quality_rx.recv())
+            .await
+            .expect("quality callback timeout")
+            .expect("quality callback");
+        assert_eq!(quality, "Good");
+
+        provider
+            .send_audio(&AudioChunk::new(vec![1000; 480], 16_000, 1))
+            .await
+            .unwrap();
+
+        let partial = tokio::time::timeout(Duration::from_secs(3), partial_rx.recv())
+            .await
+            .expect("partial callback timeout")
+            .expect("partial callback");
+        assert_eq!(partial.text, "hello");
+        assert!(!partial.is_final);
+        assert_eq!(partial.confidence, Some(0.52));
+        assert_eq!(partial.duration, 0.3);
+
+        let usage = tokio::time::timeout(Duration::from_secs(3), usage_rx.recv())
+            .await
+            .expect("usage callback timeout")
+            .expect("usage callback");
+        assert!((usage.0 - 0.3).abs() < 0.001);
+        assert!((usage.1 - 59.7).abs() < 0.001);
+
+        let final_result = tokio::time::timeout(Duration::from_secs(3), final_rx.recv())
+            .await
+            .expect("final callback timeout")
+            .expect("final callback");
+        assert_eq!(final_result.text, "hello world");
+        assert!(final_result.is_final);
+        assert_eq!(final_result.confidence, Some(0.91));
+        assert_eq!(final_result.duration, 0.42);
+
+        provider.pause_stream().await.unwrap();
+        assert!(provider.is_connection_alive());
+        provider.abort().await.unwrap();
+
+        let capture = tokio::time::timeout(Duration::from_secs(3), server_task)
+            .await
+            .expect("mock backend timeout")
+            .expect("mock backend task");
+
+        assert_eq!(capture.config["type"], "config");
+        assert_eq!(capture.config["provider"], "elevenlabs");
+        assert_eq!(capture.config["language"], "en");
+        assert_eq!(capture.config["sample_rate"], 16000);
+        assert_eq!(capture.config["encoding"], "pcm_s16le");
+        assert_eq!(capture.config["keyterms"][0], "VoicetextAI");
+        assert_eq!(capture.config["keyterms"][1], "ElevenLabs");
+        assert_eq!(capture.config["capabilities"][0], CAPABILITY_FINALIZE_ACK);
+        assert_eq!(capture.binary_lengths, vec![960]);
+        assert!(capture.saw_finalize);
     }
 
     #[test]

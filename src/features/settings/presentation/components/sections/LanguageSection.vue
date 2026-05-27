@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * Секция выбора языка распознавания.
- * Полный список языков Deepgram Nova-3 (~45 языков).
+ * Общий список языков для backend streaming providers.
  */
 
 import { computed, watch } from 'vue';
@@ -10,9 +10,10 @@ import SettingGroup from '../shared/SettingGroup.vue';
 import FlagIcon from '@/presentation/components/FlagIcon.vue';
 import { useSettings } from '../../composables/useSettings';
 import { STT_LANGUAGES } from '@/i18n.locales';
+import { BackendStreamingProviderType } from '@/types';
 
 const { t } = useI18n();
-const { language, syncLocale } = useSettings();
+const { backendStreamingProvider, language, syncLocale } = useSettings();
 
 interface SttLanguageOption {
   value: string;
@@ -27,6 +28,11 @@ const languageOptions = computed<SttLanguageOption[]>(() =>
 );
 
 const isMulti = computed(() => language.value === 'multi');
+const multiHint = computed(() =>
+  backendStreamingProvider.value === BackendStreamingProviderType.ElevenLabs
+    ? t('settings.language.multiHintElevenLabs')
+    : t('settings.language.multiHint')
+);
 
 watch(language, () => {
   syncLocale({ persist: false });
@@ -62,7 +68,7 @@ watch(language, () => {
     </v-autocomplete>
 
     <div v-if="isMulti" class="text-caption text-medium-emphasis mt-2">
-      {{ t('settings.language.multiHint') }}
+      {{ multiHint }}
     </div>
   </SettingGroup>
 </template>

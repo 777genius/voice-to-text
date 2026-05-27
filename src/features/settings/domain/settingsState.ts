@@ -5,6 +5,7 @@ export function areSettingsStatesEqual(a: SettingsState | null, b: SettingsState
 
   return (
     a.provider === b.provider &&
+    a.backendStreamingProvider === b.backendStreamingProvider &&
     a.language === b.language &&
     a.deepgramApiKey === b.deepgramApiKey &&
     a.assemblyaiApiKey === b.assemblyaiApiKey &&

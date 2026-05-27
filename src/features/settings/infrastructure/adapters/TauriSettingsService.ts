@@ -38,6 +38,9 @@ class TauriSettingsService {
       language: config.language,
     };
 
+    if ('backendStreamingProvider' in config) {
+      args.backendStreamingProvider = config.backendStreamingProvider;
+    }
     if ('deepgramApiKey' in config) args.deepgramApiKey = config.deepgramApiKey;
     if ('assemblyaiApiKey' in config) args.assemblyaiApiKey = config.assemblyaiApiKey;
     if ('model' in config) args.model = config.model;

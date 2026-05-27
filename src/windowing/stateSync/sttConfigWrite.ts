@@ -12,6 +12,7 @@ export type UpdateSttConfigInvokeArgs = {
   provider: string;
   language: string;
 
+  backendStreamingProvider?: string;
   deepgramApiKey?: string | null;
   assemblyaiApiKey?: string | null;
   model?: string | null;
@@ -21,6 +22,7 @@ export type UpdateSttConfigInvokeArgs = {
 const ALLOWED_KEYS = new Set([
   'provider',
   'language',
+  'backendStreamingProvider',
   'deepgramApiKey',
   'assemblyaiApiKey',
   'model',
@@ -55,4 +57,3 @@ export async function invokeUpdateSttConfig(next: UpdateSttConfigInvokeArgs): Pr
   assertValidUpdateSttConfigArgs(args);
   await invoke(CMD_UPDATE_STT_CONFIG, args);
 }
-

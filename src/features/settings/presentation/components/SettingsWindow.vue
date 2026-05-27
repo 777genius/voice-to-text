@@ -19,6 +19,7 @@ import UnsavedChangesDialog from './dialogs/UnsavedChangesDialog.vue';
 
 // Секции
 import LanguageSection from './sections/LanguageSection.vue';
+import StreamingProviderSection from './sections/StreamingProviderSection.vue';
 import KeytermsSection from './sections/KeytermsSection.vue';
 import ThemeSection from './sections/ThemeSection.vue';
 import HotkeySection from './sections/HotkeySection.vue';
@@ -53,6 +54,7 @@ let liveApplySeq = 0;
 function snapshotSettingsState(): SettingsState {
   return {
     provider: settingsStore.provider,
+    backendStreamingProvider: settingsStore.backendStreamingProvider,
     language: settingsStore.language,
     deepgramApiKey: settingsStore.deepgramApiKey,
     assemblyaiApiKey: settingsStore.assemblyaiApiKey,
@@ -268,6 +270,7 @@ watch(
       <template v-else>
         <div class="settings-two-cols">
           <LanguageSection />
+          <StreamingProviderSection />
           <ThemeSection />
         </div>
         <KeytermsSection />

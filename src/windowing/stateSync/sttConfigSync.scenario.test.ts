@@ -43,6 +43,7 @@ describe('scenario: stt-config sync across windows (mocked tauri)', () => {
     let currentRevision = '0';
     let currentData = {
       provider: SttProviderType.Backend,
+      backend_streaming_provider: 'deepgram',
       language: 'ru',
       auto_detect_language: false,
       enable_punctuation: true,
@@ -62,6 +63,12 @@ describe('scenario: stt-config sync across windows (mocked tauri)', () => {
         // «Rust» применяет изменения
         if (typeof args?.language === 'string') {
           currentData = { ...currentData, language: args.language };
+        }
+        if (typeof args?.backendStreamingProvider === 'string') {
+          currentData = {
+            ...currentData,
+            backend_streaming_provider: args.backendStreamingProvider,
+          };
         }
 
         currentRevision = String(BigInt(currentRevision) + BigInt(1));
@@ -94,6 +101,15 @@ describe('scenario: stt-config sync across windows (mocked tauri)', () => {
 
     await vi.waitFor(() => {
       expect(sttConfigMain.language).toBe('en');
+    });
+
+    await invokeMock(CMD_UPDATE_STT_CONFIG, {
+      language: 'en',
+      backendStreamingProvider: 'elevenlabs',
+    });
+
+    await vi.waitFor(() => {
+      expect(sttConfigMain.backendStreamingProvider).toBe('elevenlabs');
     });
   });
 });

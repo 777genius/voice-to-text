@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import { useSettings } from './useSettings';
 import { useSettingsStore } from '../../store/settingsStore';
+import { BackendStreamingProviderType } from '@/types';
 
 const { localeRef, invokeMock, tauriSettingsServiceMock } = vi.hoisted(() => ({
   localeRef: { value: 'ru' },
@@ -95,7 +96,62 @@ describe('useSettings saveConfig', () => {
     expect(tauriSettingsServiceMock.updateSttConfig).toHaveBeenCalledWith({
       provider: 'backend',
       language: 'en',
+      backendStreamingProvider: 'deepgram',
       deepgramKeyterms: 'Kubernetes, VoicetextAI',
+    });
+    expect(tauriSettingsServiceMock.updateAppConfig).not.toHaveBeenCalled();
+  });
+
+  it('сохраняет переключение backend streaming provider без app-config write', async () => {
+    const store = useSettingsStore();
+    store.setLanguage('ru', { persist: false });
+    store.setBackendStreamingProvider(BackendStreamingProviderType.Deepgram);
+    store.setMicrophoneSensitivity(100, { persist: false });
+    store.setRecordingHotkey('CmdOrCtrl+Shift+X');
+    store.setAutoCopyToClipboard(false);
+    store.setAutoPasteText(false);
+    store.setHideRecordingWindowOnHotkey(false);
+    store.setShowMiniRecordingWindow(false);
+    store.setKeepRecordingUntilManualStop(false);
+    store.setSelectedAudioDevice('');
+    store.setDeepgramKeyterms('', { persist: false });
+    store.capturePersistedState();
+
+    store.setBackendStreamingProvider(BackendStreamingProviderType.ElevenLabs);
+
+    tauriSettingsServiceMock.getSttConfig
+      .mockResolvedValueOnce({
+        language: 'ru',
+        backend_streaming_provider: 'deepgram',
+        deepgram_keyterms: null,
+      })
+      .mockResolvedValueOnce({
+        language: 'ru',
+        backend_streaming_provider: 'elevenlabs',
+        deepgram_keyterms: null,
+      });
+
+    tauriSettingsServiceMock.getAppConfig.mockResolvedValueOnce({
+      microphone_sensitivity: 100,
+      recording_hotkey: 'CmdOrCtrl+Shift+X',
+      auto_copy_to_clipboard: false,
+      auto_paste_text: false,
+      play_completion_sound: false,
+      hide_recording_window_on_hotkey: false,
+      show_mini_recording_window: false,
+      keep_recording_until_manual_stop: false,
+      selected_audio_device: null,
+    });
+
+    tauriSettingsServiceMock.updateSttConfig.mockResolvedValue(undefined);
+
+    const { saveConfig } = useSettings();
+    await expect(saveConfig()).resolves.toBe(true);
+
+    expect(tauriSettingsServiceMock.updateSttConfig).toHaveBeenCalledWith({
+      provider: 'backend',
+      language: 'ru',
+      backendStreamingProvider: 'elevenlabs',
     });
     expect(tauriSettingsServiceMock.updateAppConfig).not.toHaveBeenCalled();
   });

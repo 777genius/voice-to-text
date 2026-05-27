@@ -36,10 +36,16 @@ const messages = {
         hintCloudBody: 'cloud services with high quality.',
         hintDeepgramNote: 'Uses Deepgram Nova-3 model with support for 47+ languages.',
       },
+      streamingProvider: {
+        label: 'Streaming provider',
+        optionDeepgram: 'Deepgram',
+        optionElevenLabs: 'ElevenLabs',
+      },
       language: {
         label: 'Language',
         searchPlaceholder: 'Search language...',
         multiHint: 'Multilingual recognition across 10 languages: English, Spanish, French, German, Portuguese, Italian, Dutch, Hindi, Japanese, Russian.',
+        multiHintElevenLabs: 'ElevenLabs auto-detects the spoken language in multilingual mode.',
       },
       apiKeys: {
         label: 'API Keys (optional)',
@@ -142,10 +148,10 @@ const messages = {
       },
       keyterms: {
         label: 'Key terms',
-        placeholder: 'Kubernetes, VoicetextAI, Deepgram',
-        hint: 'Terms separated by comma to improve recognition of domain words.',
+        placeholder: 'Kubernetes, VoicetextAI, API',
+        hint: 'Terms separated by comma to improve recognition of domain words. Some providers may charge extra.',
         tokenCount: '{count} / 500 tokens',
-        limitExceeded: 'Token limit exceeded. Deepgram may reject the request.',
+        limitExceeded: 'Token limit exceeded. Provider may reject the request.',
       },
       unsavedChanges: {
         title: 'Unsaved changes',
@@ -394,10 +400,16 @@ const messages = {
         hintCloudBody: 'облачные сервисы с высоким качеством.',
         hintDeepgramNote: 'Используется модель Deepgram Nova-3 с поддержкой 47+ языков.',
       },
+      streamingProvider: {
+        label: 'Streaming-провайдер',
+        optionDeepgram: 'Deepgram',
+        optionElevenLabs: 'ElevenLabs',
+      },
       language: {
         label: 'Язык',
         searchPlaceholder: 'Поиск языка...',
         multiHint: 'Мультиязычное распознавание 10 языков: английский, испанский, французский, немецкий, португальский, итальянский, нидерландский, хинди, японский, русский.',
+        multiHintElevenLabs: 'ElevenLabs в мультиязычном режиме автоматически определяет язык речи.',
       },
       apiKeys: {
         label: 'API ключи (опционально)',
@@ -500,10 +512,10 @@ const messages = {
       },
       keyterms: {
         label: 'Ключевые термины',
-        placeholder: 'Kubernetes, VoicetextAI, Deepgram',
-        hint: 'Термины через запятую для улучшения распознавания доменных слов.',
+        placeholder: 'Kubernetes, VoicetextAI, API',
+        hint: 'Термины через запятую для улучшения распознавания доменных слов. Некоторые провайдеры могут брать доплату.',
         tokenCount: '{count} / 500 токенов',
-        limitExceeded: 'Превышен лимит токенов. Deepgram может отклонить запрос.',
+        limitExceeded: 'Превышен лимит токенов. Провайдер может отклонить запрос.',
       },
       unsavedChanges: {
         title: 'Несохранённые изменения',
@@ -752,10 +764,16 @@ const messages = {
         hintCloudBody: 'servicios en la nube con alta calidad.',
         hintDeepgramNote: 'Utiliza el modelo Deepgram Nova-3 con soporte para más de 47 idiomas.',
       },
+      streamingProvider: {
+        label: 'Proveedor de streaming',
+        optionDeepgram: 'Deepgram',
+        optionElevenLabs: 'ElevenLabs',
+      },
       language: {
         label: 'Idioma',
         searchPlaceholder: 'Buscar idioma...',
         multiHint: 'Reconocimiento multilingüe en 10 idiomas: inglés, español, francés, alemán, portugués, italiano, neerlandés, hindi, japonés, ruso.',
+        multiHintElevenLabs: 'ElevenLabs detecta automáticamente el idioma hablado en modo multilingüe.',
       },
       apiKeys: {
         label: 'Claves API (opcional)',
@@ -858,10 +876,10 @@ const messages = {
       },
       keyterms: {
         label: 'Términos clave',
-        placeholder: 'Kubernetes, VoicetextAI, Deepgram',
-        hint: 'Términos separados por coma para mejorar el reconocimiento de palabras de dominio.',
+        placeholder: 'Kubernetes, VoicetextAI, API',
+        hint: 'Términos separados por coma para mejorar el reconocimiento de palabras de dominio. Algunos proveedores pueden cobrar extra.',
         tokenCount: '{count} / 500 tokens',
-        limitExceeded: 'Límite de tokens excedido. Deepgram puede rechazar la solicitud.',
+        limitExceeded: 'Límite de tokens excedido. El proveedor puede rechazar la solicitud.',
       },
       unsavedChanges: {
         title: 'Cambios sin guardar',
@@ -1110,10 +1128,16 @@ const messages = {
         hintCloudBody: 'services cloud de haute qualité.',
         hintDeepgramNote: 'Utilise le modèle Deepgram Nova-3 avec prise en charge de plus de 47 langues.',
       },
+      streamingProvider: {
+        label: 'Fournisseur streaming',
+        optionDeepgram: 'Deepgram',
+        optionElevenLabs: 'ElevenLabs',
+      },
       language: {
         label: 'Langue',
         searchPlaceholder: 'Rechercher une langue...',
         multiHint: 'Reconnaissance multilingue dans 10 langues : anglais, espagnol, français, allemand, portugais, italien, néerlandais, hindi, japonais, russe.',
+        multiHintElevenLabs: 'ElevenLabs détecte automatiquement la langue parlée en mode multilingue.',
       },
       apiKeys: {
         label: 'Clés API (optionnel)',
@@ -1216,10 +1240,10 @@ const messages = {
       },
       keyterms: {
         label: 'Termes clés',
-        placeholder: 'Kubernetes, VoicetextAI, Deepgram',
-        hint: 'Termes séparés par des virgules pour améliorer la reconnaissance des mots de domaine.',
+        placeholder: 'Kubernetes, VoicetextAI, API',
+        hint: 'Termes séparés par des virgules pour améliorer la reconnaissance des mots de domaine. Certains fournisseurs peuvent facturer un supplément.',
         tokenCount: '{count} / 500 jetons',
-        limitExceeded: 'Limite de jetons dépassée. Deepgram peut rejeter la requête.',
+        limitExceeded: 'Limite de jetons dépassée. Le fournisseur peut rejeter la requête.',
       },
       unsavedChanges: {
         title: 'Modifications non enregistrées',
@@ -1468,10 +1492,16 @@ const messages = {
         hintCloudBody: 'Cloud-Dienste mit hoher Qualität.',
         hintDeepgramNote: 'Verwendet das Deepgram Nova-3-Modell mit Unterstützung für über 47 Sprachen.',
       },
+      streamingProvider: {
+        label: 'Streaming-Anbieter',
+        optionDeepgram: 'Deepgram',
+        optionElevenLabs: 'ElevenLabs',
+      },
       language: {
         label: 'Sprache',
         searchPlaceholder: 'Sprache suchen...',
         multiHint: 'Mehrsprachige Erkennung in 10 Sprachen: Englisch, Spanisch, Französisch, Deutsch, Portugiesisch, Italienisch, Niederländisch, Hindi, Japanisch, Russisch.',
+        multiHintElevenLabs: 'ElevenLabs erkennt die gesprochene Sprache im mehrsprachigen Modus automatisch.',
       },
       apiKeys: {
         label: 'API-Schlüssel (optional)',
@@ -1574,10 +1604,10 @@ const messages = {
       },
       keyterms: {
         label: 'Schlüsselbegriffe',
-        placeholder: 'Kubernetes, VoicetextAI, Deepgram',
-        hint: 'Begriffe durch Komma getrennt zur Verbesserung der Erkennung von Fachbegriffen.',
+        placeholder: 'Kubernetes, VoicetextAI, API',
+        hint: 'Begriffe durch Komma getrennt zur Verbesserung der Erkennung von Fachbegriffen. Einige Anbieter können dafür extra berechnen.',
         tokenCount: '{count} / 500 Token',
-        limitExceeded: 'Token-Limit überschritten. Deepgram kann die Anfrage ablehnen.',
+        limitExceeded: 'Token-Limit überschritten. Der Anbieter kann die Anfrage ablehnen.',
       },
       unsavedChanges: {
         title: 'Nicht gespeicherte Änderungen',
@@ -1826,10 +1856,16 @@ const messages = {
         hintCloudBody: 'хмарні сервіси з високою якістю.',
         hintDeepgramNote: 'Використовується модель Deepgram Nova-3 з підтримкою 47+ мов.',
       },
+      streamingProvider: {
+        label: 'Streaming-провайдер',
+        optionDeepgram: 'Deepgram',
+        optionElevenLabs: 'ElevenLabs',
+      },
       language: {
         label: 'Мова',
         searchPlaceholder: 'Пошук мови...',
         multiHint: 'Багатомовне розпізнавання 10 мов: англійська, іспанська, французька, німецька, португальська, італійська, нідерландська, гінді, японська, російська.',
+        multiHintElevenLabs: 'ElevenLabs у багатомовному режимі автоматично визначає мову мовлення.',
       },
       apiKeys: {
         label: 'API ключі (опційно)',
@@ -1932,10 +1968,10 @@ const messages = {
       },
       keyterms: {
         label: 'Ключові терміни',
-        placeholder: 'Kubernetes, VoicetextAI, Deepgram',
-        hint: 'Терміни через кому для покращення розпізнавання доменних слів.',
+        placeholder: 'Kubernetes, VoicetextAI, API',
+        hint: 'Терміни через кому для покращення розпізнавання доменних слів. Деякі провайдери можуть брати доплату.',
         tokenCount: '{count} / 500 токенів',
-        limitExceeded: 'Перевищено ліміт токенів. Deepgram може відхилити запит.',
+        limitExceeded: 'Перевищено ліміт токенів. Провайдер може відхилити запит.',
       },
       unsavedChanges: {
         title: 'Незбережені зміни',

@@ -27,6 +27,7 @@ type E2eApi = {
   getSttConfig: () => {
     revision: string;
     provider: string;
+    backendStreamingProvider: string;
     language: string;
     keepConnectionAlive: boolean;
   };
@@ -104,6 +105,7 @@ export function installE2eHooks(pinia: Pinia): void {
     getSttConfig: () => ({
       revision: sttConfig.revision,
       provider: String(sttConfig.provider),
+      backendStreamingProvider: String(sttConfig.backendStreamingProvider),
       language: sttConfig.language,
       keepConnectionAlive: sttConfig.keepConnectionAlive,
     }),

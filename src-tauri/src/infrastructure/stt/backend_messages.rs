@@ -12,7 +12,7 @@ pub enum ClientMessage {
     Config {
         /// Версия протокола
         protocol_v: u16,
-        /// Провайдер: deepgram
+        /// Streaming provider behind our backend: deepgram or elevenlabs
         provider: String,
         /// Язык распознавания (ISO 639-1)
         language: String,

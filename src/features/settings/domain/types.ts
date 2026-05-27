@@ -2,7 +2,7 @@
  * Типы для модуля настроек
  */
 
-import { SttProviderType } from '@/types';
+import { BackendStreamingProviderType, SttProviderType } from '@/types';
 
 // Языки для распознавания речи
 export interface LanguageOption {
@@ -34,6 +34,7 @@ export type AppTheme = 'dark' | 'light';
 // Конфигурация STT (соответствует бэкенду)
 export interface SttConfigData {
   provider: SttProviderType;
+  backendStreamingProvider: BackendStreamingProviderType;
   language: string;
   deepgramApiKey: string | null;
   assemblyaiApiKey: string | null;
@@ -58,6 +59,7 @@ export interface AppConfigData {
 export interface SettingsState {
   // Провайдер STT
   provider: SttProviderType;
+  backendStreamingProvider: BackendStreamingProviderType;
   language: string;
 
   // API ключи

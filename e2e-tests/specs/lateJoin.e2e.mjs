@@ -23,6 +23,7 @@ describe('multi-window sync (late join)', () => {
     const sttRes = await invoke('update_stt_config', {
       provider: 'backend',
       language: 'en',
+      backendStreamingProvider: 'elevenlabs',
       deepgram_api_key: null,
       assemblyai_api_key: null,
       model: null,
@@ -48,7 +49,7 @@ describe('multi-window sync (late join)', () => {
 
     await waitFor(async () => {
       const cfg = await browser.execute(() => window.__E2E__.getSttConfig());
-      return cfg.language === 'en';
+      return cfg.language === 'en' && cfg.backendStreamingProvider === 'elevenlabs';
     });
   });
 });

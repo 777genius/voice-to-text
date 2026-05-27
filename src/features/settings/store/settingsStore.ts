@@ -4,7 +4,7 @@
 
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import { SttProviderType } from '@/types';
+import { BackendStreamingProviderType, SttProviderType } from '@/types';
 import { invoke } from '@tauri-apps/api/core';
 import { isTauriAvailable } from '@/utils/tauri';
 import {
@@ -19,8 +19,11 @@ import type { AppTheme, SaveStatus, SettingsState } from '../domain/types';
 
 export const useSettingsStore = defineStore('settings', () => {
   // Состояние настроек
-  // По умолчанию используем только наш Backend. Выбор провайдера в UI скрыт.
+  // По умолчанию используем только наш Backend; ниже выбирается provider внутри backend streaming.
   const provider = ref<SttProviderType>(SttProviderType.Backend);
+  const backendStreamingProvider = ref<BackendStreamingProviderType>(
+    BackendStreamingProviderType.Deepgram
+  );
   const language = ref('ru');
   const deepgramApiKey = ref('');
   const assemblyaiApiKey = ref('');
@@ -76,6 +79,7 @@ export const useSettingsStore = defineStore('settings', () => {
   // Получить текущее состояние как объект
   const currentState = computed<SettingsState>(() => ({
     provider: provider.value,
+    backendStreamingProvider: backendStreamingProvider.value,
     language: language.value,
     deepgramApiKey: deepgramApiKey.value,
     assemblyaiApiKey: assemblyaiApiKey.value,
@@ -98,6 +102,14 @@ export const useSettingsStore = defineStore('settings', () => {
   function setProvider(_value: SttProviderType) {
     // Выбор провайдера выключен: всегда используем Backend.
     provider.value = SttProviderType.Backend;
+  }
+
+  function setBackendStreamingProvider(value: BackendStreamingProviderType | string) {
+    const next = String(value ?? '').trim().toLowerCase();
+    backendStreamingProvider.value =
+      next === BackendStreamingProviderType.ElevenLabs
+        ? BackendStreamingProviderType.ElevenLabs
+        : BackendStreamingProviderType.Deepgram;
   }
 
   function setLanguage(value: string, opts?: { persist?: boolean }) {
@@ -300,6 +312,8 @@ export const useSettingsStore = defineStore('settings', () => {
   // Применить состояние из объекта
   function applyState(state: Partial<SettingsState>) {
     if (state.provider !== undefined) provider.value = state.provider;
+    if (state.backendStreamingProvider !== undefined)
+      setBackendStreamingProvider(state.backendStreamingProvider);
     if (state.language !== undefined) setLanguage(state.language, { persist: false });
     if (state.deepgramApiKey !== undefined)
       deepgramApiKey.value = state.deepgramApiKey;
@@ -346,6 +360,7 @@ export const useSettingsStore = defineStore('settings', () => {
   return {
     // Состояние
     provider,
+    backendStreamingProvider,
     language,
     deepgramApiKey,
     assemblyaiApiKey,
@@ -378,6 +393,7 @@ export const useSettingsStore = defineStore('settings', () => {
 
     // Действия
     setProvider,
+    setBackendStreamingProvider,
     setLanguage,
     flushSttLanguagePersist,
     setDeepgramApiKey,

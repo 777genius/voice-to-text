@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 /// Supported STT provider types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,6 +22,46 @@ pub enum SttProviderType {
 impl Default for SttProviderType {
     fn default() -> Self {
         Self::Backend // Через наш API с лицензией и usage tracking
+    }
+}
+
+/// Streaming STT provider selected behind our Backend API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendStreamingProvider {
+    /// Deepgram realtime STT
+    Deepgram,
+    /// ElevenLabs realtime speech-to-text
+    ElevenLabs,
+}
+
+impl BackendStreamingProvider {
+    pub fn as_protocol_name(self) -> &'static str {
+        match self {
+            Self::Deepgram => "deepgram",
+            Self::ElevenLabs => "elevenlabs",
+        }
+    }
+}
+
+impl Default for BackendStreamingProvider {
+    fn default() -> Self {
+        Self::Deepgram
+    }
+}
+
+impl FromStr for BackendStreamingProvider {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "deepgram" => Ok(Self::Deepgram),
+            "elevenlabs" | "eleven_labs" | "eleven-labs" => Ok(Self::ElevenLabs),
+            other => Err(format!(
+                "Unsupported backend streaming provider: {}. Expected deepgram or elevenlabs",
+                other
+            )),
+        }
     }
 }
 
@@ -60,6 +101,10 @@ pub struct SttConfig {
     /// URL нашего Backend API (по умолчанию wss://api.voicetext.site)
     pub backend_url: Option<String>,
 
+    /// Streaming provider used by our Backend API when `provider = Backend`.
+    #[serde(default)]
+    pub backend_streaming_provider: BackendStreamingProvider,
+
     /// Keep WebSocket connection alive between recording sessions (only for providers that support it)
     /// Deepgram: safe (bills by audio duration, not connection time)
     /// AssemblyAI: dangerous (bills by connection time)
@@ -73,8 +118,8 @@ pub struct SttConfig {
     #[serde(default = "default_keep_alive_ttl_secs")]
     pub keep_alive_ttl_secs: u64,
 
-    /// Ключевые термины для улучшения распознавания Deepgram (через запятую).
-    /// Например: "Kubernetes, VoicetextAI, Deepgram"
+    /// Ключевые термины для улучшения streaming-распознавания (через запятую).
+    /// Например: "Kubernetes, VoicetextAI"
     #[serde(default)]
     pub deepgram_keyterms: Option<String>,
 }
@@ -98,6 +143,7 @@ impl Default for SttConfig {
             model: None,
             backend_auth_token: None,
             backend_url: None,
+            backend_streaming_provider: BackendStreamingProvider::default(),
             keep_connection_alive: false, // Безопасно по умолчанию для всех провайдеров
             keep_alive_ttl_secs: default_keep_alive_ttl_secs(),
             deepgram_keyterms: None,
@@ -250,8 +296,66 @@ mod tests {
         assert!(config.model.is_none());
         assert!(config.backend_auth_token.is_none());
         assert!(config.backend_url.is_none());
+        assert_eq!(
+            config.backend_streaming_provider,
+            BackendStreamingProvider::Deepgram
+        );
         assert!(!config.keep_connection_alive);
         assert_eq!(config.keep_alive_ttl_secs, BACKEND_KEEPALIVE_TTL_SECS);
+    }
+
+    #[test]
+    fn test_backend_streaming_provider_parse_aliases() {
+        assert_eq!(
+            "deepgram".parse::<BackendStreamingProvider>().unwrap(),
+            BackendStreamingProvider::Deepgram
+        );
+        assert_eq!(
+            "eleven_labs".parse::<BackendStreamingProvider>().unwrap(),
+            BackendStreamingProvider::ElevenLabs
+        );
+        assert!("assemblyai".parse::<BackendStreamingProvider>().is_err());
+    }
+
+    #[test]
+    fn test_backend_streaming_provider_protocol_names() {
+        assert_eq!(
+            BackendStreamingProvider::Deepgram.as_protocol_name(),
+            "deepgram"
+        );
+        assert_eq!(
+            BackendStreamingProvider::ElevenLabs.as_protocol_name(),
+            "elevenlabs"
+        );
+    }
+
+    #[test]
+    fn test_stt_config_deserializes_legacy_config_without_backend_streaming_provider() {
+        let mut value = serde_json::to_value(SttConfig::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("backend_streaming_provider");
+
+        let config: SttConfig = serde_json::from_value(value).unwrap();
+
+        assert_eq!(
+            config.backend_streaming_provider,
+            BackendStreamingProvider::Deepgram
+        );
+    }
+
+    #[test]
+    fn test_stt_config_deserializes_saved_elevenlabs_backend_streaming_provider() {
+        let mut value = serde_json::to_value(SttConfig::default()).unwrap();
+        value["backend_streaming_provider"] = serde_json::Value::String("elevenlabs".to_string());
+
+        let config: SttConfig = serde_json::from_value(value).unwrap();
+
+        assert_eq!(
+            config.backend_streaming_provider,
+            BackendStreamingProvider::ElevenLabs
+        );
     }
 
     #[test]

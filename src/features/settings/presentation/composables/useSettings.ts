@@ -5,7 +5,7 @@
 
 import { computed, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { SttProviderType } from '@/types';
+import { BackendStreamingProviderType, SttProviderType } from '@/types';
 import { invoke } from '@tauri-apps/api/core';
 import { isTauriAvailable } from '@/utils/tauri';
 import {
@@ -33,6 +33,12 @@ export function useSettings() {
   const provider = computed({
     get: () => store.provider,
     set: (value: SttProviderType) => store.setProvider(value),
+  });
+
+  const backendStreamingProvider = computed({
+    get: () => store.backendStreamingProvider,
+    set: (value: BackendStreamingProviderType) =>
+      store.setBackendStreamingProvider(value),
   });
 
   const language = computed({
@@ -128,6 +134,10 @@ export function useSettings() {
         localStorage.setItem('sttLanguage', storedSttLang);
 
         store.setProvider(SttProviderType.Backend);
+        store.setBackendStreamingProvider(
+          sttConfigStoreInstance.backendStreamingProvider ??
+            BackendStreamingProviderType.Deepgram
+        );
         store.setLanguage(storedSttLang, { persist: false });
 
         if (appConfigStoreInstance.isLoaded) {
@@ -163,6 +173,9 @@ export function useSettings() {
         // Если sttConfig store уже загружен (например, в тестах) — можно синхронизировать
         if (sttConfigStoreInstance.isLoaded) {
           const sttLang = normalizeSttLanguage(sttConfigStoreInstance.language);
+          store.setBackendStreamingProvider(
+            sttConfigStoreInstance.backendStreamingProvider
+          );
           store.setLanguage(sttLang, { persist: false });
           const fallbackLocale = sttLangToUiLocale(sttLang);
           locale.value = fallbackLocale;
@@ -179,11 +192,18 @@ export function useSettings() {
       const sttConfigStoreInstance = useSttConfigStore();
       if (sttConfigStoreInstance.isLoaded) {
         store.setProvider(SttProviderType.Backend);
+        store.setBackendStreamingProvider(
+          sttConfigStoreInstance.backendStreamingProvider
+        );
         store.setLanguage(sttConfigStoreInstance.language, { persist: false });
         store.setDeepgramKeyterms(sttConfigStoreInstance.deepgramKeyterms ?? '', { persist: false });
       } else {
         const sttConfig = await tauriSettingsService.getSttConfig();
         store.setProvider(SttProviderType.Backend);
+        store.setBackendStreamingProvider(
+          sttConfig.backend_streaming_provider ??
+            BackendStreamingProviderType.Deepgram
+        );
         store.setLanguage(sttConfig.language, { persist: false });
         store.setDeepgramKeyterms(sttConfig.deepgram_keyterms ?? '', { persist: false });
       }
@@ -291,18 +311,29 @@ export function useSettings() {
       const hasLanguageChange = persistedState
         ? persistedState.language !== store.language
         : latestStt.language !== store.language;
+      const latestBackendStreamingProvider =
+        latestStt.backend_streaming_provider ??
+        BackendStreamingProviderType.Deepgram;
+      const hasBackendStreamingProviderChange = persistedState
+        ? persistedState.backendStreamingProvider !== store.backendStreamingProvider
+        : latestBackendStreamingProvider !== store.backendStreamingProvider;
       const expectedKeyterms = normalizeKeyterms(store.deepgramKeyterms);
       const persistedKeyterms = normalizeKeyterms(persistedState?.deepgramKeyterms);
       const hasKeytermsChange = persistedState
         ? persistedKeyterms !== expectedKeyterms
         : normalizeKeyterms(latestStt.deepgram_keyterms) !== expectedKeyterms;
 
-      const shouldSaveStt = hasLanguageChange || hasKeytermsChange;
+      const shouldSaveStt =
+        hasLanguageChange || hasKeytermsChange || hasBackendStreamingProviderChange;
       if (shouldSaveStt) {
         const languageForSave = hasLanguageChange ? store.language : latestStt.language;
+        const backendStreamingProviderForSave = hasBackendStreamingProviderChange
+          ? store.backendStreamingProvider
+          : latestBackendStreamingProvider;
         const sttConfigData: Partial<SttConfigData> & Pick<SttConfigData, 'provider' | 'language'> = {
           provider: SttProviderType.Backend,
           language: languageForSave,
+          backendStreamingProvider: backendStreamingProviderForSave,
         };
 
         if (hasKeytermsChange) {
@@ -317,6 +348,12 @@ export function useSettings() {
 
         const isSttApplied = (stt: Awaited<ReturnType<typeof tauriSettingsService.getSttConfig>>) => {
           if (stt.language !== languageForSave) return false;
+          if (
+            (stt.backend_streaming_provider ?? BackendStreamingProviderType.Deepgram) !==
+            backendStreamingProviderForSave
+          ) {
+            return false;
+          }
           if (hasKeytermsChange) {
             return normalizeKeyterms(stt.deepgram_keyterms) === expectedKeyterms;
           }
@@ -561,6 +598,7 @@ export function useSettings() {
   return {
     // Store state (через computed для v-model)
     provider,
+    backendStreamingProvider,
     language,
     deepgramApiKey,
     assemblyaiApiKey,

@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import { useSttConfigStore } from './sttConfig';
 import { CMD_GET_STT_CONFIG_SNAPSHOT, STATE_SYNC_INVALIDATION_EVENT } from '@/windowing/stateSync';
-import { SttProviderType } from '@/types';
+import { BackendStreamingProviderType, SttProviderType } from '@/types';
 
 const invokeMock = vi.fn();
 const listenMock = vi.fn();
@@ -31,6 +31,7 @@ describe('useSttConfigStore sync', () => {
       revision: '3',
       data: {
         provider: 'backend',
+        backend_streaming_provider: 'deepgram',
         language: 'en',
         auto_detect_language: true,
         enable_punctuation: false,
@@ -50,6 +51,7 @@ describe('useSttConfigStore sync', () => {
     expect(invokeMock).toHaveBeenCalledWith(CMD_GET_STT_CONFIG_SNAPSHOT, undefined);
     expect(store.revision).toBe('3');
     expect(store.provider).toBe('backend');
+    expect(store.backendStreamingProvider).toBe('deepgram');
     expect(store.language).toBe('en');
     expect(store.autoDetectLanguage).toBe(true);
     expect(store.enablePunctuation).toBe(false);
@@ -65,6 +67,7 @@ describe('useSttConfigStore sync', () => {
     store.applySnapshot(
       {
         provider: SttProviderType.Deepgram,
+        backend_streaming_provider: BackendStreamingProviderType.ElevenLabs,
         language: 'de',
         auto_detect_language: false,
         enable_punctuation: true,
@@ -80,6 +83,7 @@ describe('useSttConfigStore sync', () => {
 
     expect(store.revision).toBe('15');
     expect(store.provider).toBe('deepgram');
+    expect(store.backendStreamingProvider).toBe('elevenlabs');
     expect(store.language).toBe('de');
     expect(store.deepgramApiKey).toBe('key-123');
     expect(store.isLoaded).toBe(true);
@@ -91,6 +95,7 @@ describe('useSttConfigStore sync', () => {
     store.applySnapshot(
       {
         provider: SttProviderType.Backend,
+        backend_streaming_provider: BackendStreamingProviderType.Deepgram,
         language: 'ru',
         auto_detect_language: false,
         enable_punctuation: true,
@@ -110,6 +115,7 @@ describe('useSttConfigStore sync', () => {
     store.applySnapshot(
       {
         provider: SttProviderType.Backend,
+        backend_streaming_provider: BackendStreamingProviderType.Deepgram,
         language: 'en',
         auto_detect_language: false,
         enable_punctuation: true,
@@ -141,6 +147,7 @@ describe('useSttConfigStore sync', () => {
       revision: '1',
       data: {
         provider: 'backend',
+        backend_streaming_provider: 'deepgram',
         language: 'en',
         auto_detect_language: false,
         enable_punctuation: true,
@@ -167,6 +174,7 @@ describe('useSttConfigStore sync', () => {
       revision: '1',
       data: {
         provider: 'backend',
+        backend_streaming_provider: 'deepgram',
         language: 'ru',
         auto_detect_language: false,
         enable_punctuation: true,
@@ -187,6 +195,7 @@ describe('useSttConfigStore sync', () => {
       revision: '2',
       data: {
         provider: 'backend',
+        backend_streaming_provider: 'deepgram',
         language: 'ja',
         auto_detect_language: false,
         enable_punctuation: true,

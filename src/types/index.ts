@@ -107,8 +107,14 @@ export enum SttProviderType {
   Azure = 'azure',
 }
 
+export enum BackendStreamingProviderType {
+  Deepgram = 'deepgram',
+  ElevenLabs = 'elevenlabs',
+}
+
 export interface SttConfig {
   provider: SttProviderType;
+  backend_streaming_provider: BackendStreamingProviderType;
   language: string;
   auto_detect_language: boolean;
   enable_punctuation: boolean;

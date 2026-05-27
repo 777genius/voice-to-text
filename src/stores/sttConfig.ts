@@ -8,7 +8,7 @@ import {
 } from '@/windowing/stateSync';
 import type { RevisionSyncHandle } from '@/windowing/stateSync';
 import type { SttConfigSnapshotData, TauriSnapshotEnvelope } from '@/windowing/stateSync';
-import { SttProviderType } from '@/types';
+import { BackendStreamingProviderType, SttProviderType } from '@/types';
 
 export const useSttConfigStore = defineStore('sttConfig', () => {
   const revision = ref('0');
@@ -16,6 +16,9 @@ export const useSttConfigStore = defineStore('sttConfig', () => {
   const isSyncing = ref(false);
 
   const provider = ref<SttProviderType>(SttProviderType.Backend);
+  const backendStreamingProvider = ref<BackendStreamingProviderType>(
+    BackendStreamingProviderType.Deepgram
+  );
   const language = ref('ru');
   const autoDetectLanguage = ref(false);
   const enablePunctuation = ref(true);
@@ -31,6 +34,8 @@ export const useSttConfigStore = defineStore('sttConfig', () => {
   function applySnapshot(data: SttConfigSnapshotData, rev: string): void {
     revision.value = rev;
     provider.value = data.provider ?? provider.value;
+    backendStreamingProvider.value =
+      data.backend_streaming_provider ?? backendStreamingProvider.value;
     language.value = data.language ?? language.value;
     autoDetectLanguage.value = data.auto_detect_language ?? autoDetectLanguage.value;
     enablePunctuation.value = data.enable_punctuation ?? enablePunctuation.value;
@@ -91,6 +96,7 @@ export const useSttConfigStore = defineStore('sttConfig', () => {
     isLoaded,
     isSyncing,
     provider,
+    backendStreamingProvider,
     language,
     autoDetectLanguage,
     enablePunctuation,

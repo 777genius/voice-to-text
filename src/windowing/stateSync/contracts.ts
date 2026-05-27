@@ -6,7 +6,7 @@
  * - уменьшить риск дрейфа между Rust и TS
  */
 
-import type { SttProviderType } from '@/types';
+import type { BackendStreamingProviderType, SttProviderType } from '@/types';
 import type { UiLocale, UiTheme } from '@/i18n.locales';
 import type { SnapshotEnvelope } from '@statesync/core';
 
@@ -32,6 +32,7 @@ export type AppConfigSnapshotData = {
  */
 export type SttConfigSnapshotData = {
   provider: SttProviderType;
+  backend_streaming_provider: BackendStreamingProviderType;
   language: string;
 
   auto_detect_language: boolean;

@@ -4,8 +4,8 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
 
 use crate::domain::{
-    AppConfig, AudioCapture, AudioError, RecordingStatus, RecordingWindowPosition,
-    SttConnectionCategory, SttError, SttProviderType,
+    AppConfig, AudioCapture, AudioError, BackendStreamingProvider, RecordingStatus,
+    RecordingWindowPosition, SttConnectionCategory, SttError, SttProviderType,
 };
 use crate::infrastructure::{
     auto_paste::AutoPasteTarget, AuthSession, AuthStore, AuthUser, ConfigStore,
@@ -1052,7 +1052,8 @@ mod snapshot_contract_tests {
         SnapshotEnvelope, SttConfigSnapshotData,
     };
     use crate::domain::{
-        AppConfig, AudioError, RecordingWindowPosition, SttError, SttProviderType,
+        AppConfig, AudioError, BackendStreamingProvider, RecordingWindowPosition, SttError,
+        SttProviderType,
     };
     use crate::infrastructure::auto_paste::{AutoPasteTarget, VOICETEXT_BUNDLE_ID};
     use tauri::{PhysicalPosition, PhysicalSize};
@@ -1299,6 +1300,7 @@ mod snapshot_contract_tests {
             revision: "7".to_string(),
             data: SttConfigSnapshotData {
                 provider: SttProviderType::Backend,
+                backend_streaming_provider: BackendStreamingProvider::Deepgram,
                 language: "ru".to_string(),
                 auto_detect_language: false,
                 enable_punctuation: true,
@@ -1329,6 +1331,7 @@ mod snapshot_contract_tests {
             .and_then(|x| x.as_object())
             .expect("data object");
         assert!(data.contains_key("provider"));
+        assert!(data.contains_key("backend_streaming_provider"));
         assert!(data.contains_key("language"));
         assert!(data.contains_key("keep_connection_alive"));
     }
@@ -1711,6 +1714,7 @@ pub async fn update_stt_config(
     window: Window,
     provider: String,
     language: String,
+    backend_streaming_provider: Option<String>,
     deepgram_api_key: Option<String>,
     assemblyai_api_key: Option<String>,
     model: Option<String>,
@@ -1745,6 +1749,9 @@ pub async fn update_stt_config(
     // Обновляем только переданные параметры
     config.provider = provider_type;
     config.language = language;
+    if let Some(next_provider) = backend_streaming_provider {
+        config.backend_streaming_provider = next_provider.parse::<BackendStreamingProvider>()?;
+    }
 
     // Whisper/model больше не используем в backend-only архитектуре.
     let _ = model;
@@ -1772,7 +1779,7 @@ pub async fn update_stt_config(
     config.deepgram_api_key = None;
     config.assemblyai_api_key = None;
 
-    // Keyterms для улучшения распознавания Deepgram
+    // Keyterms для улучшения streaming-распознавания
     // - None: не меняем существующее значение
     // - Some(None): очищаем
     // - Some(Some(v)): устанавливаем v
@@ -1803,6 +1810,7 @@ pub async fn update_stt_config(
     // чтобы state-sync корректно подтягивал актуальный snapshot (включая keyterms и т.д.)
     let stt_changed = config.language != old_stt.language
         || config.deepgram_keyterms != old_stt.deepgram_keyterms
+        || config.backend_streaming_provider != old_stt.backend_streaming_provider
         || config.provider != old_stt.provider;
     if stt_changed {
         let revision = AppState::bump_revision(&state.stt_config_revision).await;
@@ -1876,6 +1884,7 @@ pub async fn get_app_config_snapshot(
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SttConfigSnapshotData {
     pub provider: crate::domain::SttProviderType,
+    pub backend_streaming_provider: crate::domain::BackendStreamingProvider,
     pub language: String,
     pub auto_detect_language: bool,
     pub enable_punctuation: bool,
@@ -1896,6 +1905,7 @@ pub async fn get_stt_config_snapshot(
     let config = state.transcription_service.get_config().await;
     let data = SttConfigSnapshotData {
         provider: config.provider,
+        backend_streaming_provider: config.backend_streaming_provider,
         language: config.language,
         auto_detect_language: config.auto_detect_language,
         enable_punctuation: config.enable_punctuation,
