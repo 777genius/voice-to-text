@@ -47,8 +47,11 @@ pub struct AudioOutputConfig {
     /// поэтому небольшой буфер сглаживает сетевые/серверные интервалы между чанками.
     pub prebuffer_ms: u64,
     /// Максимум буфера в output_ready (в frames per channel). Превышение → дропаем старое.
-    /// ~2 секунды по native sample rate — безопасный потолок без раздувания latency.
+    /// ~6 секунд при 48 kHz — безопасный потолок без раздувания active-session latency.
     pub max_buffered_frames: usize,
+    /// Более высокий потолок на время graceful stop. OpenAI может прислать финальный
+    /// synthesized tail быстрее realtime, и обычный latency cap не должен резать хвост.
+    pub drain_max_buffered_frames: usize,
 }
 
 impl AudioOutputConfig {
@@ -61,6 +64,8 @@ impl AudioOutputConfig {
             // OpenAI может отдавать synthesized audio пачками быстрее realtime.
             // Держим запас ~6 сек при native 48 kHz, чтобы не резать речь на burst'ах.
             max_buffered_frames: 300_000,
+            // На stop допускаем до ~15 сек tail-buffer при 48 kHz.
+            drain_max_buffered_frames: 720_000,
         }
     }
 }
@@ -68,11 +73,15 @@ impl AudioOutputConfig {
 #[derive(Debug)]
 struct OutputPlaybackState {
     prebuffering: bool,
+    draining: bool,
 }
 
 impl Default for OutputPlaybackState {
     fn default() -> Self {
-        Self { prebuffering: true }
+        Self {
+            prebuffering: true,
+            draining: false,
+        }
     }
 }
 
@@ -341,6 +350,14 @@ impl CpalAudioOutput {
         }
     }
 
+    /// Raises queue headroom for graceful stop before OpenAI starts sending the final tail.
+    pub fn begin_drain_mode(&self) {
+        if let Ok(mut state) = self.playback_state.lock() {
+            state.draining = true;
+            state.prebuffering = false;
+        }
+    }
+
     /// Flushes the final partial source chunk and lets the output callback play
     /// whatever remains without waiting for another full prebuffer.
     pub fn prepare_for_drain(&self) -> AudioOutputResult<Duration> {
@@ -359,7 +376,7 @@ impl CpalAudioOutput {
             &self.output_ready,
             &self.resampler,
             native.channels() as usize,
-            cfg.max_buffered_frames,
+            cfg.drain_max_buffered_frames,
             true,
         );
 
@@ -501,6 +518,16 @@ impl AudioOutput for CpalAudioOutput {
             return Err(AudioOutputError::Closed);
         };
         let native_channels = native.channels() as usize;
+        let max_buffered_frames = if self
+            .playback_state
+            .lock()
+            .map(|state| state.draining)
+            .unwrap_or(false)
+        {
+            cfg.drain_max_buffered_frames
+        } else {
+            cfg.max_buffered_frames
+        };
 
         {
             let mut q = self
@@ -515,7 +542,7 @@ impl AudioOutput for CpalAudioOutput {
             &self.output_ready,
             &self.resampler,
             native_channels,
-            cfg.max_buffered_frames,
+            max_buffered_frames,
             false,
         );
 
@@ -540,6 +567,7 @@ impl AudioOutput for CpalAudioOutput {
         }
         if let Ok(mut state) = self.playback_state.lock() {
             state.prebuffering = true;
+            state.draining = false;
         }
         log::info!("CpalAudioOutput closed");
         Ok(())
@@ -635,6 +663,7 @@ mod tests {
         assert_eq!(cfg.source_channels, 1);
         assert!((250..=500).contains(&cfg.prebuffer_ms));
         assert!(cfg.max_buffered_frames >= 288_000); // headroom хотя бы 6 сек на 48 kHz
+        assert!(cfg.drain_max_buffered_frames > cfg.max_buffered_frames);
     }
 
     #[test]
@@ -676,5 +705,23 @@ mod tests {
 
         assert_eq!(underrun, [0.5, 0.6, 0.0, 0.0]);
         assert!(state.lock().unwrap().prebuffering);
+    }
+
+    #[test]
+    fn begin_drain_mode_disables_prebuffer_for_late_tail() {
+        let out = CpalAudioOutput::new();
+        out.output_ready.lock().unwrap().extend([0.1, 0.2]);
+
+        {
+            let mut state = out.playback_state.lock().unwrap();
+            state.prebuffering = true;
+            state.draining = false;
+        }
+
+        out.begin_drain_mode();
+
+        let state = out.playback_state.lock().unwrap();
+        assert!(state.draining);
+        assert!(!state.prebuffering);
     }
 }

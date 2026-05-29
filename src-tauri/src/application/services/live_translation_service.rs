@@ -40,7 +40,7 @@ const GRACEFUL_CLOSE_TIMEOUT_MS: u64 = 2_500;
 const MIC_PUMP_DRAIN_TIMEOUT_MS: u64 = 500;
 const FORWARDER_DRAIN_TIMEOUT_MS: u64 = 750;
 const OUTPUT_DRAIN_SAFETY_MS: u64 = 250;
-const OUTPUT_DRAIN_MAX_MS: u64 = 6_000;
+const OUTPUT_DRAIN_MAX_MS: u64 = 12_000;
 const OUTPUT_DRAIN_POLL_MS: u64 = 50;
 const OUTPUT_DRAIN_EMPTY_THRESHOLD_MS: u64 = 30;
 
@@ -511,6 +511,11 @@ async fn cleanup_session(mut session: RunningSession, mode: CleanupMode) {
 
     match mode {
         CleanupMode::GracefulStop => {
+            {
+                let out = session.output.read().await;
+                out.begin_drain_mode();
+            }
+
             let audio_pump_finished = wait_task_done(
                 &mut session.audio_pump_task,
                 Duration::from_millis(MIC_PUMP_DRAIN_TIMEOUT_MS),
