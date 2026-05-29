@@ -36,8 +36,9 @@ use crate::infrastructure::openai::{
 use super::audio_spectrum::AudioSpectrumAnalyzer;
 
 const TRANSLATION_TARGET_LANGUAGE_DEFAULT: &str = "en";
+const OPENAI_INPUT_FRAME_SAMPLES: usize = 4_800; // 200 ms at 24 kHz mono.
 const GRACEFUL_CLOSE_TIMEOUT_MS: u64 = 8_000;
-const MIC_PUMP_DRAIN_TIMEOUT_MS: u64 = 500;
+const MIC_PUMP_DRAIN_TIMEOUT_MS: u64 = 1_500;
 const FORWARDER_DRAIN_TIMEOUT_MS: u64 = 1_500;
 const OUTPUT_DRAIN_SAFETY_MS: u64 = 250;
 const OUTPUT_DRAIN_MAX_MS: u64 = 12_000;
@@ -226,6 +227,16 @@ impl LiveTranslationService {
                 return Err(err);
             }
         };
+        let selected_input_name = capture.read().await.device_name().unwrap_or_default();
+        if is_blackhole_device_name(&selected_input_name) {
+            let _ = output.write().await.close().await;
+            let err = LiveTranslationError::Configuration(
+                "BlackHole 2ch выбран как входной микрофон. Для live translation выберите реальный микрофон, а BlackHole оставьте микрофоном в Meet/Zoom."
+                    .to_string(),
+            );
+            self.transition_to_error().await;
+            return Err(err);
+        }
 
         // 4. OpenAI client connect
         let mut client = OpenAIRealtimeTranslationClient::new(
@@ -355,6 +366,36 @@ fn microphone_permission_preflight() -> Result<(), String> {
     Ok(())
 }
 
+fn is_blackhole_device_name(name: &str) -> bool {
+    name.to_ascii_lowercase().contains("blackhole")
+}
+
+fn take_ready_openai_input_frames(buffer: &mut Vec<i16>) -> Vec<Vec<i16>> {
+    let mut frames = Vec::new();
+    while buffer.len() >= OPENAI_INPUT_FRAME_SAMPLES {
+        frames.push(buffer.drain(..OPENAI_INPUT_FRAME_SAMPLES).collect());
+    }
+    frames
+}
+
+fn take_padded_final_openai_input_frame(buffer: &mut Vec<i16>) -> Option<Vec<i16>> {
+    if buffer.is_empty() {
+        return None;
+    }
+
+    let mut frame = std::mem::take(buffer);
+    frame.resize(OPENAI_INPUT_FRAME_SAMPLES, 0);
+    Some(frame)
+}
+
+async fn send_openai_input_frame(
+    client: &Arc<Mutex<OpenAIRealtimeTranslationClient>>,
+    frame: &[i16],
+) -> Result<(), LiveTranslationError> {
+    let client = client.lock().await;
+    client.append_input_audio(frame).await.map_err(Into::into)
+}
+
 async fn run_audio_pump(
     mut mic_rx: mpsc::UnboundedReceiver<AudioChunk>,
     client: Arc<Mutex<OpenAIRealtimeTranslationClient>>,
@@ -364,6 +405,8 @@ async fn run_audio_pump(
 ) {
     let gain = microphone_sensitivity_gain(sensitivity);
     let mut spectrum = AudioSpectrumAnalyzer::new();
+    let mut openai_input_buffer = Vec::<i16>::with_capacity(OPENAI_INPUT_FRAME_SAMPLES * 2);
+    let mut failed = false;
 
     while let Some(chunk) = mic_rx.recv().await {
         // gain
@@ -378,19 +421,33 @@ async fn run_audio_pump(
             on_spectrum(bars);
         }
 
-        // отправка в OpenAI
-        let send_res = {
-            let client = client.lock().await;
-            client.append_input_audio(&amplified).await
-        };
-        if let Err(e) = send_res {
-            let kind_err: LiveTranslationError = e.into();
-            log::warn!("LiveTranslationService audio pump send error: {}", kind_err);
-            let _ = runtime_stop_tx.send(RuntimeStop::Error(kind_err));
-            // single error → выходим, чтобы не спамить
+        openai_input_buffer.extend_from_slice(&amplified);
+        for frame in take_ready_openai_input_frames(&mut openai_input_buffer) {
+            if let Err(kind_err) = send_openai_input_frame(&client, &frame).await {
+                log::warn!("LiveTranslationService audio pump send error: {}", kind_err);
+                let _ = runtime_stop_tx.send(RuntimeStop::Error(kind_err));
+                failed = true;
+                break;
+            }
+        }
+
+        if failed {
             break;
         }
     }
+
+    if !failed {
+        if let Some(frame) = take_padded_final_openai_input_frame(&mut openai_input_buffer) {
+            if let Err(kind_err) = send_openai_input_frame(&client, &frame).await {
+                log::warn!(
+                    "LiveTranslationService final audio frame send error: {}",
+                    kind_err
+                );
+                let _ = runtime_stop_tx.send(RuntimeStop::Error(kind_err));
+            }
+        }
+    }
+
     log::info!("LiveTranslationService: audio pump exited");
 }
 
@@ -716,6 +773,38 @@ mod tests {
         assert_eq!(cfg.session_id, 42);
         assert_eq!(cfg.microphone_sensitivity, 100);
         assert!(cfg.microphone_device.is_none());
+    }
+
+    #[test]
+    fn blackhole_input_device_names_are_detected() {
+        assert!(is_blackhole_device_name("BlackHole 2ch"));
+        assert!(is_blackhole_device_name("blackhole"));
+        assert!(!is_blackhole_device_name("Внешний микрофон"));
+        assert!(!is_blackhole_device_name("MacBook Pro Microphone"));
+    }
+
+    #[test]
+    fn openai_input_buffer_emits_200ms_frames() {
+        let mut buffer = vec![1; 2_000];
+        assert!(take_ready_openai_input_frames(&mut buffer).is_empty());
+
+        buffer.extend(std::iter::repeat_n(2, 2_800));
+        let frames = take_ready_openai_input_frames(&mut buffer);
+
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].len(), OPENAI_INPUT_FRAME_SAMPLES);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn final_openai_input_frame_is_padded_to_200ms() {
+        let mut buffer = vec![7; 123];
+        let frame = take_padded_final_openai_input_frame(&mut buffer).unwrap();
+
+        assert_eq!(frame.len(), OPENAI_INPUT_FRAME_SAMPLES);
+        assert!(frame[..123].iter().all(|sample| *sample == 7));
+        assert!(frame[123..].iter().all(|sample| *sample == 0));
+        assert!(buffer.is_empty());
     }
 
     #[tokio::test]

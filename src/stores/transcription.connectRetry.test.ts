@@ -215,6 +215,43 @@ describe('transcription connect-retry reliability', () => {
     expect(store.displayText).toBe('Hello world');
   });
 
+  it('завершает live translation connect-loop сразу по translation:error', async () => {
+    const handlers = new Map<string, any>();
+    const start = deferred<string>();
+    appConfigMock.recordingMode = 'live_translation';
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'start_recording') return start.promise;
+      return Promise.resolve(null);
+    });
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    const startPromise = store.startRecording();
+    await flushMicrotasks();
+
+    await handlers.get('translation:error')({
+      payload: {
+        session_id: 91,
+        error: 'Authentication: HTTP 401 during WS handshake',
+        error_type: 'authentication',
+      },
+    });
+    start.resolve('LiveTranslation started');
+    await startPromise;
+
+    expect(store.isConnecting).toBe(false);
+    expect(store.status).toBe('Error');
+    expect(store.errorType).toBe('authentication');
+    expect(authContainerMock.refreshTokensUseCase.execute).not.toHaveBeenCalled();
+    expect(authStoreMock.reset).not.toHaveBeenCalled();
+  });
+
   it('очищает скрытый старый текст, когда приходит новая recording session', async () => {
     const handlers = new Map<string, any>();
 

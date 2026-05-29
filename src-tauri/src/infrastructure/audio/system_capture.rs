@@ -125,6 +125,10 @@ impl SystemAudioCapture {
         })
     }
 
+    pub fn device_name(&self) -> Option<String> {
+        self.device.name().ok()
+    }
+
     fn select_device_and_config(
         host: &Host,
         device_name: Option<&str>,

@@ -1553,9 +1553,23 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             return;
           }
           // Translation errors не должны триггерить STT auth/logout flow.
-          // Просто показываем сообщение в UI и не лезем в refreshAuthForStt.
+          // Но для live_translation это terminal error, поэтому connect-loop должен
+          // завершиться сразу, а не ждать общий timeout.
+          const normalizedType =
+            asKnownErrorType(event.payload.error_type) ??
+            detectErrorTypeFromRaw(event.payload.error) ??
+            'connection';
           error.value = event.payload.error;
-          errorType.value = (event.payload.error_type as TranscriptionErrorPayload['error_type']) ?? null;
+          errorType.value = normalizedType;
+          isDeviceNotFoundError.value =
+            normalizedType === 'configuration' && isDeviceNotFoundInRaw(event.payload.error);
+          if (isConnecting.value || awaitingSessionStart.value) {
+            lastConnectFailure.value = normalizedType;
+            lastConnectFailureRaw.value = event.payload.error;
+            lastConnectFailureDetails.value = null;
+          }
+          status.value = RecordingStatus.Error;
+          awaitingSessionStart.value = false;
           console.error('[translation:error]', event.payload);
         }
       );

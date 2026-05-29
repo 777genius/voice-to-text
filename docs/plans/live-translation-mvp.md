@@ -554,6 +554,13 @@ English / en
 }
 ```
 
+Implementation detail:
+
+- OpenAI accepts shorter chunks, but official docs recommend 200 ms chunks for best realtime behavior.
+- LiveTranslationService aggregates mic capture into `4800` samples per append (`24_000 Hz * 200 ms`).
+- On stop it pads the final partial frame with silence before `session.close`, so the last short phrase is not dropped.
+- Stop gives the mic pump up to `1500 ms` to send already captured frames before `session.close`.
+
 ### Output events to handle
 
 Minimum:
@@ -1581,9 +1588,11 @@ Manual test matrix:
 
 - [ ] Dictation remains 16 kHz mono.
 - [ ] Translation uses 24 kHz mono.
+- [ ] Translation sends OpenAI input as 200 ms frames (4800 samples at 24 kHz).
 - [ ] Translation does not use VAD wrapper.
 - [ ] Mic permission denied gives clear error.
 - [ ] Selected input device from settings still applies if reasonable.
+- [ ] BlackHole is rejected as selected input device for live translation to avoid feedback loop.
 - [ ] If selected mic unavailable, behavior matches current fallback or clear error.
 - [ ] All-zero mic stream reports error instead of silently burning OpenAI minutes.
 
