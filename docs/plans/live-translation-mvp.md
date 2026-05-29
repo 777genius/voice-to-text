@@ -516,10 +516,9 @@ Headers:
 
 ```text
 Authorization: Bearer ${OPENAI_API_KEY}
-OpenAI-Beta: realtime=v1
 ```
 
-Нужно проверить актуальные headers при реализации по official docs/OpenAPI.
+GA Realtime Translation не использует `OpenAI-Beta: realtime=v1`. Этот header относится к beta Realtime API и на GA endpoint может ломать handshake.
 
 ### Session update
 
@@ -595,7 +594,7 @@ session.closed
 Timeout:
 
 ```text
-1500-2000 ms
+8000 ms
 ```
 
 Если timeout:
@@ -604,6 +603,8 @@ Timeout:
 - close WebSocket;
 - emit Idle;
 - log warning.
+
+Почему не 1500-2000 ms: official docs требуют отправить `session.close` и продолжать читать events до `session.closed`, потому что иначе можно потерять финальный translated audio/transcript tail. В MVP оставляем hard timeout как защиту от зависания сети, но он должен быть достаточно длинным для реального flush.
 
 ## Audio capture design
 
@@ -1805,4 +1806,3 @@ Avoid:
 - introducing second hotkey system;
 - mixing translation text into STT auto-paste path;
 - adding Settings complexity not needed for MVP.
-

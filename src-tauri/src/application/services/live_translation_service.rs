@@ -36,9 +36,9 @@ use crate::infrastructure::openai::{
 use super::audio_spectrum::AudioSpectrumAnalyzer;
 
 const TRANSLATION_TARGET_LANGUAGE_DEFAULT: &str = "en";
-const GRACEFUL_CLOSE_TIMEOUT_MS: u64 = 2_500;
+const GRACEFUL_CLOSE_TIMEOUT_MS: u64 = 8_000;
 const MIC_PUMP_DRAIN_TIMEOUT_MS: u64 = 500;
-const FORWARDER_DRAIN_TIMEOUT_MS: u64 = 750;
+const FORWARDER_DRAIN_TIMEOUT_MS: u64 = 1_500;
 const OUTPUT_DRAIN_SAFETY_MS: u64 = 250;
 const OUTPUT_DRAIN_MAX_MS: u64 = 12_000;
 const OUTPUT_DRAIN_POLL_MS: u64 = 50;
