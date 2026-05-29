@@ -11,6 +11,12 @@ fn get_test_api_key() -> String {
         .expect("Set DEEPGRAM_TEST_KEY environment variable for benchmarks")
 }
 
+fn deepgram_config_with_key() -> SttConfig {
+    let mut config = SttConfig::new(SttProviderType::Deepgram);
+    config.deepgram_api_key = Some(get_test_api_key());
+    config
+}
+
 /// Бенчмарк инициализации провайдера
 fn bench_initialization(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
@@ -18,9 +24,7 @@ fn bench_initialization(c: &mut Criterion) {
     c.bench_function("deepgram_initialization", |b| {
         b.iter(|| {
             let mut provider = DeepgramProvider::new();
-            let mut config = SttConfig::new(SttProviderType::Deepgram)
-                .with_api_key(&get_test_api_key())
-                .with_language("ru");
+            let config = deepgram_config_with_key().with_language("ru");
 
             rt.block_on(async {
                 provider.initialize(&config).await.unwrap();
@@ -174,6 +178,8 @@ fn bench_callback_invocation(c: &mut Criterion) {
         is_final: false,
         language: Some("ru".to_string()),
         timestamp: 0,
+        start: 0.0,
+        duration: 0.0,
     };
 
     c.bench_function("callback_invocation", |b| {
@@ -187,8 +193,7 @@ fn bench_callback_invocation(c: &mut Criterion) {
 fn bench_config_creation(c: &mut Criterion) {
     c.bench_function("stt_config_creation", |b| {
         b.iter(|| {
-            let config = SttConfig::new(SttProviderType::Deepgram)
-                .with_api_key(&get_test_api_key())
+            let config = deepgram_config_with_key()
                 .with_language("ru")
                 .with_model("nova-3");
             black_box(config);
@@ -198,9 +203,7 @@ fn bench_config_creation(c: &mut Criterion) {
 
 /// Бенчмарк клонирования конфигурации
 fn bench_config_cloning(c: &mut Criterion) {
-    let config = SttConfig::new(SttProviderType::Deepgram)
-        .with_api_key(&get_test_api_key())
-        .with_language("ru");
+    let config = deepgram_config_with_key().with_language("ru");
 
     c.bench_function("stt_config_clone", |b| {
         b.iter(|| {
@@ -216,7 +219,7 @@ fn bench_factory_provider_creation(c: &mut Criterion) {
     use app_lib::infrastructure::factory::DefaultSttProviderFactory;
 
     let factory = DefaultSttProviderFactory::new();
-    let config = SttConfig::new(SttProviderType::Deepgram).with_api_key(&get_test_api_key());
+    let config = deepgram_config_with_key();
 
     c.bench_function("factory_create_provider", |b| {
         b.iter(|| {
@@ -235,6 +238,8 @@ fn bench_transcription_serialization(c: &mut Criterion) {
         is_final: true,
         language: Some("ru".to_string()),
         timestamp: 1234567890,
+        start: 0.0,
+        duration: 0.0,
     };
 
     c.bench_function("transcription_to_json", |b| {
@@ -247,7 +252,7 @@ fn bench_transcription_serialization(c: &mut Criterion) {
 
 /// Бенчмарк десериализации транскрипции из JSON
 fn bench_transcription_deserialization(c: &mut Criterion) {
-    let json = r#"{"text":"Привет, это тестовая транскрипция","confidence":0.95,"is_final":true,"language":"ru","timestamp":1234567890}"#;
+    let json = r#"{"text":"Привет, это тестовая транскрипция","confidence":0.95,"is_final":true,"language":"ru","timestamp":1234567890,"start":0.0,"duration":0.0}"#;
 
     c.bench_function("transcription_from_json", |b| {
         b.iter(|| {

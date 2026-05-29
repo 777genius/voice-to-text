@@ -4,6 +4,7 @@ import { mdiBullseye, mdiLightningBolt, mdiSpeedometer, mdiTranslate } from '@md
 const { content } = useLandingContent();
 const { t, locale } = useI18n();
 const { data: releaseData } = useReleaseDownloads();
+const { isDark } = useBrowserTheme();
 
 const releaseVersion = computed(() => releaseData.value?.version || null);
 const releaseDate = computed(() => {
@@ -18,7 +19,11 @@ const releaseDate = computed(() => {
 </script>
 
 <template>
-  <section id="hero" class="hero-section section anchor-offset">
+  <section
+    id="hero"
+    class="hero-section section anchor-offset"
+    :class="isDark ? 'hero-section--dark' : 'hero-section--light'"
+  >
     <ClientOnly>
       <LazyHeroCanvasBackground />
     </ClientOnly>
@@ -113,6 +118,7 @@ const releaseDate = computed(() => {
   align-items: center;
   isolation: isolate;
   overflow: hidden;
+  background: #050816;
 }
 
 /* ─── Content ─── */
@@ -403,26 +409,39 @@ const releaseDate = computed(() => {
 }
 
 /* ─── Light Theme ─── */
-.v-theme--light .hero-section__badge {
+.v-theme--light .hero-section,
+.hero-section--light {
+  background:
+    radial-gradient(circle at 80% 18%, rgba(74, 158, 255, 0.14), transparent 34%),
+    radial-gradient(circle at 16% 56%, rgba(99, 102, 241, 0.08), transparent 34%),
+    linear-gradient(180deg, #f8fbff 0%, #ffffff 72%);
+}
+
+.v-theme--light .hero-section__badge,
+.hero-section--light .hero-section__badge {
   color: #4f46e5;
 }
 
-.v-theme--light .hero-section__title {
+.v-theme--light .hero-section__title,
+.hero-section--light .hero-section__title {
   background: linear-gradient(135deg, #1e293b 0%, #4f46e5 50%, #db2777 100%);
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
-.v-theme--light .hero-section__subtitle {
+.v-theme--light .hero-section__subtitle,
+.hero-section--light .hero-section__subtitle {
   color: #475569;
 }
 
-.v-theme--light .hero-section__release-info {
+.v-theme--light .hero-section__release-info,
+.hero-section--light .hero-section__release-info {
   color: #94a3b8;
 }
 
-.v-theme--light .hero-section__trust-item {
+.v-theme--light .hero-section__trust-item,
+.hero-section--light .hero-section__trust-item {
   color: #475569;
 }
 

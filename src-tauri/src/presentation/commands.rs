@@ -4,7 +4,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
 
 use crate::domain::{
-    AppConfig, AudioCapture, AudioError, BackendStreamingProvider, RecordingStatus,
+    AppConfig, AudioCapture, AudioError, BackendStreamingProvider, RecordingMode, RecordingStatus,
     RecordingWindowPosition, SttConnectionCategory, SttError, SttProviderType,
 };
 use crate::infrastructure::{
@@ -65,10 +65,16 @@ fn clear_active_transcription_session_id_if_current(state: &AppState, session_id
     );
 }
 
-fn emit_idle_recording_status(app_handle: &AppHandle, session_id: u64, stopped_via_hotkey: bool) {
+fn emit_idle_recording_status(
+    app_handle: &AppHandle,
+    session_id: u64,
+    stopped_via_hotkey: bool,
+    mode: Option<RecordingMode>,
+) {
     log::debug!(
-        "Emitting status: Idle (stopped_via_hotkey: {})",
-        stopped_via_hotkey
+        "Emitting status: Idle (stopped_via_hotkey: {}, mode: {:?})",
+        stopped_via_hotkey,
+        mode
     );
     let _ = app_handle.emit(
         EVENT_RECORDING_STATUS,
@@ -76,8 +82,21 @@ fn emit_idle_recording_status(app_handle: &AppHandle, session_id: u64, stopped_v
             session_id,
             status: RecordingStatus::Idle,
             stopped_via_hotkey,
+            mode,
         },
     );
+}
+
+async fn active_recording_status(state: &AppState) -> RecordingStatus {
+    let active_mode = *state.active_recording_mode.read().await;
+    if matches!(active_mode, Some(RecordingMode::LiveTranslation)) {
+        let svc = state.live_translation_service.read().await;
+        if let Some(service) = svc.as_ref() {
+            return service.get_status().await;
+        }
+    }
+
+    state.transcription_service.get_status().await
 }
 
 #[tauri::command]
@@ -232,7 +251,7 @@ async fn get_hotkey_start_connection_hint(state: &AppState, config: &AppConfig) 
         .await;
     let keep_alive_enabled =
         config.stt.keep_connection_alive || config.stt.provider == SttProviderType::Backend;
-    let status = state.transcription_service.get_status().await;
+    let status = active_recording_status(state).await;
     let warm_start_expected = can_resume_keep_alive
         || (keep_alive_enabled
             && matches!(
@@ -320,12 +339,20 @@ fn emit_recording_window_shown(app_handle: &AppHandle) {
         let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
     }
 }
-
 async fn stop_recording_and_emit_idle(
     state: &AppState,
     app_handle: &AppHandle,
     stopped_via_hotkey: bool,
 ) -> Result<String, String> {
+    // Dispatcher: если активный режим — live_translation, останавливаем translation сервис.
+    let active_mode = *state.active_recording_mode.read().await;
+    if matches!(
+        active_mode,
+        Some(crate::domain::RecordingMode::LiveTranslation)
+    ) {
+        return stop_live_translation_recording(state, app_handle, stopped_via_hotkey).await;
+    }
+
     let status_before_stop = state.transcription_service.get_status().await;
     log::info!(
         "Stopping recording: stopped_via_hotkey={}, status_before={:?}",
@@ -342,7 +369,8 @@ async fn stop_recording_and_emit_idle(
                 session_id,
                 result
             );
-            emit_idle_recording_status(app_handle, session_id, stopped_via_hotkey);
+            *state.active_recording_mode.write().await = None;
+            emit_idle_recording_status(app_handle, session_id, stopped_via_hotkey, None);
             Ok(result)
         }
         Err(err) => {
@@ -353,7 +381,8 @@ async fn stop_recording_and_emit_idle(
                     "Recording stop returned error after service recovered to Idle; emitting Idle status: {}",
                     err
                 );
-                emit_idle_recording_status(app_handle, session_id, stopped_via_hotkey);
+                *state.active_recording_mode.write().await = None;
+                emit_idle_recording_status(app_handle, session_id, stopped_via_hotkey, None);
                 Ok("Recording stopped".to_string())
             } else {
                 log::error!(
@@ -367,6 +396,227 @@ async fn stop_recording_and_emit_idle(
             }
         }
     }
+}
+
+async fn get_or_create_live_translation_service(
+    state: &AppState,
+) -> std::sync::Arc<crate::application::services::LiveTranslationService> {
+    {
+        let guard = state.live_translation_service.read().await;
+        if let Some(existing) = guard.as_ref() {
+            return existing.clone();
+        }
+    }
+    let mut guard = state.live_translation_service.write().await;
+    if let Some(existing) = guard.as_ref() {
+        return existing.clone();
+    }
+    let service = std::sync::Arc::new(crate::application::services::LiveTranslationService::new());
+    *guard = Some(service.clone());
+    service
+}
+
+fn translation_error_type_to_str(
+    err: &crate::application::services::LiveTranslationError,
+) -> &'static str {
+    err.error_type()
+}
+
+async fn start_live_translation_recording(
+    state: &AppState,
+    app_handle: AppHandle,
+    session_id: u64,
+) -> Result<String, String> {
+    use crate::application::services::{
+        LiveTranslationCallbacks, LiveTranslationConfig, LiveTranslationError,
+    };
+    use crate::domain::RecordingMode;
+    use crate::presentation::events::{
+        EVENT_AUDIO_SPECTRUM, EVENT_TRANSLATION_DELTA, EVENT_TRANSLATION_ERROR,
+    };
+
+    let config = state.config.read().await.clone();
+    let service = get_or_create_live_translation_service(state).await;
+    *state.active_recording_mode.write().await = Some(RecordingMode::LiveTranslation);
+
+    // Translation status emit — Starting с mode
+    let _ = app_handle.emit(
+        EVENT_RECORDING_STATUS,
+        RecordingStatusPayload {
+            session_id,
+            status: RecordingStatus::Starting,
+            stopped_via_hotkey: false,
+            mode: Some(RecordingMode::LiveTranslation),
+        },
+    );
+
+    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+    let translation_cfg = LiveTranslationConfig {
+        openai_api_key: api_key,
+        target_language: "en".to_string(),
+        microphone_device: config.selected_audio_device.clone(),
+        microphone_sensitivity: config.microphone_sensitivity,
+        session_id,
+    };
+
+    // Callbacks: emit события во фронт
+    let app_handle_transcript = app_handle.clone();
+    let on_transcript_delta: std::sync::Arc<dyn Fn(String) + Send + Sync> =
+        std::sync::Arc::new(move |text: String| {
+            let payload = crate::presentation::events::TranslationDeltaPayload {
+                session_id,
+                text,
+                timestamp: now_ms_u64(),
+            };
+            if let Err(e) = app_handle_transcript.emit(EVENT_TRANSLATION_DELTA, payload) {
+                log::error!("Failed to emit translation delta: {}", e);
+            }
+        });
+
+    let app_handle_spectrum = app_handle.clone();
+    let on_audio_spectrum: std::sync::Arc<dyn Fn([f32; 48]) + Send + Sync> =
+        std::sync::Arc::new(move |bars: [f32; 48]| {
+            let payload = AudioSpectrumPayload {
+                bars: bars.to_vec(),
+            };
+            let _ = app_handle_spectrum.emit(EVENT_AUDIO_SPECTRUM, payload);
+        });
+
+    let app_handle_error = app_handle.clone();
+    let app_handle_error_cleanup = app_handle.clone();
+    let on_error: std::sync::Arc<dyn Fn(LiveTranslationError) + Send + Sync> =
+        std::sync::Arc::new(move |err: LiveTranslationError| {
+            let error_type = translation_error_type_to_str(&err).to_string();
+            let payload = crate::presentation::events::TranslationErrorPayload {
+                session_id,
+                error: err.to_string(),
+                error_type,
+            };
+            if let Err(e) = app_handle_error.emit(EVENT_TRANSLATION_ERROR, payload) {
+                log::error!("Failed to emit translation error: {}", e);
+            }
+            let _ = app_handle_error.emit(
+                EVENT_RECORDING_STATUS,
+                RecordingStatusPayload {
+                    session_id,
+                    status: RecordingStatus::Error,
+                    stopped_via_hotkey: false,
+                    mode: Some(RecordingMode::LiveTranslation),
+                },
+            );
+            let cleanup_handle = app_handle_error_cleanup.clone();
+            tauri::async_runtime::spawn(async move {
+                let Some(state) = cleanup_handle.try_state::<AppState>() else {
+                    return;
+                };
+                clear_active_transcription_session_id_if_current(state.inner(), session_id);
+                let mut active_mode = state.active_recording_mode.write().await;
+                if matches!(*active_mode, Some(RecordingMode::LiveTranslation)) {
+                    *active_mode = None;
+                }
+            });
+        });
+
+    let app_handle_status = app_handle.clone();
+    let on_status: std::sync::Arc<dyn Fn(RecordingStatus) + Send + Sync> =
+        std::sync::Arc::new(move |status: RecordingStatus| {
+            // Состояния Starting / Recording / Error эмитятся выше явно; здесь логируем для диагностики.
+            log::debug!(
+                "LiveTranslation status callback: session={}, status={:?}",
+                session_id,
+                status
+            );
+            // Можем дополнительно эмитить, но во избежание двойных эмитов оставим только лог.
+            let _ = app_handle_status;
+        });
+
+    let callbacks = LiveTranslationCallbacks {
+        on_transcript_delta,
+        on_audio_spectrum,
+        on_error,
+        on_status,
+    };
+
+    match service.start_translation(translation_cfg, callbacks).await {
+        Ok(()) => {
+            *state.active_recording_mode.write().await = Some(RecordingMode::LiveTranslation);
+            let _ = app_handle.emit(
+                EVENT_RECORDING_STATUS,
+                RecordingStatusPayload {
+                    session_id,
+                    status: RecordingStatus::Recording,
+                    stopped_via_hotkey: false,
+                    mode: Some(RecordingMode::LiveTranslation),
+                },
+            );
+            Ok("LiveTranslation started".to_string())
+        }
+        Err(err) => {
+            let error_type = translation_error_type_to_str(&err).to_string();
+            let payload = crate::presentation::events::TranslationErrorPayload {
+                session_id,
+                error: err.to_string(),
+                error_type,
+            };
+            let _ = app_handle.emit(EVENT_TRANSLATION_ERROR, payload);
+            let _ = app_handle.emit(
+                EVENT_RECORDING_STATUS,
+                RecordingStatusPayload {
+                    session_id,
+                    status: RecordingStatus::Error,
+                    stopped_via_hotkey: false,
+                    mode: Some(RecordingMode::LiveTranslation),
+                },
+            );
+            clear_active_transcription_session_id_if_current(state, session_id);
+            let mut active_mode = state.active_recording_mode.write().await;
+            if matches!(*active_mode, Some(RecordingMode::LiveTranslation)) {
+                *active_mode = None;
+            }
+            Err(err.to_string())
+        }
+    }
+}
+
+async fn stop_live_translation_recording(
+    state: &AppState,
+    app_handle: &AppHandle,
+    stopped_via_hotkey: bool,
+) -> Result<String, String> {
+    use crate::domain::RecordingMode;
+
+    let service = {
+        let guard = state.live_translation_service.read().await;
+        guard.as_ref().cloned()
+    };
+
+    let session_id = take_active_transcription_session_id(state);
+
+    // Эмитим Processing (drain) — UI знает что мы заканчиваем
+    let _ = app_handle.emit(
+        EVENT_RECORDING_STATUS,
+        RecordingStatusPayload {
+            session_id,
+            status: RecordingStatus::Processing,
+            stopped_via_hotkey,
+            mode: Some(RecordingMode::LiveTranslation),
+        },
+    );
+
+    if let Some(svc) = service {
+        if let Err(e) = svc.stop_translation().await {
+            log::warn!("LiveTranslationService stop returned error: {}", e);
+        }
+    }
+
+    *state.active_recording_mode.write().await = None;
+    emit_idle_recording_status(
+        app_handle,
+        session_id,
+        stopped_via_hotkey,
+        Some(RecordingMode::LiveTranslation),
+    );
+    Ok("LiveTranslation stopped".to_string())
 }
 
 /// Start recording voice
@@ -387,6 +637,15 @@ pub async fn start_recording(
         .active_transcription_session_id
         .store(session_id, Ordering::Relaxed);
     log::info!("Recording session started: session_id={}", session_id);
+
+    // Dispatcher: если в Settings выбран live_translation, направляем в отдельный сервис
+    // и НЕ запускаем STT pipeline. Dictation идёт по прежнему пути ниже.
+    let selected_mode = state.config.read().await.recording_mode;
+    if selected_mode == crate::domain::RecordingMode::LiveTranslation {
+        return start_live_translation_recording(state.inner(), app_handle, session_id).await;
+    }
+    // Dictation mode: помечаем active_recording_mode, чтобы stop корректно роутил.
+    *state.active_recording_mode.write().await = Some(crate::domain::RecordingMode::Dictation);
 
     // На macOS при отсутствии разрешения на микрофон CoreAudio может отдавать "тишину" (все нули),
     // и UI будет выглядеть как "не записывает".
@@ -420,6 +679,7 @@ pub async fn start_recording(
                         session_id,
                         status: RecordingStatus::Error,
                         stopped_via_hotkey: false,
+                        mode: None,
                     },
                 );
                 clear_active_transcription_session_id_if_current(state.inner(), session_id);
@@ -541,6 +801,7 @@ pub async fn start_recording(
                     session_id,
                     status: RecordingStatus::Error,
                     stopped_via_hotkey: false,
+                    mode: None,
                 },
             );
 
@@ -600,6 +861,7 @@ pub async fn start_recording(
                 session_id,
                 status: RecordingStatus::Starting,
                 stopped_via_hotkey: false,
+                mode: None,
             },
         );
     }
@@ -630,6 +892,7 @@ pub async fn start_recording(
                 session_id,
                 status: RecordingStatus::Error,
                 stopped_via_hotkey: false,
+                mode: None,
             },
         );
         clear_active_transcription_session_id_if_current(state.inner(), session_id);
@@ -726,6 +989,7 @@ pub async fn start_recording(
             session_id,
             status: RecordingStatus::Recording,
             stopped_via_hotkey: false,
+            mode: None,
         },
     );
 
@@ -747,7 +1011,7 @@ pub async fn stop_recording(
 #[tauri::command]
 pub async fn get_recording_status(state: State<'_, AppState>) -> Result<RecordingStatus, String> {
     log::debug!("Command: get_recording_status");
-    Ok(state.transcription_service.get_status().await)
+    Ok(active_recording_status(state.inner()).await)
 }
 
 use tauri::{LogicalSize, PhysicalPosition, Position};
@@ -1263,6 +1527,7 @@ mod snapshot_contract_tests {
                 show_mini_recording_window: false,
                 keep_recording_until_manual_stop: false,
                 selected_audio_device: None,
+                recording_mode: crate::domain::RecordingMode::Dictation,
             },
         };
 
@@ -1406,7 +1671,7 @@ pub async fn toggle_recording_with_window(
     }
 
     // Переключаем состояние записи
-    let current_status = state.transcription_service.get_status().await;
+    let current_status = active_recording_status(state.inner()).await;
     log::info!(
         "[HotkeyDiag] toggle_recording_with_window: current_status={:?}",
         current_status
@@ -1495,7 +1760,19 @@ pub async fn toggle_recording_with_window(
             log::info!("Recording stopped via hotkey");
         }
         RecordingStatus::Processing => {
-            queue_recording_start_after_stop(state.inner(), app_handle.clone(), "command", None);
+            if matches!(
+                *state.active_recording_mode.read().await,
+                Some(RecordingMode::LiveTranslation)
+            ) {
+                log::info!("[HotkeyDiag] ignoring queued start while live translation is draining");
+            } else {
+                queue_recording_start_after_stop(
+                    state.inner(),
+                    app_handle.clone(),
+                    "command",
+                    None,
+                );
+            }
         }
         RecordingStatus::Error => {
             log::warn!("Cannot toggle recording - system is in error state");
@@ -1526,7 +1803,7 @@ pub async fn toggle_recording_with_window_internal(
         return Ok(());
     }
 
-    let current_status = state.transcription_service.get_status().await;
+    let current_status = active_recording_status(state).await;
     log::info!(
         "[HotkeyDiag] toggle_recording_with_window_internal: current_status={:?}",
         current_status
@@ -1617,7 +1894,7 @@ pub async fn toggle_recording_with_window_internal(
             let deadline = tokio::time::Instant::now()
                 + Duration::from_millis(HOTKEY_STOP_WAIT_FOR_RECORDING_MS);
             loop {
-                let status = state.transcription_service.get_status().await;
+                let status = active_recording_status(state).await;
                 match status {
                     RecordingStatus::Recording => {
                         if let Err(err) =
@@ -1705,12 +1982,19 @@ pub async fn toggle_recording_with_window_internal(
             log::info!("Recording stopped via hotkey");
         }
         RecordingStatus::Processing => {
-            queue_recording_start_after_stop(
-                state,
-                app_handle.clone(),
-                "global-hotkey",
-                Some(accepted_press_seq),
-            );
+            if matches!(
+                *state.active_recording_mode.read().await,
+                Some(RecordingMode::LiveTranslation)
+            ) {
+                log::info!("[HotkeyDiag] ignoring queued start while live translation is draining");
+            } else {
+                queue_recording_start_after_stop(
+                    state,
+                    app_handle.clone(),
+                    "global-hotkey",
+                    Some(accepted_press_seq),
+                );
+            }
         }
         RecordingStatus::Error => {
             log::warn!("Cannot toggle recording - error state");
@@ -1874,7 +2158,6 @@ pub struct SnapshotEnvelope<T: serde::Serialize> {
     pub revision: String,
     pub data: T,
 }
-
 /// Минимальный "public" снапшот app-config для фронтенда.
 ///
 /// Важно: не включаем STT конфиг и тем более токены — снапшоты идут во все окна через IPC.
@@ -1889,8 +2172,8 @@ pub struct AppConfigSnapshotData {
     pub show_mini_recording_window: bool,
     pub keep_recording_until_manual_stop: bool,
     pub selected_audio_device: Option<String>,
+    pub recording_mode: crate::domain::RecordingMode,
 }
-
 /// Get current application configuration + revision (for cross-window sync)
 #[tauri::command]
 pub async fn get_app_config_snapshot(
@@ -1908,6 +2191,7 @@ pub async fn get_app_config_snapshot(
         show_mini_recording_window: config.show_mini_recording_window,
         keep_recording_until_manual_stop: config.keep_recording_until_manual_stop,
         selected_audio_device: config.selected_audio_device,
+        recording_mode: config.recording_mode,
     };
     let revision = state.app_config_revision.read().await.to_string();
     Ok(SnapshotEnvelope { revision, data })
@@ -2120,9 +2404,10 @@ pub async fn update_app_config(
     show_mini_recording_window: Option<bool>,
     keep_recording_until_manual_stop: Option<bool>,
     selected_audio_device: Option<String>,
+    recording_mode: Option<crate::domain::RecordingMode>,
 ) -> Result<(), String> {
-    log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}, auto_copy: {:?}, auto_paste: {:?}, completion_sound: {:?}, hide_window_on_hotkey: {:?}, mini_window: {:?}, manual_stop_only: {:?}, device: {:?}",
-        microphone_sensitivity, recording_hotkey, auto_copy_to_clipboard, auto_paste_text, play_completion_sound, hide_recording_window_on_hotkey, show_mini_recording_window, keep_recording_until_manual_stop, selected_audio_device);
+    log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}, auto_copy: {:?}, auto_paste: {:?}, completion_sound: {:?}, hide_window_on_hotkey: {:?}, mini_window: {:?}, manual_stop_only: {:?}, device: {:?}, mode: {:?}",
+        microphone_sensitivity, recording_hotkey, auto_copy_to_clipboard, auto_paste_text, play_completion_sound, hide_recording_window_on_hotkey, show_mini_recording_window, keep_recording_until_manual_stop, selected_audio_device, recording_mode);
 
     // Защита от "тихих" провалов: если фронт случайно отправил snake_case ключи,
     // Tauri не сматчит аргументы, и сюда придут одни None.
@@ -2136,8 +2421,9 @@ pub async fn update_app_config(
         && show_mini_recording_window.is_none()
         && keep_recording_until_manual_stop.is_none()
         && selected_audio_device.is_none()
+        && recording_mode.is_none()
     {
-        return Err("update_app_config: не получены поля для обновления. Проверьте, что фронтенд отправляет args в camelCase (например microphoneSensitivity, recordingHotkey, autoCopyToClipboard, autoPasteText, playCompletionSound, hideRecordingWindowOnHotkey, showMiniRecordingWindow, keepRecordingUntilManualStop, selectedAudioDevice).".to_string());
+        return Err("update_app_config: не получены поля для обновления. Проверьте, что фронтенд отправляет args в camelCase (например microphoneSensitivity, recordingHotkey, autoCopyToClipboard, autoPasteText, playCompletionSound, hideRecordingWindowOnHotkey, showMiniRecordingWindow, keepRecordingUntilManualStop, selectedAudioDevice, recordingMode).".to_string());
     }
 
     let mut config = state.config.write().await;
@@ -2240,6 +2526,18 @@ pub async fn update_app_config(
                 manual_stop_only
             );
             config.keep_recording_until_manual_stop = manual_stop_only;
+            any_changed = true;
+        }
+    }
+
+    if let Some(new_mode) = recording_mode {
+        if config.recording_mode != new_mode {
+            log::info!(
+                "Updating recording_mode: {:?} -> {:?}",
+                config.recording_mode,
+                new_mode
+            );
+            config.recording_mode = new_mode;
             any_changed = true;
         }
     }
@@ -2568,7 +2866,7 @@ async fn start_recording_after_queued_hotkey_idle(
     let toggle_guard = state.recording_hotkey_toggle_guard.clone();
     let _toggle_guard = toggle_guard.lock().await;
 
-    let status = state.transcription_service.get_status().await;
+    let status = active_recording_status(state.inner()).await;
     if status != RecordingStatus::Idle {
         log::info!(
             "[HotkeyDiag] queued start cancelled: status changed before start (source={}, status={:?})",
@@ -2667,7 +2965,7 @@ fn queue_recording_start_after_stop(
                 return;
             };
 
-            let status = state.transcription_service.get_status().await;
+            let status = active_recording_status(state.inner()).await;
             match status {
                 RecordingStatus::Idle => break,
                 RecordingStatus::Processing | RecordingStatus::Starting => {
@@ -3104,7 +3402,7 @@ fn dispatch_recording_hotkey_toggle(app_clone: AppHandle, accepted_press_seq: u6
         let _toggle_guard = match toggle_guard.try_lock() {
             Ok(guard) => guard,
             Err(_) => {
-                let status_before_lock = state.transcription_service.get_status().await;
+                let status_before_lock = active_recording_status(state.inner()).await;
                 if status_before_lock == RecordingStatus::Processing {
                     if let Err(err) = show_recording_window_for_hotkey_start(
                         state.inner(),
@@ -3166,7 +3464,7 @@ fn dispatch_recording_hotkey_toggle(app_clone: AppHandle, accepted_press_seq: u6
             log::warn!("Recording hotkey ignored: main window is unavailable");
             return;
         };
-        let status_before = state.transcription_service.get_status().await;
+        let status_before = active_recording_status(state.inner()).await;
         let window_visible = window.is_visible().ok();
         log::info!(
             "[HotkeyDiag] dispatch toggle: status_before={:?}, window_visible={:?}, accepted_press_seq={}",

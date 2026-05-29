@@ -8,6 +8,7 @@ pub mod factory;
 pub mod hotkey; // Нормализация/миграция хоткеев
 pub mod microphone_permission; // Проверка разрешения на микрофон (macOS)
 pub mod models;
+pub mod openai; // OpenAI Realtime translation client
 /// Infrastructure layer - contains concrete implementations of domain interfaces
 /// This layer depends on domain layer but is independent of application layer
 pub mod stt;

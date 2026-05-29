@@ -1597,13 +1597,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_initialize_uses_embedded_key() {
+    async fn test_initialize_uses_embedded_key_when_available() {
         // Тест проверяет что при отсутствии пользовательского ключа
-        // используется встроенный ключ из embedded_keys
+        // используется встроенный ключ из embedded_keys, если он реально встроен в build.
         let mut provider = DeepgramProvider::new();
         let config = SttConfig::default();
 
         let result = provider.initialize(&config).await;
+        if !embedded_keys::has_embedded_deepgram_key() {
+            assert!(
+                result.is_err(),
+                "Should fail without user key when embedded key is not built in"
+            );
+            assert!(provider.api_key.is_none());
+            return;
+        }
+
         assert!(result.is_ok(), "Should succeed with embedded key");
         assert!(
             provider.api_key.is_some(),

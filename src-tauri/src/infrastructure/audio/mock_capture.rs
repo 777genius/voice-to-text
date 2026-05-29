@@ -149,8 +149,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_capture_default() {
-        let _ = MockAudioCapture::default();
-        assert!(true);
+        let capture = MockAudioCapture::default();
+        let config = capture.config();
+        let default_config = AudioConfig::default();
+        assert_eq!(config.sample_rate, default_config.sample_rate);
+        assert_eq!(config.channels, default_config.channels);
+        assert_eq!(config.buffer_size, default_config.buffer_size);
     }
 
     #[tokio::test]
@@ -207,7 +211,6 @@ mod tests {
     fn test_random_generator() {
         let val1: u16 = rand::random();
         let val2: u16 = rand::random();
-        // Просто проверяем что генератор работает
-        assert!(val1 != val2 || val1 == val2);
+        std::hint::black_box((val1, val2));
     }
 }

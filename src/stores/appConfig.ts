@@ -7,7 +7,11 @@ import {
   createStoreTauriTopicSync,
 } from '@/windowing/stateSync';
 import type { RevisionSyncHandle } from '@/windowing/stateSync';
-import type { AppConfigSnapshotData, TauriSnapshotEnvelope } from '@/windowing/stateSync';
+import type {
+  AppConfigSnapshotData,
+  RecordingMode,
+  TauriSnapshotEnvelope,
+} from '@/windowing/stateSync';
 
 export const useAppConfigStore = defineStore('appConfig', () => {
   const revision = ref('0');
@@ -23,6 +27,7 @@ export const useAppConfigStore = defineStore('appConfig', () => {
   const keepRecordingUntilManualStop = ref(false);
   const microphoneSensitivity = ref(100);
   const selectedAudioDevice = ref('');
+  const recordingMode = ref<RecordingMode>('dictation');
 
   let syncHandle: RevisionSyncHandle | null = null;
 
@@ -40,6 +45,7 @@ export const useAppConfigStore = defineStore('appConfig', () => {
       data.keep_recording_until_manual_stop ?? keepRecordingUntilManualStop.value;
     microphoneSensitivity.value = data.microphone_sensitivity ?? microphoneSensitivity.value;
     selectedAudioDevice.value = data.selected_audio_device ?? '';
+    recordingMode.value = data.recording_mode ?? recordingMode.value;
     isLoaded.value = true;
   }
 
@@ -97,6 +103,7 @@ export const useAppConfigStore = defineStore('appConfig', () => {
     keepRecordingUntilManualStop,
     microphoneSensitivity,
     selectedAudioDevice,
+    recordingMode,
 
     hasSelectedAudioDevice: computed(() => Boolean(selectedAudioDevice.value)),
 

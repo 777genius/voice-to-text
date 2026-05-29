@@ -4,6 +4,7 @@ import { mdiClose, mdiDownload, mdiMenu } from '@mdi/js';
 const { t } = useI18n();
 const menuOpen = ref(false);
 const { trackNavClick } = useAnalytics();
+const { isDark } = useBrowserTheme();
 
 const desktopNavItems = computed(() => [
   { id: 'features', label: t('nav.features') },
@@ -61,7 +62,12 @@ const mobileNavItems = computed(() => [
         <v-btn class="app-header__menu-btn" :icon="mdiMenu" variant="text" aria-label="Open menu" @click="menuOpen = true" />
         <Teleport to="body">
           <Transition name="mobile-menu-fade">
-            <div v-if="menuOpen" class="mobile-menu-overlay" @click.self="menuOpen = false">
+            <div
+              v-if="menuOpen"
+              class="mobile-menu-overlay"
+              :class="isDark ? 'mobile-menu-overlay--dark' : 'mobile-menu-overlay--light'"
+              @click.self="menuOpen = false"
+            >
               <div class="mobile-menu">
                 <div class="mobile-menu__header">
                   <div class="mobile-menu__brand">
@@ -474,11 +480,20 @@ const mobileNavItems = computed(() => [
   display: flex;
   justify-content: center;
   padding: 12px;
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.mobile-menu-overlay--dark {
   background:
     radial-gradient(circle at 50% 0%, rgba(74, 158, 255, 0.18), transparent 36%),
     rgba(2, 6, 23, 0.78);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
+}
+
+.mobile-menu-overlay--light {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(74, 158, 255, 0.16), transparent 38%),
+    rgba(248, 250, 252, 0.74);
 }
 
 .mobile-menu {
@@ -487,6 +502,7 @@ const mobileNavItems = computed(() => [
   align-self: flex-start;
   padding: 14px 14px 20px;
   overflow-y: auto;
+  color: rgba(241, 245, 249, 0.94);
   border: 1px solid rgba(165, 180, 252, 0.24);
   border-radius: 24px;
   background:
@@ -495,6 +511,17 @@ const mobileNavItems = computed(() => [
   box-shadow:
     0 28px 80px rgba(0, 0, 0, 0.46),
     0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+}
+
+.mobile-menu-overlay--light .mobile-menu {
+  color: rgba(15, 23, 42, 0.9);
+  border-color: rgba(79, 70, 229, 0.18);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.94), rgba(240, 247, 255, 0.88)),
+    radial-gradient(circle at 20% 0%, rgba(74, 158, 255, 0.16), transparent 35%);
+  box-shadow:
+    0 28px 80px rgba(15, 23, 42, 0.16),
+    0 0 0 1px rgba(255, 255, 255, 0.72) inset;
 }
 
 .mobile-menu__header {
@@ -508,6 +535,7 @@ const mobileNavItems = computed(() => [
   gap: 10px;
   font-size: 1.08rem;
   font-weight: 800;
+  color: inherit;
 }
 
 .mobile-menu__brand :deep(.app-logo__icon) {
@@ -522,6 +550,10 @@ const mobileNavItems = computed(() => [
   border-top: 1px solid rgba(255, 255, 255, 0.1);
 }
 
+.mobile-menu-overlay--light .mobile-menu__divider {
+  border-top-color: rgba(15, 23, 42, 0.12);
+}
+
 .mobile-menu__list {
   display: flex;
   flex-direction: column;
@@ -534,7 +566,7 @@ const mobileNavItems = computed(() => [
   padding: 14px 16px;
   font-size: 1.02rem;
   font-weight: 650;
-  color: rgba(241, 245, 249, 0.92);
+  color: inherit;
   text-decoration: none;
   border-radius: 16px;
   transition: background-color 0.15s;
@@ -568,6 +600,13 @@ const mobileNavItems = computed(() => [
   color: rgba(241, 245, 249, 0.94);
 }
 
+.mobile-menu-overlay--light .mobile-menu__actions :deep(.v-field) {
+  background: rgba(255, 255, 255, 0.72);
+  border-color: rgba(15, 23, 42, 0.12);
+  color: rgba(15, 23, 42, 0.9);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
+}
+
 .mobile-menu__actions :deep(.v-field__input) {
   min-height: 52px;
   display: flex;
@@ -585,6 +624,10 @@ const mobileNavItems = computed(() => [
   color: rgba(203, 213, 225, 0.78);
 }
 
+.mobile-menu-overlay--light .mobile-menu__actions :deep(.v-field__append-inner) {
+  color: rgba(15, 23, 42, 0.58);
+}
+
 .mobile-menu__actions :deep(.v-autocomplete__selection) {
   margin: 0;
 }
@@ -600,7 +643,7 @@ const mobileNavItems = computed(() => [
 }
 
 .mobile-menu__actions :deep(.language-switcher__code) {
-  color: rgba(241, 245, 249, 0.94);
+  color: currentColor;
   font-size: 1rem;
   font-weight: 800;
 }
@@ -612,6 +655,14 @@ const mobileNavItems = computed(() => [
   background: rgba(255, 255, 255, 0.06) !important;
   border: 1px solid rgba(255, 255, 255, 0.12) !important;
   color: rgba(241, 245, 249, 0.94) !important;
+}
+
+.mobile-menu-overlay--light .mobile-menu__theme :deep(.v-btn),
+.mobile-menu-overlay--light .mobile-menu__close {
+  background: rgba(255, 255, 255, 0.72) !important;
+  border-color: rgba(15, 23, 42, 0.12) !important;
+  color: rgba(15, 23, 42, 0.82) !important;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
 }
 
 .mobile-menu-fade-enter-active,

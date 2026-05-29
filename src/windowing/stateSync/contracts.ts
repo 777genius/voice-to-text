@@ -10,6 +10,9 @@ import type { BackendStreamingProviderType, SttProviderType } from '@/types';
 import type { UiLocale, UiTheme } from '@/i18n.locales';
 import type { SnapshotEnvelope } from '@statesync/core';
 
+/** Режим записи. Соответствует Rust `RecordingMode`. */
+export type RecordingMode = 'dictation' | 'live_translation';
+
 /**
  * Публичный снапшот app-config, который можно безопасно раздавать во все окна.
  * Соответствует Rust `AppConfigSnapshotData`.
@@ -24,6 +27,7 @@ export type AppConfigSnapshotData = {
   show_mini_recording_window: boolean;
   keep_recording_until_manual_stop: boolean;
   selected_audio_device: string | null;
+  recording_mode: RecordingMode;
 };
 
 /**

@@ -23,6 +23,7 @@ import StreamingProviderSection from './sections/StreamingProviderSection.vue';
 import KeytermsSection from './sections/KeytermsSection.vue';
 import ThemeSection from './sections/ThemeSection.vue';
 import HotkeySection from './sections/HotkeySection.vue';
+import RecordingModeSection from './sections/RecordingModeSection.vue';
 import AutoActionsSection from './sections/AutoActionsSection.vue';
 import AudioDeviceSection from './sections/AudioDeviceSection.vue';
 import MicTestSection from './sections/MicTestSection.vue';
@@ -110,6 +111,7 @@ function snapshotSettingsState(): SettingsState {
     showMiniRecordingWindow: settingsStore.showMiniRecordingWindow,
     keepRecordingUntilManualStop: settingsStore.keepRecordingUntilManualStop,
     streamingKeyterms: settingsStore.streamingKeyterms,
+    recordingMode: settingsStore.recordingMode,
   };
 }
 
@@ -260,6 +262,9 @@ watch(
 
           <!-- Горячая клавиша -->
           <HotkeySection />
+
+          <!-- Режим записи (dictation vs live_translation) -->
+          <RecordingModeSection />
 
           <!-- Автоматические действия -->
           <AutoActionsSection />

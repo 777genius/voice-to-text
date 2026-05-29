@@ -84,6 +84,12 @@ const messages = {
         hintLine2: 'above 100% = boost for quiet mics, below 100% = attenuation.',
         hintLine3: 'Recommended: 100% for normal mics, 150-200% for very quiet mics.',
       },
+      recordingMode: {
+        label: 'Recording mode',
+        dictation: 'Voice to text',
+        liveTranslation: 'Live translation',
+        hintBody: 'Voice to text uses the configured STT provider. Live translation streams to OpenAI realtime translate and writes English voice to BlackHole 2ch virtual microphone.',
+      },
       autoActions: {
         label: 'Automatic actions',
         copy: 'Automatically copy to clipboard',
@@ -448,6 +454,12 @@ const messages = {
         hintLine1: 'Регулирует громкость микрофона. 100% = без изменений (как записывает микрофон),',
         hintLine2: 'выше 100% = усиление для тихих микрофонов, ниже 100% = приглушение.',
         hintLine3: 'Рекомендуется: 100% для нормального микрофона, 150-200% для очень тихого.',
+      },
+      recordingMode: {
+        label: 'Режим записи',
+        dictation: 'Голос в текст',
+        liveTranslation: 'Live-перевод',
+        hintBody: 'Голос в текст использует выбранный STT-провайдер. Live-перевод стримит звук в OpenAI realtime translate и выводит англоязычный голос в виртуальный микрофон BlackHole 2ch.',
       },
       autoActions: {
         label: 'Автоматические действия',
@@ -814,6 +826,12 @@ const messages = {
         hintLine2: 'por encima de 100% = amplifica micrófonos silenciosos, por debajo = atenúa.',
         hintLine3: 'Recomendado: 100% para micrófonos normales, 150-200% para muy silenciosos.',
       },
+      recordingMode: {
+        label: 'Modo de grabación',
+        dictation: 'Voz a texto',
+        liveTranslation: 'Traducción en directo',
+        hintBody: 'Voz a texto usa el proveedor STT configurado. Traducción en directo transmite audio a OpenAI realtime translate y envía la voz traducida al micrófono virtual BlackHole 2ch.',
+      },
       autoActions: {
         label: 'Acciones automáticas',
         copy: 'Copiar automáticamente al portapapeles',
@@ -1178,6 +1196,12 @@ const messages = {
         hintLine1: 'Contrôle le volume du micro. 100% = inchangé,',
         hintLine2: 'au‑dessus de 100% = amplification, en dessous = atténuation.',
         hintLine3: 'Recommandé : 100% pour un micro normal, 150‑200% pour un micro très faible.',
+      },
+      recordingMode: {
+        label: 'Mode d’enregistrement',
+        dictation: 'Voix vers texte',
+        liveTranslation: 'Traduction en direct',
+        hintBody: 'Voix vers texte utilise le fournisseur STT configuré. Traduction en direct envoie l’audio à OpenAI realtime translate et la voix traduite vers le micro virtuel BlackHole 2ch.',
       },
       autoActions: {
         label: 'Actions automatiques',
@@ -1544,6 +1568,12 @@ const messages = {
         hintLine2: 'über 100% = Verstärkung, unter 100% = Dämpfung.',
         hintLine3: 'Empfohlen: 100% für normale Mikrofone, 150-200% für sehr leise.',
       },
+      recordingMode: {
+        label: 'Aufnahmemodus',
+        dictation: 'Sprache zu Text',
+        liveTranslation: 'Live-Übersetzung',
+        hintBody: 'Sprache zu Text nutzt den konfigurierten STT-Provider. Live-Übersetzung streamt Audio an OpenAI realtime translate und sendet die übersetzte Stimme an das virtuelle Mikrofon BlackHole 2ch.',
+      },
       autoActions: {
         label: 'Automatische Aktionen',
         copy: 'Automatisch in die Zwischenablage kopieren',
@@ -1908,6 +1938,12 @@ const messages = {
         hintLine1: 'Регулює гучність мікрофона. 100% = без змін,',
         hintLine2: 'вище 100% = підсилення для тихих мікрофонів, нижче 100% = приглушення.',
         hintLine3: 'Рекомендовано: 100% для нормального мікрофона, 150-200% для дуже тихого.',
+      },
+      recordingMode: {
+        label: 'Режим запису',
+        dictation: 'Голос у текст',
+        liveTranslation: 'Жива трансляція',
+        hintBody: 'Голос у текст використовує налаштований STT-провайдер. Жива трансляція стрімить аудіо в OpenAI realtime translate і виводить перекладений голос у віртуальний мікрофон BlackHole 2ch.',
       },
       autoActions: {
         label: 'Автоматичні дії',

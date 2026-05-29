@@ -35,10 +35,27 @@ export interface FinalTranscriptionPayload {
   duration?: number;
 }
 
+export type RecordingMode = 'dictation' | 'live_translation';
+
 export interface RecordingStatusPayload {
   session_id: number;
   status: RecordingStatus;
   stopped_via_hotkey?: boolean;
+  /** Активный режим сессии. Если undefined — считаем 'dictation' (back-compat). */
+  mode?: RecordingMode;
+}
+
+export interface TranslationDeltaPayload {
+  session_id: number;
+  text: string;
+  timestamp: number;
+}
+
+export interface TranslationErrorPayload {
+  session_id: number;
+  error: string;
+  /** 'configuration' | 'authentication' | 'rate_limited' | 'connection' | 'timeout' | 'processing' */
+  error_type: string;
 }
 
 export interface ErrorPayload {
@@ -55,6 +72,7 @@ export interface TranscriptionErrorPayload {
     | 'processing'
     | 'timeout'
     | 'authentication'
+    | 'rate_limited'
     | 'limit_exceeded'
     | 'provider_quota_exceeded';
   error_details?: TranscriptionErrorDetailsPayload;
@@ -100,6 +118,8 @@ export const EVENT_TRANSCRIPTION_FINAL = 'transcription:final';
 export const EVENT_RECORDING_STATUS = 'recording:status';
 export const EVENT_TRANSCRIPTION_ERROR = 'transcription:error';
 export const EVENT_CONNECTION_QUALITY = 'connection:quality';
+export const EVENT_TRANSLATION_DELTA = 'translation:delta';
+export const EVENT_TRANSLATION_ERROR = 'translation:error';
 export const EVENT_ERROR = 'app:error';
 export const EVENT_RECORDING_WINDOW_SHOWN = 'recording:window-shown';
 export const EVENT_RECORDING_WINDOW_WILL_HIDE_FOR_HOTKEY_STOP = 'recording:window-will-hide-for-hotkey-stop';

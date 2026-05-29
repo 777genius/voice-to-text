@@ -3,8 +3,11 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::RwLock;
 
+use crate::application::services::LiveTranslationService;
 use crate::application::TranscriptionService;
-use crate::domain::{AppConfig, AudioCapture, AudioError, Transcription, UiPreferences};
+use crate::domain::{
+    AppConfig, AudioCapture, AudioError, RecordingMode, Transcription, UiPreferences,
+};
 use crate::infrastructure::{
     audio::{SystemAudioCapture, VadCaptureWrapper, VadProcessor},
     auto_paste::AutoPasteTarget,
@@ -189,6 +192,15 @@ pub struct AppState {
     /// Используется для маркировки статусов Idle/Error, которые эмитятся "в обход" start_recording callbacks.
     pub active_transcription_session_id: AtomicU64,
 
+    /// Какой режим (dictation / live_translation) сейчас владеет активной сессией.
+    /// None = ничего не запущено. Hotkey stop читает active_recording_mode (не AppConfig),
+    /// чтобы остановить именно то, что играет — даже если пользователь переключил Settings.
+    pub active_recording_mode: Arc<RwLock<Option<RecordingMode>>>,
+
+    /// Live translation service. Создаётся лениво при первом start_translation,
+    /// потому что connect к OpenAI стоит денег и не должен происходить до явного намерения.
+    pub live_translation_service: Arc<RwLock<Option<Arc<LiveTranslationService>>>>,
+
     /// До какого момента игнорировать WindowEvent::Moved для main окна.
     /// Нужно, чтобы программные resize/show/fit не перезаписывали пользовательскую mini-позицию.
     pub recording_window_position_save_suppressed_until_ms: AtomicI64,
@@ -256,6 +268,8 @@ impl AppState {
                     active_audio_capture_device: Arc::new(RwLock::new(None)),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
+                    active_recording_mode: Arc::new(RwLock::new(None)),
+                    live_translation_service: Arc::new(RwLock::new(None)),
                     recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),
                 };
             }
@@ -321,6 +335,8 @@ impl AppState {
                     active_audio_capture_device: Arc::new(RwLock::new(Some(None))),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: AtomicU64::new(0),
+                    active_recording_mode: Arc::new(RwLock::new(None)),
+                    live_translation_service: Arc::new(RwLock::new(None)),
                     recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),
                 };
             }
@@ -400,6 +416,8 @@ impl AppState {
             active_audio_capture_device: Arc::new(RwLock::new(Some(None))),
             transcription_session_seq: AtomicU64::new(0),
             active_transcription_session_id: AtomicU64::new(0),
+            active_recording_mode: Arc::new(RwLock::new(None)),
+            live_translation_service: Arc::new(RwLock::new(None)),
             recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),
         }
     }
@@ -906,6 +924,7 @@ impl AppState {
                                 session_id,
                                 status: crate::domain::RecordingStatus::Idle,
                                 stopped_via_hotkey: false,
+                                mode: None,
                             },
                         );
 
@@ -933,6 +952,7 @@ impl AppState {
                                     session_id,
                                     status: crate::domain::RecordingStatus::Idle,
                                     stopped_via_hotkey: false,
+                                    mode: None,
                                 },
                             );
                         }

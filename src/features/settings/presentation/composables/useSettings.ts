@@ -19,7 +19,7 @@ import { useSettingsStore } from '../../store/settingsStore';
 import { tauriSettingsService } from '../../infrastructure/adapters/TauriSettingsService';
 import { useAppConfigStore } from '@/stores/appConfig';
 import { useSttConfigStore } from '@/stores/sttConfig';
-import type { AppConfigData, SttConfigData } from '../../domain/types';
+import type { AppConfigData, RecordingMode, SttConfigData } from '../../domain/types';
 import { withTimeout } from '@/utils/async';
 
 // Кэшируем определение macOS - это не меняется во время работы
@@ -114,6 +114,11 @@ export function useSettings() {
   const keepRecordingUntilManualStop = computed({
     get: () => store.keepRecordingUntilManualStop,
     set: (value: boolean) => store.setKeepRecordingUntilManualStop(value),
+  });
+
+  const recordingMode = computed({
+    get: () => store.recordingMode,
+    set: (value: RecordingMode) => store.setRecordingMode(value),
   });
 
   const streamingKeyterms = computed({
@@ -245,6 +250,7 @@ export function useSettings() {
         store.setShowMiniRecordingWindow(appConfigStoreInstance.showMiniRecordingWindow);
         store.setKeepRecordingUntilManualStop(appConfigStoreInstance.keepRecordingUntilManualStop);
         store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
+        store.setRecordingMode(appConfigStoreInstance.recordingMode);
       } else {
         try {
           const appConfig = await tauriSettingsService.getAppConfig();
@@ -257,6 +263,7 @@ export function useSettings() {
           store.setShowMiniRecordingWindow(appConfig.show_mini_recording_window ?? true);
           store.setKeepRecordingUntilManualStop(appConfig.keep_recording_until_manual_stop ?? false);
           store.setSelectedAudioDevice(appConfig.selected_audio_device ?? '');
+          store.setRecordingMode(appConfig.recording_mode ?? 'dictation');
         } catch (err) {
           console.log('App config не загружен, используем значения по умолчанию');
         }
@@ -475,6 +482,14 @@ export function useSettings() {
         appUpdatePayload.selected_audio_device = selectedDevice;
       }
 
+      const latestMode = latestApp.recording_mode ?? 'dictation';
+      const hasRecordingModeChange = persistedState
+        ? persistedState.recordingMode !== store.recordingMode
+        : latestMode !== store.recordingMode;
+      if (hasRecordingModeChange && latestMode !== store.recordingMode) {
+        appUpdatePayload.recording_mode = store.recordingMode;
+      }
+
       if (Object.keys(appUpdatePayload).length > 0) {
         await withTimeout(
           tauriSettingsService.updateAppConfig(appUpdatePayload),
@@ -626,6 +641,7 @@ export function useSettings() {
     hideRecordingWindowOnHotkey,
     showMiniRecordingWindow,
     keepRecordingUntilManualStop,
+    recordingMode,
     streamingKeyterms,
 
     // Store state (через computed для корректной реактивности)

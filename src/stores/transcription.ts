@@ -19,12 +19,17 @@ import {
   RecordingStatusPayload,
   TranscriptionErrorPayload,
   ConnectionQualityPayload,
+  TranslationDeltaPayload,
+  TranslationErrorPayload,
   EVENT_TRANSCRIPTION_PARTIAL,
   EVENT_TRANSCRIPTION_FINAL,
   EVENT_RECORDING_STATUS,
   EVENT_TRANSCRIPTION_ERROR,
   EVENT_CONNECTION_QUALITY,
+  EVENT_TRANSLATION_DELTA,
+  EVENT_TRANSLATION_ERROR,
 } from '../types';
+import type { RecordingMode } from '../types';
 
 export const useTranscriptionStore = defineStore('transcription', () => {
   // State
@@ -52,6 +57,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const lastSpeechFinalRangeKey = ref<string>(''); // последний speech_final range (для дедупликации)
   const connectionQuality = ref<ConnectionQuality>(ConnectionQuality.Good);
 
+  // Live translation: режим активной сессии + накопленный перевод.
+  // Обновляется из payload.mode у recording:status; live_translation сессии не идут через STT auto-paste.
+  const activeRecordingMode = ref<RecordingMode>('dictation');
+  const translationText = ref<string>('');
+
   // Retry логика подключения (когда запись ещё не стартанула и мы пытаемся подключиться к STT)
   const isConnecting = ref<boolean>(false);
   const connectAttempt = ref<number>(0);
@@ -72,8 +82,14 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   // Config flags - appConfig store is the single source of truth for auto actions.
   const appConfig = useAppConfigStore();
-  const autoCopyEnabled = computed(() => appConfig.autoCopyToClipboard);
-  const autoPasteEnabled = computed(() => appConfig.autoPasteText);
+  // В live_translation auto-copy/paste/history намеренно отключены — перевод не должен попадать
+  // в clipboard или активное окно. См. плана MVP, секция "Auto actions disabled".
+  const autoCopyEnabled = computed(
+    () => activeRecordingMode.value !== 'live_translation' && appConfig.autoCopyToClipboard
+  );
+  const autoPasteEnabled = computed(
+    () => activeRecordingMode.value !== 'live_translation' && appConfig.autoPasteText
+  );
 
   // Auth store — нужен, чтобы корректно сбрасывать ошибки записи после успешной авторизации,
   // если ошибка относилась к предыдущему пользователю/токену.
@@ -233,6 +249,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   let unlistenStatus: UnlistenFn | null = null;
   let unlistenError: UnlistenFn | null = null;
   let unlistenConnectionQuality: UnlistenFn | null = null;
+  let unlistenTranslationDelta: UnlistenFn | null = null;
+  let unlistenTranslationError: UnlistenFn | null = null;
 
   function bumpLastSeenSessionId(next: number): void {
     if (next > lastSeenSessionId.value) {
@@ -272,6 +290,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   function ensureActiveSessionForIncomingEvent(payloadSessionId: number, source: string): boolean {
     bumpLastSeenSessionId(payloadSessionId);
+    const isTranslationEvent = source.startsWith('translation:');
 
     // Никогда не принимаем события от "закрытых" сессий.
     if (payloadSessionId <= closedSessionIdFloor.value) {
@@ -323,6 +342,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       if (status.value === RecordingStatus.Starting) {
         status.value = RecordingStatus.Recording;
       }
+    }
+
+    if (isTranslationEvent) {
+      activeRecordingMode.value = 'live_translation';
     }
 
     return payloadSessionId === sessionId.value;
@@ -478,6 +501,19 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   const displayText = computed(() => {
     const t = i18n.global.t;
+
+    // В режиме live_translation показываем накопленный перевод вместо STT-буферов.
+    if (activeRecordingMode.value === 'live_translation') {
+      if (translationText.value) {
+        return translationText.value;
+      }
+      if (status.value === RecordingStatus.Idle) {
+        return t('main.idlePrompt');
+      }
+      // Starting/Recording без текста — пусть placeholder отрабатывает как обычно (через isConnectingPlaceholder/isListeningPlaceholder).
+      return '';
+    }
+
     // Показываем: финальный текст + анимированный накопленный + анимированный промежуточный
     const final = visibleFinalText.value;
     const accumulated = visibleAccumulatedText.value;
@@ -719,6 +755,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     animatedPartialText.value = '';
     animatedAccumulatedText.value = '';
     clearTranscriptionAnimationTimers();
+    translationText.value = '';
   }
 
   function suppressPreviousTranscriptionDisplay(reason = 'window_hide'): void {
@@ -1138,6 +1175,21 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             sessionId.value = payloadSessionId;
           }
 
+          const modeBeforeStatus = activeRecordingMode.value;
+
+          // Активный режим — обновляем при start. Если backend не прислал mode, считаем dictation.
+          if (isStartLike) {
+            activeRecordingMode.value = event.payload.mode ?? 'dictation';
+          }
+          // На Idle после live_translation оставляем mode, чтобы translated text не исчезал мгновенно
+          // и auto-copy/paste оставались отключены до cleanup/следующего старта.
+          const idleFromLiveTranslation =
+            nextStatus === RecordingStatus.Idle &&
+            (modeBeforeStatus === 'live_translation' || event.payload.mode === 'live_translation');
+          if (nextStatus === RecordingStatus.Idle && !idleFromLiveTranslation) {
+            activeRecordingMode.value = 'dictation';
+          }
+
           // Если статус стал Starting или Recording - очищаем весь текст
           // Это работает и для кнопки, и для hotkey (Ctrl+X)
           const isNewSession = isStartLike && payloadSessionId !== prevSessionId;
@@ -1481,6 +1533,33 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         }
       );
 
+      // Live translation events. Идут параллельно STT — не пересекаются с auto-paste/copy/history.
+      unlistenTranslationDelta = await listen<TranslationDeltaPayload>(
+        EVENT_TRANSLATION_DELTA,
+        (event) => {
+          if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'translation:delta')) {
+            return;
+          }
+          if (event.payload.text) {
+            translationText.value += event.payload.text;
+          }
+        }
+      );
+
+      unlistenTranslationError = await listen<TranslationErrorPayload>(
+        EVENT_TRANSLATION_ERROR,
+        (event) => {
+          if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'translation:error')) {
+            return;
+          }
+          // Translation errors не должны триггерить STT auth/logout flow.
+          // Просто показываем сообщение в UI и не лезем в refreshAuthForStt.
+          error.value = event.payload.error;
+          errorType.value = (event.payload.error_type as TranscriptionErrorPayload['error_type']) ?? null;
+          console.error('[translation:error]', event.payload);
+        }
+      );
+
       console.log('Event listeners initialized successfully');
     } catch (err) {
       console.error('Failed to initialize event listeners:', err);
@@ -1539,6 +1618,14 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       return 'authentication';
     }
     if (lower.includes('timeout') || lower.includes('timed out')) return 'timeout';
+    if (
+      lower.includes('rate_limited') ||
+      lower.includes('rate limited') ||
+      lower.includes('too many requests') ||
+      lower.includes('429')
+    ) {
+      return 'rate_limited';
+    }
     if (lower.includes('limit_exceeded') || lower.includes('limit exceeded') || lower.includes('usage limit')) return 'limit_exceeded';
     if (lower.includes('provider_quota_exceeded') || lower.includes('quota_exceeded')) return 'provider_quota_exceeded';
     if (lower.includes('connection error') || lower.includes('websocket')) return 'connection';
@@ -1572,6 +1659,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     if (value === 'configuration') return 'configuration';
     if (value === 'processing') return 'processing';
     if (value === 'authentication') return 'authentication';
+    if (value === 'rate_limited') return 'rate_limited';
     if (value === 'limit_exceeded') return 'limit_exceeded';
     if (value === 'provider_quota_exceeded') return 'provider_quota_exceeded';
     return null;
@@ -1714,6 +1802,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         // По идее мы сюда не попадаем (auth ошибка приводит к auto-logout),
         // но оставляем адекватный текст на всякий случай.
         return i18n.global.t('errors.authentication');
+      case 'rate_limited':
+        return i18n.global.t('errors.rateLimited');
       case 'configuration':
         if (
           raw.toLowerCase().includes('device not found') ||
@@ -1923,9 +2013,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       return;
     }
 
+    const requestedRecordingMode = appConfig.recordingMode ?? 'dictation';
+    const isLiveTranslationAttempt = requestedRecordingMode === 'live_translation';
+
     isConnecting.value = true;
     connectAttempt.value = 0;
-    connectMaxAttempts.value = Math.max(1, maxAttempts);
+    connectMaxAttempts.value = Math.max(1, isLiveTranslationAttempt ? 1 : maxAttempts);
     let authRefreshUsed = false;
 
     try {
@@ -1938,7 +2031,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         try {
           // Перед первой попыткой гарантируем, что access token свежий.
           // Иначе backend WS легко вернёт 401 (access TTL ~15 минут), и UI начнёт "разлогинивать" пользователя.
-          if (attempt === 1) {
+          // Для live_translation это OpenAI key, не STT backend auth, поэтому refresh/logout тут запрещён.
+          if (attempt === 1 && !isLiveTranslationAttempt) {
             const tokenRepo = getTokenRepository();
             const session = await tokenRepo.get();
             if (session && isAccessTokenExpired(session)) {
@@ -1986,6 +2080,22 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             serverCode === 'LIMIT_EXCEEDED' ||
             serverCode === 'LICENSE_INACTIVE' ||
             isLicenseInactiveFromRaw(raw);
+
+          if (isLiveTranslationAttempt) {
+            errorType.value = detected;
+            error.value = mapErrorMessage(detected, raw, details);
+            isDeviceNotFoundError.value =
+              detected === 'configuration' && isDeviceNotFoundInRaw(raw);
+            status.value = RecordingStatus.Error;
+            clientLog('recording_connect_attempt_failed', {
+              attempt,
+              maxAttempts: connectMaxAttempts.value,
+              detected,
+              liveTranslation: true,
+              raw,
+            }, 'error');
+            return;
+          }
 
           // Auth ошибка: обычно это протухший access token.
           // Пробуем один раз обновить сессию и продолжить retry-цикл.
@@ -2107,6 +2217,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     clearHotkeyStopFinalizeTimer();
 
     suppressPreviousTranscriptionDisplay('rust_hotkey_start');
+    activeRecordingMode.value = appConfig.recordingMode ?? 'dictation';
     awaitingSessionStart.value = true;
     sessionId.value = null;
     status.value = warmStartExpected ? RecordingStatus.Recording : RecordingStatus.Starting;
@@ -2206,6 +2317,14 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       unlistenConnectionQuality();
       unlistenConnectionQuality = null;
     }
+    if (unlistenTranslationDelta) {
+      unlistenTranslationDelta();
+      unlistenTranslationDelta = null;
+    }
+    if (unlistenTranslationError) {
+      unlistenTranslationError();
+      unlistenTranslationError = null;
+    }
 
     clearHotkeyStopFinalizeTimer();
 
@@ -2231,6 +2350,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     error,
     errorType,
     connectionQuality,
+    activeRecordingMode,
+    translationText,
 
     // Computed
     isStarting,

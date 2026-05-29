@@ -31,6 +31,9 @@ export interface WhisperModelOption {
 // Тема приложения
 export type AppTheme = 'dark' | 'light';
 
+// Режим записи: STT в текст vs realtime translation в virtual mic
+export type RecordingMode = 'dictation' | 'live_translation';
+
 // Конфигурация STT (соответствует бэкенду)
 export interface SttConfigData {
   provider: SttProviderType;
@@ -53,6 +56,7 @@ export interface AppConfigData {
   show_mini_recording_window: boolean;
   keep_recording_until_manual_stop: boolean;
   selected_audio_device: string | null;
+  recording_mode: RecordingMode;
 }
 
 // Полная конфигурация настроек для UI
@@ -90,6 +94,9 @@ export interface SettingsState {
 
   // Streaming keyterms
   streamingKeyterms: string;
+
+  // Режим записи (dictation vs live_translation)
+  recordingMode: RecordingMode;
 }
 
 // Статус сохранения

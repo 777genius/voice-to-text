@@ -32,6 +32,7 @@ const appConfigMock = vi.hoisted(() => ({
   hideRecordingWindowOnHotkey: false,
   showMiniRecordingWindow: false,
   keepRecordingUntilManualStop: false,
+  recordingMode: 'dictation' as 'dictation' | 'live_translation',
 }));
 
 function deferred<T>() {
@@ -98,6 +99,7 @@ describe('transcription connect-retry reliability', () => {
     appConfigMock.hideRecordingWindowOnHotkey = false;
     appConfigMock.showMiniRecordingWindow = false;
     appConfigMock.keepRecordingUntilManualStop = false;
+    appConfigMock.recordingMode = 'dictation';
 
     // initialize() не вызываем, но пусть listen будет безопасным.
     listenMock.mockResolvedValue(() => {});
@@ -142,11 +144,35 @@ describe('transcription connect-retry reliability', () => {
     expect(calledShowAuth).toBe(true);
   });
 
+  it('не запускает STT auth/logout flow для OpenAI auth error в live translation', async () => {
+    appConfigMock.recordingMode = 'live_translation';
+    let startRecordingCalls = 0;
+
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'start_recording') {
+        startRecordingCalls++;
+        return Promise.reject('Authentication: HTTP 401 during WS handshake');
+      }
+      return Promise.resolve(null);
+    });
+
+    const store = useTranscriptionStore();
+
+    await store.startRecording();
+
+    expect(startRecordingCalls).toBe(1);
+    expect(authContainerMock.refreshTokensUseCase.execute).not.toHaveBeenCalled();
+    expect(authStoreMock.reset).not.toHaveBeenCalled();
+    expect(store.status).toBe('Error');
+    expect(store.errorType).toBe('authentication');
+  });
+
   it('не показывает "Подключение..." для ожидаемого warm-start после hotkey', () => {
     const store = useTranscriptionStore();
     store.finalText = 'старый текст';
     store.accumulatedText = 'старый хвост';
     store.partialText = 'старый partial';
+    appConfigMock.recordingMode = 'live_translation';
 
     store.prepareForRustHotkeyStart(true);
 
@@ -158,6 +184,35 @@ describe('transcription connect-retry reliability', () => {
     expect(store.hasVisibleTranscriptionText).toBe(false);
     expect(store.visibleFinalText).toBe('');
     expect(store.finalText).toBe('старый текст');
+    expect(store.activeRecordingMode).toBe('live_translation');
+  });
+
+  it('принимает translation delta как live mode fallback если status event потерялся', async () => {
+    const handlers = new Map<string, any>();
+    appConfigMock.recordingMode = 'live_translation';
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+    store.prepareForRustHotkeyStart(true);
+
+    await handlers.get('translation:delta')({
+      payload: { session_id: 71, text: 'Hello', is_final: false },
+    });
+    await handlers.get('translation:delta')({
+      payload: { session_id: 71, text: ' world', is_final: false },
+    });
+
+    expect(store.sessionId).toBe(71);
+    expect(store.status).toBe('Recording');
+    expect(store.activeRecordingMode).toBe('live_translation');
+    expect(store.translationText).toBe('Hello world');
+    expect(store.displayText).toBe('Hello world');
   });
 
   it('очищает скрытый старый текст, когда приходит новая recording session', async () => {

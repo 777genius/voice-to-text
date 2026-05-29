@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::domain::{RecordingStatus, Transcription};
+use crate::domain::{RecordingMode, RecordingStatus, Transcription};
 use crate::domain::{SttConnectionCategory, SttConnectionDetails};
 
 /// Event names for Tauri event system
@@ -13,6 +13,10 @@ pub const EVENT_MICROPHONE_TEST_LEVEL: &str = "microphone_test:level";
 
 pub const EVENT_TRANSCRIPTION_ERROR: &str = "transcription:error";
 pub const EVENT_CONNECTION_QUALITY: &str = "connection:quality";
+
+// Live translation (OpenAI realtime translate) events.
+pub const EVENT_TRANSLATION_DELTA: &str = "translation:delta";
+pub const EVENT_TRANSLATION_ERROR: &str = "translation:error";
 
 // UI lifecycle events
 // Важно: это не "focus", потому что main окно на macOS может быть nonactivating NSPanel и не получать фокус.
@@ -99,6 +103,10 @@ pub struct RecordingStatusPayload {
     pub status: RecordingStatus,
     #[serde(default)]
     pub stopped_via_hotkey: bool,
+    /// Какой режим владеет сессией. Optional чтобы старый TS код (без знания о mode)
+    /// мог продолжать работать — если поля нет, фронт считает `dictation`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<RecordingMode>,
 }
 
 /// Payload for audio level event
@@ -180,6 +188,22 @@ fn stt_category_to_string(cat: SttConnectionCategory) -> String {
         SttConnectionCategory::Unknown => "unknown",
     }
     .to_string()
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TranslationDeltaPayload {
+    pub session_id: u64,
+    pub text: String,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TranslationErrorPayload {
+    pub session_id: u64,
+    pub error: String,
+    /// Один из: "configuration" | "authentication" | "rate_limited" | "connection" | "timeout" | "processing".
+    /// Отдельно от `transcription:error` чтобы UI не путал OpenAI-ошибки с STT auth retry/logout.
+    pub error_type: String,
 }
 /// Connection quality states
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

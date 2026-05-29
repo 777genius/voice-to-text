@@ -15,7 +15,7 @@ import {
   invokeUpdateSttConfig,
 } from '@/windowing/stateSync';
 import { normalizeUiLocale, normalizeUiTheme } from '@/i18n.locales';
-import type { AppTheme, SaveStatus, SettingsState } from '../domain/types';
+import type { AppTheme, RecordingMode, SaveStatus, SettingsState } from '../domain/types';
 
 export const useSettingsStore = defineStore('settings', () => {
   // Состояние настроек
@@ -42,6 +42,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const showMiniRecordingWindow = ref(true);
   const keepRecordingUntilManualStop = ref(false);
   const streamingKeyterms = ref('');
+  const recordingMode = ref<RecordingMode>('dictation');
   const persistedState = ref<SettingsState | null>(null);
 
   // Debounce для автосохранения STT языка
@@ -96,6 +97,7 @@ export const useSettingsStore = defineStore('settings', () => {
     showMiniRecordingWindow: showMiniRecordingWindow.value,
     keepRecordingUntilManualStop: keepRecordingUntilManualStop.value,
     streamingKeyterms: streamingKeyterms.value,
+    recordingMode: recordingMode.value,
   }));
 
   // Действия
@@ -279,6 +281,10 @@ export const useSettingsStore = defineStore('settings', () => {
     streamingKeyterms.value = nextRaw;
   }
 
+  function setRecordingMode(value: RecordingMode) {
+    recordingMode.value = value === 'live_translation' ? 'live_translation' : 'dictation';
+  }
+
   function setAvailableAudioDevices(devices: string[]) {
     availableAudioDevices.value = devices;
   }
@@ -342,6 +348,7 @@ export const useSettingsStore = defineStore('settings', () => {
       keepRecordingUntilManualStop.value = state.keepRecordingUntilManualStop;
     if (state.streamingKeyterms !== undefined)
       setStreamingKeyterms(state.streamingKeyterms, { persist: false });
+    if (state.recordingMode !== undefined) setRecordingMode(state.recordingMode);
   }
 
   function capturePersistedState(state?: SettingsState): void {
@@ -377,6 +384,7 @@ export const useSettingsStore = defineStore('settings', () => {
     showMiniRecordingWindow,
     keepRecordingUntilManualStop,
     streamingKeyterms,
+    recordingMode,
     persistedState,
     availableAudioDevices,
     hasAccessibilityPermission,
@@ -411,6 +419,7 @@ export const useSettingsStore = defineStore('settings', () => {
     setShowMiniRecordingWindow,
     setKeepRecordingUntilManualStop,
     setStreamingKeyterms,
+    setRecordingMode,
     setAvailableAudioDevices,
     setAccessibilityPermission,
     setLoading,

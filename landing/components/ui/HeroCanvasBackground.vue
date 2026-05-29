@@ -2,6 +2,7 @@
 import type { NeatConfig, NeatController } from '@firecms/neat';
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
+const { isDark } = useBrowserTheme();
 const isLive = ref(false);
 
 let gradient: NeatController | null = null;
@@ -172,7 +173,14 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="hero-canvas-background" :class="{ 'hero-canvas-background--live': isLive }" aria-hidden="true">
+  <div
+    class="hero-canvas-background"
+    :class="{
+      'hero-canvas-background--live': isLive,
+      'hero-canvas-background--light': !isDark,
+    }"
+    aria-hidden="true"
+  >
     <canvas ref="canvasRef" class="hero-canvas-background__canvas" />
   </div>
 </template>
@@ -226,6 +234,36 @@ onBeforeUnmount(() => {
 
 .hero-canvas-background--live .hero-canvas-background__canvas {
   opacity: 0.36;
+}
+
+.v-theme--light .hero-canvas-background,
+.hero-canvas-background--light {
+  background:
+    radial-gradient(circle at 74% 30%, rgba(74, 158, 255, 0.24), transparent 36%),
+    radial-gradient(circle at 82% 72%, rgba(34, 197, 94, 0.14), transparent 34%),
+    radial-gradient(circle at 58% 18%, rgba(99, 102, 241, 0.18), transparent 30%),
+    linear-gradient(180deg, rgba(248, 251, 255, 0.8), rgba(255, 255, 255, 0.98));
+}
+
+.v-theme--light .hero-canvas-background::before,
+.hero-canvas-background--light::before {
+  background:
+    radial-gradient(circle at 24% 38%, rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.28) 36%, transparent 64%),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.44) 0%, rgba(255, 255, 255, 0.16) 44%, rgba(255, 255, 255, 0.04) 66%, rgba(255, 255, 255, 0.32) 100%);
+}
+
+.v-theme--light .hero-canvas-background::after,
+.hero-canvas-background--light::after {
+  background:
+    linear-gradient(180deg, rgba(248, 251, 255, 0.72) 0%, rgba(248, 251, 255, 0.42) 20%, rgba(255, 255, 255, 0.12) 48%, rgba(255, 255, 255, 0.68) 100%),
+    radial-gradient(circle at 66% 45%, rgba(255, 255, 255, 0) 0 28%, rgba(255, 255, 255, 0.26) 70%, rgba(255, 255, 255, 0.46) 100%);
+}
+
+.v-theme--light .hero-canvas-background--live .hero-canvas-background__canvas,
+.hero-canvas-background--light.hero-canvas-background--live .hero-canvas-background__canvas {
+  opacity: 0.34;
+  filter: blur(2.6px) saturate(1.55) brightness(1.35) contrast(0.9);
+  mix-blend-mode: multiply;
 }
 
 .hero-canvas-background :deep(a[data-n]) {

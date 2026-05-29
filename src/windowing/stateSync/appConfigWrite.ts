@@ -12,6 +12,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { CMD_UPDATE_APP_CONFIG } from './tauri';
+import type { RecordingMode } from './contracts';
 
 export type UpdateAppConfigInvokeArgs = Partial<{
   microphoneSensitivity: number;
@@ -23,6 +24,7 @@ export type UpdateAppConfigInvokeArgs = Partial<{
   showMiniRecordingWindow: boolean;
   keepRecordingUntilManualStop: boolean;
   selectedAudioDevice: string | null;
+  recordingMode: RecordingMode;
 }>;
 
 const ALLOWED_KEYS = new Set([
@@ -35,6 +37,7 @@ const ALLOWED_KEYS = new Set([
   'showMiniRecordingWindow',
   'keepRecordingUntilManualStop',
   'selectedAudioDevice',
+  'recordingMode',
 ]);
 
 function assertValidUpdateAppConfigArgs(args: Record<string, unknown>): void {
@@ -75,6 +78,13 @@ function assertValidUpdateAppConfigArgs(args: Record<string, unknown>): void {
       case 'selectedAudioDevice':
         if (!(typeof v === 'string' || v === null)) {
           throw new Error(`[update_app_config] "${k}" должен быть string|null, получили: ${String(v)}`);
+        }
+        break;
+      case 'recordingMode':
+        if (v !== 'dictation' && v !== 'live_translation') {
+          throw new Error(
+            `[update_app_config] "recordingMode" должен быть 'dictation' | 'live_translation', получили: ${String(v)}`,
+          );
         }
         break;
     }

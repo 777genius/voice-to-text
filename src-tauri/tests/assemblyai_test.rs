@@ -3,7 +3,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 use app_lib::domain::{AudioChunk, SttConfig, SttProvider, SttProviderType, Transcription};
-use app_lib::infrastructure::stt::AssemblyAIProvider;
+use app_lib::infrastructure::{embedded_keys, stt::AssemblyAIProvider};
 
 mod test_support;
 use test_support::{noop_connection_quality, stderr_error, SttConfigTestExt};
@@ -26,10 +26,18 @@ async fn test_assemblyai_initialization() {
     assert_eq!(provider.name(), "AssemblyAI Universal-Streaming (v3)");
     assert!(provider.is_online());
 
-    // Инициализация без пользовательского ключа должна использовать встроенный ключ
+    // Инициализация без пользовательского ключа должна использовать встроенный ключ,
+    // если он реально встроен в текущий build.
     let config = SttConfig::default();
     let result = provider.initialize(&config).await;
-    assert!(result.is_ok(), "Should succeed with embedded API key");
+    if embedded_keys::has_embedded_assemblyai_key() {
+        assert!(result.is_ok(), "Should succeed with embedded API key");
+    } else {
+        assert!(
+            result.is_err(),
+            "Should fail without user key when embedded key is not built in"
+        );
+    }
 
     // Инициализация с пользовательским API key также должна пройти успешно
     let mut config_with_key = SttConfig::default();
@@ -125,7 +133,7 @@ async fn test_assemblyai_state_machine() {
 
     // Инициализация
     let mut config = SttConfig::default();
-    config.deepgram_api_key = Some(get_api_key());
+    config.assemblyai_api_key = Some(get_api_key());
     provider.initialize(&config).await.unwrap();
 
     // Попытка отправить audio до start_stream должна вернуть ошибку
@@ -192,7 +200,7 @@ async fn test_assemblyai_graceful_shutdown() {
     let mut provider = AssemblyAIProvider::new();
 
     let mut config = SttConfig::default();
-    config.deepgram_api_key = Some(get_api_key());
+    config.assemblyai_api_key = Some(get_api_key());
     provider.initialize(&config).await.unwrap();
 
     // Проверяем что abort безопасен
@@ -211,7 +219,7 @@ async fn test_assemblyai_factory_creation() {
 
     let mut config = SttConfig::default();
     config.provider = SttProviderType::AssemblyAI;
-    config.deepgram_api_key = Some(get_api_key());
+    config.assemblyai_api_key = Some(get_api_key());
 
     let result = factory.create(&config);
     assert!(result.is_ok(), "Factory should create AssemblyAI provider");

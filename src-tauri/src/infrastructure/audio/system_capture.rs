@@ -25,9 +25,38 @@ use crate::domain::{
 /// - 16kHz sample rate
 /// - Mono channel
 /// - i16 PCM samples
-const TARGET_SAMPLE_RATE: u32 = 16000;
+const DEFAULT_DICTATION_SAMPLE_RATE: u32 = 16_000;
+const DEFAULT_TRANSLATION_SAMPLE_RATE: u32 = 24_000;
 const TARGET_CHANNELS: u16 = 1;
 const RESAMPLER_CHUNK_SIZE: usize = 1024; // Fixed chunk size for rubato
+
+/// Параметры целевого формата audio capture.
+/// Dictation pipeline ожидает 16 kHz mono (STT провайдеры),
+/// translation pipeline — 24 kHz mono (OpenAI realtime translate).
+#[derive(Debug, Clone, Copy)]
+pub struct SystemAudioCaptureOptions {
+    pub target_sample_rate: u32,
+    pub target_channels: u16,
+}
+
+impl Default for SystemAudioCaptureOptions {
+    fn default() -> Self {
+        Self {
+            target_sample_rate: DEFAULT_DICTATION_SAMPLE_RATE,
+            target_channels: TARGET_CHANNELS,
+        }
+    }
+}
+
+impl SystemAudioCaptureOptions {
+    /// 24 kHz mono — формат для OpenAI realtime translation input.
+    pub fn translation() -> Self {
+        Self {
+            target_sample_rate: DEFAULT_TRANSLATION_SAMPLE_RATE,
+            target_channels: TARGET_CHANNELS,
+        }
+    }
+}
 
 /// System audio capture with automatic resampling
 pub struct SystemAudioCapture {
@@ -37,6 +66,7 @@ pub struct SystemAudioCapture {
     native_config: SupportedStreamConfig,
     audio_config: AudioConfig,
     is_capturing: bool,
+    options: SystemAudioCaptureOptions,
 }
 
 impl SystemAudioCapture {
@@ -65,12 +95,21 @@ impl SystemAudioCapture {
 
     /// Create new system audio capture with default input device
     pub fn new() -> AudioResult<Self> {
-        Self::with_device(None)
+        Self::with_device_and_options(None, SystemAudioCaptureOptions::default())
     }
 
-    /// Create new system audio capture with specific input device
-    /// If device_name is None, uses default input device
+    /// Create new system audio capture with specific input device.
+    /// If device_name is None, uses default input device. Target формат = dictation default (16 kHz mono).
     pub fn with_device(device_name: Option<String>) -> AudioResult<Self> {
+        Self::with_device_and_options(device_name, SystemAudioCaptureOptions::default())
+    }
+
+    /// Полный конструктор: явное устройство + явные target опции (sample rate / channels).
+    /// Используем для translation pipeline (24 kHz mono).
+    pub fn with_device_and_options(
+        device_name: Option<String>,
+        options: SystemAudioCaptureOptions,
+    ) -> AudioResult<Self> {
         let host = cpal::default_host();
         let (device, native_config) =
             Self::select_device_and_config(&host, device_name.as_deref())?;
@@ -82,6 +121,7 @@ impl SystemAudioCapture {
             native_config,
             audio_config: AudioConfig::default(),
             is_capturing: false,
+            options,
         })
     }
 
@@ -205,7 +245,11 @@ impl SystemAudioCapture {
     }
 
     /// Create resampler for converting native sample rate to 16kHz
-    fn create_resampler(from_sample_rate: u32, channels: usize) -> AudioResult<SincFixedIn<f32>> {
+    fn create_resampler(
+        from_sample_rate: u32,
+        to_sample_rate: u32,
+        channels: usize,
+    ) -> AudioResult<SincFixedIn<f32>> {
         let params = SincInterpolationParameters {
             sinc_len: 256,
             f_cutoff: 0.95,
@@ -215,7 +259,7 @@ impl SystemAudioCapture {
         };
 
         SincFixedIn::<f32>::new(
-            TARGET_SAMPLE_RATE as f64 / from_sample_rate as f64,
+            to_sample_rate as f64 / from_sample_rate as f64,
             2.0, // Max relative ratio change
             params,
             RESAMPLER_CHUNK_SIZE,
@@ -283,6 +327,8 @@ impl AudioCapture for SystemAudioCapture {
 
         // На некоторых устройствах (особенно на macOS) stream может не собраться с первого раза,
         // если конфиг/девайс изменился "под ногами". Делаем 1 безопасный ретрай с рефрешем.
+        let target_sample_rate = self.options.target_sample_rate;
+        let target_channels = self.options.target_channels;
         for attempt in 0..=1 {
             let native_sample_rate = self.native_config.sample_rate().0;
             let native_channels = self.native_config.channels() as usize;
@@ -290,16 +336,17 @@ impl AudioCapture for SystemAudioCapture {
             log::info!(
                 "Starting audio capture: {} Hz → {} Hz, {} channels → {} channel",
                 native_sample_rate,
-                TARGET_SAMPLE_RATE,
+                target_sample_rate,
                 native_channels,
-                TARGET_CHANNELS
+                target_channels
             );
 
             // Create resampler if needed (wrapped in Arc<Mutex<>> for thread safety)
-            let needs_resampling = native_sample_rate != TARGET_SAMPLE_RATE;
+            let needs_resampling = native_sample_rate != target_sample_rate;
             let resampler: Option<Arc<Mutex<SincFixedIn<f32>>>> = if needs_resampling {
                 Some(Arc::new(Mutex::new(Self::create_resampler(
                     native_sample_rate,
+                    target_sample_rate,
                     1, // mono after conversion
                 )?)))
             } else {
@@ -364,7 +411,7 @@ impl AudioCapture for SystemAudioCapture {
                     };
 
                     let audio_chunk =
-                        AudioChunk::new(final_samples, TARGET_SAMPLE_RATE, TARGET_CHANNELS);
+                        AudioChunk::new(final_samples, target_sample_rate, target_channels);
                     on_chunk_cb(audio_chunk);
                 }
             };
@@ -527,11 +574,42 @@ mod tests {
         match result {
             Ok(capture) => {
                 assert!(!capture.is_capturing());
+                assert_eq!(
+                    capture.options.target_sample_rate,
+                    DEFAULT_DICTATION_SAMPLE_RATE
+                );
+                assert_eq!(capture.options.target_channels, 1);
             }
             Err(_) => {
                 // OK if no device available in CI environment
             }
         }
+    }
+
+    #[test]
+    fn test_default_options_are_dictation() {
+        let opts = SystemAudioCaptureOptions::default();
+        assert_eq!(opts.target_sample_rate, 16_000);
+        assert_eq!(opts.target_channels, 1);
+    }
+
+    #[test]
+    fn test_translation_options_are_24khz_mono() {
+        let opts = SystemAudioCaptureOptions::translation();
+        assert_eq!(opts.target_sample_rate, 24_000);
+        assert_eq!(opts.target_channels, 1);
+    }
+
+    #[tokio::test]
+    async fn test_with_device_and_options_keeps_translation_target() {
+        if let Ok(capture) = SystemAudioCapture::with_device_and_options(
+            None,
+            SystemAudioCaptureOptions::translation(),
+        ) {
+            assert_eq!(capture.options.target_sample_rate, 24_000);
+            assert_eq!(capture.options.target_channels, 1);
+        }
+        // если устройство недоступно в CI — пропускаем без падения
     }
 
     #[test]

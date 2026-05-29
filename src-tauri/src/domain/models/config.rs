@@ -1,6 +1,21 @@
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
+/// Active recording mode. Чем-то управляет hotkey: dictation = STT в текст,
+/// live_translation = OpenAI realtime translate в virtual mic + текст в popover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingMode {
+    Dictation,
+    LiveTranslation,
+}
+
+impl Default for RecordingMode {
+    fn default() -> Self {
+        Self::Dictation
+    }
+}
+
 /// Supported STT provider types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -231,6 +246,10 @@ pub struct AppConfig {
 
     /// Maximum number of history items
     pub max_history_items: usize,
+
+    /// Активный режим записи. dictation = STT в текст, live_translation = OpenAI realtime translate.
+    #[serde(default)]
+    pub recording_mode: RecordingMode,
 }
 
 impl Default for AppConfig {
@@ -251,6 +270,7 @@ impl Default for AppConfig {
             selected_audio_device: None,  // По умолчанию используем системное устройство
             keep_history: true,
             max_history_items: 20,
+            recording_mode: RecordingMode::default(),
         }
     }
 }
@@ -434,6 +454,46 @@ mod tests {
         assert_eq!(config.microphone_sensitivity, 100);
         assert!(config.keep_history);
         assert_eq!(config.max_history_items, 20);
+        assert_eq!(config.recording_mode, RecordingMode::Dictation);
+    }
+
+    #[test]
+    fn test_recording_mode_default_is_dictation() {
+        assert_eq!(RecordingMode::default(), RecordingMode::Dictation);
+    }
+
+    #[test]
+    fn test_recording_mode_serde_snake_case() {
+        let dict = serde_json::to_string(&RecordingMode::Dictation).unwrap();
+        assert_eq!(dict, "\"dictation\"");
+        let lt = serde_json::to_string(&RecordingMode::LiveTranslation).unwrap();
+        assert_eq!(lt, "\"live_translation\"");
+
+        let parsed: RecordingMode = serde_json::from_str("\"dictation\"").unwrap();
+        assert_eq!(parsed, RecordingMode::Dictation);
+        let parsed: RecordingMode = serde_json::from_str("\"live_translation\"").unwrap();
+        assert_eq!(parsed, RecordingMode::LiveTranslation);
+    }
+
+    #[test]
+    fn test_app_config_accepts_legacy_config_without_recording_mode() {
+        let legacy = r#"{
+            "recording_hotkey": "CmdOrCtrl+Shift+X",
+            "auto_copy_to_clipboard": false,
+            "auto_paste_text": true,
+            "play_completion_sound": false,
+            "hide_recording_window_on_hotkey": false,
+            "show_mini_recording_window": true,
+            "keep_recording_until_manual_stop": false,
+            "auto_close_window": true,
+            "vad_silence_timeout_ms": 5000,
+            "microphone_sensitivity": 100,
+            "keep_history": true,
+            "max_history_items": 20
+        }"#;
+        let config: AppConfig =
+            serde_json::from_str(legacy).expect("legacy config must deserialize");
+        assert_eq!(config.recording_mode, RecordingMode::Dictation);
     }
 
     #[test]

@@ -95,6 +95,7 @@ describe('useAppConfigStore sync', () => {
         keep_recording_until_manual_stop: true,
         microphone_sensitivity: 50,
         selected_audio_device: 'Mic B',
+        recording_mode: 'dictation',
       },
       '42',
     );

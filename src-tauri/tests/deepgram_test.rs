@@ -3,7 +3,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 use app_lib::domain::{AudioChunk, SttConfig, SttProvider, SttProviderType, Transcription};
-use app_lib::infrastructure::stt::DeepgramProvider;
+use app_lib::infrastructure::{embedded_keys, stt::DeepgramProvider};
 
 mod test_support;
 use test_support::{noop_connection_quality, noop_error, stderr_error, SttConfigTestExt};
@@ -15,12 +15,12 @@ use test_support::{noop_connection_quality, noop_error, stderr_error, SttConfigT
 /// export DEEPGRAM_TEST_KEY="your_api_key_here"
 /// cargo test
 /// ```
-fn get_api_key() -> Option<String> {
+fn get_api_key() -> String {
     // Пробуем загрузить .env файл (если есть)
     let _ = dotenv::dotenv();
 
     // Читаем из переменной окружения
-    std::env::var("DEEPGRAM_TEST_KEY").ok()
+    std::env::var("DEEPGRAM_TEST_KEY").unwrap_or_else(|_| "test-key".to_string())
 }
 
 // ============================================================================
@@ -39,27 +39,33 @@ async fn test_deepgram_initialization() {
     assert!(provider.is_online());
     assert!(provider.supports_streaming());
 
-    // Инициализация без пользовательского ключа должна использовать встроенный ключ
+    // Инициализация без пользовательского ключа должна использовать встроенный ключ,
+    // если он реально встроен в текущий build.
     let config = SttConfig::default();
     let result = provider.initialize(&config).await;
-    assert!(
-        result.is_ok(),
-        "Инициализация должна пройти со встроенным ключом"
-    );
-
-    // Пользовательский ключ (если задан) тоже должен приниматься
-    if let Some(api_key) = get_api_key() {
-        let mut config_with_key = SttConfig::default();
-        config_with_key.deepgram_api_key = Some(api_key);
-        config_with_key.language = "ru".to_string();
-
-        let result = provider.initialize(&config_with_key).await;
+    if embedded_keys::has_embedded_deepgram_key() {
         assert!(
             result.is_ok(),
-            "Инициализация с пользовательским ключом должна пройти успешно: {:?}",
-            result
+            "Инициализация должна пройти со встроенным ключом"
+        );
+    } else {
+        assert!(
+            result.is_err(),
+            "Инициализация без пользовательского ключа должна падать, если embedded key не встроен"
         );
     }
+
+    // Пользовательский ключ тоже должен приниматься.
+    let mut config_with_key = SttConfig::default();
+    config_with_key.deepgram_api_key = Some(get_api_key());
+    config_with_key.language = "ru".to_string();
+
+    let result = provider.initialize(&config_with_key).await;
+    assert!(
+        result.is_ok(),
+        "Инициализация с пользовательским ключом должна пройти успешно: {:?}",
+        result
+    );
 }
 
 /// Тестируем конфигурацию с разными языками и моделями
@@ -69,18 +75,21 @@ async fn test_deepgram_configuration() {
 
     // Русский язык
     let mut config_ru = SttConfig::new(SttProviderType::Deepgram).with_language("ru");
+    config_ru.deepgram_api_key = Some(get_api_key());
 
     let result = provider.initialize(&config_ru).await;
     assert!(result.is_ok());
 
     // Английский язык
     let mut config_en = SttConfig::new(SttProviderType::Deepgram).with_language("en");
+    config_en.deepgram_api_key = Some(get_api_key());
 
     let result = provider.initialize(&config_en).await;
     assert!(result.is_ok());
 
     // Кастомная модель
     let mut config_custom = SttConfig::new(SttProviderType::Deepgram).with_model("nova-2");
+    config_custom.deepgram_api_key = Some(get_api_key());
 
     let result = provider.initialize(&config_custom).await;
     assert!(result.is_ok());
@@ -92,9 +101,7 @@ async fn test_deepgram_state_machine() {
     let mut provider = DeepgramProvider::new();
 
     let mut config = SttConfig::new(SttProviderType::Deepgram);
-    if let Some(api_key) = get_api_key() {
-        config.deepgram_api_key = Some(api_key);
-    }
+    config.deepgram_api_key = Some(get_api_key());
 
     provider.initialize(&config).await.unwrap();
 
@@ -174,9 +181,7 @@ async fn test_deepgram_graceful_shutdown() {
     let mut provider = DeepgramProvider::new();
 
     let mut config = SttConfig::new(SttProviderType::Deepgram);
-    if let Some(api_key) = get_api_key() {
-        config.deepgram_api_key = Some(api_key);
-    }
+    config.deepgram_api_key = Some(get_api_key());
 
     provider.initialize(&config).await.unwrap();
 
@@ -247,9 +252,7 @@ async fn test_deepgram_factory_creation() {
     let factory = DefaultSttProviderFactory::new();
 
     let mut config = SttConfig::new(SttProviderType::Deepgram);
-    if let Some(api_key) = get_api_key() {
-        config.deepgram_api_key = Some(api_key);
-    }
+    config.deepgram_api_key = Some(get_api_key());
 
     let result = factory.create(&config);
     assert!(result.is_ok(), "Factory должна создать Deepgram провайдер");

@@ -92,6 +92,9 @@ class TauriSettingsService {
     if (typeof config.selected_audio_device === 'string' || config.selected_audio_device === null) {
       args.selectedAudioDevice = config.selected_audio_device;
     }
+    if (config.recording_mode === 'dictation' || config.recording_mode === 'live_translation') {
+      args.recordingMode = config.recording_mode;
+    }
 
     await invokeUpdateAppConfig(args);
   }
