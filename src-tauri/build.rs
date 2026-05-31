@@ -1,7 +1,7 @@
 use std::env;
 use std::fs;
-use std::path::Path;
 #[cfg(target_os = "macos")]
+use std::path::Path;
 use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]
@@ -61,7 +61,7 @@ pub fn has_embedded_assemblyai_key() -> bool {{
     );
 
     // Путь к генерируемому файлу
-    let out_dir = Path::new("src/infrastructure");
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is not set"));
     let dest_path = out_dir.join("embedded_keys.rs");
 
     // Записываем сгенерированный код

@@ -3,7 +3,9 @@ pub mod auth_store;
 pub mod auto_paste; // Автоматическая вставка текста
 pub mod clipboard; // Кроссплатформенная работа с clipboard
 pub mod config_store;
-pub mod embedded_keys; // API ключи встроенные в build
+pub mod embedded_keys {
+    include!(concat!(env!("OUT_DIR"), "/embedded_keys.rs"));
+}
 pub mod factory;
 pub mod hotkey; // Нормализация/миграция хоткеев
 pub mod microphone_permission; // Проверка разрешения на микрофон (macOS)
