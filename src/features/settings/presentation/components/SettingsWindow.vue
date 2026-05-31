@@ -59,6 +59,7 @@ function snapshotSettingsState(): SettingsState {
     language: settingsStore.language,
     deepgramApiKey: settingsStore.deepgramApiKey,
     assemblyaiApiKey: settingsStore.assemblyaiApiKey,
+    openaiApiKey: settingsStore.openaiApiKey,
     whisperModel: settingsStore.whisperModel,
     theme: settingsStore.theme,
     useSystemTheme: settingsStore.useSystemTheme,

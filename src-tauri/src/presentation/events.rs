@@ -18,6 +18,12 @@ pub const EVENT_CONNECTION_QUALITY: &str = "connection:quality";
 pub const EVENT_TRANSLATION_DELTA: &str = "translation:delta";
 pub const EVENT_TRANSLATION_ERROR: &str = "translation:error";
 
+// Incoming system-audio subtitles: system audio -> STT -> text translation.
+pub const EVENT_INCOMING_TRANSLATION_STATUS: &str = "incoming_translation:status";
+pub const EVENT_INCOMING_TRANSLATION_SOURCE_FINAL: &str = "incoming_translation:source-final";
+pub const EVENT_INCOMING_TRANSLATION_DELTA: &str = "incoming_translation:delta";
+pub const EVENT_INCOMING_TRANSLATION_ERROR: &str = "incoming_translation:error";
+
 // UI lifecycle events
 // Важно: это не "focus", потому что main окно на macOS может быть nonactivating NSPanel и не получать фокус.
 pub const EVENT_RECORDING_WINDOW_SHOWN: &str = "recording:window-shown";
@@ -203,6 +209,26 @@ pub struct TranslationErrorPayload {
     pub error: String,
     /// Один из: "configuration" | "authentication" | "rate_limited" | "connection" | "timeout" | "processing".
     /// Отдельно от `transcription:error` чтобы UI не путал OpenAI-ошибки с STT auth retry/logout.
+    pub error_type: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IncomingTranslationStatusPayload {
+    pub session_id: u64,
+    pub status: RecordingStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IncomingTranslationTextPayload {
+    pub session_id: u64,
+    pub text: String,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IncomingTranslationErrorPayload {
+    pub session_id: u64,
+    pub error: String,
     pub error_type: String,
 }
 /// Connection quality states

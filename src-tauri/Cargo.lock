@@ -154,6 +154,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "apple-cf"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "813dec007e3038ef4a7b09445b4b9bee2d6d25ca0f4fb0ae7d8cedf908d05b02"
+
+[[package]]
+name = "apple-metal"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d46cb814ee659967026377dde17d12f7bbd756cb79b46819a239e1e3f0f7492"
+dependencies = [
+ "apple-cf",
+]
+
+[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4827,6 +4842,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "screencapturekit"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3ba81cd5ca4035c013319eb7e50497d3212bc2c5f2c239839a39707aa5ed982"
+dependencies = [
+ "apple-cf",
+ "apple-metal",
+]
+
+[[package]]
 name = "sdd"
 version = "3.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6509,7 +6534,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "voice-to-text"
-version = "0.10.26"
+version = "0.10.27"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6534,6 +6559,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rubato",
  "rustfft",
+ "screencapturekit",
  "serde",
  "serde_json",
  "serde_urlencoded",

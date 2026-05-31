@@ -26,6 +26,7 @@ describe('useAppConfigStore sync', () => {
       keep_recording_until_manual_stop: false,
       microphone_sensitivity: 100,
       selected_audio_device: null,
+      openai_api_key: null,
       ...overrides,
     };
   }
@@ -96,6 +97,7 @@ describe('useAppConfigStore sync', () => {
         microphone_sensitivity: 50,
         selected_audio_device: 'Mic B',
         recording_mode: 'dictation',
+        openai_api_key: 'sk-test',
       },
       '42',
     );
@@ -110,6 +112,7 @@ describe('useAppConfigStore sync', () => {
     expect(store.keepRecordingUntilManualStop).toBe(true);
     expect(store.microphoneSensitivity).toBe(50);
     expect(store.selectedAudioDevice).toBe('Mic B');
+    expect(store.openaiApiKey).toBe('sk-test');
     expect(store.isLoaded).toBe(true);
   });
 

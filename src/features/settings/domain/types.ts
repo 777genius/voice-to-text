@@ -57,6 +57,7 @@ export interface AppConfigData {
   keep_recording_until_manual_stop: boolean;
   selected_audio_device: string | null;
   recording_mode: RecordingMode;
+  openai_api_key: string | null;
 }
 
 // Полная конфигурация настроек для UI
@@ -69,6 +70,7 @@ export interface SettingsState {
   // API ключи
   deepgramApiKey: string;
   assemblyaiApiKey: string;
+  openaiApiKey: string;
 
   // Whisper
   whisperModel: string;

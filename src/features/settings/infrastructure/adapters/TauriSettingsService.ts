@@ -95,6 +95,9 @@ class TauriSettingsService {
     if (config.recording_mode === 'dictation' || config.recording_mode === 'live_translation') {
       args.recordingMode = config.recording_mode;
     }
+    if (typeof config.openai_api_key === 'string' || config.openai_api_key === null) {
+      args.openaiApiKey = config.openai_api_key ?? '';
+    }
 
     await invokeUpdateAppConfig(args);
   }

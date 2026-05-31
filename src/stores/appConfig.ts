@@ -28,6 +28,7 @@ export const useAppConfigStore = defineStore('appConfig', () => {
   const microphoneSensitivity = ref(100);
   const selectedAudioDevice = ref('');
   const recordingMode = ref<RecordingMode>('dictation');
+  const openaiApiKey = ref('');
 
   let syncHandle: RevisionSyncHandle | null = null;
 
@@ -46,6 +47,7 @@ export const useAppConfigStore = defineStore('appConfig', () => {
     microphoneSensitivity.value = data.microphone_sensitivity ?? microphoneSensitivity.value;
     selectedAudioDevice.value = data.selected_audio_device ?? '';
     recordingMode.value = data.recording_mode ?? recordingMode.value;
+    openaiApiKey.value = data.openai_api_key ?? '';
     isLoaded.value = true;
   }
 
@@ -104,6 +106,7 @@ export const useAppConfigStore = defineStore('appConfig', () => {
     microphoneSensitivity,
     selectedAudioDevice,
     recordingMode,
+    openaiApiKey,
 
     hasSelectedAudioDevice: computed(() => Boolean(selectedAudioDevice.value)),
 

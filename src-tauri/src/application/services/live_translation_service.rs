@@ -187,7 +187,7 @@ impl LiveTranslationService {
         // 1. API key
         if config.openai_api_key.trim().is_empty() {
             let err = LiveTranslationError::Configuration(
-                "OPENAI_API_KEY не задан. Положите ключ в frontend/src-tauri/.env или frontend/.env"
+                "OpenAI API key не задан. Укажите ключ в Settings или задайте OPENAI_API_KEY"
                     .into(),
             );
             self.transition_to_error().await;

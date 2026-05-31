@@ -25,6 +25,7 @@ export type UpdateAppConfigInvokeArgs = Partial<{
   keepRecordingUntilManualStop: boolean;
   selectedAudioDevice: string | null;
   recordingMode: RecordingMode;
+  openaiApiKey: string | null;
 }>;
 
 const ALLOWED_KEYS = new Set([
@@ -38,6 +39,7 @@ const ALLOWED_KEYS = new Set([
   'keepRecordingUntilManualStop',
   'selectedAudioDevice',
   'recordingMode',
+  'openaiApiKey',
 ]);
 
 function assertValidUpdateAppConfigArgs(args: Record<string, unknown>): void {
@@ -76,6 +78,7 @@ function assertValidUpdateAppConfigArgs(args: Record<string, unknown>): void {
         }
         break;
       case 'selectedAudioDevice':
+      case 'openaiApiKey':
         if (!(typeof v === 'string' || v === null)) {
           throw new Error(`[update_app_config] "${k}" должен быть string|null, получили: ${String(v)}`);
         }

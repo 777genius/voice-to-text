@@ -610,6 +610,14 @@ const minimizeWindow = async () => {
           <div class="mini-actions no-drag">
             <UpdateIndicator compact @click="openUpdateDialog" />
             <button
+              class="mini-icon-button"
+              :class="{ active: store.isIncomingTranslationActive }"
+              @click="store.toggleIncomingTranslation()"
+              :title="store.isIncomingTranslationActive ? t('main.incomingTranslationStop') : t('main.incomingTranslationStart')"
+            >
+              <span class="mdi mdi-closed-caption-outline"></span>
+            </button>
+            <button
               v-if="authStore.isAuthenticated"
               class="mini-icon-button"
               @click="openProfile"
@@ -727,6 +735,32 @@ const minimizeWindow = async () => {
             {{ t('errors.actions.openSettingsForDevice') }}
           </button>
         </div>
+
+        <div
+          v-if="store.isIncomingTranslationActive || store.hasIncomingTranslationText || store.incomingTranslationError"
+          class="incoming-translation-panel"
+        >
+          <div class="incoming-translation-header">
+            <span>{{ t('main.incomingTranslation') }}</span>
+            <span
+              class="incoming-translation-dot"
+              :class="{
+                active: store.isIncomingTranslationActive,
+                error: Boolean(store.incomingTranslationError),
+              }"
+            ></span>
+          </div>
+          <div
+            class="incoming-translation-text"
+            :class="{ placeholder: !store.incomingTranslationText && !store.incomingTranslationError }"
+          >
+            {{
+              store.incomingTranslationError ||
+              store.incomingTranslationText ||
+              t('main.incomingTranslationEmpty')
+            }}
+          </div>
+        </div>
       </div>
 
       <!-- Controls -->
@@ -747,6 +781,20 @@ const minimizeWindow = async () => {
           <span v-if="store.isRecording" class="mdi mdi-stop"></span>
           <span v-else-if="store.isProcessing" class="mdi mdi-cached record-icon-spin"></span>
           <span v-else class="mdi mdi-microphone"></span>
+        </button>
+        <button
+          v-ripple="{ class: store.isIncomingTranslationActive ? 'text-red' : 'text-blue' }"
+          class="incoming-toggle-button no-drag"
+          :class="{ active: store.isIncomingTranslationActive, error: store.incomingTranslationError }"
+          :disabled="store.incomingTranslationStatus === 'Processing'"
+          @click="store.toggleIncomingTranslation()"
+          :title="store.isIncomingTranslationActive ? t('main.incomingTranslationStop') : t('main.incomingTranslationStart')"
+        >
+          <span
+            v-if="store.incomingTranslationStatus === 'Processing'"
+            class="mdi mdi-cached record-icon-spin"
+          ></span>
+          <span v-else class="mdi mdi-closed-caption-outline"></span>
         </button>
       </div>
 
@@ -945,6 +993,11 @@ const minimizeWindow = async () => {
 .mini-icon-button:hover {
   background: rgba(255, 255, 255, 0.1);
   color: var(--color-text);
+}
+
+.mini-icon-button.active {
+  color: var(--color-accent);
+  background: rgba(33, 150, 243, 0.14);
 }
 
 :global(.theme-light) .mini-icon-button:hover {
@@ -1187,6 +1240,60 @@ const minimizeWindow = async () => {
   cursor: not-allowed;
 }
 
+.incoming-translation-panel {
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid rgba(33, 150, 243, 0.24);
+  border-radius: var(--radius-sm);
+  background: rgba(33, 150, 243, 0.08);
+  box-sizing: border-box;
+}
+
+.incoming-translation-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-xs);
+  margin-bottom: 4px;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.incoming-translation-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-text-secondary);
+  opacity: 0.7;
+}
+
+.incoming-translation-dot.active {
+  background: var(--color-accent);
+  opacity: 1;
+}
+
+.incoming-translation-dot.error {
+  background: var(--color-error);
+  opacity: 1;
+}
+
+.incoming-translation-text {
+  color: var(--color-text);
+  font-size: 14px;
+  line-height: 1.35;
+  max-height: 92px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.incoming-translation-text.placeholder {
+  color: var(--color-text-secondary);
+  font-style: italic;
+}
+
 @keyframes shake {
   0%, 100% {
     transform: translateX(0);
@@ -1201,7 +1308,9 @@ const minimizeWindow = async () => {
 
 .controls {
   display: flex;
+  align-items: center;
   justify-content: center;
+  gap: var(--spacing-sm);
   width: 100%;
   box-sizing: border-box;
   margin-top: auto;
@@ -1280,6 +1389,41 @@ const minimizeWindow = async () => {
 
 .record-button.processing {
   background: var(--color-warning);
+}
+
+.incoming-toggle-button {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--color-text);
+  font-size: 21px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform 0.2s ease, background 0.2s ease, color 0.2s ease, opacity 0.2s ease;
+}
+
+.incoming-toggle-button:hover:not(:disabled) {
+  transform: scale(1.06);
+  background: rgba(255, 255, 255, 0.13);
+}
+
+.incoming-toggle-button.active {
+  color: #fff;
+  background: var(--color-accent);
+}
+
+.incoming-toggle-button.error {
+  color: #fff;
+  background: var(--color-error);
+}
+
+.incoming-toggle-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 @keyframes pulse {

@@ -14,7 +14,8 @@ import type { SnapshotEnvelope } from '@statesync/core';
 export type RecordingMode = 'dictation' | 'live_translation';
 
 /**
- * Публичный снапшот app-config, который можно безопасно раздавать во все окна.
+ * App-config snapshot for frontend windows.
+ * It can include user-entered API keys needed by Settings UI, so never log it.
  * Соответствует Rust `AppConfigSnapshotData`.
  */
 export type AppConfigSnapshotData = {
@@ -28,6 +29,7 @@ export type AppConfigSnapshotData = {
   keep_recording_until_manual_stop: boolean;
   selected_audio_device: string | null;
   recording_mode: RecordingMode;
+  openai_api_key: string | null;
 };
 
 /**

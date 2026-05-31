@@ -27,6 +27,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const language = ref('ru');
   const deepgramApiKey = ref('');
   const assemblyaiApiKey = ref('');
+  const openaiApiKey = ref('');
   const whisperModel = ref('small');
   const theme = ref<AppTheme>(
     (localStorage.getItem('uiTheme') as AppTheme) ?? 'dark'
@@ -84,6 +85,7 @@ export const useSettingsStore = defineStore('settings', () => {
     language: language.value,
     deepgramApiKey: deepgramApiKey.value,
     assemblyaiApiKey: assemblyaiApiKey.value,
+    openaiApiKey: openaiApiKey.value,
     whisperModel: whisperModel.value,
     theme: theme.value,
     useSystemTheme: useSystemTheme.value,
@@ -173,6 +175,10 @@ export const useSettingsStore = defineStore('settings', () => {
 
   function setAssemblyaiApiKey(value: string) {
     assemblyaiApiKey.value = value;
+  }
+
+  function setOpenaiApiKey(value: string) {
+    openaiApiKey.value = value;
   }
 
   function setWhisperModel(value: string) {
@@ -325,6 +331,8 @@ export const useSettingsStore = defineStore('settings', () => {
       deepgramApiKey.value = state.deepgramApiKey;
     if (state.assemblyaiApiKey !== undefined)
       assemblyaiApiKey.value = state.assemblyaiApiKey;
+    if (state.openaiApiKey !== undefined)
+      openaiApiKey.value = state.openaiApiKey;
     if (state.whisperModel !== undefined) whisperModel.value = state.whisperModel;
     if (state.theme !== undefined) setTheme(state.theme, { persist: false });
     if (state.useSystemTheme !== undefined) setUseSystemTheme(state.useSystemTheme, { persist: false });
@@ -371,6 +379,7 @@ export const useSettingsStore = defineStore('settings', () => {
     language,
     deepgramApiKey,
     assemblyaiApiKey,
+    openaiApiKey,
     whisperModel,
     theme,
     useSystemTheme,
@@ -406,6 +415,7 @@ export const useSettingsStore = defineStore('settings', () => {
     flushSttLanguagePersist,
     setDeepgramApiKey,
     setAssemblyaiApiKey,
+    setOpenaiApiKey,
     setWhisperModel,
     setTheme,
     setUseSystemTheme,

@@ -422,6 +422,16 @@ fn translation_error_type_to_str(
     err.error_type()
 }
 
+fn resolve_openai_api_key(config: &AppConfig) -> String {
+    config
+        .openai_api_key
+        .as_ref()
+        .map(|key| key.trim())
+        .filter(|key| !key.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| std::env::var("OPENAI_API_KEY").unwrap_or_default())
+}
+
 async fn start_live_translation_recording(
     state: &AppState,
     app_handle: AppHandle,
@@ -450,9 +460,8 @@ async fn start_live_translation_recording(
         },
     );
 
-    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
     let translation_cfg = LiveTranslationConfig {
-        openai_api_key: api_key,
+        openai_api_key: resolve_openai_api_key(&config),
         target_language: "en".to_string(),
         microphone_device: config.selected_audio_device.clone(),
         microphone_sensitivity: config.microphone_sensitivity,
@@ -617,6 +626,219 @@ async fn stop_live_translation_recording(
         Some(RecordingMode::LiveTranslation),
     );
     Ok("LiveTranslation stopped".to_string())
+}
+
+async fn get_or_create_incoming_translation_service(
+    state: &AppState,
+) -> std::sync::Arc<crate::application::services::IncomingTranslationService> {
+    {
+        let guard = state.incoming_translation_service.read().await;
+        if let Some(existing) = guard.as_ref() {
+            return existing.clone();
+        }
+    }
+    let mut guard = state.incoming_translation_service.write().await;
+    if let Some(existing) = guard.as_ref() {
+        return existing.clone();
+    }
+    let service =
+        std::sync::Arc::new(crate::application::services::IncomingTranslationService::new());
+    *guard = Some(service.clone());
+    service
+}
+
+#[tauri::command]
+pub async fn start_incoming_translation(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<String, String> {
+    use crate::application::services::{
+        IncomingTranslationCallbacks, IncomingTranslationConfig, IncomingTranslationError,
+    };
+    use crate::presentation::events::{
+        EVENT_INCOMING_TRANSLATION_DELTA, EVENT_INCOMING_TRANSLATION_ERROR,
+        EVENT_INCOMING_TRANSLATION_SOURCE_FINAL, EVENT_INCOMING_TRANSLATION_STATUS,
+    };
+
+    let service = get_or_create_incoming_translation_service(state.inner()).await;
+    if service.get_status().await != RecordingStatus::Idle {
+        return Ok("Incoming translation already running".to_string());
+    }
+
+    let session_id = state
+        .incoming_translation_session_seq
+        .fetch_add(1, Ordering::Relaxed)
+        + 1;
+    let mut stt_config = state.transcription_service.get_config().await;
+    stt_config.keep_connection_alive = false;
+    let app_config = state.config.read().await.clone();
+    let mut cfg = IncomingTranslationConfig::new_with_defaults(stt_config, session_id);
+    cfg.openai_api_key = resolve_openai_api_key(&app_config);
+
+    let _ = app_handle.emit(
+        EVENT_INCOMING_TRANSLATION_STATUS,
+        IncomingTranslationStatusPayload {
+            session_id,
+            status: RecordingStatus::Starting,
+        },
+    );
+
+    let source_handle = app_handle.clone();
+    let on_source_final: std::sync::Arc<dyn Fn(String) + Send + Sync> =
+        std::sync::Arc::new(move |text: String| {
+            let _ = source_handle.emit(
+                EVENT_INCOMING_TRANSLATION_SOURCE_FINAL,
+                IncomingTranslationTextPayload {
+                    session_id,
+                    text,
+                    timestamp: now_ms_u64(),
+                },
+            );
+        });
+
+    let delta_handle = app_handle.clone();
+    let on_translation_delta: std::sync::Arc<dyn Fn(String) + Send + Sync> =
+        std::sync::Arc::new(move |text: String| {
+            let _ = delta_handle.emit(
+                EVENT_INCOMING_TRANSLATION_DELTA,
+                IncomingTranslationTextPayload {
+                    session_id,
+                    text,
+                    timestamp: now_ms_u64(),
+                },
+            );
+        });
+
+    let error_handle = app_handle.clone();
+    let on_error: std::sync::Arc<dyn Fn(IncomingTranslationError) + Send + Sync> =
+        std::sync::Arc::new(move |err: IncomingTranslationError| {
+            let should_emit_error_status = matches!(
+                &err,
+                IncomingTranslationError::Configuration(_)
+                    | IncomingTranslationError::Authentication(_)
+                    | IncomingTranslationError::RateLimited(_)
+            );
+            let _ = error_handle.emit(
+                EVENT_INCOMING_TRANSLATION_ERROR,
+                IncomingTranslationErrorPayload {
+                    session_id,
+                    error: err.to_string(),
+                    error_type: err.error_type().to_string(),
+                },
+            );
+            if should_emit_error_status {
+                let _ = error_handle.emit(
+                    EVENT_INCOMING_TRANSLATION_STATUS,
+                    IncomingTranslationStatusPayload {
+                        session_id,
+                        status: RecordingStatus::Error,
+                    },
+                );
+            }
+        });
+
+    let status_handle = app_handle.clone();
+    let on_status: std::sync::Arc<dyn Fn(RecordingStatus) + Send + Sync> =
+        std::sync::Arc::new(move |status: RecordingStatus| {
+            let _ = status_handle.emit(
+                EVENT_INCOMING_TRANSLATION_STATUS,
+                IncomingTranslationStatusPayload { session_id, status },
+            );
+        });
+
+    let callbacks = IncomingTranslationCallbacks {
+        on_source_final,
+        on_translation_delta,
+        on_error,
+        on_status,
+    };
+
+    service.start(cfg, callbacks).await.map_err(|err| {
+        let _ = app_handle.emit(
+            EVENT_INCOMING_TRANSLATION_ERROR,
+            IncomingTranslationErrorPayload {
+                session_id,
+                error: err.to_string(),
+                error_type: err.error_type().to_string(),
+            },
+        );
+        let _ = app_handle.emit(
+            EVENT_INCOMING_TRANSLATION_STATUS,
+            IncomingTranslationStatusPayload {
+                session_id,
+                status: RecordingStatus::Error,
+            },
+        );
+        err.to_string()
+    })?;
+
+    Ok("Incoming translation started".to_string())
+}
+
+#[tauri::command]
+pub async fn stop_incoming_translation(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<String, String> {
+    use crate::presentation::events::EVENT_INCOMING_TRANSLATION_STATUS;
+
+    let service = {
+        let guard = state.incoming_translation_service.read().await;
+        guard.as_ref().cloned()
+    };
+    let session_id = state
+        .incoming_translation_session_seq
+        .load(Ordering::Relaxed)
+        .max(1);
+
+    let _ = app_handle.emit(
+        EVENT_INCOMING_TRANSLATION_STATUS,
+        IncomingTranslationStatusPayload {
+            session_id,
+            status: RecordingStatus::Processing,
+        },
+    );
+
+    if let Some(service) = service {
+        service.stop().await.map_err(|err| err.to_string())?;
+    }
+
+    let _ = app_handle.emit(
+        EVENT_INCOMING_TRANSLATION_STATUS,
+        IncomingTranslationStatusPayload {
+            session_id,
+            status: RecordingStatus::Idle,
+        },
+    );
+    Ok("Incoming translation stopped".to_string())
+}
+
+#[tauri::command]
+pub async fn toggle_incoming_translation(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<String, String> {
+    let service = get_or_create_incoming_translation_service(state.inner()).await;
+    if service.get_status().await == RecordingStatus::Idle {
+        start_incoming_translation(state, app_handle).await
+    } else {
+        stop_incoming_translation(state, app_handle).await
+    }
+}
+
+#[tauri::command]
+pub async fn get_incoming_translation_status(
+    state: State<'_, AppState>,
+) -> Result<RecordingStatus, String> {
+    let service = {
+        let guard = state.incoming_translation_service.read().await;
+        guard.as_ref().cloned()
+    };
+    if let Some(service) = service {
+        Ok(service.get_status().await)
+    } else {
+        Ok(RecordingStatus::Idle)
+    }
 }
 
 /// Start recording voice
@@ -1514,7 +1736,7 @@ mod snapshot_contract_tests {
     }
 
     #[test]
-    fn app_config_snapshot_is_public_and_does_not_leak_secrets() {
+    fn app_config_snapshot_keeps_internal_secrets_out() {
         let env = SnapshotEnvelope {
             revision: "1".to_string(),
             data: AppConfigSnapshotData {
@@ -1528,6 +1750,7 @@ mod snapshot_contract_tests {
                 keep_recording_until_manual_stop: false,
                 selected_audio_device: None,
                 recording_mode: crate::domain::RecordingMode::Dictation,
+                openai_api_key: None,
             },
         };
 
@@ -1560,6 +1783,7 @@ mod snapshot_contract_tests {
         assert!(data.contains_key("show_mini_recording_window"));
         assert!(data.contains_key("keep_recording_until_manual_stop"));
         assert!(data.contains_key("selected_audio_device"));
+        assert!(data.contains_key("openai_api_key"));
     }
 
     #[test]
@@ -2158,9 +2382,8 @@ pub struct SnapshotEnvelope<T: serde::Serialize> {
     pub revision: String,
     pub data: T,
 }
-/// Минимальный "public" снапшот app-config для фронтенда.
-///
-/// Важно: не включаем STT конфиг и тем более токены — снапшоты идут во все окна через IPC.
+/// Snapshot app-config для frontend windows.
+/// Может содержать user-entered API keys для Settings UI, поэтому не логировать целиком.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AppConfigSnapshotData {
     pub microphone_sensitivity: u8,
@@ -2173,6 +2396,7 @@ pub struct AppConfigSnapshotData {
     pub keep_recording_until_manual_stop: bool,
     pub selected_audio_device: Option<String>,
     pub recording_mode: crate::domain::RecordingMode,
+    pub openai_api_key: Option<String>,
 }
 /// Get current application configuration + revision (for cross-window sync)
 #[tauri::command]
@@ -2192,6 +2416,7 @@ pub async fn get_app_config_snapshot(
         keep_recording_until_manual_stop: config.keep_recording_until_manual_stop,
         selected_audio_device: config.selected_audio_device,
         recording_mode: config.recording_mode,
+        openai_api_key: config.openai_api_key,
     };
     let revision = state.app_config_revision.read().await.to_string();
     Ok(SnapshotEnvelope { revision, data })
@@ -2405,9 +2630,10 @@ pub async fn update_app_config(
     keep_recording_until_manual_stop: Option<bool>,
     selected_audio_device: Option<String>,
     recording_mode: Option<crate::domain::RecordingMode>,
+    openai_api_key: Option<String>,
 ) -> Result<(), String> {
-    log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}, auto_copy: {:?}, auto_paste: {:?}, completion_sound: {:?}, hide_window_on_hotkey: {:?}, mini_window: {:?}, manual_stop_only: {:?}, device: {:?}, mode: {:?}",
-        microphone_sensitivity, recording_hotkey, auto_copy_to_clipboard, auto_paste_text, play_completion_sound, hide_recording_window_on_hotkey, show_mini_recording_window, keep_recording_until_manual_stop, selected_audio_device, recording_mode);
+    log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}, auto_copy: {:?}, auto_paste: {:?}, completion_sound: {:?}, hide_window_on_hotkey: {:?}, mini_window: {:?}, manual_stop_only: {:?}, device: {:?}, mode: {:?}, openai_key: {}",
+        microphone_sensitivity, recording_hotkey, auto_copy_to_clipboard, auto_paste_text, play_completion_sound, hide_recording_window_on_hotkey, show_mini_recording_window, keep_recording_until_manual_stop, selected_audio_device, recording_mode, openai_api_key.as_ref().is_some_and(|key| !key.trim().is_empty()));
 
     // Защита от "тихих" провалов: если фронт случайно отправил snake_case ключи,
     // Tauri не сматчит аргументы, и сюда придут одни None.
@@ -2422,8 +2648,9 @@ pub async fn update_app_config(
         && keep_recording_until_manual_stop.is_none()
         && selected_audio_device.is_none()
         && recording_mode.is_none()
+        && openai_api_key.is_none()
     {
-        return Err("update_app_config: не получены поля для обновления. Проверьте, что фронтенд отправляет args в camelCase (например microphoneSensitivity, recordingHotkey, autoCopyToClipboard, autoPasteText, playCompletionSound, hideRecordingWindowOnHotkey, showMiniRecordingWindow, keepRecordingUntilManualStop, selectedAudioDevice, recordingMode).".to_string());
+        return Err("update_app_config: не получены поля для обновления. Проверьте, что фронтенд отправляет args в camelCase (например microphoneSensitivity, recordingHotkey, autoCopyToClipboard, autoPasteText, playCompletionSound, hideRecordingWindowOnHotkey, showMiniRecordingWindow, keepRecordingUntilManualStop, selectedAudioDevice, recordingMode, openaiApiKey).".to_string());
     }
 
     let mut config = state.config.write().await;
@@ -2538,6 +2765,29 @@ pub async fn update_app_config(
                 new_mode
             );
             config.recording_mode = new_mode;
+            any_changed = true;
+        }
+    }
+
+    if let Some(key) = openai_api_key {
+        let normalized = key.trim().to_string();
+        let next_key = if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized)
+        };
+        if config.openai_api_key != next_key {
+            log::info!(
+                "Updating openai_api_key: present {} -> {}",
+                config
+                    .openai_api_key
+                    .as_ref()
+                    .is_some_and(|value| !value.trim().is_empty()),
+                next_key
+                    .as_ref()
+                    .is_some_and(|value| !value.trim().is_empty())
+            );
+            config.openai_api_key = next_key;
             any_changed = true;
         }
     }

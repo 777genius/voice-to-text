@@ -65,6 +65,11 @@ export function useSettings() {
     set: (value: string) => store.setAssemblyaiApiKey(value),
   });
 
+  const openaiApiKey = computed({
+    get: () => store.openaiApiKey,
+    set: (value: string) => store.setOpenaiApiKey(value),
+  });
+
   const whisperModel = computed({
     get: () => store.whisperModel,
     set: (value: string) => store.setWhisperModel(value),
@@ -164,6 +169,8 @@ export function useSettings() {
           store.setShowMiniRecordingWindow(appConfigStoreInstance.showMiniRecordingWindow);
           store.setKeepRecordingUntilManualStop(appConfigStoreInstance.keepRecordingUntilManualStop);
           store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
+          store.setRecordingMode(appConfigStoreInstance.recordingMode);
+          store.setOpenaiApiKey(appConfigStoreInstance.openaiApiKey);
         } else {
           store.setMicrophoneSensitivity(95, { persist: false });
           store.setRecordingHotkey('CmdOrCtrl+Shift+X');
@@ -174,6 +181,8 @@ export function useSettings() {
           store.setShowMiniRecordingWindow(true);
           store.setKeepRecordingUntilManualStop(false);
           store.setSelectedAudioDevice('');
+          store.setRecordingMode('dictation');
+          store.setOpenaiApiKey('');
         }
 
         // В web режиме аудио-устройства/permission недоступны
@@ -251,6 +260,7 @@ export function useSettings() {
         store.setKeepRecordingUntilManualStop(appConfigStoreInstance.keepRecordingUntilManualStop);
         store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
         store.setRecordingMode(appConfigStoreInstance.recordingMode);
+        store.setOpenaiApiKey(appConfigStoreInstance.openaiApiKey);
       } else {
         try {
           const appConfig = await tauriSettingsService.getAppConfig();
@@ -264,6 +274,7 @@ export function useSettings() {
           store.setKeepRecordingUntilManualStop(appConfig.keep_recording_until_manual_stop ?? false);
           store.setSelectedAudioDevice(appConfig.selected_audio_device ?? '');
           store.setRecordingMode(appConfig.recording_mode ?? 'dictation');
+          store.setOpenaiApiKey(appConfig.openai_api_key ?? '');
         } catch (err) {
           console.log('App config не загружен, используем значения по умолчанию');
         }
@@ -314,6 +325,10 @@ export function useSettings() {
         return s ? s : null;
       };
       const normalizeAudioDevice = (v: string | null | undefined): string | null => {
+        const s = String(v ?? '').trim();
+        return s ? s : null;
+      };
+      const normalizeSecret = (v: string | null | undefined): string | null => {
         const s = String(v ?? '').trim();
         return s ? s : null;
       };
@@ -490,6 +505,16 @@ export function useSettings() {
         appUpdatePayload.recording_mode = store.recordingMode;
       }
 
+      const openaiKey = normalizeSecret(store.openaiApiKey);
+      const persistedOpenaiKey = normalizeSecret(persistedState?.openaiApiKey);
+      const latestOpenaiKey = normalizeSecret(latestApp.openai_api_key);
+      const hasOpenaiKeyChange = persistedState
+        ? persistedOpenaiKey !== openaiKey
+        : latestOpenaiKey !== openaiKey;
+      if (hasOpenaiKeyChange && latestOpenaiKey !== openaiKey) {
+        appUpdatePayload.openai_api_key = openaiKey ?? '';
+      }
+
       if (Object.keys(appUpdatePayload).length > 0) {
         await withTimeout(
           tauriSettingsService.updateAppConfig(appUpdatePayload),
@@ -631,6 +656,7 @@ export function useSettings() {
     language,
     deepgramApiKey,
     assemblyaiApiKey,
+    openaiApiKey,
     whisperModel,
     recordingHotkey,
     microphoneSensitivity,

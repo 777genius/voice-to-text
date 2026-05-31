@@ -1,6 +1,6 @@
 [package]
 name = "voice-to-text"
-version = "0.10.26"
+version = "0.10.27"
 description = "Privacy-focused voice-to-text application with offline support"
 authors = ["VoicetextAI Contributors"]
 license = "MIT"
@@ -93,6 +93,7 @@ tauri = { version = "2.8.5", features = ["tray-icon", "macos-private-api"] }
 cocoa = "0.25"  # macOS API для работы с окнами и Accessibility
 objc = "0.2"  # Objective-C runtime bindings
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1" }  # NSPanel для появления поверх fullscreen приложений
+screencapturekit = "=3.0.0"  # macOS system audio capture via ScreenCaptureKit; 6.x currently pulls macOS 26 Metal SDK APIs
 
 [dev-dependencies]
 tokio-test = "0.4"  # Utilities for testing async code

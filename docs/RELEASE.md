@@ -16,6 +16,71 @@
 
 ---
 
+## Текущий релиз: v0.10.27
+
+Релиз для статьи про live translation в VoicetextAI.
+
+### Что говорить в статье
+
+- Скачать приложение можно с [voicetext.site](https://voicetext.site).
+- Нужна авторизация в VoicetextAI, потому что фича встроена в приложение.
+- Для live translation нужен OpenAI API key. Его можно указать в Settings после выбора режима `Live translation`; если поле пустое, используется `OPENAI_API_KEY`.
+- Для Google Meet, Zoom и похожих приложений нужно выбрать `BlackHole 2ch` как microphone input.
+- Сейчас сделано: исходящий голос пользователя переводится в английскую речь и отправляется в virtual microphone; входящий системный звук переводится в русский текст в popover.
+- Пока не сделано: входящий перевод голосом в наушники и selector для output device.
+
+### Ссылки на код для статьи
+
+- User guide: [`docs/LIVE_TRANSLATION.md`](LIVE_TRANSLATION.md)
+- Outgoing service: `src-tauri/src/application/services/live_translation_service.rs`
+- OpenAI realtime client: `src-tauri/src/infrastructure/openai/realtime_translation.rs`
+- BlackHole output: `src-tauri/src/infrastructure/audio/cpal_output.rs`
+- Incoming subtitles service: `src-tauri/src/application/services/incoming_translation_service.rs`
+- macOS system audio capture: `src-tauri/src/infrastructure/audio/macos_system_audio_capture.rs`
+- OpenAI text translation client: `src-tauri/src/infrastructure/openai/text_translation.rs`
+- Settings UI: `src/features/settings/presentation/components/sections/RecordingModeSection.vue`
+
+### Release notes для GitHub
+
+```markdown
+## What is new
+
+### Live call translation
+- Speak into your microphone and VoicetextAI translates your voice through OpenAI realtime translation.
+- The translated English voice is played into `BlackHole 2ch`, so Meet, Zoom, and similar apps can use it as your microphone.
+- The recording popover shows the translated text while the session is running.
+
+### Incoming subtitles
+- VoicetextAI can listen to macOS system audio and show Russian subtitles for incoming speech.
+- This first version is text-only, so translated voice playback to headphones is still future work.
+
+### OpenAI key in Settings
+- Users can paste their OpenAI API key in Settings after selecting `Live translation`.
+- `OPENAI_API_KEY` remains supported as an environment fallback.
+
+## Setup
+
+- Download VoicetextAI from https://voicetext.site
+- Sign in to VoicetextAI
+- Install `BlackHole 2ch` on macOS for virtual microphone output
+- Select `Live translation` in Settings and add an OpenAI API key
+- Choose `BlackHole 2ch` as the microphone in Meet, Zoom, or another call app
+```
+
+### Команды релиза
+
+```bash
+pnpm release:notes v0.10.27
+git add CHANGELOG.md docs package.json src-tauri src
+git commit -m "release: v0.10.27"
+git tag v0.10.27
+git push origin HEAD
+git push origin v0.10.27
+gh run watch
+```
+
+---
+
 ## 1. Определить тип релиза
 
 Используем [Semantic Versioning](https://semver.org/):

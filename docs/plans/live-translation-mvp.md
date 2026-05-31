@@ -48,15 +48,16 @@ Settings -> Recording mode:
 - добавление второго independent hotkey сильно повышает риск регрессий;
 - пользователю проще переключить режим в Settings и пользоваться привычным hotkey.
 
-### 2. OpenAI key для MVP через env
+### 2. OpenAI key for MVP
 
 Выбранный вариант:
 
 ```text
-OPENAI_API_KEY
+Settings OpenAI API key with OPENAI_API_KEY env fallback
 ```
 
-Для dev MVP ключ читается из env. В debug Tauri уже вызывает `dotenv::dotenv()`, поэтому можно положить ключ в:
+Изначально MVP читал ключ только из env. Для product release добавлено поле в Settings, которое используется первым.
+Если поле пустое, приложение читает `OPENAI_API_KEY` из env. В debug Tauri уже вызывает `dotenv::dotenv()`, поэтому можно положить ключ в:
 
 ```text
 frontend/src-tauri/.env
@@ -65,10 +66,11 @@ frontend/src-tauri/.env
 Важно:
 
 - при запуске packaged app из Finder shell env может не наследоваться;
-- это нормально для MVP/dev;
-- для продукта позже нужен secure storage, keychain или backend proxy.
+- поэтому для обычного пользователя нужен Settings input;
+- ключ не логируется, но пока хранится локально в app config;
+- будущий hardening: keychain или backend proxy.
 
-Оценка: 🎯 9   🛡️ 4   🧠 2
+Оценка: 🎯 9   🛡️ 6   🧠 3
 
 ### 3. Output только в BlackHole 2ch
 
@@ -936,7 +938,7 @@ No output selector in MVP.
 
 No target language selector in MVP.
 
-No OpenAI API key input in MVP.
+OpenAI API key input is included in Settings for the product release.
 
 ### Type additions
 
@@ -1205,18 +1207,23 @@ Possible later additions:
 
 ## Security and secrets
 
-MVP:
+Product release:
 
 ```text
-OPENAI_API_KEY from env / .env
+Settings OpenAI API key first, OPENAI_API_KEY from env / .env as fallback
 ```
 
 Do not:
 
 - log API key;
-- include key in frontend snapshots;
-- include key in state-sync;
-- save key to app config.
+- include key in logs, analytics, or article screenshots;
+- send key to the Voicetext backend;
+- use the user key outside OpenAI translation calls.
+
+Current tradeoff:
+
+- key is stored locally in app config so Settings can work for packaged builds;
+- frontend app-config snapshot can contain the key for Settings UI, so snapshots must not be logged.
 
 Later product version:
 
@@ -1710,14 +1717,14 @@ Impact:
 
 Mitigation:
 
-- MVP uses `.env` in debug;
-- product version needs keychain/backend.
+- Settings input is now the primary path;
+- env remains useful for dev/debug;
+- keychain/backend proxy remains the stronger future option.
 
 ## Not in MVP
 
 - two-way translation;
-- incoming speaker translation;
-- system audio capture;
+- incoming translated voice to headphones;
 - speaker monitor output;
 - output device selector;
 - target language selector;
@@ -1726,7 +1733,7 @@ Mitigation:
 - custom voice selection;
 - backend proxy for OpenAI;
 - billing/usage UI;
-- packaged key storage.
+- keychain storage.
 
 ## Future phases after MVP
 

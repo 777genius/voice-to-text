@@ -22,6 +22,10 @@ const messages = {
       processing: 'Processing...',
       hotkeyHint: '{hotkey} to start/stop recording',
       miniHotkeyPrompt: 'Press {hotkey}',
+      incomingTranslation: 'Incoming translation',
+      incomingTranslationStart: 'Start incoming subtitles',
+      incomingTranslationStop: 'Stop incoming subtitles',
+      incomingTranslationEmpty: 'Translated system audio will appear here',
     },
     settings: {
       title: 'Settings',
@@ -54,6 +58,11 @@ const messages = {
         placeholder: 'Leave empty to use the built-in key',
         hintLine1: 'You can provide your own API key or leave it empty to use the built-in key.',
         hintLine2: 'Use your own key if you want your own quotas and limits.',
+      },
+      openaiApiKey: {
+        label: 'OpenAI API Key',
+        placeholder: 'Leave empty to use OPENAI_API_KEY from env',
+        hint: 'Used only for live translation and incoming subtitles.',
       },
       whisper: {
         label: 'Whisper model',
@@ -393,6 +402,10 @@ const messages = {
       processing: 'Обработка...',
       hotkeyHint: '{hotkey} для старта/остановки записи',
       miniHotkeyPrompt: 'Нажмите {hotkey}',
+      incomingTranslation: 'Входящий перевод',
+      incomingTranslationStart: 'Включить входящие субтитры',
+      incomingTranslationStop: 'Остановить входящие субтитры',
+      incomingTranslationEmpty: 'Здесь появится перевод системного звука',
     },
     settings: {
       title: 'Настройки',
@@ -425,6 +438,11 @@ const messages = {
         placeholder: 'Оставьте пустым для использования встроенного ключа',
         hintLine1: 'Можете указать свой API ключ или оставить пустым для использования встроенного ключа.',
         hintLine2: 'Свой ключ нужен если хотите использовать собственные квоты и лимиты.',
+      },
+      openaiApiKey: {
+        label: 'OpenAI API Key',
+        placeholder: 'Оставьте пустым, чтобы использовать OPENAI_API_KEY из env',
+        hint: 'Используется только для live-перевода и входящих субтитров.',
       },
       whisper: {
         label: 'Модель Whisper',
@@ -764,6 +782,10 @@ const messages = {
       processing: 'Procesando...',
       hotkeyHint: '{hotkey} para iniciar/detener la grabación',
       miniHotkeyPrompt: 'Pulsa {hotkey}',
+      incomingTranslation: 'Traducción entrante',
+      incomingTranslationStart: 'Iniciar subtítulos entrantes',
+      incomingTranslationStop: 'Detener subtítulos entrantes',
+      incomingTranslationEmpty: 'La traducción del audio del sistema aparecerá aquí',
     },
     settings: {
       title: 'Ajustes',
@@ -796,6 +818,11 @@ const messages = {
         placeholder: 'Déjelo vacío para usar la clave integrada',
         hintLine1: 'Puede indicar su propia clave API o dejarla vacía para usar la integrada.',
         hintLine2: 'Use su propia clave si quiere sus propias cuotas y límites.',
+      },
+      openaiApiKey: {
+        label: 'OpenAI API Key',
+        placeholder: 'Déjelo vacío para usar OPENAI_API_KEY desde env',
+        hint: 'Se usa solo para traducción en directo y subtítulos entrantes.',
       },
       whisper: {
         label: 'Modelo Whisper',
@@ -1135,6 +1162,10 @@ const messages = {
       processing: 'Traitement...',
       hotkeyHint: '{hotkey} pour démarrer/arrêter l’enregistrement',
       miniHotkeyPrompt: 'Appuyez sur {hotkey}',
+      incomingTranslation: 'Traduction entrante',
+      incomingTranslationStart: 'Démarrer les sous-titres entrants',
+      incomingTranslationStop: 'Arrêter les sous-titres entrants',
+      incomingTranslationEmpty: 'La traduction de l’audio système apparaîtra ici',
     },
     settings: {
       title: 'Paramètres',
@@ -1167,6 +1198,11 @@ const messages = {
         placeholder: 'Laisser vide pour utiliser la clé intégrée',
         hintLine1: 'Vous pouvez fournir votre clé API ou laisser vide pour la clé intégrée.',
         hintLine2: 'Utilisez votre clé si vous voulez vos propres quotas et limites.',
+      },
+      openaiApiKey: {
+        label: 'OpenAI API Key',
+        placeholder: 'Laisser vide pour utiliser OPENAI_API_KEY depuis env',
+        hint: 'Utilisé uniquement pour la traduction en direct et les sous-titres entrants.',
       },
       whisper: {
         label: 'Modèle Whisper',
@@ -1506,6 +1542,10 @@ const messages = {
       processing: 'Verarbeiten...',
       hotkeyHint: '{hotkey} zum Starten/Stoppen der Aufnahme',
       miniHotkeyPrompt: 'Drücken Sie {hotkey}',
+      incomingTranslation: 'Eingehende Übersetzung',
+      incomingTranslationStart: 'Eingehende Untertitel starten',
+      incomingTranslationStop: 'Eingehende Untertitel stoppen',
+      incomingTranslationEmpty: 'Übersetztes Systemaudio erscheint hier',
     },
     settings: {
       title: 'Einstellungen',
@@ -1538,6 +1578,11 @@ const messages = {
         placeholder: 'Leer lassen, um den integrierten Schlüssel zu verwenden',
         hintLine1: 'Sie können Ihren eigenen API-Schlüssel angeben oder leer lassen.',
         hintLine2: 'Nutzen Sie den eigenen Schlüssel für eigene Quoten und Limits.',
+      },
+      openaiApiKey: {
+        label: 'OpenAI API Key',
+        placeholder: 'Leer lassen, um OPENAI_API_KEY aus env zu verwenden',
+        hint: 'Nur für Live-Übersetzung und eingehende Untertitel.',
       },
       whisper: {
         label: 'Whisper-Modell',
@@ -1877,6 +1922,10 @@ const messages = {
       processing: 'Обробка...',
       hotkeyHint: '{hotkey} для старту/зупинки запису',
       miniHotkeyPrompt: 'Натисніть {hotkey}',
+      incomingTranslation: 'Вхідний переклад',
+      incomingTranslationStart: 'Увімкнути вхідні субтитри',
+      incomingTranslationStop: 'Зупинити вхідні субтитри',
+      incomingTranslationEmpty: 'Тут зявиться переклад системного звуку',
     },
     settings: {
       title: 'Налаштування',
@@ -1909,6 +1958,11 @@ const messages = {
         placeholder: 'Залиште порожнім, щоб використовувати вбудований ключ',
         hintLine1: 'Можна вказати власний API ключ або залишити порожнім для вбудованого.',
         hintLine2: 'Власний ключ потрібен, якщо хочете власні квоти та ліміти.',
+      },
+      openaiApiKey: {
+        label: 'OpenAI API Key',
+        placeholder: 'Залиште порожнім, щоб використовувати OPENAI_API_KEY з env',
+        hint: 'Використовується тільки для live-перекладу та вхідних субтитрів.',
       },
       whisper: {
         label: 'Модель Whisper',

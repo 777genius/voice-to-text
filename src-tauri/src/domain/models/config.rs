@@ -250,6 +250,10 @@ pub struct AppConfig {
     /// Активный режим записи. dictation = STT в текст, live_translation = OpenAI realtime translate.
     #[serde(default)]
     pub recording_mode: RecordingMode,
+
+    /// User-provided OpenAI API key for live translation and incoming subtitles.
+    #[serde(default)]
+    pub openai_api_key: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -271,6 +275,7 @@ impl Default for AppConfig {
             keep_history: true,
             max_history_items: 20,
             recording_mode: RecordingMode::default(),
+            openai_api_key: None,
         }
     }
 }
@@ -455,6 +460,7 @@ mod tests {
         assert!(config.keep_history);
         assert_eq!(config.max_history_items, 20);
         assert_eq!(config.recording_mode, RecordingMode::Dictation);
+        assert_eq!(config.openai_api_key, None);
     }
 
     #[test]
@@ -494,6 +500,7 @@ mod tests {
         let config: AppConfig =
             serde_json::from_str(legacy).expect("legacy config must deserialize");
         assert_eq!(config.recording_mode, RecordingMode::Dictation);
+        assert_eq!(config.openai_api_key, None);
     }
 
     #[test]

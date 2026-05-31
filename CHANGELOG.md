@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.27] - 2026-05-31
+
+### Added
+- Added OpenAI live translation mode for calls: microphone speech is translated with OpenAI realtime translation and played as English voice into the BlackHole 2ch virtual microphone.
+- Added incoming system-audio subtitles on macOS: app and meeting audio can be transcribed and translated into Russian text in the recording popover.
+- Added an OpenAI API key field in Settings for live translation, with `OPENAI_API_KEY` environment fallback.
+
+### Changed
+- Live translation keeps translated text in the recording popover and does not run dictation auto-copy, auto-paste, or history side effects.
+
+### Fixed
+- Improved translated audio draining and incoming translation queuing so speech is less likely to be clipped or skipped during longer sessions.
+
+---
+
 ## [0.10.26] - 2026-05-19
 
 ### Changed

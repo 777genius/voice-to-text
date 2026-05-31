@@ -21,6 +21,9 @@ import {
   ConnectionQualityPayload,
   TranslationDeltaPayload,
   TranslationErrorPayload,
+  IncomingTranslationStatusPayload,
+  IncomingTranslationTextPayload,
+  IncomingTranslationErrorPayload,
   EVENT_TRANSCRIPTION_PARTIAL,
   EVENT_TRANSCRIPTION_FINAL,
   EVENT_RECORDING_STATUS,
@@ -28,6 +31,10 @@ import {
   EVENT_CONNECTION_QUALITY,
   EVENT_TRANSLATION_DELTA,
   EVENT_TRANSLATION_ERROR,
+  EVENT_INCOMING_TRANSLATION_STATUS,
+  EVENT_INCOMING_TRANSLATION_SOURCE_FINAL,
+  EVENT_INCOMING_TRANSLATION_DELTA,
+  EVENT_INCOMING_TRANSLATION_ERROR,
 } from '../types';
 import type { RecordingMode } from '../types';
 
@@ -61,6 +68,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   // Обновляется из payload.mode у recording:status; live_translation сессии не идут через STT auto-paste.
   const activeRecordingMode = ref<RecordingMode>('dictation');
   const translationText = ref<string>('');
+
+  // Incoming subtitles: system audio -> STT -> text translation. Separate lifecycle.
+  const incomingTranslationStatus = ref<RecordingStatus>(RecordingStatus.Idle);
+  const incomingTranslationSessionId = ref<number | null>(null);
+  const incomingSourceText = ref<string>('');
+  const incomingTranslationText = ref<string>('');
+  const incomingTranslationError = ref<string | null>(null);
 
   // Retry логика подключения (когда запись ещё не стартанула и мы пытаемся подключиться к STT)
   const isConnecting = ref<boolean>(false);
@@ -251,6 +265,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   let unlistenConnectionQuality: UnlistenFn | null = null;
   let unlistenTranslationDelta: UnlistenFn | null = null;
   let unlistenTranslationError: UnlistenFn | null = null;
+  let unlistenIncomingStatus: UnlistenFn | null = null;
+  let unlistenIncomingSourceFinal: UnlistenFn | null = null;
+  let unlistenIncomingDelta: UnlistenFn | null = null;
+  let unlistenIncomingError: UnlistenFn | null = null;
 
   function bumpLastSeenSessionId(next: number): void {
     if (next > lastSeenSessionId.value) {
@@ -1574,6 +1592,84 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         }
       );
 
+      unlistenIncomingStatus = await listen<IncomingTranslationStatusPayload>(
+        EVENT_INCOMING_TRANSLATION_STATUS,
+        (event) => {
+          const payloadSessionId = event.payload.session_id;
+          const nextStatus = event.payload.status;
+          const isNewStart =
+            nextStatus === RecordingStatus.Starting || nextStatus === RecordingStatus.Recording;
+
+          if (isNewStart && payloadSessionId !== incomingTranslationSessionId.value) {
+            incomingTranslationSessionId.value = payloadSessionId;
+            incomingSourceText.value = '';
+            incomingTranslationText.value = '';
+            incomingTranslationError.value = null;
+          }
+
+          if (
+            incomingTranslationSessionId.value !== null &&
+            payloadSessionId !== incomingTranslationSessionId.value
+          ) {
+            return;
+          }
+
+          incomingTranslationStatus.value = nextStatus;
+          if (nextStatus === RecordingStatus.Idle) {
+            incomingTranslationSessionId.value = null;
+          }
+        }
+      );
+
+      unlistenIncomingSourceFinal = await listen<IncomingTranslationTextPayload>(
+        EVENT_INCOMING_TRANSLATION_SOURCE_FINAL,
+        (event) => {
+          if (event.payload.session_id !== incomingTranslationSessionId.value) return;
+          if (event.payload.text) {
+            incomingSourceText.value = appendTranscriptText(
+              incomingSourceText.value,
+              event.payload.text
+            );
+          }
+        }
+      );
+
+      unlistenIncomingDelta = await listen<IncomingTranslationTextPayload>(
+        EVENT_INCOMING_TRANSLATION_DELTA,
+        (event) => {
+          if (event.payload.session_id !== incomingTranslationSessionId.value) return;
+          if (event.payload.text) {
+            incomingTranslationError.value = null;
+            if (incomingTranslationStatus.value === RecordingStatus.Error) {
+              incomingTranslationStatus.value = RecordingStatus.Recording;
+            }
+            incomingTranslationText.value = appendTranscriptText(
+              incomingTranslationText.value,
+              event.payload.text
+            );
+          }
+        }
+      );
+
+      unlistenIncomingError = await listen<IncomingTranslationErrorPayload>(
+        EVENT_INCOMING_TRANSLATION_ERROR,
+        (event) => {
+          if (
+            incomingTranslationSessionId.value !== null &&
+            event.payload.session_id !== incomingTranslationSessionId.value
+          ) {
+            return;
+          }
+          incomingTranslationSessionId.value = event.payload.session_id;
+          if (['configuration', 'authentication', 'rate_limited'].includes(event.payload.error_type)) {
+            incomingTranslationError.value = event.payload.error;
+            incomingTranslationStatus.value = RecordingStatus.Error;
+          } else {
+            console.warn('[incoming_translation:transient_error]', event.payload);
+          }
+        }
+      );
+
       console.log('Event listeners initialized successfully');
     } catch (err) {
       console.error('Failed to initialize event listeners:', err);
@@ -2310,6 +2406,17 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
+  async function toggleIncomingTranslation(): Promise<void> {
+    if (!isTauriAvailable()) return;
+    incomingTranslationError.value = null;
+    try {
+      await invoke<string>('toggle_incoming_translation');
+    } catch (err) {
+      incomingTranslationError.value = String(err);
+      incomingTranslationStatus.value = RecordingStatus.Error;
+    }
+  }
+
   function cleanup() {
     if (unlistenPartial) {
       unlistenPartial();
@@ -2339,6 +2446,22 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       unlistenTranslationError();
       unlistenTranslationError = null;
     }
+    if (unlistenIncomingStatus) {
+      unlistenIncomingStatus();
+      unlistenIncomingStatus = null;
+    }
+    if (unlistenIncomingSourceFinal) {
+      unlistenIncomingSourceFinal();
+      unlistenIncomingSourceFinal = null;
+    }
+    if (unlistenIncomingDelta) {
+      unlistenIncomingDelta();
+      unlistenIncomingDelta = null;
+    }
+    if (unlistenIncomingError) {
+      unlistenIncomingError();
+      unlistenIncomingError = null;
+    }
 
     clearHotkeyStopFinalizeTimer();
 
@@ -2366,6 +2489,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     connectionQuality,
     activeRecordingMode,
     translationText,
+    incomingTranslationStatus,
+    incomingTranslationSessionId,
+    incomingSourceText,
+    incomingTranslationText,
+    incomingTranslationError,
 
     // Computed
     isStarting,
@@ -2388,6 +2516,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     isListeningPlaceholder,
     isConnectingPlaceholder,
     displayText,
+    isIncomingTranslationActive: computed(
+      () =>
+        incomingTranslationStatus.value === RecordingStatus.Starting ||
+        incomingTranslationStatus.value === RecordingStatus.Recording ||
+        incomingTranslationStatus.value === RecordingStatus.Processing
+    ),
+    hasIncomingTranslationText: computed(() => incomingTranslationText.value.trim().length > 0),
 
     // Actions
     initialize,
@@ -2399,6 +2534,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     stopRecording,
     clearText,
     toggleRecording,
+    toggleIncomingTranslation,
     reconcileBackendStatus,
     cleanup,
   };

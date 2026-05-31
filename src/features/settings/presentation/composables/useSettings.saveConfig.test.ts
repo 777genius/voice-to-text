@@ -350,4 +350,52 @@ describe('useSettings saveConfig', () => {
       auto_paste_text: true,
     });
   });
+
+  it('сбрасывает OpenAI key пустой строкой', async () => {
+    const store = useSettingsStore();
+    store.setLanguage('ru', { persist: false });
+    store.setMicrophoneSensitivity(100, { persist: false });
+    store.setRecordingHotkey('CmdOrCtrl+Shift+X');
+    store.setAutoCopyToClipboard(false);
+    store.setAutoPasteText(false);
+    store.setPlayCompletionSound(false);
+    store.setHideRecordingWindowOnHotkey(false);
+    store.setShowMiniRecordingWindow(false);
+    store.setKeepRecordingUntilManualStop(false);
+    store.setSelectedAudioDevice('');
+    store.setStreamingKeyterms('', { persist: false });
+    store.setOpenaiApiKey('sk-old');
+    store.capturePersistedState();
+
+    store.setOpenaiApiKey('');
+
+    tauriSettingsServiceMock.getSttConfig.mockResolvedValueOnce({
+      language: 'ru',
+      streaming_keyterms: null,
+    });
+
+    tauriSettingsServiceMock.getAppConfig.mockResolvedValueOnce({
+      microphone_sensitivity: 100,
+      recording_hotkey: 'CmdOrCtrl+Shift+X',
+      auto_copy_to_clipboard: false,
+      auto_paste_text: false,
+      play_completion_sound: false,
+      hide_recording_window_on_hotkey: false,
+      show_mini_recording_window: false,
+      keep_recording_until_manual_stop: false,
+      selected_audio_device: null,
+      recording_mode: 'dictation',
+      openai_api_key: 'sk-old',
+    });
+
+    tauriSettingsServiceMock.updateAppConfig.mockResolvedValue(undefined);
+
+    const { saveConfig } = useSettings();
+    await expect(saveConfig()).resolves.toBe(true);
+
+    expect(tauriSettingsServiceMock.updateSttConfig).not.toHaveBeenCalled();
+    expect(tauriSettingsServiceMock.updateAppConfig).toHaveBeenCalledWith({
+      openai_api_key: '',
+    });
+  });
 });
