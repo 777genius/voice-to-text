@@ -139,6 +139,8 @@ fn should_hide_recording_window_immediately_on_hotkey_stop(
 async fn hide_recording_window_for_hotkey_stop_if_needed(
     window: &tauri::WebviewWindow,
     config: &AppConfig,
+    state: &AppState,
+    accepted_press_seq: u64,
     context: &'static str,
 ) -> Result<bool, String> {
     let window_visible = window.is_visible().map_err(|e| e.to_string())?;
@@ -156,6 +158,19 @@ async fn hide_recording_window_for_hotkey_stop_if_needed(
     if should_hide_immediately && window_visible {
         let _ = window.emit(EVENT_RECORDING_WINDOW_WILL_HIDE_FOR_HOTKEY_STOP, ());
         tokio::time::sleep(Duration::from_millis(hotkey_stop_hide_ui_flush_ms(config))).await;
+        if hotkey_action_is_stale(
+            accepted_press_seq,
+            state
+                .recording_hotkey_accepted_press_seq
+                .load(Ordering::SeqCst),
+        ) {
+            log::info!(
+                "[HotkeyDiag] hotkey stop hide skipped because a newer press was accepted (context={}, stop_press_seq={})",
+                context,
+                accepted_press_seq
+            );
+            return Ok(false);
+        }
         window.hide().map_err(|e| e.to_string())?;
         return Ok(true);
     }
@@ -218,6 +233,7 @@ fn recording_hotkey_press_intent(
 
     match status {
         RecordingStatus::Idle => RecordingHotkeyDispatchIntent::Start,
+        RecordingStatus::Processing => RecordingHotkeyDispatchIntent::Start,
         _ => RecordingHotkeyDispatchIntent::Ignore,
     }
 }
@@ -275,6 +291,22 @@ fn should_ignore_hotkey_stop_after_start(
     current_press_seq: u64,
 ) -> bool {
     now_ms <= suppressed_until_ms && current_press_seq <= suppression_press_seq
+}
+
+fn hotkey_action_is_stale(action_press_seq: u64, current_press_seq: u64) -> bool {
+    action_press_seq != current_press_seq
+}
+
+fn should_cancel_hold_to_record_pending_start(
+    hold_to_record: bool,
+    action_press_seq: Option<u64>,
+    current_press_seq: u64,
+    released_since_press: bool,
+) -> bool {
+    hold_to_record
+        && action_press_seq.is_some_and(|seq| {
+            hotkey_action_is_stale(seq, current_press_seq) || released_since_press
+        })
 }
 
 fn should_ignore_immediate_hotkey_stop_after_start(state: &AppState) -> bool {
@@ -1594,8 +1626,9 @@ where
 mod snapshot_contract_tests {
     use super::{
         auto_paste_text_can_trigger_recording_hotkey, calculate_recording_window_position,
-        is_audio_capture_start_failure, recording_hotkey_press_intent,
+        hotkey_action_is_stale, is_audio_capture_start_failure, recording_hotkey_press_intent,
         recording_hotkey_release_intent, resolve_streaming_keyterms_update,
+        should_cancel_hold_to_record_pending_start,
         should_hide_recording_window_immediately_on_hotkey_stop,
         should_ignore_hotkey_stop_after_start, should_show_recording_window_on_processing_hotkey,
         validate_auto_paste_target_for_focus, AppConfigSnapshotData, RecordingHotkeyDispatchIntent,
@@ -1870,7 +1903,7 @@ mod snapshot_contract_tests {
         );
         assert_eq!(
             recording_hotkey_press_intent(true, RecordingStatus::Processing),
-            RecordingHotkeyDispatchIntent::Ignore
+            RecordingHotkeyDispatchIntent::Start
         );
         assert_eq!(
             recording_hotkey_release_intent(true, RecordingStatus::Starting),
@@ -1884,6 +1917,40 @@ mod snapshot_contract_tests {
             recording_hotkey_release_intent(true, RecordingStatus::Idle),
             RecordingHotkeyDispatchIntent::Ignore
         );
+    }
+
+    #[test]
+    fn hold_to_record_cancels_stale_release_and_pending_start() {
+        assert!(hotkey_action_is_stale(1, 2));
+        assert!(!hotkey_action_is_stale(2, 2));
+
+        assert!(should_cancel_hold_to_record_pending_start(
+            true,
+            Some(1),
+            2,
+            false
+        ));
+        assert!(should_cancel_hold_to_record_pending_start(
+            true,
+            Some(2),
+            2,
+            true
+        ));
+        assert!(!should_cancel_hold_to_record_pending_start(
+            true,
+            Some(2),
+            2,
+            false
+        ));
+        assert!(!should_cancel_hold_to_record_pending_start(
+            false,
+            Some(1),
+            2,
+            true
+        ));
+        assert!(!should_cancel_hold_to_record_pending_start(
+            true, None, 2, true
+        ));
     }
 
     #[test]
@@ -2211,6 +2278,8 @@ pub async fn toggle_recording_with_window_internal(
                 hide_recording_window_for_hotkey_stop_if_needed(
                     &window,
                     &config,
+                    state,
+                    accepted_press_seq,
                     "internal-starting",
                 )
                 .await?
@@ -2284,8 +2353,14 @@ pub async fn toggle_recording_with_window_internal(
                 log::info!("[HotkeyDiag] hotkey stop window was already hidden before guard");
                 true
             } else {
-                hide_recording_window_for_hotkey_stop_if_needed(&window, &config, "internal")
-                    .await?
+                hide_recording_window_for_hotkey_stop_if_needed(
+                    &window,
+                    &config,
+                    state,
+                    accepted_press_seq,
+                    "internal",
+                )
+                .await?
             };
 
             if let Err(err) = stop_recording_and_emit_idle(state, &app_handle, true).await {
@@ -3332,6 +3407,28 @@ fn queue_recording_start_after_stop(
                 return;
             };
 
+            let hold_to_record = state.config.read().await.hold_to_record;
+            if should_cancel_hold_to_record_pending_start(
+                hold_to_record,
+                stop_suppression_press_seq,
+                state
+                    .recording_hotkey_accepted_press_seq
+                    .load(Ordering::SeqCst),
+                state
+                    .recording_hotkey_released_since_press
+                    .load(Ordering::SeqCst),
+            ) {
+                state
+                    .recording_start_pending_after_stop
+                    .store(false, Ordering::SeqCst);
+                log::info!(
+                    "[HotkeyDiag] queued hold-to-record start cancelled before Idle (source={}, press_seq={:?})",
+                    source,
+                    stop_suppression_press_seq
+                );
+                return;
+            }
+
             let status = active_recording_status(state.inner()).await;
             match status {
                 RecordingStatus::Idle => break,
@@ -3379,6 +3476,25 @@ fn queue_recording_start_after_stop(
         state
             .recording_start_pending_after_stop
             .store(false, Ordering::SeqCst);
+
+        let hold_to_record = state.config.read().await.hold_to_record;
+        if should_cancel_hold_to_record_pending_start(
+            hold_to_record,
+            stop_suppression_press_seq,
+            state
+                .recording_hotkey_accepted_press_seq
+                .load(Ordering::SeqCst),
+            state
+                .recording_hotkey_released_since_press
+                .load(Ordering::SeqCst),
+        ) {
+            log::info!(
+                "[HotkeyDiag] queued hold-to-record start cancelled at Idle (source={}, press_seq={:?})",
+                source,
+                stop_suppression_press_seq
+            );
+            return;
+        }
 
         if let Err(err) = start_recording_after_queued_hotkey_idle(
             state,
@@ -3798,6 +3914,8 @@ fn dispatch_recording_hotkey_toggle(app_clone: AppHandle, accepted_press_seq: u6
                         match hide_recording_window_for_hotkey_stop_if_needed(
                             &window,
                             &config,
+                            state.inner(),
+                            accepted_press_seq,
                             "pre-guard-stop",
                         )
                         .await
@@ -3900,6 +4018,19 @@ fn dispatch_recording_hotkey_release(app_clone: AppHandle, accepted_press_seq: u
                 }
             }
         }
+
+        let current_press_seq = state
+            .recording_hotkey_accepted_press_seq
+            .load(Ordering::SeqCst);
+        if hold_to_record && hotkey_action_is_stale(accepted_press_seq, current_press_seq) {
+            log::info!(
+                "[HotkeyDiag] hotkey release ignored because a newer press is active (release_press_seq={}, current_press_seq={})",
+                accepted_press_seq,
+                current_press_seq
+            );
+            return;
+        }
+
         let intent = recording_hotkey_release_intent(hold_to_record, status);
         log::info!(
             "[HotkeyDiag] hotkey release intent={:?}, hold_to_record={}, status={:?}",

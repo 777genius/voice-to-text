@@ -58,6 +58,7 @@ const appVersion = ref('');
 const glowColor = ref<'blue' | 'red' | null>(null);
 const isMiniOpening = ref(false);
 const isMiniClosing = ref(false);
+const isMiniAnimationReset = ref(false);
 const miniHideSide = ref<'left' | 'right'>('right');
 const isMiniWindow = computed(() => appConfigStore.showMiniRecordingWindow);
 const useMiniLayout = computed(() => isMiniWindow.value && !showUpdateDialog.value);
@@ -223,6 +224,7 @@ function applyRecordingWindowSize() {
 
 let hideRecordingWindowTimeout: number | null = null;
 let miniOpeningTimer: number | null = null;
+let miniCloseResetTimer: number | null = null;
 let hotkeyStartIntentUntilMs = 0;
 const HOTKEY_START_INTENT_SUPPRESS_HIDE_MS = 5_000;
 
@@ -234,6 +236,10 @@ function cancelPendingHideRecordingWindow() {
   if (hideRecordingWindowTimeout !== null) {
     window.clearTimeout(hideRecordingWindowTimeout);
     hideRecordingWindowTimeout = null;
+  }
+  if (miniCloseResetTimer !== null) {
+    window.clearTimeout(miniCloseResetTimer);
+    miniCloseResetTimer = null;
   }
   isMiniClosing.value = false;
 }
@@ -261,21 +267,43 @@ async function resolveMiniHideSide(): Promise<'left' | 'right'> {
 
 async function beginMiniCloseAnimation() {
   miniHideSide.value = await resolveMiniHideSide();
-  isMiniOpening.value = false;
-  isMiniClosing.value = true;
-}
-
-function playMiniOpenAnimation() {
-  if (!useMiniLayout.value) return;
-
-  isMiniClosing.value = false;
-  isMiniOpening.value = false;
   if (miniOpeningTimer !== null) {
     window.clearTimeout(miniOpeningTimer);
     miniOpeningTimer = null;
   }
+  if (miniCloseResetTimer !== null) {
+    window.clearTimeout(miniCloseResetTimer);
+    miniCloseResetTimer = null;
+  }
+  isMiniAnimationReset.value = false;
+  isMiniOpening.value = false;
+  isMiniClosing.value = true;
+  miniCloseResetTimer = window.setTimeout(() => {
+    isMiniClosing.value = false;
+    miniCloseResetTimer = null;
+  }, MINI_CLOSE_ANIMATION_MS + 40);
+}
 
+async function playMiniOpenAnimation() {
+  if (!useMiniLayout.value) return;
+
+  if (miniOpeningTimer !== null) {
+    window.clearTimeout(miniOpeningTimer);
+    miniOpeningTimer = null;
+  }
+  if (miniCloseResetTimer !== null) {
+    window.clearTimeout(miniCloseResetTimer);
+    miniCloseResetTimer = null;
+  }
+
+  isMiniOpening.value = false;
+  isMiniClosing.value = false;
+  isMiniAnimationReset.value = true;
+  await nextTick();
+
+  void document.querySelector<HTMLElement>('.popover.mini')?.offsetHeight;
   window.requestAnimationFrame(() => {
+    isMiniAnimationReset.value = false;
     isMiniOpening.value = true;
     miniOpeningTimer = window.setTimeout(() => {
       isMiniOpening.value = false;
@@ -504,6 +532,10 @@ onUnmounted(() => {
     window.clearTimeout(miniOpeningTimer);
     miniOpeningTimer = null;
   }
+  if (miniCloseResetTimer !== null) {
+    window.clearTimeout(miniCloseResetTimer);
+    miniCloseResetTimer = null;
+  }
   cancelPendingHideRecordingWindow();
 });
 
@@ -637,6 +669,7 @@ const minimizeWindow = async () => {
       class="popover"
       :class="{
         mini: useMiniLayout,
+        'mini-animation-reset': isMiniAnimationReset,
         'mini-opening': isMiniOpening,
         'mini-closing': isMiniClosing,
         'mini-closing-left': isMiniClosing && miniHideSide === 'left',
@@ -915,6 +948,13 @@ const minimizeWindow = async () => {
 
 .popover.mini.mini-opening {
   animation: mini-pop-in 520ms cubic-bezier(0.2, 0.9, 0.25, 1.15) both;
+}
+
+.popover.mini.mini-animation-reset {
+  opacity: 1 !important;
+  transform: translate3d(0, 0, 0) scale(1) !important;
+  transition: none !important;
+  animation: none !important;
 }
 
 .popover.mini.mini-closing {
