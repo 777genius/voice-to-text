@@ -16,7 +16,7 @@ export default defineNuxtConfig({
   compatibilityDate: "2026-01-19",
   ssr: true,
   experimental: {
-    // Не инлайним стили — они раздувают HTML на 60+ КиБ,
+    // Не инлайним стили - они раздувают HTML на 60+ КиБ,
     // а render-blocking Vuetify CSS всё равно грузится отдельно
     inlineSSRStyles: false
   },
@@ -70,12 +70,12 @@ export default defineNuxtConfig({
         "/sitemap.xml",
         "/robots.txt",
         "/_robots.txt",
-        // "/releases.json" — теперь подгружаем с GitHub API в рантайме
+        "/releases.json",
       ]
     }
   },
   routeRules: {
-    // Статика с хешем в имени — кешируем навсегда
+    // Статика с хешем в имени - кешируем навсегда
     "/_nuxt/**": {
       headers: { "Cache-Control": "public, max-age=31536000, immutable" }
     }
@@ -114,7 +114,7 @@ export default defineNuxtConfig({
   },
   runtimeConfig: {
     // Опциональный токен для GitHub API: без него лимит 60 req/час на IP,
-    // с токеном — 5000 req/час. Для прода рекомендуется выставить GITHUB_TOKEN.
+    // с токеном - 5000 req/час. Для прода рекомендуется выставить GITHUB_TOKEN.
     github: {
       token: process.env.GITHUB_TOKEN
     },

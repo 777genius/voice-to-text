@@ -1,16 +1,15 @@
 import { computed, onMounted, ref } from "vue";
-import { detectMacArch, detectPlatform, getNavigatorPlatformSignature } from "~/utils/platform";
+import { detectPlatformInfo } from "~/utils/platform";
+import type { PlatformArch, PlatformOs } from "~/types/platform";
 
 export const usePlatform = () => {
-  const platform = ref("unknown");
-  const arch = ref("unknown");
+  const platform = ref<PlatformOs>("unknown");
+  const arch = ref<PlatformArch>("unknown");
 
-  onMounted(() => {
-    const signature = getNavigatorPlatformSignature(navigator);
-    platform.value = detectPlatform(signature);
-    if (platform.value === "macos") {
-      arch.value = detectMacArch(signature);
-    }
+  onMounted(async () => {
+    const detected = await detectPlatformInfo(window.navigator);
+    platform.value = detected.os;
+    arch.value = detected.arch;
   });
 
   const label = computed(() => {

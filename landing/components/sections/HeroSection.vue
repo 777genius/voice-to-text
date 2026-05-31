@@ -3,13 +3,26 @@ import { mdiBullseye, mdiLightningBolt, mdiSpeedometer, mdiTranslate } from '@md
 
 const { content } = useLandingContent();
 const { t, locale } = useI18n();
-const { data: releaseData } = useReleaseDownloads();
+const downloadStore = useDownloadStore();
+const { data: releaseData, resolve } = useReleaseDownloads();
 const { isDark } = useBrowserTheme();
 
-const releaseVersion = computed(() => releaseData.value?.version || null);
+onMounted(() => {
+  void downloadStore.init();
+});
+
+const platformRelease = computed(() => {
+  if (downloadStore.os === "macos") return resolve("macos", downloadStore.arch);
+  if (downloadStore.os === "windows") return resolve("windows", "x64");
+  if (downloadStore.os === "linux") return resolve("linux", "x64");
+  return null;
+});
+
+const releaseVersion = computed(() => platformRelease.value?.version || releaseData.value?.version || null);
 const releaseDate = computed(() => {
-  if (!releaseData.value?.pubDate) return '';
-  return new Date(releaseData.value.pubDate).toLocaleDateString(locale.value, {
+  const pubDate = platformRelease.value?.pubDate || releaseData.value?.pubDate;
+  if (!pubDate) return '';
+  return new Date(pubDate).toLocaleDateString(locale.value, {
     year: 'numeric',
     month: 'short',
     day: 'numeric',

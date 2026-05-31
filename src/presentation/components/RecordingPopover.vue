@@ -610,14 +610,6 @@ const minimizeWindow = async () => {
           <div class="mini-actions no-drag">
             <UpdateIndicator compact @click="openUpdateDialog" />
             <button
-              class="mini-icon-button"
-              :class="{ active: store.isIncomingTranslationActive }"
-              @click="store.toggleIncomingTranslation()"
-              :title="store.isIncomingTranslationActive ? t('main.incomingTranslationStop') : t('main.incomingTranslationStart')"
-            >
-              <span class="mdi mdi-closed-caption-outline"></span>
-            </button>
-            <button
               v-if="authStore.isAuthenticated"
               class="mini-icon-button"
               @click="openProfile"

@@ -61,18 +61,21 @@ body {
 .download-section__card-icon-wrap,
 .opensource-section__card-icon-wrap,
 .faq-section__panel-icon-wrap {
-  transform-style: preserve-3d;
+  transform-style: flat;
   perspective: 720px;
+  transform-origin: center;
   animation: landingIcon3dTurn 7.5s ease-in-out infinite;
   will-change: transform;
 }
 
+.feature-card__icon-bg,
+.providers-section__card-icon-bg,
 .feature-card__icon,
 .providers-section__card-icon,
 .download-section__card-icon,
 .opensource-section__card-icon,
 .faq-section__panel-icon {
-  transform: translateZ(14px);
+  transform: none !important;
 }
 
 .feature-card:nth-child(2n) .feature-card__icon-wrap,
@@ -94,15 +97,15 @@ body {
 @keyframes landingIcon3dTurn {
   0%,
   100% {
-    transform: rotateX(0deg) rotateY(-8deg) translateY(0);
+    transform: rotateX(0deg) rotateY(-8deg) rotateZ(-1.5deg) translateY(0);
   }
 
   35% {
-    transform: rotateX(8deg) rotateY(9deg) translateY(-2px);
+    transform: rotateX(8deg) rotateY(9deg) rotateZ(2.5deg) translateY(-2px);
   }
 
   65% {
-    transform: rotateX(-6deg) rotateY(6deg) translateY(1px);
+    transform: rotateX(-6deg) rotateY(6deg) rotateZ(-2deg) translateY(1px);
   }
 }
 

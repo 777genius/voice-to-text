@@ -1,90 +1,16 @@
 import type { DownloadArch, DownloadOs } from "~/data/downloads";
+import type { DownloadsApiResponse, GitHubRelease, ResolveResult } from "~/utils/releaseDownloads";
+import {
+  createEmptyDownloadsResponse,
+  normalizeGitHubReleases,
+  resolveReleaseDownload,
+} from "~/utils/releaseDownloads";
 
-// --- Типы GitHub API ---
+const CACHE_KEY = "vtai_releases_v2";
+const CACHE_TTL = 10 * 60 * 1000;
+const RELEASES_PER_PAGE = 30;
 
-type ReleaseAsset = {
-  name: string;
-  browser_download_url: string;
-  size: number;
-};
-
-type GitHubRelease = {
-  tag_name: string;
-  name: string;
-  body: string;
-  published_at: string;
-  assets: ReleaseAsset[];
-};
-
-// --- Типы нашего API ---
-
-type Variant = { url: string | null; platformKey: string | null; version: string | null };
-
-type DownloadsApiResponse = {
-  ok: boolean;
-  source: "github-releases";
-  fetchedAt: string;
-  version: string | null;
-  notes: string | null;
-  pubDate: string | null;
-  variants: {
-    macos: { arm64: Variant; x64: Variant; universal: Variant };
-    windows: { x64: Variant };
-    linux: { appimage: Variant; deb: Variant };
-  };
-};
-
-type ResolveResult = { url: string; version: string | null } | null;
-
-// --- Парсинг GitHub Release → наш формат ---
-
-const CACHE_KEY = "vtai_releases";
-const CACHE_TTL = 10 * 60 * 1000; // 10 минут
-
-const emptyVariant: Variant = { url: null, platformKey: null, version: null };
-
-function findAsset(assets: ReleaseAsset[], pattern: RegExp): ReleaseAsset | null {
-  return assets.find((a) => pattern.test(a.name)) || null;
-}
-
-function toVariant(asset: ReleaseAsset | null, version: string | null): Variant {
-  if (!asset) return { ...emptyVariant };
-  return { url: asset.browser_download_url, platformKey: asset.name, version };
-}
-
-function parseGitHubRelease(release: GitHubRelease): DownloadsApiResponse {
-  const version = release.tag_name?.replace(/^v/, "") || null;
-  const assets = (release.assets || []).filter(
-    (a) => !a.name.endsWith(".sig") && !a.name.endsWith(".json") && !a.name.endsWith(".tar.gz")
-  );
-
-  return {
-    ok: assets.length > 0,
-    source: "github-releases",
-    fetchedAt: new Date().toISOString(),
-    version,
-    notes: release.body || null,
-    pubDate: release.published_at || null,
-    variants: {
-      macos: {
-        arm64: toVariant(findAsset(assets, /_aarch64\.dmg$/i), version),
-        x64: toVariant(findAsset(assets, /_x64\.dmg$/i), version),
-        universal: { ...emptyVariant },
-      },
-      windows: {
-        x64: toVariant(findAsset(assets, /\.msi$/i), version),
-      },
-      linux: {
-        appimage: toVariant(findAsset(assets, /\.AppImage$/i), version),
-        deb: toVariant(findAsset(assets, /\.deb$/i), version),
-      },
-    },
-  };
-}
-
-// --- sessionStorage кеш ---
-
-function readCache(): DownloadsApiResponse | null {
+const readCache = (): DownloadsApiResponse | null => {
   try {
     const raw = sessionStorage.getItem(CACHE_KEY);
     if (!raw) return null;
@@ -94,78 +20,88 @@ function readCache(): DownloadsApiResponse | null {
   } catch {
     return null;
   }
-}
+};
 
-function writeCache(data: DownloadsApiResponse): void {
+const writeCache = (data: DownloadsApiResponse): void => {
   try {
     sessionStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), data }));
   } catch {
-    // sessionStorage может быть недоступен (private mode и т.д.)
+    // sessionStorage может быть недоступен в private mode.
   }
-}
-
-// --- Composable ---
+};
 
 export const useReleaseDownloads = () => {
   const config = useRuntimeConfig();
   const githubRepo = (config.public.githubRepo as string) || "777genius/voice-to-text";
-
   const fallbackUrl =
     (config.public.githubReleasesUrl as string) ||
     `https://github.com/${githubRepo}/releases`;
 
-  // useAsyncData дедуплицирует запросы по ключу — все компоненты шарят один результат
-  const { data, pending, error } = useAsyncData<DownloadsApiResponse>("releases", async () => {
-    const cached = readCache();
-    if (cached) return cached;
-
-    const release = await $fetch<GitHubRelease>(
-      `https://api.github.com/repos/${githubRepo}/releases/latest`,
+  const fetchFromGitHub = async (): Promise<DownloadsApiResponse> => {
+    const releases = await $fetch<GitHubRelease[]>(
+      `https://api.github.com/repos/${githubRepo}/releases?per_page=${RELEASES_PER_PAGE}`,
       {
         headers: { Accept: "application/vnd.github+json" },
       }
     );
+    return normalizeGitHubReleases(releases);
+  };
 
-    const parsed = parseGitHubRelease(release);
-    writeCache(parsed);
-    return parsed;
+  const fetchFromStaticSnapshot = async (): Promise<DownloadsApiResponse> => {
+    return await $fetch<DownloadsApiResponse>("/releases.json");
+  };
+
+  const { data, pending, error, execute } = useAsyncData<DownloadsApiResponse>("releases", async () => {
+    const cached = readCache();
+    if (cached) return cached;
+
+    try {
+      const fresh = await fetchFromGitHub();
+      writeCache(fresh);
+      return fresh;
+    } catch {
+      try {
+        const snapshot = await fetchFromStaticSnapshot();
+        writeCache(snapshot);
+        return snapshot;
+      } catch {
+        return createEmptyDownloadsResponse();
+      }
+    }
   }, {
     server: false,
+    immediate: true,
     lazy: true,
   });
 
+  onMounted(() => {
+    if (!data.value && !pending.value) {
+      void execute();
+    }
+  });
+
+  const ensureLoaded = async (): Promise<DownloadsApiResponse | null> => {
+    if (!data.value) {
+      await execute();
+    }
+    return data.value || null;
+  };
+
   const resolve = (os: DownloadOs, arch: DownloadArch | "unknown"): ResolveResult => {
-    const api = data.value;
-    if (!api?.ok) return null;
-
-    if (os === "windows") {
-      const v = api.variants.windows.x64;
-      return v.url ? { url: v.url, version: v.version || api.version } : null;
-    }
-
-    if (os === "linux") {
-      const v = api.variants.linux.appimage.url ? api.variants.linux.appimage : api.variants.linux.deb;
-      return v.url ? { url: v.url, version: v.version || api.version } : null;
-    }
-
-    // macOS: сначала universal, потом по архитектуре
-    if (os === "macos") {
-      const universal = api.variants.macos.universal;
-      if (universal.url) return { url: universal.url, version: universal.version || api.version };
-
-      const byArch = arch === "arm64" ? api.variants.macos.arm64 : api.variants.macos.x64;
-      if (byArch.url) return { url: byArch.url, version: byArch.version || api.version };
-
-      const any = api.variants.macos.arm64.url ? api.variants.macos.arm64 : api.variants.macos.x64;
-      return any.url ? { url: any.url, version: any.version || api.version } : null;
-    }
-
-    return null;
+    return resolveReleaseDownload(data.value, os, arch);
   };
 
   const resolveUrlOrFallback = (os: DownloadOs, arch: DownloadArch | "unknown"): string => {
-    return resolve(os, arch)?.url || fallbackUrl;
+    return resolve(os, arch)?.url || (data.value ? fallbackUrl : "#download");
   };
 
-  return { data, pending, error, fallbackUrl, resolve, resolveUrlOrFallback };
+  return {
+    data,
+    pending,
+    error,
+    fallbackUrl,
+    ensureLoaded,
+    resolve,
+    resolveUrlOrFallback,
+  };
 };

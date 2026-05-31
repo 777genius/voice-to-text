@@ -2,13 +2,25 @@
 import { mdiApple, mdiMicrosoftWindows, mdiPenguin, mdiDownload, mdiCheckCircle } from '@mdi/js';
 import { downloadAssets } from "~/data/downloads";
 
+type DownloadAsset = {
+  id: string;
+  os: (typeof downloadAssets)[number]["os"];
+  arch: (typeof downloadAssets)[number]["arch"];
+  label: string;
+  archLabel: string;
+  url: string;
+};
+
 const { content } = useLandingContent();
 const { t, locale } = useI18n();
 const downloadStore = useDownloadStore();
-const { data: releaseData, resolve } = useReleaseDownloads();
+const { data: releaseData, ensureLoaded, resolve } = useReleaseDownloads();
 const { trackDownloadClick } = useAnalytics();
+const resolvingAssetId = ref<string | null>(null);
 
-onMounted(() => downloadStore.init());
+onMounted(() => {
+  void downloadStore.init();
+});
 
 const platformIcons: Record<string, string> = {
   macos: mdiApple,
@@ -23,7 +35,7 @@ const platformColors: Record<string, string> = {
 };
 
 // Для macOS на маке показываем конкретный arch, иначе "Apple Silicon / Intel"
-const visibleAssets = computed(() =>
+const visibleAssets = computed<DownloadAsset[]>(() =>
   downloadAssets.map((asset) => {
     if (asset.os !== "macos") return { ...asset };
     if (!downloadStore.isMacOs) return { ...asset };
@@ -50,25 +62,60 @@ const orderedVisibleAssets = computed(() => {
   ];
 });
 
-// macOS скачивание — резолвим по реальному arch пользователя
-const getDownloadUrl = (asset: (typeof downloadAssets)[number]) => {
+// macOS скачивание - резолвим по реальному arch пользователя
+const getDownloadUrl = (asset: DownloadAsset) => {
   const arch = asset.os === "macos" ? downloadStore.macArch : asset.arch;
   return resolve(asset.os, arch)?.url || asset.url;
 };
 
-const getDownloadArch = (asset: (typeof downloadAssets)[number]) => {
+const getDownloadArch = (asset: DownloadAsset) => {
   return asset.os === "macos" ? downloadStore.macArch : asset.arch;
 };
 
-const releaseVersion = computed(() => releaseData.value?.version || null);
+const selectedVisibleAsset = computed(() =>
+  visibleAssets.value.find((asset) => asset.id === downloadStore.selectedId) || visibleAssets.value[0]
+);
+
+const selectedRelease = computed(() => {
+  const asset = selectedVisibleAsset.value;
+  if (!asset) return null;
+  return resolve(asset.os, getDownloadArch(asset));
+});
+
+const releaseVersion = computed(() => selectedRelease.value?.version || releaseData.value?.version || null);
 const releaseDate = computed(() => {
-  if (!releaseData.value?.pubDate) return '';
-  return new Date(releaseData.value.pubDate).toLocaleDateString(locale.value, {
+  const pubDate = selectedRelease.value?.pubDate || releaseData.value?.pubDate;
+  if (!pubDate) return '';
+  return new Date(pubDate).toLocaleDateString(locale.value, {
     year: 'numeric',
     month: 'short',
     day: 'numeric',
   });
 });
+
+const downloadAsset = async (asset: DownloadAsset) => {
+  if (resolvingAssetId.value) return;
+
+  resolvingAssetId.value = asset.id;
+  downloadStore.setSelected(asset.id);
+
+  try {
+    await ensureLoaded();
+    const arch = getDownloadArch(asset);
+    const resolved = resolve(asset.os, arch);
+
+    trackDownloadClick({
+      os: asset.os,
+      arch,
+      version: resolved?.version || releaseData.value?.version,
+      source: 'download_section',
+    });
+
+    window.location.href = resolved?.url || asset.url;
+  } finally {
+    resolvingAssetId.value = null;
+  }
+};
 
 </script>
 
@@ -111,8 +158,10 @@ const releaseDate = computed(() => {
           <!-- Download button -->
           <a
             class="download-section__btn"
+            :class="{ 'download-section__btn--loading': resolvingAssetId === asset.id }"
             :href="getDownloadUrl(asset)"
-            @click.stop="trackDownloadClick({ os: asset.os, arch: getDownloadArch(asset), version: releaseVersion, source: 'download_section' }); downloadStore.setSelected(asset.id)"
+            :aria-busy="resolvingAssetId === asset.id"
+            @click.prevent.stop="downloadAsset(asset)"
           >
             <v-icon size="18" class="download-section__btn-icon" :icon="mdiDownload" />
             <span>{{ t("download.title") }}</span>
@@ -348,6 +397,11 @@ const releaseDate = computed(() => {
   filter: brightness(1.08);
 }
 
+.download-section__btn--loading {
+  opacity: 0.72;
+  pointer-events: none;
+}
+
 .download-section__btn:active {
   transform: translateY(0);
 }
@@ -524,7 +578,7 @@ const releaseDate = computed(() => {
     gap: 20px;
   }
 
-  /* На мобильном active первая в списке — scale чуть меньше, чтобы не обрезалось */
+  /* На мобильном active первая в списке - scale чуть меньше, чтобы не обрезалось */
   .download-section__card--active {
     transform: scale(1.03);
     order: -1;

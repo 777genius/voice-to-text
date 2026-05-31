@@ -2,29 +2,72 @@
 const { t } = useI18n();
 const { label } = usePlatform();
 const downloadStore = useDownloadStore();
-const { resolveUrlOrFallback, data: releaseData } = useReleaseDownloads();
+const { ensureLoaded, resolve, data: releaseData, fallbackUrl } = useReleaseDownloads();
 const { trackDownloadClick } = useAnalytics();
+const isResolving = ref(false);
 
-onMounted(() => downloadStore.init());
+onMounted(() => {
+  void downloadStore.init();
+});
 
-const href = computed(() => {
-  // Если не удалось определить платформу - пусть ведет в секцию скачивания (старое поведение).
-  if (downloadStore.os === "unknown") return "#download";
+const currentDownload = computed(() => {
   if (downloadStore.os === "macos") {
-    return resolveUrlOrFallback("macos", downloadStore.arch);
+    return resolve("macos", downloadStore.arch);
   }
   if (downloadStore.os === "windows") {
-    return resolveUrlOrFallback("windows", "x64");
+    return resolve("windows", "x64");
   }
   if (downloadStore.os === "linux") {
-    return resolveUrlOrFallback("linux", "x64");
+    return resolve("linux", "x64");
   }
-  return "#download";
+  return null;
 });
+
+const href = computed(() => currentDownload.value?.url || "#download");
+
+const scrollToDownloads = () => {
+  document.querySelector("#download")?.scrollIntoView({ behavior: "smooth" });
+};
+
+const handleClick = async () => {
+  await downloadStore.init();
+
+  if (downloadStore.os === "unknown") {
+    scrollToDownloads();
+    return;
+  }
+
+  if (isResolving.value) return;
+  isResolving.value = true;
+
+  try {
+    await ensureLoaded();
+    const resolved = currentDownload.value;
+    const targetUrl = resolved?.url || fallbackUrl;
+
+    trackDownloadClick({
+      os: downloadStore.os,
+      arch: downloadStore.arch,
+      version: resolved?.version || releaseData.value?.version,
+      source: "hero",
+    });
+
+    window.location.href = targetUrl;
+  } finally {
+    isResolving.value = false;
+  }
+};
 </script>
 
 <template>
-  <v-btn class="download-button" color="primary" size="large" :href="href" @click="trackDownloadClick({ os: downloadStore.os, arch: downloadStore.arch, version: releaseData?.version, source: 'hero' })">
+  <v-btn
+    class="download-button"
+    color="primary"
+    size="large"
+    :href="href"
+    :loading="isResolving"
+    @click.prevent="handleClick"
+  >
     <span class="download-button__ribbon">Free</span>
     <span class="download-button__title">{{ t('nav.download') }}</span>
     <span class="download-button__platform">{{ label }}</span>
