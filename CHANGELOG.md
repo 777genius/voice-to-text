@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.11.0] - 2026-05-31
+
+### Added
+- Added cross-platform live translation audio routing adapters for macOS, Windows, and Linux.
+- Added Windows VB-CABLE support for translated voice output and WASAPI loopback capture for incoming subtitles.
+- Added Linux PulseAudio/PipeWire-Pulse virtual microphone support with `pactl`, `pacat`, and `parec`.
+- Added platform setup status in Live translation settings so users know which virtual microphone to select.
+- Added hold-to-record mode that records only while the hotkey is held and still drains final speech after release.
+
+### Changed
+- Live translation services now depend on audio ports and platform factories instead of concrete macOS audio implementations.
+- The mini recording window now opens with a bouncy animation and closes by sliding toward the nearest screen edge.
+- Release builds now run frontend and Rust quality gates before creating GitHub release assets.
+
+### Fixed
+- Prevent selecting virtual translation microphones as the app's real microphone input.
+- Preserve final recording text more reliably when stopping from the hotkey.
+
+---
+
 ## [0.10.30] - 2026-05-31
 
 ### Fixed
