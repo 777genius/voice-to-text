@@ -16,7 +16,7 @@
 
 ---
 
-## Текущий релиз: v0.10.29
+## Текущий релиз: v0.10.30
 
 Hotfix-релиз для статьи про live translation в VoicetextAI.
 
@@ -61,6 +61,7 @@ Hotfix-релиз для статьи про live translation в VoicetextAI.
 ### macOS hotfix
 - Fixed the `0.10.27` launch crash by bundling the Swift Concurrency runtime required by ScreenCaptureKit incoming translation.
 - Fixed the hotfix release workflow so Swift runtime preparation works only where it is needed and does not break Linux or Windows release jobs.
+- Fixed the macOS bundle file mapping so `libswift_Concurrency.dylib` is copied into `Contents/Frameworks`.
 
 ## Setup
 
@@ -74,12 +75,12 @@ Hotfix-релиз для статьи про live translation в VoicetextAI.
 ### Команды релиза
 
 ```bash
-pnpm release:notes v0.10.29
+pnpm release:notes v0.10.30
 git add CHANGELOG.md docs package.json src-tauri src
-git commit -m "release: v0.10.29"
-git tag v0.10.29
+git commit -m "release: v0.10.30"
+git tag v0.10.30
 git push origin HEAD
-git push origin v0.10.29
+git push origin v0.10.30
 gh run watch
 ```
 

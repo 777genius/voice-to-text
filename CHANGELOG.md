@@ -7,10 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [0.10.29] - 2026-05-31
+## [0.10.30] - 2026-05-31
 
 ### Fixed
 - Fixed the macOS launch hotfix workflow by preparing the Swift Concurrency runtime with a cross-platform Node script, so Linux and Windows release jobs do not fail while macOS still bundles the required runtime.
+- Fixed the macOS bundle file mapping so `libswift_Concurrency.dylib` is copied into `Contents/Frameworks`.
 
 ---
 
