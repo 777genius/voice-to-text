@@ -23,6 +23,7 @@ export type UpdateAppConfigInvokeArgs = Partial<{
   hideRecordingWindowOnHotkey: boolean;
   showMiniRecordingWindow: boolean;
   keepRecordingUntilManualStop: boolean;
+  holdToRecord: boolean;
   selectedAudioDevice: string | null;
   recordingMode: RecordingMode;
   openaiApiKey: string | null;
@@ -37,6 +38,7 @@ const ALLOWED_KEYS = new Set([
   'hideRecordingWindowOnHotkey',
   'showMiniRecordingWindow',
   'keepRecordingUntilManualStop',
+  'holdToRecord',
   'selectedAudioDevice',
   'recordingMode',
   'openaiApiKey',
@@ -73,6 +75,7 @@ function assertValidUpdateAppConfigArgs(args: Record<string, unknown>): void {
       case 'hideRecordingWindowOnHotkey':
       case 'showMiniRecordingWindow':
       case 'keepRecordingUntilManualStop':
+      case 'holdToRecord':
         if (typeof v !== 'boolean') {
           throw new Error(`[update_app_config] "${k}" должен быть boolean, получили: ${String(v)}`);
         }

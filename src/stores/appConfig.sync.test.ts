@@ -24,6 +24,7 @@ describe('useAppConfigStore sync', () => {
       hide_recording_window_on_hotkey: false,
       show_mini_recording_window: false,
       keep_recording_until_manual_stop: false,
+      hold_to_record: false,
       microphone_sensitivity: 100,
       selected_audio_device: null,
       openai_api_key: null,
@@ -58,6 +59,7 @@ describe('useAppConfigStore sync', () => {
         hide_recording_window_on_hotkey: true,
         show_mini_recording_window: true,
         keep_recording_until_manual_stop: true,
+        hold_to_record: true,
         microphone_sensitivity: 120,
         selected_audio_device: 'Mic A',
       }),
@@ -78,6 +80,7 @@ describe('useAppConfigStore sync', () => {
     expect(store.hideRecordingWindowOnHotkey).toBe(true);
     expect(store.showMiniRecordingWindow).toBe(true);
     expect(store.keepRecordingUntilManualStop).toBe(true);
+    expect(store.holdToRecord).toBe(true);
     expect(store.microphoneSensitivity).toBe(120);
     expect(store.selectedAudioDevice).toBe('Mic A');
   });
@@ -94,6 +97,7 @@ describe('useAppConfigStore sync', () => {
         hide_recording_window_on_hotkey: true,
         show_mini_recording_window: true,
         keep_recording_until_manual_stop: true,
+        hold_to_record: true,
         microphone_sensitivity: 50,
         selected_audio_device: 'Mic B',
         recording_mode: 'dictation',
@@ -110,6 +114,7 @@ describe('useAppConfigStore sync', () => {
     expect(store.hideRecordingWindowOnHotkey).toBe(true);
     expect(store.showMiniRecordingWindow).toBe(true);
     expect(store.keepRecordingUntilManualStop).toBe(true);
+    expect(store.holdToRecord).toBe(true);
     expect(store.microphoneSensitivity).toBe(50);
     expect(store.selectedAudioDevice).toBe('Mic B');
     expect(store.openaiApiKey).toBe('sk-test');

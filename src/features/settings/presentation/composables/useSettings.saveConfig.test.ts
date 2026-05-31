@@ -304,6 +304,53 @@ describe('useSettings saveConfig', () => {
     });
   });
 
+  it('сохраняет режим записи при удержании хоткея', async () => {
+    const store = useSettingsStore();
+    store.setLanguage('ru', { persist: false });
+    store.setMicrophoneSensitivity(100, { persist: false });
+    store.setRecordingHotkey('CmdOrCtrl+Shift+X');
+    store.setAutoCopyToClipboard(false);
+    store.setAutoPasteText(false);
+    store.setPlayCompletionSound(false);
+    store.setHideRecordingWindowOnHotkey(false);
+    store.setShowMiniRecordingWindow(true);
+    store.setKeepRecordingUntilManualStop(false);
+    store.setHoldToRecord(false);
+    store.setSelectedAudioDevice('');
+    store.setStreamingKeyterms('', { persist: false });
+    store.capturePersistedState();
+
+    store.setHoldToRecord(true);
+
+    tauriSettingsServiceMock.getSttConfig.mockResolvedValueOnce({
+      language: 'ru',
+      streaming_keyterms: null,
+    });
+
+    tauriSettingsServiceMock.getAppConfig.mockResolvedValueOnce({
+      microphone_sensitivity: 100,
+      recording_hotkey: 'CmdOrCtrl+Shift+X',
+      auto_copy_to_clipboard: false,
+      auto_paste_text: false,
+      play_completion_sound: false,
+      hide_recording_window_on_hotkey: false,
+      show_mini_recording_window: true,
+      keep_recording_until_manual_stop: false,
+      hold_to_record: false,
+      selected_audio_device: null,
+    });
+
+    tauriSettingsServiceMock.updateAppConfig.mockResolvedValue(undefined);
+
+    const { saveConfig } = useSettings();
+    await expect(saveConfig()).resolves.toBe(true);
+
+    expect(tauriSettingsServiceMock.updateSttConfig).not.toHaveBeenCalled();
+    expect(tauriSettingsServiceMock.updateAppConfig).toHaveBeenCalledWith({
+      hold_to_record: true,
+    });
+  });
+
   it('сохраняет переключение auto-copy и auto-paste', async () => {
     const store = useSettingsStore();
     store.setLanguage('ru', { persist: false });

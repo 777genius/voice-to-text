@@ -15,6 +15,7 @@ const {
   hideRecordingWindowOnHotkey,
   showMiniRecordingWindow,
   keepRecordingUntilManualStop,
+  holdToRecord,
   hasAccessibilityPermission,
   isMacOS,
   requestAccessibilityPermission,
@@ -124,6 +125,23 @@ const {
           <span class="auto-action-copy">
             <span class="auto-action-label">{{ t('settings.autoActions.manualStopOnly') }}</span>
             <span class="auto-action-hint">{{ t('settings.autoActions.hintManualStopBody') }}</span>
+          </span>
+        </template>
+      </v-checkbox>
+    </div>
+
+    <div class="auto-action-option">
+      <v-checkbox
+        v-model="holdToRecord"
+        density="compact"
+        hide-details
+        color="primary"
+        class="auto-action-checkbox"
+      >
+        <template #label>
+          <span class="auto-action-copy">
+            <span class="auto-action-label">{{ t('settings.autoActions.holdToRecord') }}</span>
+            <span class="auto-action-hint">{{ t('settings.autoActions.hintHoldToRecordBody') }}</span>
           </span>
         </template>
       </v-checkbox>

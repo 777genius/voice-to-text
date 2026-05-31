@@ -27,6 +27,7 @@ export type AppConfigSnapshotData = {
   hide_recording_window_on_hotkey: boolean;
   show_mini_recording_window: boolean;
   keep_recording_until_manual_stop: boolean;
+  hold_to_record: boolean;
   selected_audio_device: string | null;
   recording_mode: RecordingMode;
   openai_api_key: string | null;

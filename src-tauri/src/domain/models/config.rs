@@ -224,6 +224,9 @@ pub struct AppConfig {
     /// Keep listening until the user stops recording manually; disables VAD silence auto-stop
     pub keep_recording_until_manual_stop: bool,
 
+    /// Record only while the global hotkey is physically held down.
+    pub hold_to_record: bool,
+
     /// Auto-close window after transcription
     pub auto_close_window: bool,
 
@@ -268,6 +271,7 @@ impl Default for AppConfig {
             show_mini_recording_window: true,
             recording_window_position: None,
             keep_recording_until_manual_stop: false,
+            hold_to_record: false,
             auto_close_window: true,
             vad_silence_timeout_ms: 5000, // 5 секунд тишины перед авто-остановкой
             microphone_sensitivity: 100,  // Нейтральный уровень: как записывает микрофон
@@ -454,6 +458,7 @@ mod tests {
         assert!(config.show_mini_recording_window);
         assert!(config.recording_window_position.is_none());
         assert!(!config.keep_recording_until_manual_stop);
+        assert!(!config.hold_to_record);
         assert!(config.auto_close_window);
         assert_eq!(config.vad_silence_timeout_ms, 5000);
         assert_eq!(config.microphone_sensitivity, 100);

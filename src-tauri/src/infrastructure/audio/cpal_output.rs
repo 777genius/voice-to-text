@@ -8,6 +8,14 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::domain::TranslationAudioOutput;
+
+pub use crate::domain::{
+    TranslationAudioOutput as AudioOutput, TranslationAudioOutputConfig as AudioOutputConfig,
+    TranslationAudioOutputError as AudioOutputError,
+    TranslationAudioOutputResult as AudioOutputResult,
+};
+
 /// Размер чанка для resampler внутри output pipeline (в source-сэмплах, mono).
 const RESAMPLER_CHUNK_SIZE: usize = 256;
 
@@ -15,57 +23,40 @@ const RESAMPLER_CHUNK_SIZE: usize = 256;
 pub const ENV_TRANSLATION_OUTPUT_DEVICE: &str = "VOICETEXT_TRANSLATION_OUTPUT_DEVICE";
 
 /// Кандидаты названий BlackHole, по которым ищем устройство (в порядке убывания специфичности).
-const BLACKHOLE_DEVICE_NAMES: &[&str] = &["BlackHole 2ch", "BlackHole"];
+pub const MACOS_BLACKHOLE_DEVICE_NAMES: &[&str] = &["BlackHole 2ch", "BlackHole"];
 
-#[derive(Debug, thiserror::Error)]
-pub enum AudioOutputError {
-    #[error("Configuration: {0}")]
-    Configuration(String),
-
-    #[error("Device: {0}")]
-    Device(String),
-
-    #[error("Stream: {0}")]
-    Stream(String),
-
-    #[error("Resample: {0}")]
-    Resample(String),
-
-    #[error("Output is closed")]
-    Closed,
-}
-
-pub type AudioOutputResult<T> = Result<T, AudioOutputError>;
+/// Кандидаты VB-CABLE output endpoint. В приложения для звонков выбирается CABLE Output,
+/// а VoicetextAI пишет именно в CABLE Input.
+pub const WINDOWS_VB_CABLE_OUTPUT_DEVICE_NAMES: &[&str] =
+    &["CABLE Input", "VB-Audio Virtual Cable", "VB-CABLE"];
 
 #[derive(Debug, Clone, Copy)]
-pub struct AudioOutputConfig {
-    /// Источник: sample rate входного PCM16 (для OpenAI translate = 24000).
-    pub source_sample_rate: u32,
-    /// Источник: каналы входного PCM16 (для OpenAI translate = 1, mono).
-    pub source_channels: u16,
-    /// Jitter/prebuffer перед стартом playback. OpenAI audio deltas приходят пачками,
-    /// поэтому небольшой буфер сглаживает сетевые/серверные интервалы между чанками.
-    pub prebuffer_ms: u64,
-    /// Максимум буфера в output_ready (в frames per channel). Превышение → дропаем старое.
-    /// ~6 секунд при 48 kHz — безопасный потолок без раздувания active-session latency.
-    pub max_buffered_frames: usize,
-    /// Более высокий потолок на время graceful stop. OpenAI может прислать финальный
-    /// synthesized tail быстрее realtime, и обычный latency cap не должен резать хвост.
-    pub drain_max_buffered_frames: usize,
+pub struct CpalOutputDeviceSelector {
+    pub env_var: &'static str,
+    pub candidates: &'static [&'static str],
+    pub not_found_message: &'static str,
 }
 
-impl AudioOutputConfig {
-    /// Конфиг для OpenAI realtime translation output (24 kHz mono).
-    pub fn openai_translation() -> Self {
+impl CpalOutputDeviceSelector {
+    pub fn macos_blackhole() -> Self {
         Self {
-            source_sample_rate: 24_000,
-            source_channels: 1,
-            prebuffer_ms: 400,
-            // OpenAI может отдавать synthesized audio пачками быстрее realtime.
-            // Держим запас ~6 сек при native 48 kHz, чтобы не резать речь на burst'ах.
-            max_buffered_frames: 300_000,
-            // На stop допускаем до ~15 сек tail-buffer при 48 kHz.
-            drain_max_buffered_frames: 720_000,
+            env_var: ENV_TRANSLATION_OUTPUT_DEVICE,
+            candidates: MACOS_BLACKHOLE_DEVICE_NAMES,
+            not_found_message:
+                "BlackHole 2ch не найден. Установите blackhole-2ch (brew install --cask blackhole-2ch), \
+                 перезагрузите macOS и выберите BlackHole 2ch как микрофон в Meet/Zoom. \
+                 Также можно задать VOICETEXT_TRANSLATION_OUTPUT_DEVICE с подстрокой имени нужного устройства.",
+        }
+    }
+
+    pub fn windows_vb_cable() -> Self {
+        Self {
+            env_var: ENV_TRANSLATION_OUTPUT_DEVICE,
+            candidates: WINDOWS_VB_CABLE_OUTPUT_DEVICE_NAMES,
+            not_found_message:
+                "VB-CABLE не найден. Установите VB-Audio Virtual Cable, перезагрузите Windows, \
+                 выберите CABLE Output как микрофон в Meet/Zoom, а VoicetextAI будет писать в CABLE Input. \
+                 Также можно задать VOICETEXT_TRANSLATION_OUTPUT_DEVICE с подстрокой имени output устройства.",
         }
     }
 }
@@ -85,20 +76,11 @@ impl Default for OutputPlaybackState {
     }
 }
 
-#[async_trait]
-pub trait AudioOutput: Send + Sync {
-    async fn open(&mut self, config: AudioOutputConfig) -> AudioOutputResult<()>;
-    /// Отправляет mono PCM16 chunk. Внутри: resample → channel-expand → push в output queue.
-    async fn enqueue_pcm16(&self, samples: &[i16]) -> AudioOutputResult<()>;
-    async fn close(&mut self) -> AudioOutputResult<()>;
-    fn is_open(&self) -> bool;
-    /// Полное имя устройства, на которое сейчас открыт output (для диагностики).
-    fn device_name(&self) -> Option<String>;
-}
-
-/// CPAL-output, направленный на BlackHole 2ch (или иное устройство из env override).
+/// CPAL-output, направленный на platform virtual microphone endpoint
+/// (BlackHole/VB-CABLE или иное устройство из env override).
 /// Не использует async внутри audio callback — только sync Mutex с короткими lock-окнами.
 pub struct CpalAudioOutput {
+    selector: CpalOutputDeviceSelector,
     device: Option<Device>,
     device_name: Option<String>,
     stream: Option<Stream>,
@@ -118,7 +100,42 @@ pub struct CpalAudioOutput {
 
 impl CpalAudioOutput {
     pub fn new() -> Self {
+        Self::platform_default()
+    }
+
+    pub fn platform_default() -> Self {
+        #[cfg(target_os = "windows")]
+        {
+            Self::windows_vb_cable()
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            Self::macos_blackhole()
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            Self::with_selector(CpalOutputDeviceSelector {
+                env_var: ENV_TRANSLATION_OUTPUT_DEVICE,
+                candidates: &[],
+                not_found_message:
+                    "CPAL virtual microphone output is not configured for this platform.",
+            })
+        }
+    }
+
+    pub fn macos_blackhole() -> Self {
+        Self::with_selector(CpalOutputDeviceSelector::macos_blackhole())
+    }
+
+    pub fn windows_vb_cable() -> Self {
+        Self::with_selector(CpalOutputDeviceSelector::windows_vb_cable())
+    }
+
+    pub fn with_selector(selector: CpalOutputDeviceSelector) -> Self {
         Self {
+            selector,
             device: None,
             device_name: None,
             stream: None,
@@ -132,27 +149,30 @@ impl CpalAudioOutput {
         }
     }
 
-    fn select_output_device(host: &Host) -> AudioOutputResult<(Device, String)> {
-        if let Ok(override_name) = std::env::var(ENV_TRANSLATION_OUTPUT_DEVICE) {
+    fn select_output_device(
+        host: &Host,
+        selector: CpalOutputDeviceSelector,
+    ) -> AudioOutputResult<(Device, String)> {
+        if let Ok(override_name) = std::env::var(selector.env_var) {
             let trimmed = override_name.trim();
             if !trimmed.is_empty() {
                 let device = host
                     .output_devices()
                     .map_err(|e| AudioOutputError::Device(e.to_string()))?
-                    .find(|d| d.name().map(|n| n.contains(trimmed)).unwrap_or(false));
+                    .find(|d| {
+                        d.name()
+                            .map(|name| output_device_name_matches(&name, trimmed))
+                            .unwrap_or(false)
+                    });
                 return match device {
                     Some(d) => {
                         let name = d.name().unwrap_or_else(|_| trimmed.to_string());
-                        log::info!(
-                            "Output device picked via {}: {}",
-                            ENV_TRANSLATION_OUTPUT_DEVICE,
-                            name
-                        );
+                        log::info!("Output device picked via {}: {}", selector.env_var, name);
                         Ok((d, name))
                     }
                     None => Err(AudioOutputError::Configuration(format!(
                         "Output устройство '{}' (из {}) не найдено в системе.",
-                        trimmed, ENV_TRANSLATION_OUTPUT_DEVICE
+                        trimmed, selector.env_var
                     ))),
                 };
             }
@@ -163,10 +183,10 @@ impl CpalAudioOutput {
             .map_err(|e| AudioOutputError::Device(e.to_string()))?
             .collect();
 
-        for candidate in BLACKHOLE_DEVICE_NAMES {
+        for candidate in selector.candidates {
             for dev in &outputs {
                 if let Ok(name) = dev.name() {
-                    if name.contains(candidate) {
+                    if output_device_name_matches(&name, candidate) {
                         log::info!("Auto-picked output device: {}", name);
                         return Ok((dev.clone(), name));
                     }
@@ -175,10 +195,7 @@ impl CpalAudioOutput {
         }
 
         Err(AudioOutputError::Configuration(
-            "BlackHole 2ch не найден. Установите blackhole-2ch (brew install --cask blackhole-2ch), \
-             перезагрузите macOS и выберите BlackHole 2ch как микрофон в Meet/Zoom. \
-             Также можно задать VOICETEXT_TRANSLATION_OUTPUT_DEVICE с подстрокой имени нужного устройства."
-                .to_string(),
+            selector.not_found_message.to_string(),
         ))
     }
 
@@ -426,7 +443,7 @@ impl Default for CpalAudioOutput {
 }
 
 #[async_trait]
-impl AudioOutput for CpalAudioOutput {
+impl TranslationAudioOutput for CpalAudioOutput {
     async fn open(&mut self, config: AudioOutputConfig) -> AudioOutputResult<()> {
         if self.is_open {
             return Err(AudioOutputError::Configuration(
@@ -434,7 +451,7 @@ impl AudioOutput for CpalAudioOutput {
             ));
         }
         let host = cpal::default_host();
-        let (device, name) = Self::select_output_device(&host)?;
+        let (device, name) = Self::select_output_device(&host, self.selector)?;
         let native = device
             .default_output_config()
             .map_err(|e| AudioOutputError::Configuration(e.to_string()))?;
@@ -475,6 +492,7 @@ impl AudioOutput for CpalAudioOutput {
         }
         if let Ok(mut state) = self.playback_state.lock() {
             state.prebuffering = true;
+            state.draining = false;
         }
 
         let prebuffer_frames =
@@ -580,6 +598,18 @@ impl AudioOutput for CpalAudioOutput {
     fn device_name(&self) -> Option<String> {
         self.device_name.clone()
     }
+
+    fn begin_drain_mode(&self) {
+        CpalAudioOutput::begin_drain_mode(self);
+    }
+
+    fn prepare_for_drain(&self) -> AudioOutputResult<Duration> {
+        CpalAudioOutput::prepare_for_drain(self)
+    }
+
+    fn pending_playback_duration(&self) -> Duration {
+        CpalAudioOutput::pending_playback_duration(self)
+    }
 }
 
 // SAFETY: аналогично SystemAudioCapture — cpal::Stream не Send/Sync на macOS,
@@ -652,6 +682,12 @@ fn fill_output_u16(
     }
 }
 
+fn output_device_name_matches(name: &str, candidate: &str) -> bool {
+    let lower_name = name.to_ascii_lowercase();
+    let lower_candidate = candidate.to_ascii_lowercase();
+    lower_name.contains(&lower_candidate)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,6 +707,19 @@ mod tests {
         let out = CpalAudioOutput::new();
         assert!(!out.is_open());
         assert!(out.device_name().is_none());
+    }
+
+    #[test]
+    fn output_device_name_matching_is_case_insensitive() {
+        assert!(output_device_name_matches(
+            "Speakers (CABLE INPUT VB-Audio Virtual Cable)",
+            "Cable Input"
+        ));
+        assert!(output_device_name_matches("BlackHole 2ch", "blackhole"));
+        assert!(!output_device_name_matches(
+            "MacBook Speakers",
+            "CABLE Input"
+        ));
     }
 
     #[tokio::test]

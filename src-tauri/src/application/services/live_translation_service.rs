@@ -1,12 +1,12 @@
 //! LiveTranslationService — orchestrator для live-перевода голоса.
 //!
 //! Pipeline:
-//! - mic 24 kHz mono (SystemAudioCapture с translation options)
+//! - mic 24 kHz mono через platform audio factory
 //!   - применяем microphone_sensitivity gain
 //!   - feed-им в audio_spectrum analyzer
 //!   - отправляем в OpenAI realtime translation client (PCM16 base64)
 //! - OpenAI отдаёт events:
-//!   - `AudioDelta(Vec<i16>)` → `CpalAudioOutput.enqueue_pcm16(...)` (BlackHole 2ch)
+//!   - `AudioDelta(Vec<i16>)` → `TranslationAudioOutput.enqueue_pcm16(...)`
 //!   - `TranscriptDelta(String)` → callback в UI (popover)
 //!   - `Error(...)` → callback в UI + статус Error
 //!   - `Closed` → если незапланированно → callback в UI
@@ -23,12 +23,11 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 use crate::domain::{
-    amplify_i16_samples, microphone_sensitivity_gain, AudioCapture, AudioChunk, AudioChunkCallback,
-    RecordingStatus,
+    amplify_i16_samples, microphone_sensitivity_gain, AudioCapture, AudioCaptureTarget, AudioChunk,
+    AudioChunkCallback, AudioConfig, PlatformAudioFactory, RecordingStatus, TranslationAudioOutput,
+    TranslationAudioOutputConfig,
 };
-use crate::infrastructure::audio::{
-    AudioOutput, AudioOutputConfig, CpalAudioOutput, SystemAudioCapture, SystemAudioCaptureOptions,
-};
+use crate::infrastructure::audio::DefaultPlatformAudioFactory;
 use crate::infrastructure::openai::{
     OpenAIErrorKind, OpenAIRealtimeEvent, OpenAIRealtimeTranslationClient, OpenAITranslationError,
 };
@@ -121,11 +120,12 @@ impl From<OpenAITranslationError> for LiveTranslationError {
 pub struct LiveTranslationService {
     status: Arc<RwLock<RecordingStatus>>,
     inner: Arc<Mutex<Option<RunningSession>>>,
+    audio_factory: Arc<dyn PlatformAudioFactory>,
 }
 
 struct RunningSession {
-    capture: Arc<RwLock<SystemAudioCapture>>,
-    output: Arc<RwLock<CpalAudioOutput>>,
+    capture: Arc<RwLock<Box<dyn AudioCapture>>>,
+    output: Arc<RwLock<Box<dyn TranslationAudioOutput>>>,
     client: Arc<Mutex<OpenAIRealtimeTranslationClient>>,
     forwarder_task: JoinHandle<()>,
     audio_pump_task: JoinHandle<()>,
@@ -152,9 +152,14 @@ impl Default for LiveTranslationService {
 
 impl LiveTranslationService {
     pub fn new() -> Self {
+        Self::new_with_audio_factory(Arc::new(DefaultPlatformAudioFactory::new()))
+    }
+
+    pub fn new_with_audio_factory(audio_factory: Arc<dyn PlatformAudioFactory>) -> Self {
         Self {
             status: Arc::new(RwLock::new(RecordingStatus::Idle)),
             inner: Arc::new(Mutex::new(None)),
+            audio_factory,
         }
     }
 
@@ -194,10 +199,17 @@ impl LiveTranslationService {
             return Err(err);
         }
 
-        // 2. Output device (BlackHole) — fail cheap, до OpenAI
-        let mut output_concrete = CpalAudioOutput::new();
+        // 2. Output device - fail cheap, before OpenAI session creation.
+        let mut output_concrete = match self.audio_factory.create_translation_output() {
+            Ok(output) => output,
+            Err(e) => {
+                let err = LiveTranslationError::Configuration(e.to_string());
+                self.transition_to_error().await;
+                return Err(err);
+            }
+        };
         if let Err(e) = output_concrete
-            .open(AudioOutputConfig::openai_translation())
+            .open(TranslationAudioOutputConfig::openai_translation())
             .await
         {
             let err = LiveTranslationError::Configuration(e.to_string());
@@ -207,19 +219,19 @@ impl LiveTranslationService {
         let output = Arc::new(RwLock::new(output_concrete));
 
         // 3. Mic preflight. Do this before paid OpenAI session creation.
-        if let Err(e) = microphone_permission_preflight() {
+        if let Err(e) = self.audio_factory.microphone_preflight() {
             let _ = output.write().await.close().await;
-            let err = LiveTranslationError::Configuration(e);
+            let err = LiveTranslationError::Configuration(e.to_string());
             self.transition_to_error().await;
             return Err(err);
         }
 
-        let capture_result = SystemAudioCapture::with_device_and_options(
+        let capture_result = self.audio_factory.create_microphone_capture(
             config.microphone_device.clone(),
-            SystemAudioCaptureOptions::translation(),
+            AudioCaptureTarget::outgoing_translation(),
         );
         let capture = match capture_result {
-            Ok(c) => Arc::new(RwLock::new(c)),
+            Ok(c) => c,
             Err(e) => {
                 let _ = output.write().await.close().await;
                 let err = LiveTranslationError::Configuration(format!("mic init: {}", e));
@@ -227,13 +239,19 @@ impl LiveTranslationService {
                 return Err(err);
             }
         };
-        let selected_input_name = capture.read().await.device_name().unwrap_or_default();
-        if is_blackhole_device_name(&selected_input_name) {
+        let capture = Arc::new(RwLock::new(capture));
+        if let Err(e) = capture
+            .write()
+            .await
+            .initialize(AudioConfig {
+                sample_rate: AudioCaptureTarget::outgoing_translation().sample_rate,
+                channels: AudioCaptureTarget::outgoing_translation().channels,
+                buffer_size: AudioConfig::default().buffer_size,
+            })
+            .await
+        {
             let _ = output.write().await.close().await;
-            let err = LiveTranslationError::Configuration(
-                "BlackHole 2ch выбран как входной микрофон. Для live translation выберите реальный микрофон, а BlackHole оставьте микрофоном в Meet/Zoom."
-                    .to_string(),
-            );
+            let err = LiveTranslationError::Configuration(format!("mic init: {}", e));
             self.transition_to_error().await;
             return Err(err);
         }
@@ -346,30 +364,6 @@ impl LiveTranslationService {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn microphone_permission_preflight() -> Result<(), String> {
-    use crate::infrastructure::microphone_permission::{
-        microphone_permission_status, MicrophonePermissionStatus,
-    };
-
-    match microphone_permission_status() {
-        MicrophonePermissionStatus::Authorized | MicrophonePermissionStatus::NotDetermined => Ok(()),
-        _ => Err(
-            "Нет доступа к микрофону. Откройте macOS System Settings -> Privacy & Security -> Microphone и включите доступ для приложения."
-                .to_string(),
-        ),
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn microphone_permission_preflight() -> Result<(), String> {
-    Ok(())
-}
-
-fn is_blackhole_device_name(name: &str) -> bool {
-    name.to_ascii_lowercase().contains("blackhole")
-}
-
 fn take_ready_openai_input_frames(buffer: &mut Vec<i16>) -> Vec<Vec<i16>> {
     let mut frames = Vec::new();
     while buffer.len() >= OPENAI_INPUT_FRAME_SAMPLES {
@@ -453,7 +447,7 @@ async fn run_audio_pump(
 
 async fn run_event_forwarder(
     mut openai_rx: mpsc::UnboundedReceiver<OpenAIRealtimeEvent>,
-    output: Arc<RwLock<CpalAudioOutput>>,
+    output: Arc<RwLock<Box<dyn TranslationAudioOutput>>>,
     on_transcript: Arc<dyn Fn(String) + Send + Sync>,
     runtime_stop_tx: mpsc::UnboundedSender<RuntimeStop>,
 ) {
@@ -667,7 +661,7 @@ async fn wait_task_done(
     }
 }
 
-async fn drain_output_tail(output: Arc<RwLock<CpalAudioOutput>>, session_id: u64) {
+async fn drain_output_tail(output: Arc<RwLock<Box<dyn TranslationAudioOutput>>>, session_id: u64) {
     let initial_pending = {
         let out = output.read().await;
         match out.prepare_for_drain() {
@@ -737,6 +731,7 @@ async fn drain_output_tail(output: Arc<RwLock<CpalAudioOutput>>, session_id: u64
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[test]
     fn error_type_strings_are_stable() {
@@ -777,10 +772,12 @@ mod tests {
 
     #[test]
     fn blackhole_input_device_names_are_detected() {
-        assert!(is_blackhole_device_name("BlackHole 2ch"));
-        assert!(is_blackhole_device_name("blackhole"));
-        assert!(!is_blackhole_device_name("Внешний микрофон"));
-        assert!(!is_blackhole_device_name("MacBook Pro Microphone"));
+        use crate::infrastructure::audio::is_macos_blackhole_device_name;
+
+        assert!(is_macos_blackhole_device_name("BlackHole 2ch"));
+        assert!(is_macos_blackhole_device_name("blackhole"));
+        assert!(!is_macos_blackhole_device_name("Внешний микрофон"));
+        assert!(!is_macos_blackhole_device_name("MacBook Pro Microphone"));
     }
 
     #[test]
@@ -811,6 +808,329 @@ mod tests {
     async fn service_starts_in_idle() {
         let svc = LiveTranslationService::new();
         assert_eq!(svc.get_status().await, RecordingStatus::Idle);
+        assert!(svc.active_session_id().await.is_none());
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum TestFactoryMode {
+        OutputCreateFails,
+        MicPreflightFails,
+        MicInitializeFails,
+        MicCreateFails,
+    }
+
+    #[derive(Default)]
+    struct TestFactoryState {
+        output_create_calls: AtomicUsize,
+        output_opened: AtomicBool,
+        output_closed: AtomicBool,
+        mic_preflight_calls: AtomicUsize,
+        mic_create_calls: AtomicUsize,
+        mic_initialize_calls: AtomicUsize,
+    }
+
+    struct TestTranslationOutput {
+        state: Arc<TestFactoryState>,
+    }
+
+    #[async_trait::async_trait]
+    impl TranslationAudioOutput for TestTranslationOutput {
+        async fn open(
+            &mut self,
+            _config: TranslationAudioOutputConfig,
+        ) -> crate::domain::TranslationAudioOutputResult<()> {
+            self.state.output_opened.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn enqueue_pcm16(
+            &self,
+            _samples: &[i16],
+        ) -> crate::domain::TranslationAudioOutputResult<()> {
+            Ok(())
+        }
+
+        async fn close(&mut self) -> crate::domain::TranslationAudioOutputResult<()> {
+            self.state.output_closed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_open(&self) -> bool {
+            self.state.output_opened.load(Ordering::SeqCst)
+                && !self.state.output_closed.load(Ordering::SeqCst)
+        }
+
+        fn device_name(&self) -> Option<String> {
+            Some("test-output".to_string())
+        }
+
+        fn begin_drain_mode(&self) {}
+
+        fn prepare_for_drain(&self) -> crate::domain::TranslationAudioOutputResult<Duration> {
+            Ok(Duration::ZERO)
+        }
+
+        fn pending_playback_duration(&self) -> Duration {
+            Duration::ZERO
+        }
+    }
+
+    struct TestAudioCapture {
+        config: crate::domain::AudioConfig,
+        state: Arc<TestFactoryState>,
+        fail_initialize: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl AudioCapture for TestAudioCapture {
+        async fn initialize(
+            &mut self,
+            config: crate::domain::AudioConfig,
+        ) -> crate::domain::AudioResult<()> {
+            self.state
+                .mic_initialize_calls
+                .fetch_add(1, Ordering::SeqCst);
+            if self.fail_initialize {
+                return Err(crate::domain::AudioError::Configuration(
+                    "simulated mic initialize failure".to_string(),
+                ));
+            }
+            self.config = config;
+            Ok(())
+        }
+
+        async fn start_capture(
+            &mut self,
+            _on_chunk: AudioChunkCallback,
+        ) -> crate::domain::AudioResult<()> {
+            Ok(())
+        }
+
+        async fn stop_capture(&mut self) -> crate::domain::AudioResult<()> {
+            Ok(())
+        }
+
+        fn is_capturing(&self) -> bool {
+            false
+        }
+
+        fn config(&self) -> crate::domain::AudioConfig {
+            self.config
+        }
+    }
+
+    struct TestPlatformAudioFactory {
+        mode: TestFactoryMode,
+        state: Arc<TestFactoryState>,
+    }
+
+    #[async_trait::async_trait]
+    impl PlatformAudioFactory for TestPlatformAudioFactory {
+        fn create_microphone_capture(
+            &self,
+            _device_name: Option<String>,
+            _target: AudioCaptureTarget,
+        ) -> crate::domain::AudioResult<Box<dyn AudioCapture>> {
+            self.state.mic_create_calls.fetch_add(1, Ordering::SeqCst);
+            if self.mode == TestFactoryMode::MicCreateFails {
+                return Err(crate::domain::AudioError::Configuration(
+                    "simulated mic create failure".to_string(),
+                ));
+            }
+            Ok(Box::new(TestAudioCapture {
+                config: crate::domain::AudioConfig::default(),
+                state: self.state.clone(),
+                fail_initialize: self.mode == TestFactoryMode::MicInitializeFails,
+            }))
+        }
+
+        fn create_translation_output(
+            &self,
+        ) -> crate::domain::TranslationAudioOutputResult<Box<dyn TranslationAudioOutput>> {
+            self.state
+                .output_create_calls
+                .fetch_add(1, Ordering::SeqCst);
+            if self.mode == TestFactoryMode::OutputCreateFails {
+                return Err(crate::domain::TranslationAudioOutputError::Configuration(
+                    "simulated output create failure".to_string(),
+                ));
+            }
+            Ok(Box::new(TestTranslationOutput {
+                state: self.state.clone(),
+            }))
+        }
+
+        fn create_system_loopback_capture(
+            &self,
+            _target: AudioCaptureTarget,
+        ) -> crate::domain::AudioResult<Box<dyn AudioCapture>> {
+            Ok(Box::new(TestAudioCapture {
+                config: crate::domain::AudioConfig::default(),
+                state: self.state.clone(),
+                fail_initialize: false,
+            }))
+        }
+
+        async fn setup_status(&self) -> crate::domain::PlatformAudioSetupStatus {
+            crate::domain::PlatformAudioSetupStatus {
+                platform: "test".to_string(),
+                status: crate::domain::PlatformAudioSetupState::Ready,
+                outgoing_supported: true,
+                incoming_supported: true,
+                virtual_microphone_name: "test-output".to_string(),
+                message: "ready".to_string(),
+            }
+        }
+
+        fn is_virtual_microphone_input(&self, _name: &str) -> bool {
+            false
+        }
+
+        fn microphone_preflight(&self) -> Result<(), crate::domain::AudioError> {
+            self.state
+                .mic_preflight_calls
+                .fetch_add(1, Ordering::SeqCst);
+            if self.mode == TestFactoryMode::MicPreflightFails {
+                return Err(crate::domain::AudioError::AccessDenied(
+                    "simulated mic access denied".to_string(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    fn test_callbacks() -> LiveTranslationCallbacks {
+        LiveTranslationCallbacks {
+            on_transcript_delta: Arc::new(|_| {}),
+            on_audio_spectrum: Arc::new(|_| {}),
+            on_error: Arc::new(|_| {}),
+            on_status: Arc::new(|_| {}),
+        }
+    }
+
+    fn valid_config(session_id: u64) -> LiveTranslationConfig {
+        LiveTranslationConfig {
+            openai_api_key: "sk-test".to_string(),
+            target_language: "en".into(),
+            microphone_device: None,
+            microphone_sensitivity: 100,
+            session_id,
+        }
+    }
+
+    #[tokio::test]
+    async fn output_create_failure_stops_before_microphone_preflight() {
+        let state = Arc::new(TestFactoryState::default());
+        let svc =
+            LiveTranslationService::new_with_audio_factory(Arc::new(TestPlatformAudioFactory {
+                mode: TestFactoryMode::OutputCreateFails,
+                state: state.clone(),
+            }));
+
+        let err = svc
+            .start_translation(valid_config(11), test_callbacks())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            LiveTranslationError::Configuration(msg)
+                if msg.contains("simulated output create failure")
+        ));
+        assert_eq!(state.output_create_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.mic_preflight_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.mic_create_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.mic_initialize_calls.load(Ordering::SeqCst), 0);
+        assert!(!state.output_opened.load(Ordering::SeqCst));
+        assert!(!state.output_closed.load(Ordering::SeqCst));
+        assert_eq!(svc.get_status().await, RecordingStatus::Error);
+        assert!(svc.active_session_id().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn microphone_preflight_failure_closes_opened_output() {
+        let state = Arc::new(TestFactoryState::default());
+        let svc =
+            LiveTranslationService::new_with_audio_factory(Arc::new(TestPlatformAudioFactory {
+                mode: TestFactoryMode::MicPreflightFails,
+                state: state.clone(),
+            }));
+
+        let err = svc
+            .start_translation(valid_config(12), test_callbacks())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            LiveTranslationError::Configuration(msg)
+                if msg.contains("simulated mic access denied")
+        ));
+        assert_eq!(state.output_create_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.mic_preflight_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.mic_create_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.mic_initialize_calls.load(Ordering::SeqCst), 0);
+        assert!(state.output_opened.load(Ordering::SeqCst));
+        assert!(state.output_closed.load(Ordering::SeqCst));
+        assert_eq!(svc.get_status().await, RecordingStatus::Error);
+        assert!(svc.active_session_id().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn microphone_initialize_failure_closes_opened_output() {
+        let state = Arc::new(TestFactoryState::default());
+        let svc =
+            LiveTranslationService::new_with_audio_factory(Arc::new(TestPlatformAudioFactory {
+                mode: TestFactoryMode::MicInitializeFails,
+                state: state.clone(),
+            }));
+
+        let err = svc
+            .start_translation(valid_config(13), test_callbacks())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            LiveTranslationError::Configuration(msg)
+                if msg.contains("simulated mic initialize failure")
+        ));
+        assert_eq!(state.output_create_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.mic_preflight_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.mic_create_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.mic_initialize_calls.load(Ordering::SeqCst), 1);
+        assert!(state.output_opened.load(Ordering::SeqCst));
+        assert!(state.output_closed.load(Ordering::SeqCst));
+        assert_eq!(svc.get_status().await, RecordingStatus::Error);
+        assert!(svc.active_session_id().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn microphone_create_failure_closes_opened_output() {
+        let state = Arc::new(TestFactoryState::default());
+        let svc =
+            LiveTranslationService::new_with_audio_factory(Arc::new(TestPlatformAudioFactory {
+                mode: TestFactoryMode::MicCreateFails,
+                state: state.clone(),
+            }));
+
+        let err = svc
+            .start_translation(valid_config(14), test_callbacks())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            LiveTranslationError::Configuration(msg)
+                if msg.contains("simulated mic create failure")
+        ));
+        assert_eq!(state.output_create_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.mic_preflight_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.mic_create_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.mic_initialize_calls.load(Ordering::SeqCst), 0);
+        assert!(state.output_opened.load(Ordering::SeqCst));
+        assert!(state.output_closed.load(Ordering::SeqCst));
+        assert_eq!(svc.get_status().await, RecordingStatus::Error);
         assert!(svc.active_session_id().await.is_none());
     }
 

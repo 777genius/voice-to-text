@@ -7,7 +7,8 @@ use rubato::{
 use std::sync::{Arc, Mutex};
 
 use crate::domain::{
-    AudioCapture, AudioChunk, AudioChunkCallback, AudioConfig, AudioError, AudioResult,
+    AudioCapture, AudioCaptureTarget, AudioChunk, AudioChunkCallback, AudioConfig, AudioError,
+    AudioResult,
 };
 
 /// Real system audio capture using cpal + rubato resampling
@@ -54,6 +55,13 @@ impl SystemAudioCaptureOptions {
         Self {
             target_sample_rate: DEFAULT_TRANSLATION_SAMPLE_RATE,
             target_channels: TARGET_CHANNELS,
+        }
+    }
+
+    pub fn from_target(target: AudioCaptureTarget) -> Self {
+        Self {
+            target_sample_rate: target.sample_rate,
+            target_channels: target.channels,
         }
     }
 }
@@ -123,6 +131,13 @@ impl SystemAudioCapture {
             is_capturing: false,
             options,
         })
+    }
+
+    pub fn with_device_and_target(
+        device_name: Option<String>,
+        target: AudioCaptureTarget,
+    ) -> AudioResult<Self> {
+        Self::with_device_and_options(device_name, SystemAudioCaptureOptions::from_target(target))
     }
 
     pub fn device_name(&self) -> Option<String> {
@@ -249,7 +264,7 @@ impl SystemAudioCapture {
     }
 
     /// Create resampler for converting native sample rate to 16kHz
-    fn create_resampler(
+    pub(crate) fn create_resampler(
         from_sample_rate: u32,
         to_sample_rate: u32,
         channels: usize,
@@ -274,7 +289,7 @@ impl SystemAudioCapture {
 
     /// Convert f32 samples to i16 PCM (in-place conversion concept)
     #[inline]
-    fn f32_to_i16(samples: &[f32]) -> Vec<i16> {
+    pub(crate) fn f32_to_i16(samples: &[f32]) -> Vec<i16> {
         samples
             .iter()
             .map(|&sample| {
@@ -287,13 +302,13 @@ impl SystemAudioCapture {
 
     /// Convert unsigned i16 PCM (u16) to signed i16 PCM
     #[inline]
-    fn u16_to_i16(samples: &[u16]) -> Vec<i16> {
+    pub(crate) fn u16_to_i16(samples: &[u16]) -> Vec<i16> {
         samples.iter().map(|&s| (s as i32 - 32768) as i16).collect()
     }
 
     /// Downmix N-channel PCM to mono by averaging channels
     #[inline]
-    fn downmix_to_mono(samples: &[i16], channels: usize) -> Vec<i16> {
+    pub(crate) fn downmix_to_mono(samples: &[i16], channels: usize) -> Vec<i16> {
         if channels <= 1 {
             return samples.to_vec();
         }

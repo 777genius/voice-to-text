@@ -121,6 +121,11 @@ export function useSettings() {
     set: (value: boolean) => store.setKeepRecordingUntilManualStop(value),
   });
 
+  const holdToRecord = computed({
+    get: () => store.holdToRecord,
+    set: (value: boolean) => store.setHoldToRecord(value),
+  });
+
   const recordingMode = computed({
     get: () => store.recordingMode,
     set: (value: RecordingMode) => store.setRecordingMode(value),
@@ -168,6 +173,7 @@ export function useSettings() {
           store.setHideRecordingWindowOnHotkey(appConfigStoreInstance.hideRecordingWindowOnHotkey);
           store.setShowMiniRecordingWindow(appConfigStoreInstance.showMiniRecordingWindow);
           store.setKeepRecordingUntilManualStop(appConfigStoreInstance.keepRecordingUntilManualStop);
+          store.setHoldToRecord(appConfigStoreInstance.holdToRecord);
           store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
           store.setRecordingMode(appConfigStoreInstance.recordingMode);
           store.setOpenaiApiKey(appConfigStoreInstance.openaiApiKey);
@@ -180,6 +186,7 @@ export function useSettings() {
           store.setHideRecordingWindowOnHotkey(false);
           store.setShowMiniRecordingWindow(true);
           store.setKeepRecordingUntilManualStop(false);
+          store.setHoldToRecord(false);
           store.setSelectedAudioDevice('');
           store.setRecordingMode('dictation');
           store.setOpenaiApiKey('');
@@ -258,6 +265,7 @@ export function useSettings() {
         store.setHideRecordingWindowOnHotkey(appConfigStoreInstance.hideRecordingWindowOnHotkey);
         store.setShowMiniRecordingWindow(appConfigStoreInstance.showMiniRecordingWindow);
         store.setKeepRecordingUntilManualStop(appConfigStoreInstance.keepRecordingUntilManualStop);
+        store.setHoldToRecord(appConfigStoreInstance.holdToRecord);
         store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
         store.setRecordingMode(appConfigStoreInstance.recordingMode);
         store.setOpenaiApiKey(appConfigStoreInstance.openaiApiKey);
@@ -272,6 +280,7 @@ export function useSettings() {
           store.setHideRecordingWindowOnHotkey(appConfig.hide_recording_window_on_hotkey ?? false);
           store.setShowMiniRecordingWindow(appConfig.show_mini_recording_window ?? true);
           store.setKeepRecordingUntilManualStop(appConfig.keep_recording_until_manual_stop ?? false);
+          store.setHoldToRecord(appConfig.hold_to_record ?? false);
           store.setSelectedAudioDevice(appConfig.selected_audio_device ?? '');
           store.setRecordingMode(appConfig.recording_mode ?? 'dictation');
           store.setOpenaiApiKey(appConfig.openai_api_key ?? '');
@@ -487,6 +496,13 @@ export function useSettings() {
         appUpdatePayload.keep_recording_until_manual_stop = store.keepRecordingUntilManualStop;
       }
 
+      const hasHoldToRecordChange = persistedState
+        ? persistedState.holdToRecord !== store.holdToRecord
+        : latestApp.hold_to_record !== store.holdToRecord;
+      if (hasHoldToRecordChange && latestApp.hold_to_record !== store.holdToRecord) {
+        appUpdatePayload.hold_to_record = store.holdToRecord;
+      }
+
       const selectedDevice = normalizeAudioDevice(store.selectedAudioDevice);
       const persistedDevice = normalizeAudioDevice(persistedState?.selectedAudioDevice);
       const latestDevice = normalizeAudioDevice(latestApp.selected_audio_device);
@@ -667,6 +683,7 @@ export function useSettings() {
     hideRecordingWindowOnHotkey,
     showMiniRecordingWindow,
     keepRecordingUntilManualStop,
+    holdToRecord,
     recordingMode,
     streamingKeyterms,
 

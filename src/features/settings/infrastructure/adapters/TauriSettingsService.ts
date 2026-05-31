@@ -89,6 +89,9 @@ class TauriSettingsService {
     if (typeof config.keep_recording_until_manual_stop === 'boolean') {
       args.keepRecordingUntilManualStop = config.keep_recording_until_manual_stop;
     }
+    if (typeof config.hold_to_record === 'boolean') {
+      args.holdToRecord = config.hold_to_record;
+    }
     if (typeof config.selected_audio_device === 'string' || config.selected_audio_device === null) {
       args.selectedAudioDevice = config.selected_audio_device;
     }

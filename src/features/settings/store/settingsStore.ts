@@ -42,6 +42,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const hideRecordingWindowOnHotkey = ref(false);
   const showMiniRecordingWindow = ref(true);
   const keepRecordingUntilManualStop = ref(false);
+  const holdToRecord = ref(false);
   const streamingKeyterms = ref('');
   const recordingMode = ref<RecordingMode>('dictation');
   const persistedState = ref<SettingsState | null>(null);
@@ -98,6 +99,7 @@ export const useSettingsStore = defineStore('settings', () => {
     hideRecordingWindowOnHotkey: hideRecordingWindowOnHotkey.value,
     showMiniRecordingWindow: showMiniRecordingWindow.value,
     keepRecordingUntilManualStop: keepRecordingUntilManualStop.value,
+    holdToRecord: holdToRecord.value,
     streamingKeyterms: streamingKeyterms.value,
     recordingMode: recordingMode.value,
   }));
@@ -282,6 +284,10 @@ export const useSettingsStore = defineStore('settings', () => {
     keepRecordingUntilManualStop.value = value;
   }
 
+  function setHoldToRecord(value: boolean) {
+    holdToRecord.value = value;
+  }
+
   function setStreamingKeyterms(value: string, _opts?: { persist?: boolean }) {
     const nextRaw = String(value ?? '');
     streamingKeyterms.value = nextRaw;
@@ -354,6 +360,7 @@ export const useSettingsStore = defineStore('settings', () => {
       showMiniRecordingWindow.value = state.showMiniRecordingWindow;
     if (state.keepRecordingUntilManualStop !== undefined)
       keepRecordingUntilManualStop.value = state.keepRecordingUntilManualStop;
+    if (state.holdToRecord !== undefined) holdToRecord.value = state.holdToRecord;
     if (state.streamingKeyterms !== undefined)
       setStreamingKeyterms(state.streamingKeyterms, { persist: false });
     if (state.recordingMode !== undefined) setRecordingMode(state.recordingMode);
@@ -392,6 +399,7 @@ export const useSettingsStore = defineStore('settings', () => {
     hideRecordingWindowOnHotkey,
     showMiniRecordingWindow,
     keepRecordingUntilManualStop,
+    holdToRecord,
     streamingKeyterms,
     recordingMode,
     persistedState,
@@ -428,6 +436,7 @@ export const useSettingsStore = defineStore('settings', () => {
     setHideRecordingWindowOnHotkey,
     setShowMiniRecordingWindow,
     setKeepRecordingUntilManualStop,
+    setHoldToRecord,
     setStreamingKeyterms,
     setRecordingMode,
     setAvailableAudioDevices,

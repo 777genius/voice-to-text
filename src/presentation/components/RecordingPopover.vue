@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { currentMonitor } from '@tauri-apps/api/window';
 import { getVersion } from '@tauri-apps/api/app';
 import { useTranscriptionStore } from '../../stores/transcription';
 import { useAppConfigStore } from '../../stores/appConfig';
@@ -55,7 +56,9 @@ const showProfile = ref(false);
 const showUpdateDialog = ref(false);
 const appVersion = ref('');
 const glowColor = ref<'blue' | 'red' | null>(null);
+const isMiniOpening = ref(false);
 const isMiniClosing = ref(false);
+const miniHideSide = ref<'left' | 'right'>('right');
 const isMiniWindow = computed(() => appConfigStore.showMiniRecordingWindow);
 const useMiniLayout = computed(() => isMiniWindow.value && !showUpdateDialog.value);
 
@@ -160,7 +163,7 @@ const BASE_WINDOW_HEIGHT = 330;
 const MINI_WINDOW_WIDTH = 236;
 const MINI_WINDOW_HEIGHT = 38;
 const UPDATE_DIALOG_WINDOW_HEIGHT = 430;
-const MINI_CLOSE_ANIMATION_MS = 180;
+const MINI_CLOSE_ANIMATION_MS = 220;
 const TEXT_THRESHOLD_PX = 128;
 const MAX_WINDOW_HEIGHT = 700;
 const NON_TEXT_HEIGHT = 200;
@@ -219,6 +222,7 @@ function applyRecordingWindowSize() {
 }
 
 let hideRecordingWindowTimeout: number | null = null;
+let miniOpeningTimer: number | null = null;
 let hotkeyStartIntentUntilMs = 0;
 const HOTKEY_START_INTENT_SUPPRESS_HIDE_MS = 5_000;
 
@@ -234,6 +238,52 @@ function cancelPendingHideRecordingWindow() {
   isMiniClosing.value = false;
 }
 
+async function resolveMiniHideSide(): Promise<'left' | 'right'> {
+  if (!isTauriAvailable()) return 'right';
+
+  try {
+    const win = getCurrentWebviewWindow();
+    const [position, size, monitor] = await Promise.all([
+      win.outerPosition(),
+      win.outerSize(),
+      currentMonitor(),
+    ]);
+
+    if (!monitor) return 'right';
+
+    const windowCenterX = position.x + size.width / 2;
+    const monitorCenterX = monitor.position.x + monitor.size.width / 2;
+    return windowCenterX < monitorCenterX ? 'left' : 'right';
+  } catch {
+    return miniHideSide.value;
+  }
+}
+
+async function beginMiniCloseAnimation() {
+  miniHideSide.value = await resolveMiniHideSide();
+  isMiniOpening.value = false;
+  isMiniClosing.value = true;
+}
+
+function playMiniOpenAnimation() {
+  if (!useMiniLayout.value) return;
+
+  isMiniClosing.value = false;
+  isMiniOpening.value = false;
+  if (miniOpeningTimer !== null) {
+    window.clearTimeout(miniOpeningTimer);
+    miniOpeningTimer = null;
+  }
+
+  window.requestAnimationFrame(() => {
+    isMiniOpening.value = true;
+    miniOpeningTimer = window.setTimeout(() => {
+      isMiniOpening.value = false;
+      miniOpeningTimer = null;
+    }, 520);
+  });
+}
+
 function scheduleHideRecordingWindow(reason: string) {
   if (hideRecordingWindowTimeout !== null) {
     window.clearTimeout(hideRecordingWindowTimeout);
@@ -241,7 +291,7 @@ function scheduleHideRecordingWindow(reason: string) {
 
   const delay = useMiniLayout.value ? MINI_CLOSE_ANIMATION_MS : 50;
   if (useMiniLayout.value) {
-    isMiniClosing.value = true;
+    void beginMiniCloseAnimation();
   }
 
   hideRecordingWindowTimeout = window.setTimeout(async () => {
@@ -324,6 +374,7 @@ onMounted(async () => {
   unlistenWindowShown = await listen(EVENT_RECORDING_WINDOW_SHOWN, async () => {
     cancelPendingHideRecordingWindow();
     await nextTick();
+    playMiniOpenAnimation();
     alignMiniTextToEnd();
     // Подтягиваем актуальную auth session из Rust SoT (important when WebView was "frozen").
     // Best-effort: не блокируем UI на сетевых/IPC проблемах.
@@ -348,6 +399,9 @@ onMounted(async () => {
   unlistenWindowWillHideForHotkeyStop = await listen(
     EVENT_RECORDING_WINDOW_WILL_HIDE_FOR_HOTKEY_STOP,
     () => {
+      if (useMiniLayout.value) {
+        void beginMiniCloseAnimation();
+      }
       store.suppressPreviousTranscriptionDisplay('rust_hotkey_stop_hide');
     },
   );
@@ -445,6 +499,10 @@ onUnmounted(() => {
   if (miniTextAlignRaf !== null) {
     window.cancelAnimationFrame(miniTextAlignRaf);
     miniTextAlignRaf = null;
+  }
+  if (miniOpeningTimer !== null) {
+    window.clearTimeout(miniOpeningTimer);
+    miniOpeningTimer = null;
   }
   cancelPendingHideRecordingWindow();
 });
@@ -571,8 +629,20 @@ const minimizeWindow = async () => {
 </script>
 
 <template>
-  <div class="popover-container" :class="{ mini: useMiniLayout, 'mini-closing': isMiniClosing }">
-    <div class="popover" :class="{ mini: useMiniLayout, 'mini-closing': isMiniClosing }">
+  <div
+    class="popover-container"
+    :class="{ mini: useMiniLayout, 'mini-closing': isMiniClosing }"
+  >
+    <div
+      class="popover"
+      :class="{
+        mini: useMiniLayout,
+        'mini-opening': isMiniOpening,
+        'mini-closing': isMiniClosing,
+        'mini-closing-left': isMiniClosing && miniHideSide === 'left',
+        'mini-closing-right': isMiniClosing && miniHideSide === 'right',
+      }"
+    >
       <template v-if="useMiniLayout">
         <AudioVisualizer
           variant="mini"
@@ -838,18 +908,47 @@ const minimizeWindow = async () => {
 .popover.mini {
   border-radius: 7px;
   gap: 0;
-  transform-origin: right center;
-  transition: transform 180ms cubic-bezier(0.4, 0, 0.2, 1), opacity 140ms ease;
+  transform-origin: center center;
+  transition: transform 220ms cubic-bezier(0.4, 0, 0.2, 1), opacity 160ms ease;
   will-change: transform, opacity;
+}
+
+.popover.mini.mini-opening {
+  animation: mini-pop-in 520ms cubic-bezier(0.2, 0.9, 0.25, 1.15) both;
 }
 
 .popover.mini.mini-closing {
   opacity: 0;
-  transform: scaleX(0);
+}
+
+.popover.mini.mini-closing-left {
+  transform: translateX(-112%) scale(0.98);
+}
+
+.popover.mini.mini-closing-right {
+  transform: translateX(112%) scale(0.98);
 }
 
 .popover-container.mini-closing {
   pointer-events: none;
+}
+
+@keyframes mini-pop-in {
+  0% {
+    opacity: 0;
+    transform: translateY(12px) scale(0.92);
+  }
+  55% {
+    opacity: 1;
+    transform: translateY(-5px) scale(1.045);
+  }
+  78% {
+    transform: translateY(1px) scale(0.992);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .mini-popover-content {

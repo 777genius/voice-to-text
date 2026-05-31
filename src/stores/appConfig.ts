@@ -25,6 +25,7 @@ export const useAppConfigStore = defineStore('appConfig', () => {
   const hideRecordingWindowOnHotkey = ref(false);
   const showMiniRecordingWindow = ref(true);
   const keepRecordingUntilManualStop = ref(false);
+  const holdToRecord = ref(false);
   const microphoneSensitivity = ref(100);
   const selectedAudioDevice = ref('');
   const recordingMode = ref<RecordingMode>('dictation');
@@ -44,6 +45,7 @@ export const useAppConfigStore = defineStore('appConfig', () => {
       data.show_mini_recording_window ?? showMiniRecordingWindow.value;
     keepRecordingUntilManualStop.value =
       data.keep_recording_until_manual_stop ?? keepRecordingUntilManualStop.value;
+    holdToRecord.value = data.hold_to_record ?? holdToRecord.value;
     microphoneSensitivity.value = data.microphone_sensitivity ?? microphoneSensitivity.value;
     selectedAudioDevice.value = data.selected_audio_device ?? '';
     recordingMode.value = data.recording_mode ?? recordingMode.value;
@@ -103,6 +105,7 @@ export const useAppConfigStore = defineStore('appConfig', () => {
     hideRecordingWindowOnHotkey,
     showMiniRecordingWindow,
     keepRecordingUntilManualStop,
+    holdToRecord,
     microphoneSensitivity,
     selectedAudioDevice,
     recordingMode,

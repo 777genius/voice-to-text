@@ -9,6 +9,7 @@ export function areSettingsStatesEqual(a: SettingsState | null, b: SettingsState
     a.language === b.language &&
     a.deepgramApiKey === b.deepgramApiKey &&
     a.assemblyaiApiKey === b.assemblyaiApiKey &&
+    a.openaiApiKey === b.openaiApiKey &&
     a.whisperModel === b.whisperModel &&
     a.theme === b.theme &&
     a.useSystemTheme === b.useSystemTheme &&
@@ -21,6 +22,8 @@ export function areSettingsStatesEqual(a: SettingsState | null, b: SettingsState
     a.hideRecordingWindowOnHotkey === b.hideRecordingWindowOnHotkey &&
     a.showMiniRecordingWindow === b.showMiniRecordingWindow &&
     a.keepRecordingUntilManualStop === b.keepRecordingUntilManualStop &&
-    a.streamingKeyterms === b.streamingKeyterms
+    a.holdToRecord === b.holdToRecord &&
+    a.streamingKeyterms === b.streamingKeyterms &&
+    a.recordingMode === b.recordingMode
   );
 }

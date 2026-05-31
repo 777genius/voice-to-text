@@ -4,8 +4,9 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
 
 use crate::domain::{
-    AppConfig, AudioCapture, AudioError, BackendStreamingProvider, RecordingMode, RecordingStatus,
-    RecordingWindowPosition, SttConnectionCategory, SttError, SttProviderType,
+    AppConfig, AudioCapture, AudioError, BackendStreamingProvider, PlatformAudioSetupStatus,
+    RecordingMode, RecordingStatus, RecordingWindowPosition, SttConnectionCategory, SttError,
+    SttProviderType,
 };
 use crate::infrastructure::{
     auto_paste::AutoPasteTarget, AuthSession, AuthStore, AuthUser, ConfigStore,
@@ -154,7 +155,7 @@ async fn hide_recording_window_for_hotkey_stop_if_needed(
 
     if should_hide_immediately && window_visible {
         let _ = window.emit(EVENT_RECORDING_WINDOW_WILL_HIDE_FOR_HOTKEY_STOP, ());
-        tokio::time::sleep(Duration::from_millis(HOTKEY_STOP_HIDE_UI_FLUSH_MS)).await;
+        tokio::time::sleep(Duration::from_millis(hotkey_stop_hide_ui_flush_ms(config))).await;
         window.hide().map_err(|e| e.to_string())?;
         return Ok(true);
     }
@@ -186,8 +187,56 @@ fn emit_recording_start_requested(
 
 const HOTKEY_START_STOP_SUPPRESSION_MS: u64 = 1_500;
 const HOTKEY_STOP_HIDE_UI_FLUSH_MS: u64 = 35;
+const MINI_HOTKEY_STOP_HIDE_UI_FLUSH_MS: u64 = 220;
 const HOTKEY_STOP_WAIT_FOR_RECORDING_MS: u64 = 12_000;
 const HOTKEY_STOP_WAIT_POLL_MS: u64 = 25;
+const HOLD_TO_RECORD_RELEASE_START_WAIT_MS: u64 = 2_000;
+
+fn hotkey_stop_hide_ui_flush_ms(config: &AppConfig) -> u64 {
+    if config.show_mini_recording_window {
+        MINI_HOTKEY_STOP_HIDE_UI_FLUSH_MS
+    } else {
+        HOTKEY_STOP_HIDE_UI_FLUSH_MS
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordingHotkeyDispatchIntent {
+    Toggle,
+    Start,
+    Stop,
+    Ignore,
+}
+
+fn recording_hotkey_press_intent(
+    hold_to_record: bool,
+    status: RecordingStatus,
+) -> RecordingHotkeyDispatchIntent {
+    if !hold_to_record {
+        return RecordingHotkeyDispatchIntent::Toggle;
+    }
+
+    match status {
+        RecordingStatus::Idle => RecordingHotkeyDispatchIntent::Start,
+        _ => RecordingHotkeyDispatchIntent::Ignore,
+    }
+}
+
+fn recording_hotkey_release_intent(
+    hold_to_record: bool,
+    status: RecordingStatus,
+) -> RecordingHotkeyDispatchIntent {
+    if !hold_to_record {
+        return RecordingHotkeyDispatchIntent::Ignore;
+    }
+
+    match status {
+        RecordingStatus::Starting | RecordingStatus::Recording => {
+            RecordingHotkeyDispatchIntent::Stop
+        }
+        _ => RecordingHotkeyDispatchIntent::Ignore,
+    }
+}
 
 #[cfg(target_os = "macos")]
 const HOTKEY_PHYSICAL_RELEASE_POLL_MS: u64 = 16;
@@ -287,6 +336,9 @@ async fn prepare_recording_hotkey_start(
         warm_start_expected,
     );
     if let Some(accepted_press_seq) = stop_suppression_press_seq {
+        if config.hold_to_record {
+            return config;
+        }
         suppress_immediate_hotkey_stop_after_start(state, accepted_press_seq);
     }
 
@@ -839,6 +891,14 @@ pub async fn get_incoming_translation_status(
     } else {
         Ok(RecordingStatus::Idle)
     }
+}
+
+#[tauri::command]
+pub async fn get_live_translation_platform_status() -> Result<PlatformAudioSetupStatus, String> {
+    use crate::domain::PlatformAudioFactory;
+
+    let factory = crate::infrastructure::audio::DefaultPlatformAudioFactory::new();
+    Ok(factory.setup_status().await)
 }
 
 /// Start recording voice
@@ -1534,15 +1594,16 @@ where
 mod snapshot_contract_tests {
     use super::{
         auto_paste_text_can_trigger_recording_hotkey, calculate_recording_window_position,
-        is_audio_capture_start_failure, resolve_streaming_keyterms_update,
+        is_audio_capture_start_failure, recording_hotkey_press_intent,
+        recording_hotkey_release_intent, resolve_streaming_keyterms_update,
         should_hide_recording_window_immediately_on_hotkey_stop,
         should_ignore_hotkey_stop_after_start, should_show_recording_window_on_processing_hotkey,
-        validate_auto_paste_target_for_focus, AppConfigSnapshotData, RecordingWindowPlacement,
-        SnapshotEnvelope, SttConfigSnapshotData,
+        validate_auto_paste_target_for_focus, AppConfigSnapshotData, RecordingHotkeyDispatchIntent,
+        RecordingWindowPlacement, SnapshotEnvelope, SttConfigSnapshotData,
     };
     use crate::domain::{
-        AppConfig, AudioError, BackendStreamingProvider, RecordingWindowPosition, SttError,
-        SttProviderType,
+        AppConfig, AudioError, BackendStreamingProvider, RecordingStatus, RecordingWindowPosition,
+        SttError, SttProviderType,
     };
     use crate::infrastructure::auto_paste::{AutoPasteTarget, VOICETEXT_BUNDLE_ID};
     use tauri::{PhysicalPosition, PhysicalSize};
@@ -1748,6 +1809,7 @@ mod snapshot_contract_tests {
                 hide_recording_window_on_hotkey: false,
                 show_mini_recording_window: false,
                 keep_recording_until_manual_stop: false,
+                hold_to_record: false,
                 selected_audio_device: None,
                 recording_mode: crate::domain::RecordingMode::Dictation,
                 openai_api_key: None,
@@ -1782,8 +1844,46 @@ mod snapshot_contract_tests {
         assert!(data.contains_key("hide_recording_window_on_hotkey"));
         assert!(data.contains_key("show_mini_recording_window"));
         assert!(data.contains_key("keep_recording_until_manual_stop"));
+        assert!(data.contains_key("hold_to_record"));
         assert!(data.contains_key("selected_audio_device"));
         assert!(data.contains_key("openai_api_key"));
+    }
+
+    #[test]
+    fn hold_to_record_hotkey_intents_are_press_to_start_release_to_stop() {
+        assert_eq!(
+            recording_hotkey_press_intent(false, RecordingStatus::Recording),
+            RecordingHotkeyDispatchIntent::Toggle
+        );
+        assert_eq!(
+            recording_hotkey_release_intent(false, RecordingStatus::Recording),
+            RecordingHotkeyDispatchIntent::Ignore
+        );
+
+        assert_eq!(
+            recording_hotkey_press_intent(true, RecordingStatus::Idle),
+            RecordingHotkeyDispatchIntent::Start
+        );
+        assert_eq!(
+            recording_hotkey_press_intent(true, RecordingStatus::Recording),
+            RecordingHotkeyDispatchIntent::Ignore
+        );
+        assert_eq!(
+            recording_hotkey_press_intent(true, RecordingStatus::Processing),
+            RecordingHotkeyDispatchIntent::Ignore
+        );
+        assert_eq!(
+            recording_hotkey_release_intent(true, RecordingStatus::Starting),
+            RecordingHotkeyDispatchIntent::Stop
+        );
+        assert_eq!(
+            recording_hotkey_release_intent(true, RecordingStatus::Recording),
+            RecordingHotkeyDispatchIntent::Stop
+        );
+        assert_eq!(
+            recording_hotkey_release_intent(true, RecordingStatus::Idle),
+            RecordingHotkeyDispatchIntent::Ignore
+        );
     }
 
     #[test]
@@ -1957,7 +2057,8 @@ pub async fn toggle_recording_with_window(
             );
             let hidden_for_hotkey_stop = if should_hide_immediately && window_visible {
                 let _ = window.emit(EVENT_RECORDING_WINDOW_WILL_HIDE_FOR_HOTKEY_STOP, ());
-                tokio::time::sleep(Duration::from_millis(HOTKEY_STOP_HIDE_UI_FLUSH_MS)).await;
+                tokio::time::sleep(Duration::from_millis(hotkey_stop_hide_ui_flush_ms(&config)))
+                    .await;
                 window.hide().map_err(|e| e.to_string())?;
                 true
             } else {
@@ -2394,6 +2495,7 @@ pub struct AppConfigSnapshotData {
     pub hide_recording_window_on_hotkey: bool,
     pub show_mini_recording_window: bool,
     pub keep_recording_until_manual_stop: bool,
+    pub hold_to_record: bool,
     pub selected_audio_device: Option<String>,
     pub recording_mode: crate::domain::RecordingMode,
     pub openai_api_key: Option<String>,
@@ -2414,6 +2516,7 @@ pub async fn get_app_config_snapshot(
         hide_recording_window_on_hotkey: config.hide_recording_window_on_hotkey,
         show_mini_recording_window: config.show_mini_recording_window,
         keep_recording_until_manual_stop: config.keep_recording_until_manual_stop,
+        hold_to_record: config.hold_to_record,
         selected_audio_device: config.selected_audio_device,
         recording_mode: config.recording_mode,
         openai_api_key: config.openai_api_key,
@@ -2628,12 +2731,13 @@ pub async fn update_app_config(
     hide_recording_window_on_hotkey: Option<bool>,
     show_mini_recording_window: Option<bool>,
     keep_recording_until_manual_stop: Option<bool>,
+    hold_to_record: Option<bool>,
     selected_audio_device: Option<String>,
     recording_mode: Option<crate::domain::RecordingMode>,
     openai_api_key: Option<String>,
 ) -> Result<(), String> {
-    log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}, auto_copy: {:?}, auto_paste: {:?}, completion_sound: {:?}, hide_window_on_hotkey: {:?}, mini_window: {:?}, manual_stop_only: {:?}, device: {:?}, mode: {:?}, openai_key: {}",
-        microphone_sensitivity, recording_hotkey, auto_copy_to_clipboard, auto_paste_text, play_completion_sound, hide_recording_window_on_hotkey, show_mini_recording_window, keep_recording_until_manual_stop, selected_audio_device, recording_mode, openai_api_key.as_ref().is_some_and(|key| !key.trim().is_empty()));
+    log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}, auto_copy: {:?}, auto_paste: {:?}, completion_sound: {:?}, hide_window_on_hotkey: {:?}, mini_window: {:?}, manual_stop_only: {:?}, hold_to_record: {:?}, device: {:?}, mode: {:?}, openai_key: {}",
+        microphone_sensitivity, recording_hotkey, auto_copy_to_clipboard, auto_paste_text, play_completion_sound, hide_recording_window_on_hotkey, show_mini_recording_window, keep_recording_until_manual_stop, hold_to_record, selected_audio_device, recording_mode, openai_api_key.as_ref().is_some_and(|key| !key.trim().is_empty()));
 
     // Защита от "тихих" провалов: если фронт случайно отправил snake_case ключи,
     // Tauri не сматчит аргументы, и сюда придут одни None.
@@ -2646,11 +2750,12 @@ pub async fn update_app_config(
         && hide_recording_window_on_hotkey.is_none()
         && show_mini_recording_window.is_none()
         && keep_recording_until_manual_stop.is_none()
+        && hold_to_record.is_none()
         && selected_audio_device.is_none()
         && recording_mode.is_none()
         && openai_api_key.is_none()
     {
-        return Err("update_app_config: не получены поля для обновления. Проверьте, что фронтенд отправляет args в camelCase (например microphoneSensitivity, recordingHotkey, autoCopyToClipboard, autoPasteText, playCompletionSound, hideRecordingWindowOnHotkey, showMiniRecordingWindow, keepRecordingUntilManualStop, selectedAudioDevice, recordingMode, openaiApiKey).".to_string());
+        return Err("update_app_config: не получены поля для обновления. Проверьте, что фронтенд отправляет args в camelCase (например microphoneSensitivity, recordingHotkey, autoCopyToClipboard, autoPasteText, playCompletionSound, hideRecordingWindowOnHotkey, showMiniRecordingWindow, keepRecordingUntilManualStop, holdToRecord, selectedAudioDevice, recordingMode, openaiApiKey).".to_string());
     }
 
     let mut config = state.config.write().await;
@@ -2753,6 +2858,18 @@ pub async fn update_app_config(
                 manual_stop_only
             );
             config.keep_recording_until_manual_stop = manual_stop_only;
+            any_changed = true;
+        }
+    }
+
+    if let Some(hold_mode) = hold_to_record {
+        if config.hold_to_record != hold_mode {
+            log::info!(
+                "Updating hold_to_record: {} -> {}",
+                config.hold_to_record,
+                hold_mode
+            );
+            config.hold_to_record = hold_mode;
             any_changed = true;
         }
     }
@@ -3737,6 +3854,69 @@ fn dispatch_recording_hotkey_toggle(app_clone: AppHandle, accepted_press_seq: u6
     });
 }
 
+fn dispatch_recording_hotkey_press(app_clone: AppHandle, accepted_press_seq: u64) {
+    std::mem::drop(tauri::async_runtime::spawn(async move {
+        let Some(state) = app_clone.try_state::<crate::presentation::state::AppState>() else {
+            log::warn!("Recording hotkey press ignored: AppState is unavailable");
+            return;
+        };
+
+        let hold_to_record = state.config.read().await.hold_to_record;
+        let status = active_recording_status(state.inner()).await;
+        let intent = recording_hotkey_press_intent(hold_to_record, status);
+        log::info!(
+            "[HotkeyDiag] hotkey press intent={:?}, hold_to_record={}, status={:?}",
+            intent,
+            hold_to_record,
+            status
+        );
+
+        match intent {
+            RecordingHotkeyDispatchIntent::Toggle | RecordingHotkeyDispatchIntent::Start => {
+                dispatch_recording_hotkey_toggle(app_clone.clone(), accepted_press_seq);
+            }
+            RecordingHotkeyDispatchIntent::Stop | RecordingHotkeyDispatchIntent::Ignore => {}
+        }
+    }));
+}
+
+fn dispatch_recording_hotkey_release(app_clone: AppHandle, accepted_press_seq: u64) {
+    std::mem::drop(tauri::async_runtime::spawn(async move {
+        let Some(state) = app_clone.try_state::<crate::presentation::state::AppState>() else {
+            log::warn!("Recording hotkey release ignored: AppState is unavailable");
+            return;
+        };
+
+        let hold_to_record = state.config.read().await.hold_to_record;
+        let mut status = active_recording_status(state.inner()).await;
+        if hold_to_record && status == RecordingStatus::Idle {
+            let deadline = tokio::time::Instant::now()
+                + Duration::from_millis(HOLD_TO_RECORD_RELEASE_START_WAIT_MS);
+            while tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(HOTKEY_STOP_WAIT_POLL_MS)).await;
+                status = active_recording_status(state.inner()).await;
+                if status != RecordingStatus::Idle {
+                    break;
+                }
+            }
+        }
+        let intent = recording_hotkey_release_intent(hold_to_record, status);
+        log::info!(
+            "[HotkeyDiag] hotkey release intent={:?}, hold_to_record={}, status={:?}",
+            intent,
+            hold_to_record,
+            status
+        );
+
+        match intent {
+            RecordingHotkeyDispatchIntent::Toggle | RecordingHotkeyDispatchIntent::Stop => {
+                dispatch_recording_hotkey_toggle(app_clone.clone(), accepted_press_seq);
+            }
+            RecordingHotkeyDispatchIntent::Start | RecordingHotkeyDispatchIntent::Ignore => {}
+        }
+    }));
+}
+
 fn schedule_missed_release_hotkey_confirmation(
     app_clone: AppHandle,
     press_generation: u64,
@@ -3805,7 +3985,7 @@ fn schedule_missed_release_hotkey_confirmation(
             RECORDING_HOTKEY_MISSED_RELEASE_CONFIRM_MS,
             accepted_press_seq
         );
-        dispatch_recording_hotkey_toggle(app_clone, accepted_press_seq);
+        dispatch_recording_hotkey_press(app_clone, accepted_press_seq);
     });
 }
 
@@ -4005,6 +4185,7 @@ pub async fn register_recording_hotkey(
             match event.state {
                 ShortcutState::Released => {
                     let app_clone = app.clone();
+                    let app_for_hold_release = app.clone();
                     let state_inner = state.inner();
                     let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
                     state_inner
@@ -4017,6 +4198,11 @@ pub async fn register_recording_hotkey(
                         .recording_hotkey_release_generation
                         .fetch_add(1, Ordering::SeqCst)
                         + 1;
+                    let accepted_press_seq = state_inner
+                        .recording_hotkey_accepted_press_seq
+                        .load(Ordering::SeqCst);
+
+                    dispatch_recording_hotkey_release(app_for_hold_release, accepted_press_seq);
 
                     let _ = tauri::async_runtime::spawn(async move {
                         tokio::time::sleep(Duration::from_millis(
@@ -4144,7 +4330,7 @@ pub async fn register_recording_hotkey(
             );
 
             log::debug!("Recording hotkey pressed");
-            dispatch_recording_hotkey_toggle(app.clone(), accepted_press_seq);
+            dispatch_recording_hotkey_press(app.clone(), accepted_press_seq);
         })
         .map_err(|e| format!("Failed to register hotkey '{}': {}", effective_hotkey, e))?;
 
