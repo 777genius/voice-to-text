@@ -16,9 +16,9 @@
 
 ---
 
-## Текущий релиз: v0.11.0
+## Текущий релиз: v0.11.1
 
-Feature-релиз live translation: cross-platform virtual microphone routing, incoming subtitles, hold-to-record, and mini-window motion polish.
+Patch-релиз для hold-to-record и mini-window animation после `v0.11.0`.
 
 ### Что говорить в статье
 
@@ -46,31 +46,11 @@ Feature-релиз live translation: cross-platform virtual microphone routing, 
 ### Release notes для GitHub
 
 ```markdown
-## What is new
+## What is fixed
 
-### Live call translation
-- Speak into your microphone and VoicetextAI translates your voice through OpenAI realtime translation.
-- The translated English voice is played into a virtual microphone, so Meet, Zoom, and similar apps can use it as your microphone.
-- macOS uses `BlackHole 2ch`, Windows uses VB-CABLE `CABLE Output`, and Linux uses a PulseAudio/PipeWire-Pulse `VoicetextAI Virtual Microphone`.
-- The recording popover shows the translated text while the session is running.
-
-### Incoming subtitles
-- VoicetextAI can listen to system audio and show Russian subtitles for incoming speech.
-- This first version is text-only, so translated voice playback to headphones is still future work.
-
-### Hold to record
-- Added a setting to record only while the hotkey is held.
-- Releasing the hotkey stops gracefully and keeps late final text instead of cutting it off.
-
-### Window motion
-- The mini recording window now opens with a bouncy animation and closes by sliding toward the nearest screen edge.
-
-### OpenAI key in Settings
-- Users can paste their OpenAI API key in Settings after selecting `Live translation`.
-- `OPENAI_API_KEY` remains supported as an environment fallback.
-
-### Release reliability
-- Release builds now run frontend and Rust quality gates before creating GitHub release assets.
+- Fixed hold-to-record when the hotkey is tapped too quickly and then pressed again.
+- Older release/stop events can no longer hide a mini window that was already reopened by a newer press.
+- The mini recording window now resets stale slide-out state before playing the bounce open animation.
 
 ## Setup
 
@@ -85,13 +65,12 @@ Feature-релиз live translation: cross-platform virtual microphone routing, 
 ### Команды релиза
 
 ```bash
-pnpm release:notes v0.11.0
+pnpm release:notes v0.11.1
 git add CHANGELOG.md docs package.json src-tauri src
-git commit -m "chore(release): v0.11.0"
-git tag v0.11.0
+git commit -m "chore(release): v0.11.1"
+git tag v0.11.1
 git push origin HEAD
-git push origin v0.11.0
-gh run watch
+git push origin v0.11.1
 ```
 
 ---

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.11.1] - 2026-05-31
+
+### Fixed
+- Fixed hold-to-record quick press/release/repress races where an old release could block the next start or hide the reopened mini window.
+- Fixed mini recording window open animation so stale slide-out state is reset before the bounce animation starts.
+
+---
+
 ## [0.11.0] - 2026-05-31
 
 ### Added
