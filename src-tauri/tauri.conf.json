@@ -1,14 +1,14 @@
 {
     "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
     "productName": "VoicetextAI",
-    "version": "0.10.28",
+    "version": "0.10.29",
     "identifier": "com.voicetotext.app",
     "build": {
         "frontendDist": "../dist",
         "devUrl": "http://localhost:1420",
         "beforeDevCommand": "pnpm dev",
         "beforeBuildCommand": "pnpm build",
-        "beforeBundleCommand": "sh src-tauri/scripts/prepare-swift-runtime.sh"
+        "beforeBundleCommand": "node src-tauri/scripts/prepare-swift-runtime.mjs"
     },
     "app": {
         "withGlobalTauri": true,

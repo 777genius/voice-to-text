@@ -1,6 +1,6 @@
 # Live Translation
 
-VoicetextAI `0.10.28` adds a live translation mode for calls and a first incoming subtitle mode.
+VoicetextAI `0.10.29` adds a live translation mode for calls and a first incoming subtitle mode.
 
 ## What It Does
 
