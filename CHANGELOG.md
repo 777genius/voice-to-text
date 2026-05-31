@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.28] - 2026-05-31
+
+### Fixed
+- Fixed macOS launch failure after `0.10.27` by bundling the Swift Concurrency runtime required by ScreenCaptureKit incoming translation.
+
+---
+
 ## [0.10.27] - 2026-05-31
 
 ### Added

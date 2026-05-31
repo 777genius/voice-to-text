@@ -16,9 +16,9 @@
 
 ---
 
-## Текущий релиз: v0.10.27
+## Текущий релиз: v0.10.28
 
-Релиз для статьи про live translation в VoicetextAI.
+Hotfix-релиз для статьи про live translation в VoicetextAI.
 
 ### Что говорить в статье
 
@@ -58,6 +58,9 @@
 - Users can paste their OpenAI API key in Settings after selecting `Live translation`.
 - `OPENAI_API_KEY` remains supported as an environment fallback.
 
+### macOS hotfix
+- Fixed the `0.10.27` launch crash by bundling the Swift Concurrency runtime required by ScreenCaptureKit incoming translation.
+
 ## Setup
 
 - Download VoicetextAI from https://voicetext.site
@@ -70,12 +73,12 @@
 ### Команды релиза
 
 ```bash
-pnpm release:notes v0.10.27
+pnpm release:notes v0.10.28
 git add CHANGELOG.md docs package.json src-tauri src
-git commit -m "release: v0.10.27"
-git tag v0.10.27
+git commit -m "release: v0.10.28"
+git tag v0.10.28
 git push origin HEAD
-git push origin v0.10.27
+git push origin v0.10.28
 gh run watch
 ```
 

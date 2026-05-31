@@ -6,6 +6,14 @@ fn main() {
     // Сначала запускаем стандартный билд Tauri
     tauri_build::build();
 
+    #[cfg(target_os = "macos")]
+    {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
+        println!(
+            "cargo:rustc-link-arg-bin=voice-to-text=-Wl,-rpath,@executable_path/../Frameworks"
+        );
+    }
+
     // Загружаем .env файл если он существует
     if let Err(e) = dotenv::dotenv() {
         println!("cargo:warning=No .env file found: {}", e);

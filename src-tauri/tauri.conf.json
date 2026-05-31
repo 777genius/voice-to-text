@@ -1,13 +1,14 @@
 {
     "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
     "productName": "VoicetextAI",
-    "version": "0.10.27",
+    "version": "0.10.28",
     "identifier": "com.voicetotext.app",
     "build": {
         "frontendDist": "../dist",
         "devUrl": "http://localhost:1420",
         "beforeDevCommand": "pnpm dev",
-        "beforeBuildCommand": "pnpm build"
+        "beforeBuildCommand": "pnpm build",
+        "beforeBundleCommand": "sh src-tauri/scripts/prepare-swift-runtime.sh"
     },
     "app": {
         "withGlobalTauri": true,
@@ -115,6 +116,9 @@
             "entitlements": "entitlements.plist",
             "exceptionDomain": null,
             "frameworks": [],
+            "files": {
+                "target/swift-runtime/libswift_Concurrency.dylib": "Frameworks/libswift_Concurrency.dylib"
+            },
             "providerShortName": "6C84CW694S",
             "signingIdentity": "Developer ID Application: Oleksii Zelenko (6C84CW694S)"
         },
