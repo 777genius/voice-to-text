@@ -1,6 +1,6 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
 
 use crate::domain::{
@@ -405,6 +405,41 @@ async fn apply_recording_window_for_hotkey_start(
     }
 
     Ok(false)
+}
+
+async fn apply_recording_window_before_rust_start(
+    state: &AppState,
+    app_handle: &AppHandle,
+    config: &AppConfig,
+    context: &'static str,
+) -> bool {
+    let started_at = Instant::now();
+    let hide_window_on_hotkey =
+        config.hide_recording_window_on_hotkey && !config.show_mini_recording_window;
+
+    match apply_recording_window_for_hotkey_start(state, app_handle, config).await {
+        Ok(window_updated) => {
+            log::info!(
+                "[HotkeyDiag] pre-start recording window update completed: context={}, updated={}, after_ms={}",
+                context,
+                window_updated,
+                started_at.elapsed().as_millis()
+            );
+            if window_updated && !hide_window_on_hotkey {
+                emit_recording_window_shown(app_handle);
+                return true;
+            }
+        }
+        Err(show_err) => {
+            log::warn!(
+                "[HotkeyDiag] failed to update recording window before Rust start (context={}): {}",
+                context,
+                show_err
+            );
+        }
+    }
+
+    false
 }
 
 async fn show_recording_window_for_hotkey_start(
@@ -1333,8 +1368,14 @@ use tauri::{LogicalSize, PhysicalPosition, Position};
 const RECORDING_WINDOW_EDGE_MARGIN_PX: i32 = 32;
 const FULL_RECORDING_WINDOW_WIDTH: f64 = 460.0;
 const FULL_RECORDING_WINDOW_HEIGHT: f64 = 330.0;
-const MINI_RECORDING_WINDOW_WIDTH: f64 = 236.0;
-const MINI_RECORDING_WINDOW_HEIGHT: f64 = 38.0;
+const MINI_RECORDING_CONTENT_WIDTH: f64 = 236.0;
+const MINI_RECORDING_CONTENT_HEIGHT: f64 = 38.0;
+const MINI_RECORDING_ANIMATION_GUTTER_X: f64 = 6.0;
+const MINI_RECORDING_ANIMATION_GUTTER_Y: f64 = 12.0;
+const MINI_RECORDING_WINDOW_WIDTH: f64 =
+    MINI_RECORDING_CONTENT_WIDTH + MINI_RECORDING_ANIMATION_GUTTER_X * 2.0;
+const MINI_RECORDING_WINDOW_HEIGHT: f64 =
+    MINI_RECORDING_CONTENT_HEIGHT + MINI_RECORDING_ANIMATION_GUTTER_Y * 2.0;
 
 enum RecordingWindowPlacement {
     Center,
@@ -1555,6 +1596,91 @@ pub fn set_recording_window_size(
     fit_recording_window_to_visible_area(state, window)
 }
 
+fn point_inside_rect(
+    point_x: f64,
+    point_y: f64,
+    rect_x: f64,
+    rect_y: f64,
+    rect_width: f64,
+    rect_height: f64,
+) -> bool {
+    if !point_x.is_finite()
+        || !point_y.is_finite()
+        || !rect_x.is_finite()
+        || !rect_y.is_finite()
+        || !rect_width.is_finite()
+        || !rect_height.is_finite()
+        || rect_width <= 0.0
+        || rect_height <= 0.0
+    {
+        return false;
+    }
+
+    point_x >= rect_x
+        && point_x <= rect_x + rect_width
+        && point_y >= rect_y
+        && point_y <= rect_y + rect_height
+}
+
+#[cfg(target_os = "macos")]
+fn cursor_is_over_ns_window(ns_window: *mut std::ffi::c_void) -> bool {
+    use cocoa::appkit::{NSEvent, NSWindow};
+    use cocoa::base::{id, nil, NO};
+
+    unsafe {
+        let ns_window = ns_window as id;
+        if ns_window == nil || ns_window.isVisible() == NO {
+            return false;
+        }
+
+        let frame = ns_window.frame();
+        let mouse = NSEvent::mouseLocation(nil);
+
+        point_inside_rect(
+            mouse.x,
+            mouse.y,
+            frame.origin.x,
+            frame.origin.y,
+            frame.size.width,
+            frame.size.height,
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn cursor_is_over_webview_window(window: &WebviewWindow) -> Result<bool, String> {
+    let ns_window = window
+        .ns_window()
+        .map_err(|e| format!("Failed to get recording NSWindow: {}", e))?;
+
+    Ok(cursor_is_over_ns_window(ns_window))
+}
+
+#[tauri::command]
+pub fn is_cursor_over_recording_window(window: WebviewWindow) -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let window_for_main = window.clone();
+        window
+            .run_on_main_thread(move || {
+                let result = cursor_is_over_webview_window(&window_for_main);
+                let _ = tx.send(result);
+            })
+            .map_err(|e| format!("Failed to query cursor on main thread: {}", e))?;
+
+        return rx
+            .recv()
+            .map_err(|e| format!("Failed to receive cursor query result: {}", e))?;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window;
+        Ok(false)
+    }
+}
+
 /// Общая реализация для позиционирования окна на текущем мониторе
 fn show_window_on_active_monitor_impl<F1, F2, F3, F4, F5>(
     get_current_monitor: F1,
@@ -1626,8 +1752,9 @@ where
 mod snapshot_contract_tests {
     use super::{
         auto_paste_text_can_trigger_recording_hotkey, calculate_recording_window_position,
-        hotkey_action_is_stale, is_audio_capture_start_failure, recording_hotkey_press_intent,
-        recording_hotkey_release_intent, resolve_streaming_keyterms_update,
+        hotkey_action_is_stale, is_audio_capture_start_failure, point_inside_rect,
+        recording_hotkey_press_intent, recording_hotkey_release_intent,
+        recording_window_size_from_config, resolve_streaming_keyterms_update,
         should_cancel_hold_to_record_pending_start,
         should_hide_recording_window_immediately_on_hotkey_stop,
         should_ignore_hotkey_stop_after_start, should_show_recording_window_on_processing_hotkey,
@@ -1661,6 +1788,27 @@ mod snapshot_contract_tests {
         assert!(should_hide_recording_window_immediately_on_hotkey_stop(
             &config, false
         ));
+    }
+
+    #[test]
+    fn mini_recording_window_size_includes_animation_gutter() {
+        let mut config = AppConfig::default();
+        config.show_mini_recording_window = true;
+
+        let size = recording_window_size_from_config(&config);
+
+        assert_eq!(size.width, 248.0);
+        assert_eq!(size.height, 62.0);
+    }
+
+    #[test]
+    fn cursor_rect_hit_test_accepts_edges_and_rejects_invalid_rects() {
+        assert!(point_inside_rect(10.0, 20.0, 10.0, 20.0, 100.0, 40.0));
+        assert!(point_inside_rect(110.0, 60.0, 10.0, 20.0, 100.0, 40.0));
+        assert!(!point_inside_rect(9.9, 20.0, 10.0, 20.0, 100.0, 40.0));
+        assert!(!point_inside_rect(10.0, 60.1, 10.0, 20.0, 100.0, 40.0));
+        assert!(!point_inside_rect(10.0, 20.0, 10.0, 20.0, 0.0, 40.0));
+        assert!(!point_inside_rect(f64::NAN, 20.0, 10.0, 20.0, 100.0, 40.0));
     }
 
     #[test]
@@ -1799,8 +1947,8 @@ mod snapshot_contract_tests {
             },
             PhysicalPosition { x: 0, y: 0 },
             PhysicalSize {
-                width: 236,
-                height: 38,
+                width: 248,
+                height: 62,
             },
         );
 
@@ -1821,8 +1969,8 @@ mod snapshot_contract_tests {
             },
             PhysicalPosition { x: 0, y: 0 },
             PhysicalSize {
-                width: 236,
-                height: 38,
+                width: 248,
+                height: 62,
             },
         );
 
@@ -2227,6 +2375,13 @@ pub async fn toggle_recording_with_window_internal(
                 Some(accepted_press_seq),
             )
             .await;
+            let recording_window_shown_event_emitted = apply_recording_window_before_rust_start(
+                state,
+                &app_handle,
+                &prepared_config,
+                "global-hotkey",
+            )
+            .await;
 
             // ВАЖНО: стартуем запись на Rust-стороне.
             // Иначе, когда окно было скрыто, WebView/JS могут быть "усыплены" и не обработать event,
@@ -2250,19 +2405,7 @@ pub async fn toggle_recording_with_window_internal(
                 return Err(err);
             }
 
-            match apply_recording_window_for_hotkey_start(state, &app_handle, &prepared_config)
-                .await
-            {
-                Ok(_) => {}
-                Err(show_err) => {
-                    log::warn!(
-                        "Recording started, but recording window could not be updated after hotkey start: {}",
-                        show_err
-                    );
-                }
-            }
-
-            if !hide_window_on_hotkey {
+            if !hide_window_on_hotkey && !recording_window_shown_event_emitted {
                 emit_recording_window_shown(&app_handle);
             }
             log::info!("Recording started via hotkey (internal)");
@@ -2476,12 +2619,9 @@ pub async fn update_stt_config(
     let _ = model;
     config.model = None;
 
-    // В backend-only режиме keep-alive полезен: это снижает latency при повторном старте записи,
-    // потому что мы переиспользуем WebSocket соединение с нашим сервером.
-    //
-    // Важно: TTL держим чуть ниже backend audio idle timeout.
-    // Иначе локальный keep-alive может попытаться переиспользовать WS на границе серверного закрытия.
-    config.keep_connection_alive = true;
+    // Backend keep-alive отключён: после Finalize backend/provider stream может оставаться живым,
+    // но перестать отдавать transcript для следующей dictation-записи.
+    config.keep_connection_alive = false;
     if config.provider == crate::domain::SttProviderType::Backend {
         config.keep_alive_ttl_secs = crate::domain::BACKEND_KEEPALIVE_TTL_SECS;
     }
@@ -3336,6 +3476,13 @@ async fn start_recording_after_queued_hotkey_idle(
         stop_suppression_press_seq,
     )
     .await;
+    let recording_window_shown_event_emitted = apply_recording_window_before_rust_start(
+        state.inner(),
+        &app_handle,
+        &prepared_config,
+        source,
+    )
+    .await;
 
     if let Err(err) = start_recording(state.clone(), app_handle.clone()).await {
         if hide_window_on_hotkey {
@@ -3355,19 +3502,7 @@ async fn start_recording_after_queued_hotkey_idle(
         return Err(err);
     }
 
-    match apply_recording_window_for_hotkey_start(state.inner(), &app_handle, &prepared_config)
-        .await
-    {
-        Ok(_) => {}
-        Err(show_err) => {
-            log::warn!(
-                "Recording started, but recording window could not be updated after queued hotkey start: {}",
-                show_err
-            );
-        }
-    }
-
-    if !hide_window_on_hotkey {
+    if !hide_window_on_hotkey && !recording_window_shown_event_emitted {
         emit_recording_window_shown(&app_handle);
     }
     log::info!("[HotkeyDiag] queued start after stop completed");

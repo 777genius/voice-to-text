@@ -161,6 +161,7 @@ pub fn run() {
             commands::minimize_window,
             commands::fit_recording_window_to_visible_area,
             commands::set_recording_window_size,
+            commands::is_cursor_over_recording_window,
             commands::update_stt_config,
             commands::get_app_config_snapshot,
             commands::get_stt_config_snapshot,
@@ -461,9 +462,9 @@ pub fn run() {
                             *state.is_authenticated.write().await = store.is_authenticated();
                             let _guard = state.stt_config_guard.lock().await;
 
-                            // Держим STT token синхронизированным с access token из сессии,
-                            // и сразу применяем backend keep-alive настройки (чтобы первые hotkey-сессии
-                            // не закрывали WS и не показывали "Подключение..." при повторном старте).
+                            // Держим STT token синхронизированным с access token из сессии.
+                            // Backend keep-alive отключаем: после Finalize provider stream может
+                            // остаться живым, но перестать отдавать transcript для следующей записи.
                             let (mut stt, loaded_from_disk) = match crate::infrastructure::ConfigStore::load_config().await {
                                 Ok(c) => (c, true),
                                 Err(e) => {
@@ -473,7 +474,7 @@ pub fn run() {
                             };
                             stt.backend_auth_token = store.session.as_ref().map(|s| s.access_token.clone());
                             if stt.provider == crate::domain::SttProviderType::Backend {
-                                stt.keep_connection_alive = true;
+                                stt.keep_connection_alive = false;
                                 if stt.keep_alive_ttl_secs != crate::domain::BACKEND_KEEPALIVE_TTL_SECS {
                                     stt.keep_alive_ttl_secs = crate::domain::BACKEND_KEEPALIVE_TTL_SECS;
                                 }
@@ -507,23 +508,21 @@ pub fn run() {
                     if let Some(state) = app_handle.try_state::<AppState>() {
                         let _guard = state.stt_config_guard.lock().await;
 
-                        // Backend-only режим: по умолчанию держим соединение живым между сессиями записи.
-                        // TTL держим чуть ниже backend audio idle timeout, чтобы клиент закрывал idle WS
-                        // до серверного timeout и не пытался переиспользовать поток на границе закрытия.
+                        // Backend-only режим: не держим stream живым между dictation-сессиями.
+                        // Старый keep-alive мог оставлять provider stream без transcript после Finalize.
                         let mut config_migrated = false;
                         if saved_config.provider == crate::domain::SttProviderType::Backend
-                            && !saved_config.keep_connection_alive
+                            && saved_config.keep_connection_alive
                         {
-                            saved_config.keep_connection_alive = true;
+                            saved_config.keep_connection_alive = false;
                             config_migrated = true;
                             log::info!(
-                                "Enabled keep_connection_alive for backend provider by default (ttl={}s)",
+                                "Disabled keep_connection_alive for backend provider by default (ttl={}s)",
                                 saved_config.keep_alive_ttl_secs
                             );
                         }
 
-                        // UX: keep-alive должен быть полезным для hotkey-пауз, но клиентский TTL
-                        // остаётся чуть ниже backend audio idle timeout.
+                        // TTL оставляем предсказуемым для обратной совместимости с сохранённым конфигом.
                         if saved_config.provider == crate::domain::SttProviderType::Backend
                             && saved_config.keep_alive_ttl_secs != crate::domain::BACKEND_KEEPALIVE_TTL_SECS
                         {

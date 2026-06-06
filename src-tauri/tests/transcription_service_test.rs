@@ -423,6 +423,7 @@ async fn test_keep_alive_mode() {
 
     // Конфигурация с keep-alive
     let mut config = SttConfig::default();
+    config.provider = SttProviderType::Deepgram;
     config.keep_connection_alive = true;
     service.update_config(config).await.unwrap();
 

@@ -127,9 +127,9 @@ pub struct SttConfig {
 
     /// Сколько держать соединение живым после остановки записи (если keep_connection_alive=true).
     ///
-    /// Важно: keep-alive удерживает streaming соединение на стороне провайдера (Deepgram) и занимает слот
-    /// по лимиту параллельных соединений. Для backend-only режима держим TTL чуть ниже серверного
-    /// audio_idle_ttl_secs=3600, чтобы idle клиенты закрывались до серверного timeout.
+    /// Важно: keep-alive удерживает streaming соединение на стороне провайдера и занимает слот
+    /// по лимиту параллельных соединений. Backend dictation runtime сейчас не использует keep-alive,
+    /// потому что новый stream надёжнее после Finalize.
     #[serde(default = "default_keep_alive_ttl_secs")]
     pub keep_alive_ttl_secs: u64,
 

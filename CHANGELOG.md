@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.11.2] - 2026-06-06
+
+### Changed
+- Show the mini recording window immediately in the listening state while the STT stream is still starting.
+- Keep mini-window profile, minimize, and settings controls hidden until the cursor is over the mini window.
+- Keep long mini-window transcripts pinned to the latest text with a left fade instead of cutting the newest phrase.
+- Add extra mini-window animation gutter space so the opening bounce is not clipped.
+
+### Fixed
+- Preserve speech captured immediately after the hotkey press while the backend STT stream is still connecting.
+- Finalize and drain backend STT results before closing the stream, preventing short early phrases from being dropped.
+- Emit audio level and spectrum during STT startup so the mini-window visualizer reacts immediately when speaking.
+- Prevent stale stop/idle events from older sessions from hiding a newly reopened mini window.
+- Restart VAD capture cleanly between sessions so the audio visualizer and speech detection do not get stuck.
+- Use the green mini status indicator for the immediate listening state.
+
 ## [0.11.1] - 2026-05-31
 
 ### Fixed

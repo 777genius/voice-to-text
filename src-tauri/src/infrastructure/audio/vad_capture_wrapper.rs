@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::domain::{
@@ -29,6 +29,7 @@ pub struct VadCaptureWrapper {
     audio_config: AudioConfig,
     silence_timeout_triggered: Arc<Mutex<bool>>, // Флаг для одноразового вызова callback
     running: Arc<AtomicBool>,                    // Защита от "хвостов" callback после stop_capture
+    capture_generation: Arc<AtomicU64>,          // Инвалидирует callback-и от прошлых start_capture
     microphone_sensitivity: Arc<AtomicU8>,
 }
 
@@ -54,6 +55,7 @@ impl VadCaptureWrapper {
             audio_config: AudioConfig::default(),
             silence_timeout_triggered: Arc::new(Mutex::new(false)),
             running: Arc::new(AtomicBool::new(false)),
+            capture_generation: Arc::new(AtomicU64::new(0)),
             microphone_sensitivity,
         }
     }
@@ -74,6 +76,7 @@ impl AudioCapture for VadCaptureWrapper {
     }
 
     async fn start_capture(&mut self, on_chunk: AudioChunkCallback) -> AudioResult<()> {
+        let capture_generation = self.capture_generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.running.store(true, Ordering::SeqCst);
 
         // Сбрасываем флаг при старте новой записи
@@ -92,6 +95,7 @@ impl AudioCapture for VadCaptureWrapper {
         let silence_callback = self.on_silence_timeout.clone();
         let timeout_flag = self.silence_timeout_triggered.clone();
         let running = self.running.clone();
+        let active_generation = self.capture_generation.clone();
         let microphone_sensitivity = self.microphone_sensitivity.clone();
 
         // Frame buffer for accumulating exactly 480 samples (30ms @ 16kHz)
@@ -102,7 +106,9 @@ impl AudioCapture for VadCaptureWrapper {
         let wrapped_callback = Arc::new(move |chunk: AudioChunk| {
             // Важно: после stop_capture внутренняя аудио-система может ещё кратко вызывать callback.
             // Мы обязаны игнорировать такие "хвосты", иначе VAD может отправить timeout уже в новой сессии.
-            if !running.load(Ordering::Relaxed) {
+            if !running.load(Ordering::Relaxed)
+                || active_generation.load(Ordering::Relaxed) != capture_generation
+            {
                 return;
             }
 
@@ -141,6 +147,12 @@ impl AudioCapture for VadCaptureWrapper {
             const VAD_FRAME_SIZE: usize = 480;
 
             while buffer.len() >= VAD_FRAME_SIZE {
+                if !running.load(Ordering::Relaxed)
+                    || active_generation.load(Ordering::Relaxed) != capture_generation
+                {
+                    return;
+                }
+
                 let frame: Vec<i16> = buffer.drain(..VAD_FRAME_SIZE).collect();
                 let raw_max = max_abs_i16(&frame);
                 let sensitivity = microphone_sensitivity.load(Ordering::Relaxed);
@@ -239,11 +251,19 @@ impl AudioCapture for VadCaptureWrapper {
         });
 
         // Start inner capture with wrapped callback
-        self.inner.start_capture(wrapped_callback).await
+        match self.inner.start_capture(wrapped_callback).await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.running.store(false, Ordering::SeqCst);
+                self.capture_generation.fetch_add(1, Ordering::SeqCst);
+                Err(err)
+            }
+        }
     }
 
     async fn stop_capture(&mut self) -> AudioResult<()> {
         self.running.store(false, Ordering::SeqCst);
+        self.capture_generation.fetch_add(1, Ordering::SeqCst);
 
         // Reset VAD state on stop
         if let Ok(mut vad) = self.vad.lock() {
@@ -270,6 +290,58 @@ fn max_abs_i16(samples: &[i16]) -> i32 {
 mod tests {
     use super::*;
     use crate::infrastructure::audio::MockAudioCapture;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    struct ManualCallbackCapture {
+        callback: Arc<Mutex<Option<AudioChunkCallback>>>,
+        is_capturing: Arc<AtomicBool>,
+        config: AudioConfig,
+    }
+
+    impl ManualCallbackCapture {
+        fn new(callback: Arc<Mutex<Option<AudioChunkCallback>>>) -> Self {
+            Self {
+                callback,
+                is_capturing: Arc::new(AtomicBool::new(false)),
+                config: AudioConfig::default(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AudioCapture for ManualCallbackCapture {
+        async fn initialize(&mut self, config: AudioConfig) -> AudioResult<()> {
+            self.config = config;
+            Ok(())
+        }
+
+        async fn start_capture(&mut self, on_chunk: AudioChunkCallback) -> AudioResult<()> {
+            self.is_capturing.store(true, Ordering::SeqCst);
+            *self.callback.lock().unwrap() = Some(on_chunk);
+            Ok(())
+        }
+
+        async fn stop_capture(&mut self) -> AudioResult<()> {
+            self.is_capturing.store(false, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_capturing(&self) -> bool {
+            self.is_capturing.load(Ordering::SeqCst)
+        }
+
+        fn config(&self) -> AudioConfig {
+            self.config
+        }
+    }
+
+    fn activity_then_silence_chunk() -> AudioChunk {
+        let mut samples = vec![0i16; 480 * 5];
+        for sample in samples.iter_mut().take(480) {
+            *sample = 1000;
+        }
+        AudioChunk::new(samples, 16000, 1)
+    }
 
     #[tokio::test]
     async fn test_vad_wrapper_creation() {
@@ -391,5 +463,40 @@ mod tests {
         // MockAudioCapture не генерирует реальные chunks, но wrapper инициализирован
         wrapper.stop_capture().await.unwrap();
         assert!(!wrapper.is_capturing());
+    }
+
+    #[tokio::test]
+    async fn test_stale_callback_after_restart_does_not_trigger_silence_timeout() {
+        let callback_slot = Arc::new(Mutex::new(None));
+        let manual_capture = Box::new(ManualCallbackCapture::new(callback_slot.clone()));
+        let vad = VadProcessor::new(Some(90), None).expect("Failed to create VAD");
+        let mut wrapper = VadCaptureWrapper::new(manual_capture, vad);
+
+        let silence_timeouts = Arc::new(AtomicUsize::new(0));
+        let timeout_counter = silence_timeouts.clone();
+        wrapper.set_silence_timeout_callback(Arc::new(move || {
+            timeout_counter.fetch_add(1, AtomicOrdering::SeqCst);
+        }));
+
+        let forwarded_chunks = Arc::new(AtomicUsize::new(0));
+        let forwarded_counter = forwarded_chunks.clone();
+        let on_chunk: AudioChunkCallback = Arc::new(move |_| {
+            forwarded_counter.fetch_add(1, AtomicOrdering::SeqCst);
+        });
+
+        wrapper.initialize(AudioConfig::default()).await.unwrap();
+        wrapper.start_capture(on_chunk.clone()).await.unwrap();
+        let stale_callback = callback_slot.lock().unwrap().clone().unwrap();
+
+        wrapper.stop_capture().await.unwrap();
+        wrapper.start_capture(on_chunk).await.unwrap();
+        let current_callback = callback_slot.lock().unwrap().clone().unwrap();
+
+        stale_callback(activity_then_silence_chunk());
+        assert_eq!(silence_timeouts.load(AtomicOrdering::SeqCst), 0);
+
+        current_callback(activity_then_silence_chunk());
+        assert_eq!(silence_timeouts.load(AtomicOrdering::SeqCst), 1);
+        assert!(forwarded_chunks.load(AtomicOrdering::SeqCst) > 0);
     }
 }

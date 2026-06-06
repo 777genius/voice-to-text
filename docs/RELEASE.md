@@ -16,61 +16,56 @@
 
 ---
 
-## Текущий релиз: v0.11.1
+## Текущий релиз: v0.11.2
 
-Patch-релиз для hold-to-record и mini-window animation после `v0.11.0`.
+Patch-релиз для mini-window startup, hold-to-record и backend STT finalize после `v0.11.1`.
 
 ### Что говорить в статье
 
 - Скачать приложение можно с [voicetext.site](https://voicetext.site).
 - Нужна авторизация в VoicetextAI, потому что фича встроена в приложение.
-- Для live translation нужен OpenAI API key. Его можно указать в Settings после выбора режима `Live translation`; если поле пустое, используется `OPENAI_API_KEY`.
-- Для Google Meet, Zoom и похожих приложений нужно выбрать virtual microphone как microphone input: `BlackHole 2ch` на macOS, `CABLE Output` на Windows, `VoicetextAI Virtual Microphone` на Linux.
-- Сейчас сделано: исходящий голос пользователя переводится в английскую речь и отправляется в virtual microphone; входящий системный звук переводится в русский текст в popover.
-- Пока не сделано: входящий перевод голосом в наушники и selector для output device.
+- В режиме voice-to-text mini-window теперь открывается сразу и сразу принимает речь.
+- Анимированные полоски в mini-window реагируют на голос уже во время подключения STT stream.
+- Кнопки profile, minimize и settings в mini-window скрыты до hover, чтобы оставить больше места для текста.
+- Короткие фразы, сказанные сразу после hotkey, больше не должны теряться при быстром stop.
 
 ### Ссылки на код для статьи
 
-- User guide: [`docs/LIVE_TRANSLATION.md`](LIVE_TRANSLATION.md)
-- Outgoing service: `src-tauri/src/application/services/live_translation_service.rs`
-- OpenAI realtime client: `src-tauri/src/infrastructure/openai/realtime_translation.rs`
-- Cross-platform audio factory: `src-tauri/src/infrastructure/audio/platform_factory.rs`
-- CPAL virtual cable output: `src-tauri/src/infrastructure/audio/cpal_output.rs`
-- Linux Pulse/PipeWire adapter: `src-tauri/src/infrastructure/audio/linux_pulse.rs`
-- Windows loopback capture: `src-tauri/src/infrastructure/audio/windows_wasapi_loopback_capture.rs`
-- Incoming subtitles service: `src-tauri/src/application/services/incoming_translation_service.rs`
-- macOS system audio capture: `src-tauri/src/infrastructure/audio/macos_system_audio_capture.rs`
-- OpenAI text translation client: `src-tauri/src/infrastructure/openai/text_translation.rs`
-- Settings UI: `src/features/settings/presentation/components/sections/RecordingModeSection.vue`
+- Mini-window UI: `src/presentation/components/RecordingPopover.vue`
+- STT startup/prebuffer flow: `src-tauri/src/application/services/transcription_service.rs`
+- Backend finalize/drain flow: `src-tauri/src/infrastructure/stt/backend.rs`
+- Hotkey/session guards: `src-tauri/src/presentation/commands.rs`
+- App/session state: `src-tauri/src/presentation/state.rs`
+- VAD capture restart: `src-tauri/src/infrastructure/audio/vad_capture_wrapper.rs`
 
 ### Release notes для GitHub
 
 ```markdown
+## What changed
+
+- The mini recording window now opens immediately in the listening state.
+- The mini-window visualizer reacts to speech during STT startup instead of waiting for the backend stream to finish connecting.
+- Profile, minimize, and settings controls are hidden until hover, leaving more room for recognized text.
+- Long mini-window text now stays pinned to the latest phrase with a soft left fade.
+- The mini-window opening bounce has extra invisible gutter space, so the animation is no longer clipped.
+
 ## What is fixed
 
-- Fixed hold-to-record when the hotkey is tapped too quickly and then pressed again.
-- Older release/stop events can no longer hide a mini window that was already reopened by a newer press.
-- The mini recording window now resets stale slide-out state before playing the bounce open animation.
-
-## Setup
-
-- Download VoicetextAI from https://voicetext.site
-- Sign in to VoicetextAI
-- Select `Live translation` in Settings and add an OpenAI API key
-- macOS: install `BlackHole 2ch` and choose it as the microphone in Meet/Zoom
-- Windows: install VB-CABLE and choose `CABLE Output` as the microphone in Meet/Zoom
-- Linux: install PulseAudio tools or PipeWire-Pulse, then choose `VoicetextAI Virtual Microphone` as the microphone in Meet/Zoom
+- Speech captured immediately after the hotkey press is preserved while the backend STT stream is still connecting.
+- Backend STT stop now finalizes and drains late final results before closing the WebSocket.
+- Stale stop/idle events from older sessions can no longer hide a newer reopened mini window.
+- VAD capture is restarted cleanly between sessions so speech detection and the visualizer do not get stuck.
 ```
 
 ### Команды релиза
 
 ```bash
-pnpm release:notes v0.11.1
+pnpm release:notes v0.11.2
 git add CHANGELOG.md docs package.json src-tauri src
-git commit -m "chore(release): v0.11.1"
-git tag v0.11.1
+git commit -m "chore(release): v0.11.2"
+git tag v0.11.2
 git push origin HEAD
-git push origin v0.11.1
+git push origin v0.11.2
 ```
 
 ---

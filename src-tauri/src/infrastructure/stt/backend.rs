@@ -273,6 +273,104 @@ impl BackendProvider {
             Err(SttError::Processing("WebSocket not connected".to_string()))
         }
     }
+
+    async fn flush_pending_audio_batch(&mut self, context: &'static str) {
+        if self.audio_batch.is_empty() || self.is_closed.load(Ordering::SeqCst) {
+            return;
+        }
+
+        if let Some(ref ws_write) = self.ws_write {
+            let bytes = std::mem::take(&mut self.audio_batch);
+            self.audio_batch_frames = 0;
+            self.next_send_at = None;
+            self.batch_started_at = None;
+            self.sent_chunks_count += 1;
+            self.sent_bytes_total += bytes.len();
+            let flush_fut = async {
+                let mut guard = ws_write.lock().await;
+                guard.send(Message::Binary(bytes)).await
+            };
+
+            match tokio::time::timeout(Duration::from_secs(WS_SEND_TIMEOUT_SECS), flush_fut).await {
+                Ok(Ok(())) => {
+                    log::debug!(
+                        "[ReconnectDiag] BackendProvider {} flushed pending audio batch",
+                        context
+                    );
+                }
+                Ok(Err(e)) => {
+                    log::warn!(
+                        "[ReconnectDiag] BackendProvider {} failed to flush pending audio batch: {}",
+                        context,
+                        e
+                    );
+                }
+                Err(_) => {
+                    log::warn!(
+                        "[ReconnectDiag] BackendProvider {} timed out flushing pending audio batch",
+                        context
+                    );
+                }
+            }
+        }
+    }
+
+    async fn finalize_and_wait_for_drain(&self, context: &'static str) {
+        if self.is_closed.load(Ordering::SeqCst) || self.ws_write.is_none() {
+            return;
+        }
+
+        let finalize_rx = {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            *self.finalize_waiter.lock().await = Some(tx);
+            rx
+        };
+
+        log::info!(
+            "[ReconnectDiag] BackendProvider sending Finalize on {}: closed_before_finalize={}, sent_chunks={}",
+            context,
+            self.is_closed.load(Ordering::SeqCst),
+            self.sent_chunks_count
+        );
+        if let Err(e) = self.send_json(&ClientMessage::Finalize).await {
+            let _ = self.finalize_waiter.lock().await.take();
+            log::warn!(
+                "[ReconnectDiag] BackendProvider finalize failed on {}: {}",
+                context,
+                e
+            );
+            return;
+        }
+
+        match tokio::time::timeout(
+            Duration::from_millis(FINALIZE_DRAIN_ACK_TIMEOUT_MS),
+            finalize_rx,
+        )
+        .await
+        {
+            Ok(Ok(done)) => {
+                log::info!(
+                    "[ReconnectDiag] BackendProvider finalize drain ack received on {}: status={}, saw_result={}",
+                    context,
+                    done.status,
+                    done.saw_result
+                );
+            }
+            Ok(Err(_)) => {
+                log::warn!(
+                    "[ReconnectDiag] BackendProvider finalize drain waiter dropped on {}",
+                    context
+                );
+            }
+            Err(_) => {
+                let _ = self.finalize_waiter.lock().await.take();
+                log::warn!(
+                    "[ReconnectDiag] BackendProvider finalize drain ack timeout on {}",
+                    context
+                );
+            }
+        }
+    }
 }
 
 impl Default for BackendProvider {
@@ -1189,28 +1287,15 @@ impl SttProvider for BackendProvider {
     async fn stop_stream(&mut self) -> SttResult<()> {
         log::info!("BackendProvider: Stopping stream");
 
-        if !self.audio_batch.is_empty() && !self.is_closed.load(Ordering::SeqCst) {
-            if let Some(ref ws_write) = self.ws_write {
-                let bytes = std::mem::take(&mut self.audio_batch);
-                self.audio_batch_frames = 0;
-                self.next_send_at = None;
-                self.batch_started_at = None;
-                self.sent_chunks_count += 1;
-                self.sent_bytes_total += bytes.len();
-                let flush_fut = async {
-                    let mut guard = ws_write.lock().await;
-                    guard.send(Message::Binary(bytes)).await
-                };
-                let _ = tokio::time::timeout(Duration::from_secs(WS_SEND_TIMEOUT_SECS), flush_fut)
-                    .await;
-            }
+        self.flush_pending_audio_batch("stop").await;
+        if self.sent_chunks_count > 0 {
+            self.finalize_and_wait_for_drain("stop").await;
         }
 
-        // ПЕРВЫМ ДЕЛОМ ставим флаг закрытия — это предотвращает race condition
-        self.is_closed.store(true, Ordering::SeqCst);
         let _ = self.finalize_waiter.lock().await.take();
 
         if !self.is_streaming {
+            self.is_closed.store(true, Ordering::SeqCst);
             return Ok(());
         }
 
@@ -1219,6 +1304,8 @@ impl SttProvider for BackendProvider {
             let close_msg = ClientMessage::Close;
             let _ = self.send_json(&close_msg).await;
         }
+
+        self.is_closed.store(true, Ordering::SeqCst);
 
         // Закрываем WebSocket
         if let Some(ref ws_write) = self.ws_write {
@@ -1324,84 +1411,8 @@ impl SttProvider for BackendProvider {
             return Ok(());
         }
 
-        // Флашим хвост батча, чтобы не потерять последние миллисекунды аудио перед паузой.
-        if !self.audio_batch.is_empty() && !self.is_closed.load(Ordering::SeqCst) {
-            if let Some(ref ws_write) = self.ws_write {
-                let bytes = std::mem::take(&mut self.audio_batch);
-                self.audio_batch_frames = 0;
-                self.next_send_at = None;
-                self.batch_started_at = None;
-                self.sent_chunks_count += 1;
-                self.sent_bytes_total += bytes.len();
-                let flush_fut = async {
-                    let mut guard = ws_write.lock().await;
-                    guard.send(Message::Binary(bytes)).await
-                };
-                match tokio::time::timeout(Duration::from_secs(WS_SEND_TIMEOUT_SECS), flush_fut)
-                    .await
-                {
-                    Ok(Ok(())) => {
-                        log::debug!(
-                            "[ReconnectDiag] BackendProvider pause flushed pending audio batch"
-                        );
-                    }
-                    Ok(Err(e)) => {
-                        log::warn!(
-                            "[ReconnectDiag] BackendProvider pause failed to flush pending audio batch: {}",
-                            e
-                        );
-                    }
-                    Err(_) => {
-                        log::warn!(
-                            "[ReconnectDiag] BackendProvider pause timed out flushing pending audio batch"
-                        );
-                    }
-                }
-            }
-        }
-
-        let finalize_rx = {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            *self.finalize_waiter.lock().await = Some(tx);
-            rx
-        };
-
-        // Просим сервер форсировать финализацию провайдера (Deepgram Finalize) и ждём
-        // backend-level drain ack. На старом backend ack не придёт, поэтому есть bounded fallback.
-        log::info!(
-            "[ReconnectDiag] BackendProvider sending Finalize on pause: closed_before_finalize={}, sent_chunks={}",
-            self.is_closed.load(Ordering::SeqCst),
-            self.sent_chunks_count
-        );
-        if let Err(e) = self.send_json(&ClientMessage::Finalize).await {
-            let _ = self.finalize_waiter.lock().await.take();
-            log::warn!(
-                "[ReconnectDiag] BackendProvider finalize failed on pause: {}",
-                e
-            );
-        } else {
-            match tokio::time::timeout(
-                Duration::from_millis(FINALIZE_DRAIN_ACK_TIMEOUT_MS),
-                finalize_rx,
-            )
-            .await
-            {
-                Ok(Ok(done)) => {
-                    log::info!(
-                        "[ReconnectDiag] BackendProvider finalize drain ack received: status={}, saw_result={}",
-                        done.status,
-                        done.saw_result
-                    );
-                }
-                Ok(Err(_)) => {
-                    log::warn!("[ReconnectDiag] BackendProvider finalize drain waiter dropped");
-                }
-                Err(_) => {
-                    let _ = self.finalize_waiter.lock().await.take();
-                    log::warn!("[ReconnectDiag] BackendProvider finalize drain ack timeout");
-                }
-            }
-        }
+        self.flush_pending_audio_batch("pause").await;
+        self.finalize_and_wait_for_drain("pause").await;
 
         self.is_paused = true;
         log::info!(
@@ -1693,6 +1704,75 @@ mod tests {
         (format!("ws://{addr}"), task)
     }
 
+    async fn spawn_finalize_on_stop_mock_backend() -> (String, JoinHandle<LifecycleCapture>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local websocket listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept websocket tcp");
+            let mut ws = accept_async(stream).await.expect("accept websocket");
+            let mut config: Option<serde_json::Value> = None;
+            let mut binary_lengths = Vec::new();
+            let mut saw_finalize = false;
+
+            while let Some(next) = ws.next().await {
+                let msg = next.expect("websocket message");
+                match msg {
+                    Message::Text(text) => {
+                        let value: serde_json::Value =
+                            serde_json::from_str(&text).expect("client json message");
+                        match value.get("type").and_then(|v| v.as_str()) {
+                            Some("config") => {
+                                config = Some(value);
+                                ws.send(Message::Text(
+                                    r#"{"type":"ready","session_id":"mock-session"}"#.to_string(),
+                                ))
+                                .await
+                                .expect("send ready");
+                            }
+                            Some("finalize") => {
+                                saw_finalize = true;
+                                ws.send(Message::Text(
+                                    r#"{"type":"final","text":"late final","confidence":0.93,"start_ms":0,"duration_ms":360}"#
+                                        .to_string(),
+                                ))
+                                .await
+                                .expect("send late final");
+                                ws.send(Message::Text(
+                                    r#"{"type":"finalize_complete","status":"drained","saw_result":true}"#
+                                        .to_string(),
+                                ))
+                                .await
+                                .expect("send finalize_complete");
+                            }
+                            Some("close") => break,
+                            _ => {}
+                        }
+                    }
+                    Message::Binary(bytes) => {
+                        binary_lengths.push(bytes.len());
+                        let seq = binary_lengths.len();
+                        ws.send(Message::Text(format!(r#"{{"type":"ack","seq":{seq}}}"#)))
+                            .await
+                            .expect("send ack");
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+
+            LifecycleCapture {
+                config: config.expect("client config"),
+                binary_lengths,
+                saw_finalize,
+            }
+        });
+
+        (format!("ws://{addr}"), task)
+    }
+
     #[tokio::test]
     async fn test_backend_provider_sends_selected_streaming_provider_in_config_message() {
         for (selected, expected) in [
@@ -1831,6 +1911,51 @@ mod tests {
         assert_eq!(capture.config["keyterms"][0], "VoicetextAI");
         assert_eq!(capture.config["keyterms"][1], "ElevenLabs");
         assert_eq!(capture.config["capabilities"][0], CAPABILITY_FINALIZE_ACK);
+        assert_eq!(capture.binary_lengths, vec![960]);
+        assert!(capture.saw_finalize);
+    }
+
+    #[tokio::test]
+    async fn stop_stream_waits_for_finalize_drain_before_closing_receiver() {
+        let (backend_url, server_task) = spawn_finalize_on_stop_mock_backend().await;
+        let mut config = SttConfig::new(SttProviderType::Backend);
+        config.backend_url = Some(backend_url);
+        config.backend_auth_token = Some("test-token".to_string());
+        config.backend_streaming_provider = crate::domain::BackendStreamingProvider::Deepgram;
+        config.language = "en".to_string();
+
+        let (final_tx, mut final_rx) = tokio::sync::mpsc::unbounded_channel::<Transcription>();
+        let mut provider = BackendProvider::new();
+        provider.initialize(&config).await.unwrap();
+        provider
+            .start_stream(
+                Arc::new(|_| {}),
+                Arc::new(move |t| {
+                    let _ = final_tx.send(t);
+                }),
+                Arc::new(|err| panic!("unexpected backend provider error: {err}")),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .unwrap();
+
+        provider
+            .send_audio(&AudioChunk::new(vec![1000; 480], 16_000, 1))
+            .await
+            .unwrap();
+        provider.stop_stream().await.unwrap();
+
+        let final_result = tokio::time::timeout(Duration::from_secs(3), final_rx.recv())
+            .await
+            .expect("final callback timeout")
+            .expect("final callback");
+        assert_eq!(final_result.text, "late final");
+        assert!(final_result.is_final);
+
+        let capture = tokio::time::timeout(Duration::from_secs(3), server_task)
+            .await
+            .expect("mock backend timeout")
+            .expect("mock backend task");
         assert_eq!(capture.binary_lengths, vec![960]);
         assert!(capture.saw_finalize);
     }

@@ -62,6 +62,7 @@ const isMiniAnimationReset = ref(false);
 const miniHideSide = ref<'left' | 'right'>('right');
 const isMiniWindow = computed(() => appConfigStore.showMiniRecordingWindow);
 const useMiniLayout = computed(() => isMiniWindow.value && !showUpdateDialog.value);
+const isMiniActionsVisible = ref(false);
 
 const recordingHotkey = computed(() => formatHotkeyForDisplay(appConfigStore.recordingHotkey));
 
@@ -79,19 +80,13 @@ const miniHotkeyPrompt = computed(() =>
     : ''
 );
 
-function pickLatestSpeechFragment(text: string): string {
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const lastLine = lines.length > 0 ? lines[lines.length - 1] : '';
-  const sentenceMatches = lastLine.match(/[^.!?。！？…]+[.!?。！？…]?/gu) ?? [];
-  const lastSentence = sentenceMatches
-    .map((line) => line.trim())
+function normalizeMiniTranscriptText(...parts: string[]): string {
+  return parts
+    .map((part) => part.trim())
     .filter(Boolean)
-    .pop() ?? lastLine;
-  const words = lastSentence.split(/\s+/).filter(Boolean);
-  return words.length > 18 ? words.slice(-18).join(' ') : lastSentence;
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 const miniDisplayText = computed(() => {
@@ -99,14 +94,15 @@ const miniDisplayText = computed(() => {
     return store.error || t('main.errorGeneric');
   }
 
-  const latestRecognized =
-    pickLatestSpeechFragment(store.visiblePartialText) ||
-    pickLatestSpeechFragment(store.visibleAccumulatedText) ||
-    pickLatestSpeechFragment(store.visibleFinalText);
+  const latestRecognized = normalizeMiniTranscriptText(
+    store.visibleFinalText,
+    store.visibleAccumulatedText,
+    store.visiblePartialText,
+  );
 
   if (latestRecognized) return latestRecognized;
-  if (store.isStarting || store.isConnecting) return t('main.connecting');
-  if (store.isRecording) return t('main.listening');
+  if (store.isConnecting) return t('main.connecting');
+  if (store.isStarting || store.isRecording) return t('main.listening');
   if (store.isProcessing) return store.displayText;
   return '';
 });
@@ -161,10 +157,15 @@ const transcriptionTextRef = ref<HTMLElement | null>(null);
 // Динамическая высота окна при росте текста
 const FULL_WINDOW_WIDTH = 460;
 const BASE_WINDOW_HEIGHT = 330;
-const MINI_WINDOW_WIDTH = 236;
-const MINI_WINDOW_HEIGHT = 38;
+const MINI_CONTENT_WIDTH = 236;
+const MINI_CONTENT_HEIGHT = 38;
+const MINI_ANIMATION_GUTTER_X = 6;
+const MINI_ANIMATION_GUTTER_Y = 12;
+const MINI_WINDOW_WIDTH = MINI_CONTENT_WIDTH + MINI_ANIMATION_GUTTER_X * 2;
+const MINI_WINDOW_HEIGHT = MINI_CONTENT_HEIGHT + MINI_ANIMATION_GUTTER_Y * 2;
 const UPDATE_DIALOG_WINDOW_HEIGHT = 430;
 const MINI_CLOSE_ANIMATION_MS = 220;
+const MINI_CURSOR_POLL_INTERVAL_MS = 80;
 const TEXT_THRESHOLD_PX = 128;
 const MAX_WINDOW_HEIGHT = 700;
 const NON_TEXT_HEIGHT = 200;
@@ -225,6 +226,8 @@ function applyRecordingWindowSize() {
 let hideRecordingWindowTimeout: number | null = null;
 let miniOpeningTimer: number | null = null;
 let miniCloseResetTimer: number | null = null;
+let miniCursorPollTimer: number | null = null;
+let isMiniCursorPollInFlight = false;
 let hotkeyStartIntentUntilMs = 0;
 const HOTKEY_START_INTENT_SUPPRESS_HIDE_MS = 5_000;
 
@@ -242,6 +245,63 @@ function cancelPendingHideRecordingWindow() {
     miniCloseResetTimer = null;
   }
   isMiniClosing.value = false;
+}
+
+function blurMiniActionFocus(event?: Event) {
+  const eventTarget = event?.currentTarget;
+  if (eventTarget instanceof HTMLElement) {
+    eventTarget.blur();
+  }
+
+  const activeElement = document.activeElement;
+  if (activeElement instanceof HTMLElement && activeElement.closest('.mini-actions')) {
+    activeElement.blur();
+  }
+}
+
+function resetMiniActionState(event?: Event) {
+  isMiniActionsVisible.value = false;
+  blurMiniActionFocus(event);
+}
+
+async function refreshMiniCursorOverWindow() {
+  if (!useMiniLayout.value || !isTauriAvailable()) {
+    isMiniActionsVisible.value = false;
+    return;
+  }
+
+  if (isMiniCursorPollInFlight) return;
+  isMiniCursorPollInFlight = true;
+
+  try {
+    const isCursorOver = Boolean(await invoke<boolean>('is_cursor_over_recording_window'));
+    if (useMiniLayout.value) {
+      isMiniActionsVisible.value = isCursorOver;
+    }
+  } catch {
+    if (useMiniLayout.value) {
+      isMiniActionsVisible.value = false;
+    }
+  } finally {
+    isMiniCursorPollInFlight = false;
+  }
+}
+
+function startMiniCursorPolling() {
+  if (miniCursorPollTimer !== null || !useMiniLayout.value || !isTauriAvailable()) return;
+
+  void refreshMiniCursorOverWindow();
+  miniCursorPollTimer = window.setInterval(() => {
+    void refreshMiniCursorOverWindow();
+  }, MINI_CURSOR_POLL_INTERVAL_MS);
+}
+
+function stopMiniCursorPolling() {
+  if (miniCursorPollTimer !== null) {
+    window.clearInterval(miniCursorPollTimer);
+    miniCursorPollTimer = null;
+  }
+  isMiniActionsVisible.value = false;
 }
 
 async function resolveMiniHideSide(): Promise<'left' | 'right'> {
@@ -266,6 +326,7 @@ async function resolveMiniHideSide(): Promise<'left' | 'right'> {
 }
 
 async function beginMiniCloseAnimation() {
+  resetMiniActionState();
   miniHideSide.value = await resolveMiniHideSide();
   if (miniOpeningTimer !== null) {
     window.clearTimeout(miniOpeningTimer);
@@ -286,6 +347,8 @@ async function beginMiniCloseAnimation() {
 
 async function playMiniOpenAnimation() {
   if (!useMiniLayout.value) return;
+
+  resetMiniActionState();
 
   if (miniOpeningTimer !== null) {
     window.clearTimeout(miniOpeningTimer);
@@ -368,6 +431,18 @@ watch([isMiniWindow, showUpdateDialog], () => {
   });
 });
 
+watch(useMiniLayout, (enabled) => {
+  if (enabled) {
+    startMiniCursorPolling();
+  } else {
+    stopMiniCursorPolling();
+  }
+});
+
+watch(isMiniActionsVisible, () => {
+  void nextTick(alignMiniTextToEnd);
+});
+
 watch(
   () => [
     miniDisplayText.value,
@@ -396,10 +471,12 @@ onMounted(async () => {
   await nextTick();
   applyRecordingWindowSize();
   alignMiniTextToEnd();
+  startMiniCursorPolling();
 
   // Очищаем UI при фактическом показе окна (НЕ через focus: main может быть nonactivating NSPanel).
   // Важно: не очищаем посреди активной записи — иначе можно потерять текст если пользователь скрыл и снова показал окно.
   unlistenWindowShown = await listen(EVENT_RECORDING_WINDOW_SHOWN, async () => {
+    resetMiniActionState();
     cancelPendingHideRecordingWindow();
     await nextTick();
     playMiniOpenAnimation();
@@ -427,6 +504,7 @@ onMounted(async () => {
   unlistenWindowWillHideForHotkeyStop = await listen(
     EVENT_RECORDING_WINDOW_WILL_HIDE_FOR_HOTKEY_STOP,
     () => {
+      resetMiniActionState();
       if (useMiniLayout.value) {
         void beginMiniCloseAnimation();
       }
@@ -470,22 +548,21 @@ onMounted(async () => {
     }
 
     const payloadSessionId = Number(event.payload.session_id ?? 0);
+    if (payloadSessionId <= store.closedSessionIdFloor) {
+      console.warn('[AutoHide] Ignoring Idle from closed or missing session:', {
+        payloadSessionId,
+        closedFloor: store.closedSessionIdFloor,
+      });
+      return;
+    }
+
     if (
-      payloadSessionId > 0 &&
       store.sessionId !== null &&
       payloadSessionId !== store.sessionId
     ) {
       console.warn('[AutoHide] Ignoring Idle from stale session:', {
         payloadSessionId,
         activeSessionId: store.sessionId,
-      });
-      return;
-    }
-
-    if (payloadSessionId > 0 && payloadSessionId <= store.closedSessionIdFloor) {
-      console.warn('[AutoHide] Ignoring Idle from closed session:', {
-        payloadSessionId,
-        closedFloor: store.closedSessionIdFloor,
       });
       return;
     }
@@ -536,6 +613,7 @@ onUnmounted(() => {
     window.clearTimeout(miniCloseResetTimer);
     miniCloseResetTimer = null;
   }
+  stopMiniCursorPolling();
   cancelPendingHideRecordingWindow();
 });
 
@@ -585,7 +663,8 @@ const handleHotkeyToggle = async () => {
   }
 };
 
-const openSettings = () => {
+const openSettings = (event?: Event) => {
+  resetMiniActionState(event);
   if (isTauriAvailable()) {
     invoke('show_settings_window', {});
     return;
@@ -593,7 +672,8 @@ const openSettings = () => {
   showSettings.value = true;
 };
 
-const openSettingsForDevice = () => {
+const openSettingsForDevice = (event?: Event) => {
+  resetMiniActionState(event);
   if (isTauriAvailable()) {
     invoke('show_settings_window', { scrollToSection: 'audio-device' });
     return;
@@ -604,7 +684,8 @@ const openSettingsForDevice = () => {
 
 const profileInitialSection: Ref<'none' | 'license' | 'gift'> = ref('none');
 
-const openProfile = () => {
+const openProfile = (event?: Event) => {
+  resetMiniActionState(event);
   if (isTauriAvailable()) {
     invoke('show_profile_window', { initialSection: 'none' });
     return;
@@ -613,7 +694,8 @@ const openProfile = () => {
   showProfile.value = true;
 };
 
-const openProfileWithLicense = () => {
+const openProfileWithLicense = (event?: Event) => {
+  resetMiniActionState(event);
   if (isTauriAvailable()) {
     invoke('show_profile_window', { initialSection: 'license' });
     return;
@@ -623,10 +705,12 @@ const openProfileWithLicense = () => {
 };
 
 const closeProfile = () => {
+  resetMiniActionState();
   showProfile.value = false;
 };
 
-const openUpdateDialog = async () => {
+const openUpdateDialog = async (event?: Event) => {
+  resetMiniActionState(event);
   cancelPendingHideRecordingWindow();
 
   if (await openUpdateWindow()) {
@@ -651,7 +735,8 @@ const closeSettings = async () => {
   await appConfigStore.refresh();
 };
 
-const minimizeWindow = async () => {
+const minimizeWindow = async (event?: Event) => {
+  resetMiniActionState(event);
   try {
     await invoke('toggle_window');
   } catch (err) {
@@ -682,12 +767,16 @@ const minimizeWindow = async () => {
           class="mini-audio-visualizer"
           :active="store.isStarting || store.isRecording"
         />
-        <div class="mini-popover-content" @mousedown="onDragMouseDown">
+        <div
+          class="mini-popover-content"
+          :class="{ 'mini-actions-visible': isMiniActionsVisible }"
+          @mousedown="onDragMouseDown"
+        >
           <span
             class="mini-status-dot"
             :class="{
-              recording: store.isRecording,
-              starting: store.isStarting || store.isConnecting,
+              recording: store.isStarting || store.isRecording,
+              starting: store.isConnecting,
               processing: store.isProcessing,
               error: store.hasError || Boolean(store.error),
             }"
@@ -924,6 +1013,10 @@ const minimizeWindow = async () => {
   padding: 0;
 }
 
+.popover-container.mini {
+  padding: 12px 6px;
+}
+
 .popover {
   background: var(--glass-bg);
   border: 1px solid var(--glass-border);
@@ -998,12 +1091,13 @@ const minimizeWindow = async () => {
   height: 100%;
   box-sizing: border-box;
   display: grid;
-  grid-template-columns: 8px minmax(0, 1fr) auto;
+  grid-template-columns: 8px minmax(0, 1fr);
   align-items: center;
   gap: 5px;
   padding: 2px 5px 2px 7px;
   cursor: default;
   user-select: none;
+  --mini-actions-reserve: 82px;
 }
 
 .mini-status-dot {
@@ -1043,6 +1137,7 @@ const minimizeWindow = async () => {
 
 .mini-transcription-text {
   min-width: 0;
+  box-sizing: border-box;
   color: var(--color-text-secondary);
   font-size: 12.5px;
   line-height: 1.1;
@@ -1053,11 +1148,16 @@ const minimizeWindow = async () => {
   unicode-bidi: plaintext;
   text-align: left;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  transition: padding-right 140ms ease;
+}
+
+.mini-popover-content.mini-actions-visible .mini-transcription-text {
+  padding-right: var(--mini-actions-reserve);
 }
 
 .mini-transcription-text.overflowing:not(.prompt) {
-  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 14px, #000 100%);
-  mask-image: linear-gradient(to right, transparent 0, #000 14px, #000 100%);
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 34px, #000 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 34px, #000 100%);
 }
 
 .mini-transcription-text-inner {
@@ -1099,9 +1199,23 @@ const minimizeWindow = async () => {
 }
 
 .mini-actions {
+  position: absolute;
+  top: 50%;
+  right: 5px;
   display: inline-flex;
   align-items: center;
   gap: 1px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%) translateX(4px);
+  transition: opacity 140ms ease, transform 140ms ease;
+  z-index: 2;
+}
+
+.mini-popover-content.mini-actions-visible .mini-actions {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(-50%) translateX(0);
 }
 
 .mini-icon-button {

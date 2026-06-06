@@ -59,6 +59,39 @@ fn audio_capture_device_cache_matches(
         .unwrap_or(false)
 }
 
+fn is_current_vad_timeout_session(timeout_session_id: u64, active_session_id: u64) -> bool {
+    timeout_session_id != 0 && active_session_id == timeout_session_id
+}
+
+fn claim_vad_timeout_session(
+    active_session_id: &AtomicU64,
+    timeout_session_id: u64,
+) -> Result<(), u64> {
+    if timeout_session_id == 0 {
+        return Err(active_session_id.load(Ordering::Relaxed));
+    }
+
+    active_session_id
+        .compare_exchange(timeout_session_id, 0, Ordering::Relaxed, Ordering::Relaxed)
+        .map(|_| ())
+}
+
+fn restore_vad_timeout_session_claim_if_unclaimed(
+    active_session_id: &AtomicU64,
+    timeout_session_id: u64,
+) {
+    if timeout_session_id == 0 {
+        return;
+    }
+
+    let _ = active_session_id.compare_exchange(
+        0,
+        timeout_session_id,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    );
+}
+
 /// Global application state managed by Tauri
 ///
 /// This state is shared across all Tauri commands and can be accessed
@@ -93,8 +126,8 @@ pub struct AppState {
 
     /// Receiver для VAD silence timeout событий
     /// Используется в setup для установки обработчика
-    pub vad_timeout_tx: tokio::sync::mpsc::UnboundedSender<()>,
-    pub vad_timeout_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<()>>>,
+    pub vad_timeout_tx: tokio::sync::mpsc::UnboundedSender<u64>,
+    pub vad_timeout_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<u64>>>,
 
     /// VAD timeout handler task (для перезапуска при смене устройства)
     vad_handler_task: Arc<RwLock<Option<tauri::async_runtime::JoinHandle<()>>>>,
@@ -190,7 +223,7 @@ pub struct AppState {
 
     /// Активная (последняя запущенная) сессия записи.
     /// Используется для маркировки статусов Idle/Error, которые эмитятся "в обход" start_recording callbacks.
-    pub active_transcription_session_id: AtomicU64,
+    pub active_transcription_session_id: Arc<AtomicU64>,
 
     /// Какой режим (dictation / live_translation) сейчас владеет активной сессией.
     /// None = ничего не запущено. Hotkey stop читает active_recording_mode (не AppConfig),
@@ -274,7 +307,7 @@ impl AppState {
                     recording_hotkey_registration_guard: Arc::new(tokio::sync::Mutex::new(())),
                     active_audio_capture_device: Arc::new(RwLock::new(None)),
                     transcription_session_seq: AtomicU64::new(0),
-                    active_transcription_session_id: AtomicU64::new(0),
+                    active_transcription_session_id: Arc::new(AtomicU64::new(0)),
                     active_recording_mode: Arc::new(RwLock::new(None)),
                     live_translation_service: Arc::new(RwLock::new(None)),
                     incoming_translation_service: Arc::new(RwLock::new(None)),
@@ -343,7 +376,7 @@ impl AppState {
                     recording_hotkey_registration_guard: Arc::new(tokio::sync::Mutex::new(())),
                     active_audio_capture_device: Arc::new(RwLock::new(Some(None))),
                     transcription_session_seq: AtomicU64::new(0),
-                    active_transcription_session_id: AtomicU64::new(0),
+                    active_transcription_session_id: Arc::new(AtomicU64::new(0)),
                     active_recording_mode: Arc::new(RwLock::new(None)),
                     live_translation_service: Arc::new(RwLock::new(None)),
                     incoming_translation_service: Arc::new(RwLock::new(None)),
@@ -355,6 +388,7 @@ impl AppState {
 
         // Создаем channel для VAD timeout событий
         let (vad_tx, vad_rx) = tokio::sync::mpsc::unbounded_channel();
+        let active_transcription_session_id = Arc::new(AtomicU64::new(0));
 
         // Wrap system audio with VAD
         let mut vad_wrapper = VadCaptureWrapper::new_with_microphone_sensitivity(
@@ -365,9 +399,14 @@ impl AppState {
 
         // Устанавливаем callback который отправляет событие в channel
         let vad_tx_for_cb = vad_tx.clone();
+        let active_session_id_for_vad = active_transcription_session_id.clone();
         vad_wrapper.set_silence_timeout_callback(Arc::new(move || {
-            log::info!("VAD silence timeout triggered - sending notification");
-            let _ = vad_tx_for_cb.send(());
+            let session_id = active_session_id_for_vad.load(Ordering::Relaxed);
+            log::info!(
+                "VAD silence timeout triggered - sending notification (session_id={})",
+                session_id
+            );
+            let _ = vad_tx_for_cb.send(session_id);
         }));
 
         let audio_capture = Box::new(vad_wrapper);
@@ -426,7 +465,7 @@ impl AppState {
             recording_hotkey_registration_guard: Arc::new(tokio::sync::Mutex::new(())),
             active_audio_capture_device: Arc::new(RwLock::new(Some(None))),
             transcription_session_seq: AtomicU64::new(0),
-            active_transcription_session_id: AtomicU64::new(0),
+            active_transcription_session_id,
             active_recording_mode: Arc::new(RwLock::new(None)),
             live_translation_service: Arc::new(RwLock::new(None)),
             incoming_translation_service: Arc::new(RwLock::new(None)),
@@ -897,14 +936,31 @@ impl AppState {
         let handle = tauri::async_runtime::spawn(async move {
             let mut rx_guard = rx.lock().await;
 
-            while let Some(_) = rx_guard.recv().await {
-                log::info!("VAD silence timeout detected - auto-stopping recording");
+            while let Some(timeout_session_id) = rx_guard.recv().await {
+                log::info!(
+                    "VAD silence timeout detected - auto-stopping recording (session_id={})",
+                    timeout_session_id
+                );
 
-                let manual_stop_only = if let Some(state) = app_handle.try_state::<AppState>() {
-                    state.config.read().await.keep_recording_until_manual_stop
-                } else {
-                    false
+                let Some(state) = app_handle.try_state::<AppState>() else {
+                    log::warn!("VAD timeout ignored - app state is unavailable");
+                    continue;
                 };
+                let active_session_id = state.active_transcription_session_id.clone();
+                let config = state.config.clone();
+                let active_recording_mode = state.active_recording_mode.clone();
+
+                let current_session_id = active_session_id.load(Ordering::Relaxed);
+                if !is_current_vad_timeout_session(timeout_session_id, current_session_id) {
+                    log::info!(
+                        "VAD timeout ignored - stale session event: timeout_session_id={}, active_session_id={}",
+                        timeout_session_id,
+                        current_session_id
+                    );
+                    continue;
+                }
+
+                let manual_stop_only = config.read().await.keep_recording_until_manual_stop;
                 if manual_stop_only {
                     log::info!("VAD timeout ignored - keep_recording_until_manual_stop is enabled");
                     continue;
@@ -917,6 +973,17 @@ impl AppState {
                     continue;
                 }
 
+                if let Err(active) =
+                    claim_vad_timeout_session(active_session_id.as_ref(), timeout_session_id)
+                {
+                    log::info!(
+                        "VAD timeout ignored - session changed before stop: timeout_session_id={}, active_session_id={}",
+                        timeout_session_id,
+                        active
+                    );
+                    continue;
+                }
+
                 // Останавливаем запись
                 match service.stop_recording().await {
                     Ok(_) => {
@@ -924,17 +991,11 @@ impl AppState {
 
                         // Эмитим событие в UI
                         use tauri::Emitter;
-                        let session_id = if let Some(state) = app_handle.try_state::<AppState>() {
-                            state
-                                .active_transcription_session_id
-                                .swap(0, Ordering::Relaxed)
-                        } else {
-                            0
-                        };
+                        *active_recording_mode.write().await = None;
                         let _ = app_handle.emit(
                             crate::presentation::events::EVENT_RECORDING_STATUS,
                             crate::presentation::RecordingStatusPayload {
-                                session_id,
+                                session_id: timeout_session_id,
                                 status: crate::domain::RecordingStatus::Idle,
                                 stopped_via_hotkey: false,
                                 mode: None,
@@ -951,22 +1012,20 @@ impl AppState {
                                 "VAD stop failed after service recovered to Idle; emitting Idle status"
                             );
                             use tauri::Emitter;
-                            let session_id = if let Some(state) = app_handle.try_state::<AppState>()
-                            {
-                                state
-                                    .active_transcription_session_id
-                                    .swap(0, Ordering::Relaxed)
-                            } else {
-                                0
-                            };
+                            *active_recording_mode.write().await = None;
                             let _ = app_handle.emit(
                                 crate::presentation::events::EVENT_RECORDING_STATUS,
                                 crate::presentation::RecordingStatusPayload {
-                                    session_id,
+                                    session_id: timeout_session_id,
                                     status: crate::domain::RecordingStatus::Idle,
                                     stopped_via_hotkey: false,
                                     mode: None,
                                 },
+                            );
+                        } else {
+                            restore_vad_timeout_session_claim_if_unclaimed(
+                                active_session_id.as_ref(),
+                                timeout_session_id,
                             );
                         }
                     }
@@ -1099,9 +1158,14 @@ impl AppState {
         // Используем общий VAD timeout sender, чтобы избежать гонок/дедлоков при смене устройства.
         // Receiver слушается единственным обработчиком, а при смене устройства меняется только callback.
         let vad_tx = self.vad_timeout_tx.clone();
+        let active_session_id_for_vad = self.active_transcription_session_id.clone();
         vad_wrapper.set_silence_timeout_callback(Arc::new(move || {
-            log::info!("VAD silence timeout triggered - sending notification");
-            let _ = vad_tx.send(());
+            let session_id = active_session_id_for_vad.load(Ordering::Relaxed);
+            log::info!(
+                "VAD silence timeout triggered - sending notification (session_id={})",
+                session_id
+            );
+            let _ = vad_tx.send(session_id);
         }));
 
         // Заменяем audio capture в TranscriptionService
@@ -1131,7 +1195,12 @@ impl Default for AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{audio_capture_device_cache_matches, normalize_audio_capture_device_name};
+    use super::{
+        audio_capture_device_cache_matches, claim_vad_timeout_session,
+        is_current_vad_timeout_session, normalize_audio_capture_device_name,
+        restore_vad_timeout_session_claim_if_unclaimed,
+    };
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
     fn audio_capture_device_cache_reuses_same_explicit_device() {
@@ -1174,5 +1243,38 @@ mod tests {
             normalize_audio_capture_device_name(Some("   ".to_string())),
             None
         );
+    }
+
+    #[test]
+    fn vad_timeout_session_match_rejects_zero_and_stale_events() {
+        assert!(!is_current_vad_timeout_session(0, 1));
+        assert!(!is_current_vad_timeout_session(1, 0));
+        assert!(!is_current_vad_timeout_session(1, 2));
+        assert!(is_current_vad_timeout_session(2, 2));
+    }
+
+    #[test]
+    fn vad_timeout_session_claim_clears_only_current_session() {
+        let active_session_id = AtomicU64::new(7);
+
+        assert_eq!(claim_vad_timeout_session(&active_session_id, 6), Err(7));
+        assert_eq!(active_session_id.load(Ordering::Relaxed), 7);
+
+        assert_eq!(claim_vad_timeout_session(&active_session_id, 0), Err(7));
+        assert_eq!(active_session_id.load(Ordering::Relaxed), 7);
+
+        assert_eq!(claim_vad_timeout_session(&active_session_id, 7), Ok(()));
+        assert_eq!(active_session_id.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn vad_timeout_session_restore_does_not_overwrite_new_session() {
+        let active_session_id = AtomicU64::new(0);
+        restore_vad_timeout_session_claim_if_unclaimed(&active_session_id, 7);
+        assert_eq!(active_session_id.load(Ordering::Relaxed), 7);
+
+        active_session_id.store(9, Ordering::Relaxed);
+        restore_vad_timeout_session_claim_if_unclaimed(&active_session_id, 7);
+        assert_eq!(active_session_id.load(Ordering::Relaxed), 9);
     }
 }

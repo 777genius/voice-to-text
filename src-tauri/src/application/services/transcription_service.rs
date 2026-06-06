@@ -1,11 +1,11 @@
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, Instant};
 
 use crate::domain::{
     amplify_i16_samples, limited_microphone_gain, microphone_sensitivity_gain, AudioCapture,
-    AudioConfig, AudioLevelCallback, AudioSpectrumCallback, ConnectionQualityCallback,
+    AudioChunk, AudioConfig, AudioLevelCallback, AudioSpectrumCallback, ConnectionQualityCallback,
     ErrorCallback, RecordingStatus, SttConfig, SttError, SttProvider, SttProviderFactory,
     SttProviderType, TranscriptionCallback,
 };
@@ -15,6 +15,75 @@ use crate::application::AudioSpectrumAnalyzer;
 type Result<T> = anyhow::Result<T>;
 
 const AUDIO_PROCESSOR_STOP_DRAIN_TIMEOUT: Duration = Duration::from_millis(2500);
+const PRESTART_VISUALIZER_QUEUE_CAPACITY: usize = 64;
+
+struct PreparedAudioChunk {
+    max_amplitude: i32,
+    normalized_level: f32,
+    requested_gain: f32,
+    effective_gain: f32,
+    amplified_chunk: AudioChunk,
+}
+
+fn keep_alive_enabled_for_config(config: &SttConfig) -> bool {
+    config.keep_connection_alive && config.provider != SttProviderType::Backend
+}
+
+fn prepare_audio_chunk_for_processing(chunk: &AudioChunk, sensitivity: u8) -> PreparedAudioChunk {
+    let max_amplitude: i32 = chunk
+        .data
+        .iter()
+        .map(|&s| (s as i32).abs())
+        .max()
+        .unwrap_or(0);
+    let normalized_level = (max_amplitude as f32 / 32767.0).sqrt().min(1.0);
+    let requested_gain = microphone_sensitivity_gain(sensitivity);
+    let effective_gain = limited_microphone_gain(sensitivity, max_amplitude);
+    let amplified_data = amplify_i16_samples(&chunk.data, effective_gain);
+
+    PreparedAudioChunk {
+        max_amplitude,
+        normalized_level,
+        requested_gain,
+        effective_gain,
+        amplified_chunk: AudioChunk {
+            data: amplified_data,
+            sample_rate: chunk.sample_rate,
+            channels: chunk.channels,
+            timestamp: chunk.timestamp,
+        },
+    }
+}
+
+fn emit_audio_visualization(
+    chunk_count: usize,
+    prepared: &PreparedAudioChunk,
+    spectrum: &mut AudioSpectrumAnalyzer,
+    on_audio_level: &AudioLevelCallback,
+    on_audio_spectrum: &AudioSpectrumCallback,
+) {
+    // На первом чанке эмитим сразу, чтобы mini-window ожило ещё во время STT startup.
+    if chunk_count == 1 || chunk_count % 2 == 0 {
+        on_audio_level(prepared.normalized_level);
+    }
+
+    // Берем усиленный звук, чтобы визуализация соответствовала тому, что слышит STT.
+    if let Some(bars) = spectrum.push_samples(&prepared.amplified_chunk.data) {
+        on_audio_spectrum(bars);
+    }
+}
+
+fn abort_prestart_visualizer_task(
+    task: &mut Option<tokio::task::JoinHandle<()>>,
+    active: &Arc<AtomicBool>,
+    reason: &'static str,
+) {
+    active.store(false, Ordering::Relaxed);
+    if let Some(task) = task.take() {
+        log::debug!("Aborting prestart audio visualizer task: {}", reason);
+        task.abort();
+    }
+}
 
 /// Main application service that orchestrates transcription workflow
 ///
@@ -144,11 +213,21 @@ impl TranscriptionService {
         // Важно: канал ДОЛЖЕН быть bounded. Иначе при плохой сети/подвисшем WS send()
         // мы можем накопить гигабайты аудио в памяти и уронить приложение.
         let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+        let (visual_tx, mut visual_rx) =
+            tokio::sync::mpsc::channel(PRESTART_VISUALIZER_QUEUE_CAPACITY);
 
         let dropped_chunks = Arc::new(AtomicUsize::new(0));
         let dropped_chunks_for_cb = dropped_chunks.clone();
         let dropped_chunks_for_processor = dropped_chunks.clone();
+        let prestart_visual_active = Arc::new(AtomicBool::new(true));
+        let prestart_visual_active_for_cb = prestart_visual_active.clone();
         let on_chunk = Arc::new(move |chunk: crate::domain::AudioChunk| {
+            let visual_chunk = if prestart_visual_active_for_cb.load(Ordering::Relaxed) {
+                Some(chunk.clone())
+            } else {
+                None
+            };
+
             // Не блокируем захват аудио: если бэкенд не успевает принимать,
             // просто дропаем чанки. Пользователь всё равно в этот момент получит
             // либо деградацию качества, либо ошибку/остановку записи.
@@ -167,6 +246,12 @@ impl TranscriptionService {
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_chunk)) => {
                     // Запись уже остановлена/перезапущена - молча игнорируем.
                 }
+            }
+
+            // Отдельная bounded-очередь только для prestart-визуализации.
+            // Основной STT audio queue остаётся нетронутым, поэтому ранняя речь не теряется.
+            if let Some(visual_chunk) = visual_chunk {
+                let _ = visual_tx.try_send(visual_chunk);
             }
         });
 
@@ -191,6 +276,38 @@ impl TranscriptionService {
             audio_capture_started_after.as_millis()
         );
 
+        let prestart_visual_status = self.status.clone();
+        let prestart_visual_sensitivity = self.microphone_sensitivity.clone();
+        let prestart_on_audio_level = on_audio_level.clone();
+        let prestart_on_audio_spectrum = on_audio_spectrum.clone();
+        let mut prestart_visual_task = Some(tokio::spawn(async move {
+            let mut chunk_count = 0usize;
+            let mut spectrum = AudioSpectrumAnalyzer::new();
+
+            while let Some(chunk) = visual_rx.recv().await {
+                let status = *prestart_visual_status.read().await;
+                if status != RecordingStatus::Starting {
+                    break;
+                }
+
+                chunk_count += 1;
+                let sensitivity = prestart_visual_sensitivity.load(Ordering::Relaxed);
+                let prepared = prepare_audio_chunk_for_processing(&chunk, sensitivity);
+                emit_audio_visualization(
+                    chunk_count,
+                    &prepared,
+                    &mut spectrum,
+                    &prestart_on_audio_level,
+                    &prestart_on_audio_spectrum,
+                );
+            }
+
+            log::debug!(
+                "Prestart audio visualizer finished, total chunks: {}",
+                chunk_count
+            );
+        }));
+
         // Проверяем можно ли переиспользовать существующее соединение
         let config = self.config.read().await.clone();
         let (mut can_reuse_connection, mut reuse_decision_reason) = {
@@ -198,8 +315,7 @@ impl TranscriptionService {
             if let Some(provider) = provider_opt.as_ref() {
                 let supports_keep_alive = provider.supports_keep_alive();
                 let is_connection_alive = provider.is_connection_alive();
-                let keep_alive_enabled =
-                    config.keep_connection_alive || config.provider == SttProviderType::Backend;
+                let keep_alive_enabled = keep_alive_enabled_for_config(&config);
                 log::info!(
                     "[ReconnectDiag] start probe: provider={}, supports_keep_alive={}, is_connection_alive={}, keep_alive_enabled={}, config_keep_alive={}, provider_type={:?}, ttl_secs={}",
                     provider.name(),
@@ -288,6 +404,11 @@ impl TranscriptionService {
                     // UI уже увидел Starting, но хоткей/команды будут думать что всё ещё Starting и игнорировать toggle.
                     let _ = self.audio_capture.write().await.stop_capture().await;
                     *self.status.write().await = RecordingStatus::Idle;
+                    abort_prestart_visualizer_task(
+                        &mut prestart_visual_task,
+                        &prestart_visual_active,
+                        "failed to create STT provider",
+                    );
                     return Err(anyhow::Error::new(e).context("Failed to create STT provider"));
                 }
             };
@@ -297,6 +418,11 @@ impl TranscriptionService {
                 let _ = self.audio_capture.write().await.stop_capture().await;
                 *self.status.write().await = RecordingStatus::Idle;
                 let _ = provider.abort().await;
+                abort_prestart_visualizer_task(
+                    &mut prestart_visual_task,
+                    &prestart_visual_active,
+                    "failed to initialize STT provider",
+                );
                 return Err(anyhow::Error::new(e).context("Failed to initialize STT provider"));
             }
 
@@ -312,6 +438,11 @@ impl TranscriptionService {
                 let _ = self.audio_capture.write().await.stop_capture().await;
                 *self.status.write().await = RecordingStatus::Idle;
                 let _ = provider.abort().await;
+                abort_prestart_visualizer_task(
+                    &mut prestart_visual_task,
+                    &prestart_visual_active,
+                    "failed to start STT stream",
+                );
                 return Err(anyhow::Error::new(e).context("Failed to start STT stream"));
             }
 
@@ -321,6 +452,11 @@ impl TranscriptionService {
         // Теперь STT готов принимать аудио. Переводим статус в Recording до запуска processor task,
         // чтобы предзахваченные чанки из очереди не были отброшены как "ещё Starting".
         *self.status.write().await = RecordingStatus::Recording;
+        abort_prestart_visualizer_task(
+            &mut prestart_visual_task,
+            &prestart_visual_active,
+            "STT stream started",
+        );
 
         // Запускаем обработчик чанков в async контексте
         let stt_provider = self.stt_provider.clone();
@@ -438,16 +574,9 @@ impl TranscriptionService {
                     continue;
                 }
 
-                // Вычисляем уровень громкости для визуализации
-                // Используем перцептивную нормализацию (корень квадратный) как в VU-метрах
-                // Это делает индикатор более естественным: нормальная речь ~30-50% вместо ~9-24%
-                let max_amplitude: i32 = chunk
-                    .data
-                    .iter()
-                    .map(|&s| (s as i32).abs())
-                    .max()
-                    .unwrap_or(0);
-                let normalized_level = (max_amplitude as f32 / 32767.0).sqrt().min(1.0);
+                let sensitivity = sensitivity_arc.load(Ordering::Relaxed);
+                let prepared = prepare_audio_chunk_for_processing(&chunk, sensitivity);
+                let max_amplitude = prepared.max_amplitude;
 
                 if max_amplitude == 0 {
                     consecutive_all_zero_chunks = consecutive_all_zero_chunks.saturating_add(1);
@@ -477,59 +606,32 @@ impl TranscriptionService {
                     break;
                 }
 
-                // Вызываем callback для UI (не чаще чем каждые 50ms = ~каждый второй чанк)
-                if chunk_count % 2 == 0 {
-                    on_audio_level(normalized_level);
-                }
-
-                // Применяем линейное усиление (gain) на основе чувствительности микрофона
-                // sensitivity: 0-200%
-                //   0%   = gain 0.0x (полная тишина)
-                //   100% = gain 1.0x (без изменений, как записывает микрофон)
-                //   200% = gain 5.0x (максимальное усиление для тихих микрофонов)
-                let sensitivity = sensitivity_arc.load(Ordering::Relaxed);
-
-                // Простая линейная формула усиления
-                let requested_gain = microphone_sensitivity_gain(sensitivity);
-
-                // Простой limiter: если requested_gain приводит к клиппингу — уменьшаем gain для этого чанка.
-                // Это сохраняет "помощь" тихим микрофонам и не ухудшает распознавание на нормальных уровнях.
-                let effective_gain = limited_microphone_gain(sensitivity, max_amplitude);
-
                 if chunk_count == 1 {
-                    if effective_gain < requested_gain {
+                    if prepared.effective_gain < prepared.requested_gain {
                         log::debug!(
                             "Microphone sensitivity: {}%, requested_gain: {:.2}x, effective_gain: {:.2}x (limited, peak={})",
                             sensitivity,
-                            requested_gain,
-                            effective_gain,
+                            prepared.requested_gain,
+                            prepared.effective_gain,
                             max_amplitude
                         );
                     } else {
                         log::debug!(
                             "Microphone sensitivity: {}%, gain: {:.2}x",
                             sensitivity,
-                            requested_gain
+                            prepared.requested_gain
                         );
                     }
                 }
 
-                // Применяем gain к каждому сэмплу с защитой от clipping
-                let amplified_data = amplify_i16_samples(&chunk.data, effective_gain);
-
-                // Создаем новый чанк с усиленным аудио
-                let amplified_chunk = crate::domain::AudioChunk {
-                    data: amplified_data,
-                    sample_rate: chunk.sample_rate,
-                    channels: chunk.channels,
-                    timestamp: chunk.timestamp,
-                };
-
-                // Отправляем спектр (48 баров) в UI.
-                // Берем именно усиленный звук, чтобы визуализация соответствовала тому, что слышит STT.
-                if let Some(bars) = spectrum.push_samples(&amplified_chunk.data) {
-                    on_audio_spectrum(bars);
-                }
+                emit_audio_visualization(
+                    chunk_count,
+                    &prepared,
+                    &mut spectrum,
+                    &on_audio_level,
+                    &on_audio_spectrum,
+                );
+                let amplified_chunk = prepared.amplified_chunk;
 
                 // Логируем каждый 20-й чанк для отладки
                 if chunk_count % 20 == 0 {
@@ -540,7 +642,7 @@ impl TranscriptionService {
                         .max()
                         .unwrap_or(0);
                     log::debug!("Audio processing: chunk #{}, original_max={}, amplified_max={}, gain={:.2}x",
-                        chunk_count, max_amplitude, amplified_max, effective_gain);
+                        chunk_count, max_amplitude, amplified_max, prepared.effective_gain);
                 }
 
                 // Если начали дропать аудио из-за backpressure — это почти всегда признак "плохой сети"
@@ -776,8 +878,7 @@ impl TranscriptionService {
             let provider_opt = self.stt_provider.read().await;
             if let Some(provider) = provider_opt.as_ref() {
                 let supports_keep_alive = provider.supports_keep_alive();
-                let keep_alive_enabled =
-                    config.keep_connection_alive || config.provider == SttProviderType::Backend;
+                let keep_alive_enabled = keep_alive_enabled_for_config(&config);
                 let is_connection_alive_before_pause = provider.is_connection_alive();
                 log::info!(
                     "[ReconnectDiag] stop probe: provider={}, supports_keep_alive={}, is_connection_alive_before_pause={}, keep_alive_enabled={}, config_keep_alive={}, provider_type={:?}, ttl_secs={}",
@@ -978,8 +1079,7 @@ impl TranscriptionService {
     /// without creating a new WebSocket connection.
     pub async fn can_resume_keep_alive_connection(&self) -> bool {
         let config = self.config.read().await.clone();
-        let keep_alive_enabled =
-            config.keep_connection_alive || config.provider == SttProviderType::Backend;
+        let keep_alive_enabled = keep_alive_enabled_for_config(&config);
 
         if !keep_alive_enabled {
             return false;
@@ -996,11 +1096,10 @@ impl TranscriptionService {
     pub async fn update_config(&self, config: SttConfig) -> Result<()> {
         let prev_config = self.config.read().await.clone();
 
-        // Backend-only режим: keep-alive должен быть всегда включён.
-        // Иначе даже при кратком "стоп/старт" по hotkey мы будем пересоздавать WS и UI будет показывать "Подключение...".
+        // Не принуждаем backend к runtime keep-alive: после Finalize backend/provider stream
+        // может остаться живым, но перестать отдавать transcript для следующей записи.
         let mut config = config;
         if config.provider == SttProviderType::Backend {
-            config.keep_connection_alive = true;
             // Держим клиентский TTL ниже backend audio_idle_ttl_secs=3600, чтобы не переиспользовать
             // WS в момент, когда сервер уже закрывает idle stream.
             if config.keep_alive_ttl_secs != crate::domain::BACKEND_KEEPALIVE_TTL_SECS {
@@ -1542,8 +1641,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_config_closes_idle_keep_alive_connection_when_backend_streaming_provider_changes(
-    ) {
+    async fn backend_provider_does_not_reuse_keep_alive_between_recordings() {
         let on_chunk_slot: Arc<std::sync::Mutex<Option<crate::domain::AudioChunkCallback>>> =
             Arc::new(std::sync::Mutex::new(None));
         let selected_providers = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1585,10 +1683,11 @@ mod tests {
         service
             .stop_recording()
             .await
-            .expect("first recording must pause keep-alive");
+            .expect("first recording must stop");
 
-        assert_eq!(paused_count.load(Ordering::SeqCst), 1);
-        assert!(service.can_resume_keep_alive_connection().await);
+        assert_eq!(paused_count.load(Ordering::SeqCst), 0);
+        assert_eq!(stopped_count.load(Ordering::SeqCst), 1);
+        assert!(!service.can_resume_keep_alive_connection().await);
 
         let mut next = initial;
         next.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
@@ -1612,7 +1711,10 @@ mod tests {
         service
             .stop_recording()
             .await
-            .expect("second recording must pause keep-alive");
+            .expect("second recording must stop");
+
+        assert_eq!(paused_count.load(Ordering::SeqCst), 0);
+        assert_eq!(stopped_count.load(Ordering::SeqCst), 2);
 
         let selected = selected_providers
             .lock()
@@ -1674,6 +1776,68 @@ mod tests {
         })
         .await
         .expect("prebuffered audio must be sent after STT stream starts");
+
+        service
+            .stop_recording()
+            .await
+            .expect("recording must stop cleanly");
+    }
+
+    #[tokio::test]
+    async fn start_recording_emits_audio_spectrum_while_stt_stream_starts() {
+        let sent_chunks = Arc::new(AtomicUsize::new(0));
+        let provider_stopped = Arc::new(AtomicBool::new(false));
+
+        let audio_capture = ImmediateAudioCapture::new();
+        let factory = Arc::new(CountingFactory {
+            sent_chunks,
+            stopped: provider_stopped,
+            delay_per_chunk: Duration::from_millis(0),
+            start_stream_delay: Duration::from_millis(500),
+        });
+        let service = Arc::new(TranscriptionService::new(Box::new(audio_capture), factory));
+
+        let (spectrum_tx, spectrum_rx) = tokio::sync::oneshot::channel::<()>();
+        let spectrum_tx = Arc::new(std::sync::Mutex::new(Some(spectrum_tx)));
+
+        let on_partial: TranscriptionCallback = Arc::new(|_t| {});
+        let on_final: TranscriptionCallback = Arc::new(|_t| {});
+        let on_audio_level: AudioLevelCallback = Arc::new(|_l| {});
+        let on_audio_spectrum: AudioSpectrumCallback = Arc::new(move |_b| {
+            if let Some(tx) = spectrum_tx
+                .lock()
+                .expect("spectrum signal mutex poisoned")
+                .take()
+            {
+                let _ = tx.send(());
+            }
+        });
+        let on_error: ErrorCallback = Arc::new(|_err: SttError| {});
+        let on_quality: ConnectionQualityCallback = Arc::new(|_q, _r| {});
+
+        let service_for_start = service.clone();
+        let start_task = tokio::spawn(async move {
+            service_for_start
+                .start_recording(
+                    on_partial,
+                    on_final,
+                    on_audio_level,
+                    on_audio_spectrum,
+                    on_error,
+                    on_quality,
+                )
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_millis(250), spectrum_rx)
+            .await
+            .expect("prestart spectrum must be emitted before STT stream is ready")
+            .expect("prestart spectrum signal");
+
+        start_task
+            .await
+            .expect("start task must not panic")
+            .expect("recording must start");
 
         service
             .stop_recording()
