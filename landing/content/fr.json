@@ -75,7 +75,7 @@
     {
       "id": "isFree",
       "question": "C'est gratuit ?",
-      "answer": "Oui. Le plan gratuit inclut 60 minutes de transcription. Les plans payants ne sont pas encore disponibles."
+      "answer": "Oui. Le plan gratuit inclut 120 minutes de transcription. Les plans payants ne sont pas encore disponibles."
     },
     {
       "id": "privacy",
