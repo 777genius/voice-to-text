@@ -14,7 +14,9 @@ fn main() {
     #[cfg(target_os = "macos")]
     {
         prepare_swift_runtime_for_cargo();
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/Frameworks");
         println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
+        println!("cargo:rustc-link-arg-bin=voice-to-text=-Wl,-rpath,@executable_path/Frameworks");
         println!(
             "cargo:rustc-link-arg-bin=voice-to-text=-Wl,-rpath,@executable_path/../Frameworks"
         );
