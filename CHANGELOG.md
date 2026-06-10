@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.12.0] - 2026-06-10
+
+### Added
+- Added a hybrid auto-paste backend that uses clipboard paste for longer transcripts and keeps direct typing for short text.
+
+### Changed
+- Increased the free transcription plan messaging from 60 to 120 minutes across the landing page locales.
+- Restored the user's clipboard after long transcript paste when the clipboard was not changed by the user.
+
+### Fixed
+- Fixed long transcript auto-paste reliability by using the platform paste shortcut after safely focusing the original target app.
+- Fixed macOS release runtime lookup by adding an executable Frameworks rpath for bundled Swift libraries.
+- Avoided reactivating the auto-paste target when it is already the frontmost app.
+
 ## [0.11.2] - 2026-06-06
 
 ### Changed
