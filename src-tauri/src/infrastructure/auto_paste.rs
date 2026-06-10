@@ -2,9 +2,22 @@
 #![allow(unexpected_cfgs)]
 
 use anyhow::{Context, Result};
-use enigo::{Enigo, Keyboard, Settings};
+use arboard::Clipboard;
+use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+use std::thread;
+use std::time::Duration;
 
 pub const VOICETEXT_BUNDLE_ID: &str = "com.voicetotext.app";
+pub const AUTO_PASTE_CLIPBOARD_THRESHOLD_CHARS: usize = 100;
+
+const AUTO_PASTE_PRE_PASTE_DELAY_MS: u64 = 80;
+const AUTO_PASTE_RESTORE_CLIPBOARD_DELAY_MS: u64 = 300;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoPasteMethod {
+    Typed,
+    Clipboard,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AutoPasteTarget {
@@ -293,6 +306,248 @@ pub fn frontmost_app_matches_target(_target: &AutoPasteTarget) -> bool {
     true
 }
 
+trait ClipboardAccess {
+    fn get_text(&mut self) -> Result<String>;
+    fn set_text(&mut self, text: &str) -> Result<()>;
+}
+
+trait TextInjector {
+    fn type_text(&mut self, text: &str) -> Result<()>;
+    fn paste_shortcut(&mut self) -> Result<()>;
+}
+
+trait DelayProvider {
+    fn sleep(&mut self, duration: Duration);
+}
+
+struct SystemClipboard {
+    inner: Clipboard,
+}
+
+impl SystemClipboard {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            inner: Clipboard::new().context("Failed to initialize clipboard")?,
+        })
+    }
+}
+
+impl ClipboardAccess for SystemClipboard {
+    fn get_text(&mut self) -> Result<String> {
+        self.inner
+            .get_text()
+            .context("Failed to read current clipboard text")
+    }
+
+    fn set_text(&mut self, text: &str) -> Result<()> {
+        self.inner
+            .set_text(text.to_string())
+            .context("Failed to write clipboard text")
+    }
+}
+
+struct SystemTextInjector;
+
+impl TextInjector for SystemTextInjector {
+    fn type_text(&mut self, text: &str) -> Result<()> {
+        paste_text(text)
+    }
+
+    fn paste_shortcut(&mut self) -> Result<()> {
+        send_paste_shortcut()
+    }
+}
+
+struct ThreadDelay;
+
+impl DelayProvider for ThreadDelay {
+    fn sleep(&mut self, duration: Duration) {
+        thread::sleep(duration);
+    }
+}
+
+fn pre_paste_delay() -> Duration {
+    Duration::from_millis(AUTO_PASTE_PRE_PASTE_DELAY_MS)
+}
+
+fn restore_clipboard_delay() -> Duration {
+    Duration::from_millis(AUTO_PASTE_RESTORE_CLIPBOARD_DELAY_MS)
+}
+
+fn paste_modifier_key() -> Key {
+    #[cfg(target_os = "macos")]
+    {
+        Key::Meta
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Key::Control
+    }
+}
+
+fn send_paste_shortcut() -> Result<()> {
+    log::info!("Initializing Enigo keyboard controller for paste shortcut");
+    let mut enigo = Enigo::new(&Settings::default())
+        .context("Failed to initialize Enigo keyboard controller")?;
+    let modifier = paste_modifier_key();
+
+    enigo
+        .key(modifier, Direction::Press)
+        .context("Failed to press paste modifier key")?;
+    let paste_result = send_paste_key(&mut enigo);
+    let release_result = enigo
+        .key(modifier, Direction::Release)
+        .context("Failed to release paste modifier key");
+
+    paste_result?;
+    release_result?;
+    Ok(())
+}
+
+fn send_paste_key(enigo: &mut Enigo) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        const MACOS_ANSI_V_KEY_CODE: u16 = 9;
+        enigo
+            .raw(MACOS_ANSI_V_KEY_CODE, Direction::Click)
+            .context("Failed to send paste key")
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        enigo
+            .key(Key::V, Direction::Click)
+            .context("Failed to send paste key")
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        enigo
+            .key(Key::Unicode('v'), Direction::Click)
+            .context("Failed to send paste key")
+    }
+}
+
+pub fn should_use_clipboard_backend(text: &str) -> bool {
+    text.chars().count() >= AUTO_PASTE_CLIPBOARD_THRESHOLD_CHARS
+}
+
+pub fn paste_text_hybrid(text: &str) -> Result<AutoPasteMethod> {
+    let mut injector = SystemTextInjector;
+    let mut delay = ThreadDelay;
+
+    if !should_use_clipboard_backend(text) {
+        injector.type_text(text)?;
+        return Ok(AutoPasteMethod::Typed);
+    }
+
+    let mut clipboard = match SystemClipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(error) => {
+            log::warn!(
+                "Clipboard initialization failed; falling back to keyboard typing: {}",
+                error
+            );
+            injector.type_text(text)?;
+            return Ok(AutoPasteMethod::Typed);
+        }
+    };
+
+    paste_text_hybrid_with(text, &mut clipboard, &mut injector, &mut delay)
+}
+
+fn paste_text_hybrid_with<C, I, D>(
+    text: &str,
+    clipboard: &mut C,
+    injector: &mut I,
+    delay: &mut D,
+) -> Result<AutoPasteMethod>
+where
+    C: ClipboardAccess,
+    I: TextInjector,
+    D: DelayProvider,
+{
+    if !should_use_clipboard_backend(text) {
+        injector.type_text(text)?;
+        return Ok(AutoPasteMethod::Typed);
+    }
+
+    match paste_text_via_clipboard(text, clipboard, injector, delay) {
+        Ok(()) => Ok(AutoPasteMethod::Clipboard),
+        Err(error) => {
+            log::warn!(
+                "Clipboard auto-paste failed; falling back to keyboard typing: {}",
+                error
+            );
+            injector.type_text(text)?;
+            Ok(AutoPasteMethod::Typed)
+        }
+    }
+}
+
+fn paste_text_via_clipboard<C, I, D>(
+    text: &str,
+    clipboard: &mut C,
+    injector: &mut I,
+    delay: &mut D,
+) -> Result<()>
+where
+    C: ClipboardAccess,
+    I: TextInjector,
+    D: DelayProvider,
+{
+    let previous_text = clipboard
+        .get_text()
+        .context("Clipboard does not currently contain readable text")?;
+
+    clipboard
+        .set_text(text)
+        .context("Failed to put auto-paste text into clipboard")?;
+    delay.sleep(pre_paste_delay());
+
+    if let Err(error) = injector
+        .paste_shortcut()
+        .context("Failed to send paste shortcut")
+    {
+        if let Err(restore_error) = clipboard
+            .set_text(&previous_text)
+            .context("Failed to restore previous clipboard text after paste shortcut failure")
+        {
+            log::warn!("{}", restore_error);
+        }
+        return Err(error);
+    }
+
+    delay.sleep(restore_clipboard_delay());
+    restore_clipboard_if_unchanged(text, &previous_text, clipboard);
+    Ok(())
+}
+
+fn restore_clipboard_if_unchanged<C>(text: &str, previous_text: &str, clipboard: &mut C)
+where
+    C: ClipboardAccess,
+{
+    match clipboard.get_text() {
+        Ok(current_text) if current_text == text => {
+            if previous_text != text {
+                if let Err(error) = clipboard
+                    .set_text(previous_text)
+                    .context("Failed to restore previous clipboard text after auto-paste")
+                {
+                    log::warn!("{}", error);
+                }
+            }
+        }
+        Ok(_) => {
+            log::warn!("Clipboard changed before restore; keeping current clipboard contents");
+        }
+        Err(error) => {
+            log::warn!("Failed to verify clipboard before restore: {}", error);
+        }
+    }
+}
+
 /// Вставляет текст в активное окно используя симуляцию клавиатуры
 ///
 /// Логика:
@@ -352,7 +607,107 @@ pub fn paste_text(text: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_auto_paste_target, target_matches_bundle_and_pid, VOICETEXT_BUNDLE_ID};
+    use super::{
+        normalize_auto_paste_target, paste_text_hybrid_with, should_use_clipboard_backend,
+        target_matches_bundle_and_pid, AutoPasteMethod, ClipboardAccess, DelayProvider,
+        TextInjector, AUTO_PASTE_CLIPBOARD_THRESHOLD_CHARS, VOICETEXT_BUNDLE_ID,
+    };
+    use anyhow::{bail, Result};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct FakeClipboard {
+        text: String,
+        get_calls: usize,
+        fail_get_on: Vec<usize>,
+        change_on_get: Option<(usize, String)>,
+        events: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl FakeClipboard {
+        fn new(text: &str, events: Rc<RefCell<Vec<String>>>) -> Self {
+            Self {
+                text: text.to_string(),
+                events,
+                ..Default::default()
+            }
+        }
+    }
+
+    impl ClipboardAccess for FakeClipboard {
+        fn get_text(&mut self) -> Result<String> {
+            self.get_calls += 1;
+            self.events
+                .borrow_mut()
+                .push(format!("get:{}", self.get_calls));
+
+            if self.fail_get_on.contains(&self.get_calls) {
+                bail!("clipboard get failed");
+            }
+
+            if let Some((call, text)) = &self.change_on_get {
+                if *call == self.get_calls {
+                    self.text = text.clone();
+                }
+            }
+
+            Ok(self.text.clone())
+        }
+
+        fn set_text(&mut self, text: &str) -> Result<()> {
+            self.events.borrow_mut().push(format!("set:{}", text));
+            self.text = text.to_string();
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeTextInjector {
+        typed_texts: Vec<String>,
+        paste_shortcut_calls: usize,
+        fail_paste_shortcut: bool,
+        events: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl TextInjector for FakeTextInjector {
+        fn type_text(&mut self, text: &str) -> Result<()> {
+            self.events
+                .borrow_mut()
+                .push(format!("type:{}", text.len()));
+            self.typed_texts.push(text.to_string());
+            Ok(())
+        }
+
+        fn paste_shortcut(&mut self) -> Result<()> {
+            self.events.borrow_mut().push("paste".to_string());
+            self.paste_shortcut_calls += 1;
+            if self.fail_paste_shortcut {
+                bail!("paste shortcut failed");
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeDelay {
+        sleeps: Vec<Duration>,
+        events: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl DelayProvider for FakeDelay {
+        fn sleep(&mut self, duration: Duration) {
+            self.events
+                .borrow_mut()
+                .push(format!("sleep:{}", duration.as_millis()));
+            self.sleeps.push(duration);
+        }
+    }
+
+    fn long_text() -> String {
+        "a".repeat(AUTO_PASTE_CLIPBOARD_THRESHOLD_CHARS)
+    }
 
     #[test]
     fn normalize_auto_paste_target_rejects_self_bundle() {
@@ -404,5 +759,152 @@ mod tests {
             "com.example.App",
             456
         ));
+    }
+
+    #[test]
+    fn clipboard_backend_starts_at_threshold() {
+        let below_threshold = "a".repeat(AUTO_PASTE_CLIPBOARD_THRESHOLD_CHARS - 1);
+        let at_threshold = long_text();
+
+        assert!(!should_use_clipboard_backend(&below_threshold));
+        assert!(should_use_clipboard_backend(&at_threshold));
+    }
+
+    #[test]
+    fn hybrid_uses_typing_for_short_text() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let mut clipboard = FakeClipboard::new("previous", events.clone());
+        let mut injector = FakeTextInjector {
+            events: events.clone(),
+            ..Default::default()
+        };
+        let mut delay = FakeDelay {
+            events: events.clone(),
+            ..Default::default()
+        };
+
+        let method =
+            paste_text_hybrid_with("short text", &mut clipboard, &mut injector, &mut delay)
+                .unwrap();
+
+        assert_eq!(method, AutoPasteMethod::Typed);
+        assert_eq!(injector.typed_texts, vec!["short text"]);
+        assert_eq!(injector.paste_shortcut_calls, 0);
+        assert!(delay.sleeps.is_empty());
+        assert_eq!(events.borrow().as_slice(), ["type:10"]);
+    }
+
+    #[test]
+    fn hybrid_uses_clipboard_for_long_text_and_restores_previous_text() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let text = long_text();
+        let mut clipboard = FakeClipboard::new("previous", events.clone());
+        let mut injector = FakeTextInjector {
+            events: events.clone(),
+            ..Default::default()
+        };
+        let mut delay = FakeDelay {
+            events: events.clone(),
+            ..Default::default()
+        };
+        let expected_events = vec![
+            "get:1".to_string(),
+            format!("set:{}", text),
+            "sleep:80".to_string(),
+            "paste".to_string(),
+            "sleep:300".to_string(),
+            "get:2".to_string(),
+            "set:previous".to_string(),
+        ];
+
+        let method =
+            paste_text_hybrid_with(&text, &mut clipboard, &mut injector, &mut delay).unwrap();
+
+        assert_eq!(method, AutoPasteMethod::Clipboard);
+        assert_eq!(clipboard.text, "previous");
+        assert!(injector.typed_texts.is_empty());
+        assert_eq!(injector.paste_shortcut_calls, 1);
+        assert_eq!(*events.borrow(), expected_events);
+    }
+
+    #[test]
+    fn hybrid_skips_restore_when_clipboard_changed_after_paste() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let text = long_text();
+        let mut clipboard = FakeClipboard::new("previous", events.clone());
+        clipboard.change_on_get = Some((2, "user copy".to_string()));
+        let mut injector = FakeTextInjector {
+            events: events.clone(),
+            ..Default::default()
+        };
+        let mut delay = FakeDelay {
+            events: events.clone(),
+            ..Default::default()
+        };
+
+        let method =
+            paste_text_hybrid_with(&text, &mut clipboard, &mut injector, &mut delay).unwrap();
+
+        assert_eq!(method, AutoPasteMethod::Clipboard);
+        assert_eq!(clipboard.text, "user copy");
+        assert_eq!(injector.paste_shortcut_calls, 1);
+        assert!(!events.borrow().iter().any(|event| event == "set:previous"));
+    }
+
+    #[test]
+    fn hybrid_falls_back_to_typing_when_clipboard_text_is_unavailable() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let text = long_text();
+        let mut clipboard = FakeClipboard::new("previous", events.clone());
+        clipboard.fail_get_on = vec![1];
+        let mut injector = FakeTextInjector {
+            events: events.clone(),
+            ..Default::default()
+        };
+        let mut delay = FakeDelay {
+            events: events.clone(),
+            ..Default::default()
+        };
+
+        let method =
+            paste_text_hybrid_with(&text, &mut clipboard, &mut injector, &mut delay).unwrap();
+
+        assert_eq!(method, AutoPasteMethod::Typed);
+        assert_eq!(clipboard.text, "previous");
+        assert_eq!(injector.typed_texts, vec![text]);
+        assert_eq!(injector.paste_shortcut_calls, 0);
+    }
+
+    #[test]
+    fn hybrid_restores_clipboard_before_typing_when_paste_shortcut_fails() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let text = long_text();
+        let mut clipboard = FakeClipboard::new("previous", events.clone());
+        let mut injector = FakeTextInjector {
+            fail_paste_shortcut: true,
+            events: events.clone(),
+            ..Default::default()
+        };
+        let mut delay = FakeDelay {
+            events: events.clone(),
+            ..Default::default()
+        };
+        let expected_events = vec![
+            "get:1".to_string(),
+            format!("set:{}", text),
+            "sleep:80".to_string(),
+            "paste".to_string(),
+            "set:previous".to_string(),
+            "type:100".to_string(),
+        ];
+
+        let method =
+            paste_text_hybrid_with(&text, &mut clipboard, &mut injector, &mut delay).unwrap();
+
+        assert_eq!(method, AutoPasteMethod::Typed);
+        assert_eq!(clipboard.text, "previous");
+        assert_eq!(injector.typed_texts, vec![text]);
+        assert_eq!(injector.paste_shortcut_calls, 1);
+        assert_eq!(*events.borrow(), expected_events);
     }
 }

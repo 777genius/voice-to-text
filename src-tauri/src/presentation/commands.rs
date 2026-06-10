@@ -4916,21 +4916,25 @@ pub async fn auto_paste_text(
         })?;
 
         log::info!(
-            "Attempting to focus auto-paste target: bundle_id={}, pid={}",
+            "Checking auto-paste target focus: bundle_id={}, pid={}",
             target.bundle_id,
             target.pid
         );
 
-        crate::infrastructure::auto_paste::activate_running_app_by_target(&target).map_err(
-            |e| {
-                let message = format!(
-                    "Failed to activate auto-paste target without launching app: {}",
-                    e
-                );
-                log::warn!("{}", message);
-                message
-            },
-        )?;
+        if crate::infrastructure::auto_paste::frontmost_app_matches_target(&target) {
+            log::debug!("Auto-paste target is already frontmost; skipping activation");
+        } else {
+            crate::infrastructure::auto_paste::activate_running_app_by_target(&target).map_err(
+                |e| {
+                    let message = format!(
+                        "Failed to activate auto-paste target without launching app: {}",
+                        e
+                    );
+                    log::warn!("{}", message);
+                    message
+                },
+            )?;
+        }
 
         if !wait_for_auto_paste_target_focus(&target).await {
             let message = format!(
@@ -4950,7 +4954,7 @@ pub async fn auto_paste_text(
     // Вставляем текст в blocking thread (enigo работает с синхронными нативными API)
     let text_clone = text.clone();
     let paste_result = tokio::task::spawn_blocking(move || {
-        crate::infrastructure::auto_paste::paste_text(&text_clone)
+        crate::infrastructure::auto_paste::paste_text_hybrid(&text_clone)
     })
     .await
     .map_err(|e| format!("Failed to join blocking task: {}", e))?
@@ -4960,7 +4964,7 @@ pub async fn auto_paste_text(
             AUTO_PASTE_HOTKEY_SUPPRESSION_TAIL_MS,
         ));
     }
-    paste_result?;
+    let paste_method = paste_result?;
 
     // Возвращаем окно VoicetextAI поверх всех окон (но без фокуса)
     if let Some(window) = app_handle.get_webview_window("main") {
@@ -4968,7 +4972,10 @@ pub async fn auto_paste_text(
         log::debug!("VoicetextAI window kept on top");
     }
 
-    log::info!("Text auto-pasted successfully");
+    log::info!(
+        "Text auto-pasted successfully using {:?} backend",
+        paste_method
+    );
     Ok(())
 }
 
