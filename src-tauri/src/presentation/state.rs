@@ -45,18 +45,13 @@ fn normalize_audio_capture_device_name(device_name: Option<String>) -> Option<St
 }
 
 fn audio_capture_device_cache_matches(
-    cached_device: &Option<Option<String>>,
-    requested_device: &Option<String>,
+    _cached_device: &Option<Option<String>>,
+    _requested_device: &Option<String>,
 ) -> bool {
-    // System default can resolve to another physical device after hotplug/default changes.
-    if requested_device.is_none() {
-        return false;
-    }
-
-    cached_device
-        .as_ref()
-        .map(|active_device| active_device == requested_device)
-        .unwrap_or(false)
+    // Do not reuse cpal input handles between recording starts. After hotplug,
+    // the saved device name can be the same while the underlying handle is stale
+    // or has internally fallen back to the system default input.
+    false
 }
 
 fn is_current_vad_timeout_session(timeout_session_id: u64, active_session_id: u64) -> bool {
@@ -1203,10 +1198,10 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
-    fn audio_capture_device_cache_reuses_same_explicit_device() {
+    fn audio_capture_device_cache_recreates_same_explicit_device_after_hotplug() {
         let cached = Some(Some("Studio Mic".to_string()));
         let requested = Some("Studio Mic".to_string());
-        assert!(audio_capture_device_cache_matches(&cached, &requested));
+        assert!(!audio_capture_device_cache_matches(&cached, &requested));
     }
 
     #[test]
