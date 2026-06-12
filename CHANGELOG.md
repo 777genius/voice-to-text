@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.12.1] - 2026-06-12
+
+### Fixed
+- Recreate the selected microphone capture between recording starts so reconnected headphones are resolved again instead of reusing a stale audio handle or fallback input.
+
 ## [0.12.0] - 2026-06-10
 
 ### Added
