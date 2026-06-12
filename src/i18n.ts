@@ -266,6 +266,9 @@ const messages = {
         'Microphone is unavailable. Reconnect it and select it in your system sound settings, then try again.',
       audioDeviceNotFound:
         'Selected microphone is unavailable. Open settings and choose a different recording device.',
+      detailsTitle: 'Error details',
+      detailsSummary: 'Short message',
+      detailsFullMessage: 'Full message',
       generic: 'Error: {error}',
       actions: {
         signInAgain: 'Sign in again',
@@ -273,6 +276,7 @@ const messages = {
         openSettingsForDevice: 'Open settings',
         reconnect: 'Reconnect',
         activateLicense: 'Activate license',
+        showDetails: 'Details',
       },
     },
     auth: {
@@ -651,6 +655,9 @@ const messages = {
         'Микрофон недоступен. Подключите/переподключите его и выберите в настройках звука системы, затем попробуйте снова.',
       audioDeviceNotFound:
         'Выбранный микрофон недоступен. Откройте настройки и выберите другое устройство записи.',
+      detailsTitle: 'Детали ошибки',
+      detailsSummary: 'Коротко',
+      detailsFullMessage: 'Полное сообщение',
       generic: 'Ошибка: {error}',
       actions: {
         signInAgain: 'Войти заново',
@@ -658,6 +665,7 @@ const messages = {
         openSettingsForDevice: 'Перейти в настройки',
         reconnect: 'Переподключиться',
         activateLicense: 'Активировать лицензию',
+        showDetails: 'Подробнее',
       },
     },
     auth: {
@@ -1036,6 +1044,9 @@ const messages = {
         'El micrófono no está disponible. Vuelva a conectarlo y selecciónelo en la configuración de sonido del sistema, luego inténtelo de nuevo.',
       audioDeviceNotFound:
         'El micrófono seleccionado no está disponible. Abra la configuración y elija otro dispositivo de grabación.',
+      detailsTitle: 'Detalles del error',
+      detailsSummary: 'Mensaje breve',
+      detailsFullMessage: 'Mensaje completo',
       generic: 'Error: {error}',
       actions: {
         signInAgain: 'Iniciar sesión de nuevo',
@@ -1043,6 +1054,7 @@ const messages = {
         openSettingsForDevice: 'Abrir ajustes',
         reconnect: 'Reconectar',
         activateLicense: 'Activar licencia',
+        showDetails: 'Detalles',
       },
     },
     auth: {
@@ -1421,6 +1433,9 @@ const messages = {
         'Le microphone est indisponible. Reconnectez-le et sélectionnez-le dans les réglages audio du système, puis réessayez.',
       audioDeviceNotFound:
         'Le microphone sélectionné est indisponible. Ouvrez les paramètres et choisissez un autre appareil d\'enregistrement.',
+      detailsTitle: 'Details de l\'erreur',
+      detailsSummary: 'Message court',
+      detailsFullMessage: 'Message complet',
       generic: 'Erreur : {error}',
       actions: {
         signInAgain: 'Se reconnecter',
@@ -1428,6 +1443,7 @@ const messages = {
         openSettingsForDevice: 'Ouvrir les paramètres',
         reconnect: 'Reconnexion',
         activateLicense: 'Activer la licence',
+        showDetails: 'Details',
       },
     },
     auth: {
@@ -1806,6 +1822,9 @@ const messages = {
         'Mikrofon nicht verfügbar. Bitte neu verbinden und in den Sound-Einstellungen des Systems auswählen, dann erneut versuchen.',
       audioDeviceNotFound:
         'Das ausgewählte Mikrofon ist nicht verfügbar. Öffnen Sie die Einstellungen und wählen Sie ein anderes Aufnahmegerät.',
+      detailsTitle: 'Fehlerdetails',
+      detailsSummary: 'Kurzmeldung',
+      detailsFullMessage: 'Vollstandige Meldung',
       generic: 'Fehler: {error}',
       actions: {
         signInAgain: 'Erneut anmelden',
@@ -1813,6 +1832,7 @@ const messages = {
         openSettingsForDevice: 'Einstellungen öffnen',
         reconnect: 'Erneut verbinden',
         activateLicense: 'Lizenz aktivieren',
+        showDetails: 'Details',
       },
     },
     auth: {
@@ -2189,6 +2209,11 @@ const messages = {
       processing: 'Помилка обробки аудіо. Спробуйте перезапустити запис.',
       audioDeviceUnavailable:
         'Мікрофон недоступний. Під’єднайте/перепід’єднайте його та виберіть у налаштуваннях звуку системи, потім спробуйте ще раз.',
+      audioDeviceNotFound:
+        'Вибраний мікрофон недоступний. Відкрийте налаштування та виберіть інший пристрій запису.',
+      detailsTitle: 'Деталі помилки',
+      detailsSummary: 'Коротко',
+      detailsFullMessage: 'Повне повідомлення',
       generic: 'Помилка: {error}',
       actions: {
         signInAgain: 'Увійти знову',
@@ -2196,6 +2221,7 @@ const messages = {
         openSettingsForDevice: 'Перейти в налаштування',
         reconnect: 'Перепідключитись',
         activateLicense: 'Активувати ліцензію',
+        showDetails: 'Деталі',
       },
     },
     auth: {

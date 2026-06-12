@@ -74,6 +74,9 @@ const shouldShowMiniHotkeyPrompt = computed(() =>
   recordingHotkey.value.length > 0
 );
 
+const hasMiniError = computed(() => Boolean(store.error || store.hasError));
+const showMiniActions = computed(() => isMiniActionsVisible.value || hasMiniError.value);
+
 const miniHotkeyPrompt = computed(() =>
   shouldShowMiniHotkeyPrompt.value
     ? t('main.miniHotkeyPrompt', { hotkey: recordingHotkey.value })
@@ -90,8 +93,8 @@ function normalizeMiniTranscriptText(...parts: string[]): string {
 }
 
 const miniDisplayText = computed(() => {
-  if (store.error || store.hasError) {
-    return store.error || t('main.errorGeneric');
+  if (hasMiniError.value) {
+    return store.errorSummary;
   }
 
   const latestRecognized = normalizeMiniTranscriptText(
@@ -121,14 +124,14 @@ function alignMiniTextToEnd() {
     const el = miniTranscriptionTextRef.value;
     if (!el) return;
 
-    const shouldShowTail =
+    const shouldShowText =
       useMiniLayout.value &&
       !shouldShowMiniHotkeyPrompt.value &&
       Boolean(miniDisplayText.value);
     const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
 
-    isMiniTextOverflowing.value = shouldShowTail && maxScroll > 1;
-    el.scrollLeft = shouldShowTail ? maxScroll : 0;
+    isMiniTextOverflowing.value = shouldShowText && maxScroll > 1;
+    el.scrollLeft = shouldShowText && !hasMiniError.value ? maxScroll : 0;
   });
 }
 
@@ -722,6 +725,36 @@ const openUpdateDialog = async (event?: Event) => {
   applyRecordingWindowSize();
 };
 
+const retryMiniError = async (event?: Event) => {
+  resetMiniActionState(event);
+  cancelPendingHideRecordingWindow();
+
+  try {
+    await store.reconnect();
+  } catch (err) {
+    console.error('Failed to retry recording:', err);
+  }
+};
+
+const openErrorDetails = async (event?: Event) => {
+  resetMiniActionState(event);
+  cancelPendingHideRecordingWindow();
+
+  const summary = store.errorSummary || t('main.errorGeneric');
+  const details = store.errorFullText || summary;
+
+  if (!isTauriAvailable()) {
+    console.error('[STT] Error details:', details);
+    return;
+  }
+
+  try {
+    await invoke('show_error_details_window', { summary, details });
+  } catch (err) {
+    console.error('Failed to open error details window:', err);
+  }
+};
+
 // Если store запросил открытие формы лицензии (например, через кнопку в ошибке)
 watch(() => store.wantsLicenseActivation, (val) => {
   if (val) {
@@ -769,7 +802,7 @@ const minimizeWindow = async (event?: Event) => {
         />
         <div
           class="mini-popover-content"
-          :class="{ 'mini-actions-visible': isMiniActionsVisible }"
+          :class="{ 'mini-actions-visible': showMiniActions }"
           @mousedown="onDragMouseDown"
         >
           <span
@@ -787,7 +820,7 @@ const minimizeWindow = async (event?: Event) => {
             class="mini-transcription-text"
             :class="{
               recording: store.hasVisibleTranscriptionText,
-              placeholder: !store.hasVisibleTranscriptionText,
+              placeholder: !store.hasVisibleTranscriptionText && !hasMiniError,
               prompt: shouldShowMiniHotkeyPrompt,
               error: store.hasError || Boolean(store.error),
               overflowing: isMiniTextOverflowing,
@@ -800,19 +833,58 @@ const minimizeWindow = async (event?: Event) => {
           </div>
 
           <div class="mini-actions no-drag">
-            <UpdateIndicator compact @click="openUpdateDialog" />
-            <button
-              v-if="authStore.isAuthenticated"
-              class="mini-icon-button"
-              @click="openProfile"
-              :title="t('profile.title')"
-            >
-              <span class="mdi mdi-account-circle-outline"></span>
-            </button>
+            <template v-if="hasMiniError">
+              <button
+                v-if="store.canReconnect"
+                class="mini-icon-button"
+                data-testid="mini-error-retry"
+                :disabled="store.isStarting || store.isProcessing || store.isConnecting"
+                @click="retryMiniError"
+                :title="t('errors.actions.reconnect')"
+              >
+                <span class="mdi mdi-refresh"></span>
+              </button>
+              <button
+                class="mini-icon-button"
+                data-testid="mini-error-details"
+                @click="openErrorDetails"
+                :title="t('errors.actions.showDetails')"
+              >
+                <span class="mdi mdi-alert-circle-outline"></span>
+              </button>
+              <button
+                v-if="store.canOpenSettingsForDevice"
+                class="mini-icon-button"
+                @click="openSettingsForDevice"
+                :title="t('errors.actions.openSettingsForDevice')"
+              >
+                <span class="mdi mdi-cog-outline"></span>
+              </button>
+              <button
+                v-if="store.canActivateLicense"
+                class="mini-icon-button"
+                @click="openProfileWithLicense"
+                :title="t('errors.actions.activateLicense')"
+              >
+                <span class="mdi mdi-key-outline"></span>
+              </button>
+            </template>
+            <template v-else>
+              <UpdateIndicator compact @click="openUpdateDialog" />
+              <button
+                v-if="authStore.isAuthenticated"
+                class="mini-icon-button"
+                @click="openProfile"
+                :title="t('profile.title')"
+              >
+                <span class="mdi mdi-account-circle-outline"></span>
+              </button>
+            </template>
             <button class="mini-icon-button" @click="minimizeWindow" :title="t('main.minimize')">
               <span class="mdi mdi-window-minimize"></span>
             </button>
             <button
+              v-if="!hasMiniError"
               class="mini-icon-button"
               data-testid="open-settings"
               @click="openSettings"
@@ -917,6 +989,14 @@ const minimizeWindow = async (event?: Event) => {
             @click="openSettingsForDevice"
           >
             {{ t('errors.actions.openSettingsForDevice') }}
+          </button>
+
+          <button
+            class="error-action-button no-drag"
+            data-testid="error-details"
+            @click="openErrorDetails"
+          >
+            {{ t('errors.actions.showDetails') }}
           </button>
         </div>
 
@@ -1160,6 +1240,11 @@ const minimizeWindow = async (event?: Event) => {
   mask-image: linear-gradient(to right, transparent 0, #000 34px, #000 100%);
 }
 
+.mini-transcription-text.error.overflowing {
+  -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 26px), transparent 100%);
+  mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 26px), transparent 100%);
+}
+
 .mini-transcription-text-inner {
   display: inline-block;
   min-width: max-content;
@@ -1238,6 +1323,11 @@ const minimizeWindow = async (event?: Event) => {
 .mini-icon-button:hover {
   background: rgba(255, 255, 255, 0.1);
   color: var(--color-text);
+}
+
+.mini-icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .mini-icon-button.active {

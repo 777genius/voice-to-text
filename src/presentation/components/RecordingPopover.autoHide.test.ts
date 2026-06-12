@@ -173,6 +173,14 @@ function mountRecordingPopover() {
         profile: {
           title: 'Profile',
         },
+        errors: {
+          actions: {
+            reconnect: 'Reconnect',
+            showDetails: 'Details',
+            openSettingsForDevice: 'Open settings',
+            activateLicense: 'Activate license',
+          },
+        },
       },
     },
   }));
@@ -322,6 +330,52 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     expect(visibleText.split(/\s+/).length).toBeGreaterThan(18);
     expect(textEl!.classList.contains('overflowing')).toBe(true);
 
+    wrapper.unmount();
+  });
+
+  it('shows mini error text with retry and details actions', async () => {
+    const wrapper = mountRecordingPopover();
+    await flushMicrotasks();
+    await nextTick();
+
+    const store = useTranscriptionStore();
+    const textEl = document.querySelector<HTMLElement>('.mini-transcription-text');
+    const textInner = document.querySelector<HTMLElement>('.mini-transcription-text-inner');
+    expect(textEl).not.toBeNull();
+    expect(textInner).not.toBeNull();
+
+    Object.defineProperty(textEl!, 'scrollWidth', { configurable: true, value: 720 });
+    Object.defineProperty(textEl!, 'clientWidth', { configurable: true, value: 110 });
+
+    const message = 'Connection problem. Check your internet and try again.';
+    store.status = RecordingStatus.Error;
+    store.error = message;
+    store.errorType = 'connection';
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(0);
+    await nextTick();
+
+    expect(textInner!.textContent?.trim()).toBe(message);
+    expect(textEl!.classList.contains('error')).toBe(true);
+    expect(textEl!.classList.contains('placeholder')).toBe(false);
+    expect(textEl!.classList.contains('overflowing')).toBe(true);
+    expect(textEl!.scrollLeft).toBe(0);
+    expect(document.querySelector('.mini-popover-content')?.classList.contains('mini-actions-visible')).toBe(true);
+
+    invokeMock.mockClear();
+    document.querySelector<HTMLElement>('[data-testid="mini-error-details"]')!.click();
+    await flushMicrotasks();
+
+    expect(invokeMock).toHaveBeenCalledWith('show_error_details_window', {
+      summary: message,
+      details: expect.stringContaining('Type: connection'),
+    });
+
+    const reconnectSpy = vi.spyOn(store, 'reconnect').mockResolvedValue(undefined);
+    document.querySelector<HTMLButtonElement>('[data-testid="mini-error-retry"]')!.click();
+    await flushMicrotasks();
+
+    expect(reconnectSpy).toHaveBeenCalledTimes(1);
     wrapper.unmount();
   });
 

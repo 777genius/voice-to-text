@@ -111,4 +111,24 @@ describe('getWindowMode', () => {
       })
     ).toEqual({ render: 'update', desiredWindow: null });
   });
+
+  it('error details window: authenticated -> render error details', () => {
+    expect(
+      getWindowMode({
+        windowLabel: 'error-details',
+        isInitialized: true,
+        isAuthenticated: true,
+      })
+    ).toEqual({ render: 'error-details', desiredWindow: null });
+  });
+
+  it('error details window: unauthenticated -> render error details', () => {
+    expect(
+      getWindowMode({
+        windowLabel: 'error-details',
+        isInitialized: true,
+        isAuthenticated: false,
+      })
+    ).toEqual({ render: 'error-details', desiredWindow: null });
+  });
 });

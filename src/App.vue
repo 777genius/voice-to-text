@@ -5,6 +5,7 @@ import { useAuth, useAuthState } from './features/auth';
 import AuthScreen from './features/auth/presentation/components/AuthScreen.vue';
 import RecordingPopover from './presentation/components/RecordingPopover.vue';
 import UpdateWindow from './presentation/components/UpdateWindow.vue';
+import ErrorDetailsWindow from './presentation/components/ErrorDetailsWindow.vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -89,6 +90,7 @@ const showApp = computed(() => mode.value.render === 'main');
 const showSettings = computed(() => mode.value.render === 'settings');
 const showProfile = computed(() => mode.value.render === 'profile');
 const showUpdate = computed(() => mode.value.render === 'update');
+const showErrorDetails = computed(() => mode.value.render === 'error-details');
 
 // Если окно по правилам не должно показывать UI — прячем его, чтобы не оставалось "невидимого стекла".
 watch(
@@ -106,7 +108,8 @@ watch(
         if (
           windowLabel.value !== 'settings' &&
           windowLabel.value !== 'profile' &&
-          windowLabel.value !== 'update'
+          windowLabel.value !== 'update' &&
+          windowLabel.value !== 'error-details'
         ) {
           await getCurrentWindow().show();
         }
@@ -265,7 +268,8 @@ onMounted(async () => {
         label === 'auth' ||
         label === 'settings' ||
         label === 'profile' ||
-        label === 'update'
+        label === 'update' ||
+        label === 'error-details'
           ? label
           : 'unknown';
     } catch {
@@ -418,6 +422,8 @@ if (import.meta.hot) {
     <ProfileWindow v-else-if="showProfile" />
 
     <UpdateWindow v-else-if="showUpdate" />
+
+    <ErrorDetailsWindow v-else-if="showErrorDetails" />
 
     <div v-else-if="showApp" class="app">
       <RecordingPopover />

@@ -1,0 +1,19 @@
+{
+    "$schema": "../gen/schemas/desktop-schema.json",
+    "identifier": "error-details-window",
+    "description": "Error details window: full recording error explanation",
+    "windows": ["error-details"],
+    "permissions": [
+        "core:default",
+        "core:window:default",
+        "core:window:allow-show",
+        "core:window:allow-hide",
+        "core:window:allow-close",
+        "core:window:allow-center",
+        "core:window:allow-set-focus",
+        "core:window:allow-start-dragging",
+        "core:event:default",
+        "core:event:allow-emit",
+        "core:event:allow-listen"
+    ]
+}

@@ -95,6 +95,21 @@
                 "center": true,
                 "resizable": false,
                 "url": "index.html"
+            },
+            {
+                "label": "error-details",
+                "title": "VoicetextAI - Error details",
+                "width": 520,
+                "height": 420,
+                "visible": false,
+                "decorations": false,
+                "transparent": true,
+                "shadow": false,
+                "alwaysOnTop": false,
+                "skipTaskbar": false,
+                "center": true,
+                "resizable": true,
+                "url": "index.html"
             }
         ],
         "security": {

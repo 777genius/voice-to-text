@@ -1,6 +1,21 @@
-export type AppWindowLabel = 'main' | 'auth' | 'settings' | 'profile' | 'update' | 'unknown';
+export type AppWindowLabel =
+  | 'main'
+  | 'auth'
+  | 'settings'
+  | 'profile'
+  | 'update'
+  | 'error-details'
+  | 'unknown';
 
-export type AppRenderMode = 'loading' | 'main' | 'auth' | 'settings' | 'profile' | 'update' | 'none';
+export type AppRenderMode =
+  | 'loading'
+  | 'main'
+  | 'auth'
+  | 'settings'
+  | 'profile'
+  | 'update'
+  | 'error-details'
+  | 'none';
 
 export type DesiredWindow = 'main' | 'auth' | null;
 
@@ -48,6 +63,9 @@ export function getWindowMode(input: WindowModeInput): WindowModeOutput {
 
     case 'update':
       return { render: 'update', desiredWindow: null };
+
+    case 'error-details':
+      return { render: 'error-details', desiredWindow: null };
 
     default:
       // В браузере/тестах: оставляем старое поведение как fallback.

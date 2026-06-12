@@ -32,6 +32,7 @@ pub const EVENT_RECORDING_WINDOW_WILL_HIDE_FOR_HOTKEY_STOP: &str =
 pub const EVENT_SETTINGS_WINDOW_OPENED: &str = "settings-window-opened";
 pub const EVENT_SETTINGS_FOCUS_UPDATES: &str = "settings:focus-updates";
 pub const EVENT_UPDATE_AVAILABLE: &str = "update:available";
+pub const EVENT_ERROR_DETAILS_WINDOW_OPENED: &str = "error-details-window-opened";
 
 // State-sync протокол: invalidation event для синхронизации между окнами
 pub const EVENT_STATE_SYNC_INVALIDATION: &str = "state-sync:invalidation";

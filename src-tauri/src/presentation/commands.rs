@@ -4694,6 +4694,35 @@ pub async fn show_update_window(app_handle: AppHandle) -> Result<(), String> {
     Err("Update window not found".to_string())
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorDetailsWindowPayload {
+    pub summary: String,
+    pub details: String,
+}
+
+/// Shows the standalone error details window with the latest UI error payload
+#[tauri::command]
+pub async fn show_error_details_window(
+    app_handle: AppHandle,
+    summary: String,
+    details: String,
+) -> Result<(), String> {
+    log::info!("Command: show_error_details_window");
+
+    if let Some(window) = app_handle.get_webview_window("error-details") {
+        show_webview_window_on_active_monitor(&window)?;
+        window.set_focus().map_err(|e| e.to_string())?;
+        let _ = window.emit(
+            EVENT_ERROR_DETAILS_WINDOW_OPENED,
+            ErrorDetailsWindowPayload { summary, details },
+        );
+        return Ok(());
+    }
+
+    Err("Error details window not found".to_string())
+}
+
 //
 // Whisper Model Management Commands
 //

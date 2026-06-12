@@ -60,6 +60,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const suppressedPreviousSessionId = ref<number | null>(null);
   const error = ref<string | null>(null);
   const errorType = ref<TranscriptionErrorPayload['error_type'] | null>(null);
+  const errorRaw = ref<string | null>(null);
+  const errorDetails = ref<TranscriptionErrorPayload['error_details'] | null>(null);
+  const isDeviceNotFoundError = ref(false);
   const lastFinalizedSegmentKey = ref<string>(''); // последний finalized range (для дедупликации)
   const lastSpeechFinalRangeKey = ref<string>(''); // последний speech_final range (для дедупликации)
   const connectionQuality = ref<ConnectionQuality>(ConnectionQuality.Good);
@@ -109,6 +112,28 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   // если ошибка относилась к предыдущему пользователю/токену.
   const authStore = useAuthStore();
 
+  function clearRecordingErrorState(): void {
+    error.value = null;
+    errorType.value = null;
+    errorRaw.value = null;
+    errorDetails.value = null;
+    isDeviceNotFoundError.value = false;
+  }
+
+  function setRecordingError(
+    type: TranscriptionErrorPayload['error_type'] | null,
+    raw: string,
+    details?: TranscriptionErrorPayload['error_details'] | null,
+    displayMessage?: string,
+  ): void {
+    errorType.value = type;
+    errorRaw.value = raw;
+    errorDetails.value = details ?? null;
+    error.value = displayMessage ?? mapErrorMessage(type, raw, details);
+    isDeviceNotFoundError.value =
+      type === 'configuration' && isDeviceNotFoundInRaw(raw);
+  }
+
   function clearRecordingUiError(reason: string): void {
     // Не трогаем активную запись, чтобы не скрывать реальные проблемы во время стрима.
     if (
@@ -125,9 +150,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
     // Возвращаем UI в "готов" состояние.
     if (status.value === RecordingStatus.Error) status.value = RecordingStatus.Idle;
-    error.value = null;
-    errorType.value = null;
-    isDeviceNotFoundError.value = false;
+    clearRecordingErrorState();
 
     // И сбрасываем контекст последней неудачной попытки подключения,
     // чтобы новые попытки стартовали "с чистого листа".
@@ -473,11 +496,31 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     return errorType.value === 'limit_exceeded';
   });
 
-  const isDeviceNotFoundError = ref(false);
-
   const canOpenSettingsForDevice = computed(
     () => status.value === RecordingStatus.Error && isDeviceNotFoundError.value
   );
+
+  const errorSummary = computed(() => error.value ?? i18n.global.t('main.errorGeneric'));
+
+  const errorFullText = computed(() => {
+    if (!error.value && status.value !== RecordingStatus.Error) return '';
+
+    const parts: string[] = [];
+    if (error.value) parts.push(error.value);
+    if (errorType.value) parts.push(`Type: ${errorType.value}`);
+    if (errorRaw.value && errorRaw.value !== error.value) {
+      parts.push(`Raw error: ${errorRaw.value}`);
+    }
+    if (errorDetails.value) {
+      try {
+        parts.push(`Details:\n${JSON.stringify(errorDetails.value, null, 2)}`);
+      } catch {
+        parts.push(`Details: ${String(errorDetails.value)}`);
+      }
+    }
+
+    return parts.join('\n\n') || errorSummary.value;
+  });
 
   // Флаг: RecordingPopover подхватит и откроет ProfilePopover с секцией лицензии
   const wantsLicenseActivation = ref(false);
@@ -843,8 +886,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     if (!isTauriAvailable()) {
       const message = i18n.global.t('main.tauriUnavailable');
       console.warn(message);
-      error.value = message;
-      errorType.value = null;
+      setRecordingError(null, message, null, message);
       status.value = RecordingStatus.Error;
       return;
     }
@@ -1217,9 +1259,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               (status.value !== RecordingStatus.Starting && status.value !== RecordingStatus.Recording))
           ) {
             console.log('Recording starting/started - clearing all text');
-            error.value = null;
-            errorType.value = null;
-            isDeviceNotFoundError.value = false;
+            clearRecordingErrorState();
             resetTranscriptionBuffersForNewSession();
           }
 
@@ -1333,6 +1373,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           const detectedFromRaw = detectErrorTypeFromRaw(event.payload.error);
           if (event.payload.error_type === 'authentication' || detectedFromRaw === 'authentication') {
             errorType.value = 'authentication';
+            errorRaw.value = event.payload.error;
+            errorDetails.value = event.payload.error_details ?? null;
             suppressNextErrorStatus = true;
 
             lastConnectFailure.value = 'authentication';
@@ -1371,12 +1413,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             event.payload.error_details?.serverCode === 'PROVIDER_QUOTA_EXCEEDED';
 
           if (isProviderQuotaExceeded) {
-            error.value = mapErrorMessage(
+            setRecordingError(
               'provider_quota_exceeded',
               event.payload.error,
               event.payload.error_details
             );
-            errorType.value = 'provider_quota_exceeded';
             status.value = RecordingStatus.Error;
             return;
           }
@@ -1399,8 +1440,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
                 usageMessage = i18n.global.t('errors.limitExceededDetailed', { plan: planName, used: usedMin, total: totalMin });
               }
             } catch {}
-            error.value = usageMessage;
-            errorType.value = 'limit_exceeded';
+            setRecordingError(
+              'limit_exceeded',
+              event.payload.error,
+              event.payload.error_details,
+              usageMessage
+            );
             status.value = RecordingStatus.Error;
             return;
           }
@@ -1428,8 +1473,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
                 console.warn(`[STT] 429 retry limit reached (${RATE_LIMIT_MAX_RETRIES}), showing error`);
               }
               rateLimitRetryCount = 0;
-              error.value = mapErrorMessage('connection', event.payload.error, event.payload.error_details);
-              errorType.value = 'connection';
+              setRecordingError('connection', event.payload.error, event.payload.error_details);
               status.value = RecordingStatus.Error;
             }
             return;
@@ -1469,8 +1513,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
                   usageMessage = i18n.global.t('errors.limitExceededDetailed', { plan: planName, used: usedMin, total: totalMin });
                 }
               } catch {}
-              error.value = usageMessage;
-              errorType.value = 'limit_exceeded';
+              setRecordingError(
+                'limit_exceeded',
+                event.payload.error,
+                event.payload.error_details,
+                usageMessage
+              );
               status.value = RecordingStatus.Error;
               return;
             }
@@ -1481,12 +1529,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               event.payload.error_details?.serverCode === 'PROVIDER_QUOTA_EXCEEDED';
             if (connectIsProviderQuotaExceeded) {
               isConnecting.value = false;
-              error.value = mapErrorMessage(
+              setRecordingError(
                 'provider_quota_exceeded',
                 event.payload.error,
                 event.payload.error_details
               );
-              errorType.value = 'provider_quota_exceeded';
               status.value = RecordingStatus.Error;
               return;
             }
@@ -1524,10 +1571,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             return;
           }
 
-          error.value = mapErrorMessage(normalizedType, event.payload.error, event.payload.error_details);
-          errorType.value = normalizedType;
-          isDeviceNotFoundError.value =
-            normalizedType === 'configuration' && isDeviceNotFoundInRaw(event.payload.error);
+          setRecordingError(normalizedType, event.payload.error, event.payload.error_details);
           status.value = RecordingStatus.Error;
         }
       );
@@ -1577,10 +1621,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             asKnownErrorType(event.payload.error_type) ??
             detectErrorTypeFromRaw(event.payload.error) ??
             'connection';
-          error.value = event.payload.error;
-          errorType.value = normalizedType;
-          isDeviceNotFoundError.value =
-            normalizedType === 'configuration' && isDeviceNotFoundInRaw(event.payload.error);
+          setRecordingError(normalizedType, event.payload.error, null, event.payload.error);
           if (isConnecting.value || awaitingSessionStart.value) {
             lastConnectFailure.value = normalizedType;
             lastConnectFailureRaw.value = event.payload.error;
@@ -1673,7 +1714,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       console.log('Event listeners initialized successfully');
     } catch (err) {
       console.error('Failed to initialize event listeners:', err);
-      error.value = `Failed to initialize: ${err}`;
+      const raw = formatUnknownError(err);
+      setRecordingError(null, raw, null, `Failed to initialize: ${raw}`);
     }
   }
 
@@ -2040,9 +2082,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     } finally {
       // Важно: не оставляем UI в error состоянии.
       status.value = RecordingStatus.Idle;
-      error.value = null;
-      errorType.value = null;
-      isDeviceNotFoundError.value = false;
+      clearRecordingErrorState();
       isForcingLogout = false;
     }
   }
@@ -2087,9 +2127,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     clearHotkeyStopFinalizeTimer();
 
     // Очищаем весь предыдущий текст перед новой записью
-    error.value = null;
-    errorType.value = null;
-    isDeviceNotFoundError.value = false;
+    clearRecordingErrorState();
     resetTranscriptionBuffersForNewSession();
   }
 
@@ -2192,10 +2230,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             isLicenseInactiveFromRaw(raw);
 
           if (isLiveTranslationAttempt) {
-            errorType.value = detected;
-            error.value = mapErrorMessage(detected, raw, details);
-            isDeviceNotFoundError.value =
-              detected === 'configuration' && isDeviceNotFoundInRaw(raw);
+            setRecordingError(detected, raw, details);
             status.value = RecordingStatus.Error;
             clientLog('recording_connect_attempt_failed', {
               attempt,
@@ -2214,6 +2249,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             // (или backend всё ещё использует старый). Не оставляем UI в "Подключение..." бесконечно.
             if (authRefreshUsed) {
               errorType.value = 'authentication';
+              errorRaw.value = raw;
+              errorDetails.value = details;
               suppressNextErrorStatus = true;
               await forceLogoutFromSttAuthError();
               return;
@@ -2229,14 +2266,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               continue;
             }
             errorType.value = 'authentication';
+            errorRaw.value = raw;
+            errorDetails.value = details;
             suppressNextErrorStatus = true;
             await forceLogoutFromSttAuthError();
             return;
           }
 
           if (isLimitExceeded) {
-            errorType.value = 'limit_exceeded';
-            error.value = mapErrorMessage('limit_exceeded', raw, details);
+            setRecordingError('limit_exceeded', raw, details);
             status.value = RecordingStatus.Error;
             return;
           }
@@ -2271,9 +2309,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }, isLastAttempt || !isRetriable ? 'error' : 'warn');
 
           if (!isRetriable || isLastAttempt) {
-            errorType.value = detected;
-            error.value = mapErrorMessage(detected, raw, details);
-            isDeviceNotFoundError.value = detected === 'configuration' && isDeviceNotFoundInRaw(raw);
+            setRecordingError(detected, raw, details);
             status.value = RecordingStatus.Error;
             return;
           }
@@ -2301,10 +2337,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       // или если события от backend потерялись/были отфильтрованы.
       const fallbackType = lastConnectFailure.value ?? 'connection';
       const fallbackRaw = lastConnectFailureRaw.value || 'Unknown connection error';
-      errorType.value = fallbackType;
-      error.value = mapErrorMessage(fallbackType, fallbackRaw, lastConnectFailureDetails.value);
-      isDeviceNotFoundError.value =
-        fallbackType === 'configuration' && isDeviceNotFoundInRaw(fallbackRaw);
+      setRecordingError(fallbackType, fallbackRaw, lastConnectFailureDetails.value);
       status.value = RecordingStatus.Error;
     } finally {
       isConnecting.value = false;
@@ -2331,9 +2364,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     awaitingSessionStart.value = true;
     sessionId.value = null;
     status.value = warmStartExpected ? RecordingStatus.Recording : RecordingStatus.Starting;
-    error.value = null;
-    errorType.value = null;
-    isDeviceNotFoundError.value = false;
+    clearRecordingErrorState();
     lastConnectFailure.value = null;
     lastConnectFailureRaw.value = '';
     lastConnectFailureDetails.value = null;
@@ -2365,8 +2396,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         sessionId: sessionId.value,
       }, 'info');
       if (backendStatus === RecordingStatus.Idle) {
-        error.value = null;
-        errorType.value = null;
+        clearRecordingErrorState();
       }
     } catch (err) {
       console.error('Failed to stop recording:', err);
@@ -2380,11 +2410,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       }, 'error');
       if (backendStatus === RecordingStatus.Idle) {
         console.warn('[STT] Stop command failed, but backend is already Idle:', err);
-        error.value = null;
-        errorType.value = null;
+        clearRecordingErrorState();
         return;
       }
-      error.value = String(err);
+      const raw = formatUnknownError(err);
+      setRecordingError(null, raw, null, raw);
       status.value = RecordingStatus.Error;
     }
   }
@@ -2486,6 +2516,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     finalText,
     error,
     errorType,
+    errorSummary,
+    errorFullText,
     connectionQuality,
     activeRecordingMode,
     translationText,
