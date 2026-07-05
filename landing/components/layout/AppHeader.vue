@@ -307,11 +307,18 @@ const mobileNavItems = computed(() => [
 .app-header__download-btn :deep(.v-btn__prepend) {
   position: relative;
   z-index: 1;
-  color: #22c55e;
+  color: rgba(255, 255, 255, 0.94);
+  filter: drop-shadow(0 1px 4px rgba(15, 23, 42, 0.28));
 }
 
 .app-header__download-btn :deep(.v-icon) {
   font-size: clamp(20px, 1.2vw, 25px) !important;
+  color: currentColor !important;
+}
+
+.app-header__download-btn :deep(.v-icon svg),
+.app-header__download-btn :deep(.v-icon path) {
+  fill: currentColor !important;
 }
 
 .app-header__download-btn :deep(.v-btn__content) {

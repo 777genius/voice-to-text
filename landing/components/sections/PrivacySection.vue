@@ -3,16 +3,70 @@ import { mdiSourceBranch, mdiAccountGroupOutline, mdiUpdate, mdiGithub, mdiOpenS
 
 const { content } = useLandingContent();
 const { t, locale } = useI18n();
-const { data: releaseData } = useReleaseDownloads();
+const { data: releaseData, fallbackUrl } = useReleaseDownloads();
 
 const releaseVersion = computed(() => releaseData.value?.version || null);
-const releaseDate = computed(() => {
-  if (!releaseData.value?.pubDate) return '';
-  return new Date(releaseData.value.pubDate).toLocaleDateString(locale.value, {
-    year: 'numeric',
+const formatReleaseDate = (pubDate: string | null | undefined, includeYear = false): string => {
+  if (!pubDate) return '';
+  const timestamp = Date.parse(pubDate);
+  if (!Number.isFinite(timestamp)) return '';
+
+  return new Date(timestamp).toLocaleDateString(locale.value, {
+    ...(includeYear ? { year: 'numeric' as const } : {}),
     month: 'short',
     day: 'numeric',
   });
+};
+
+const releaseDate = computed(() => formatReleaseDate(releaseData.value?.pubDate, true));
+
+const releaseTimeline = computed(() =>
+  (releaseData.value?.releases || [])
+    .filter((release) => release.version && release.pubDate)
+    .slice(0, 5)
+    .map((release, index) => ({
+      ...release,
+      date: formatReleaseDate(release.pubDate),
+      href: release.url || fallbackUrl,
+      isLatest: index === 0,
+    }))
+);
+
+const releaseCadenceLabel = computed(() => {
+  const items = releaseTimeline.value;
+  const language = locale.value.split('-')[0];
+  if (items.length < 2) return language === 'ru' ? 'Последний релиз на GitHub' : 'Latest GitHub release';
+
+  const newest = Date.parse(items[0].pubDate || '');
+  const oldest = Date.parse(items[items.length - 1].pubDate || '');
+  if (!Number.isFinite(newest) || !Number.isFinite(oldest)) {
+    return language === 'ru' ? `${items.length} последних релизов` : `${items.length} recent releases`;
+  }
+
+  const days = Math.max(1, Math.ceil((newest - oldest) / 86_400_000));
+  return language === 'ru' ? `${items.length} релизов за ${days} дн.` : `${items.length} releases in ${days} days`;
+});
+
+const releaseSummaryFallback = computed(() => {
+  const language = locale.value.split('-')[0];
+  return language === 'ru'
+    ? 'Короткие заметки к релизу на GitHub'
+    : 'Short GitHub release notes';
+});
+
+const releaseLabel = computed(() => {
+  const language = locale.value.split('-')[0];
+  return {
+    title: language === 'ru' ? 'Последние релизы' : 'Latest releases',
+    latest: language === 'ru' ? 'Новый' : 'Latest',
+  };
+});
+
+const releaseTimelineLabel = computed(() => {
+  const language = locale.value.split('-')[0];
+  return language === 'ru'
+    ? 'Последние релизы VoicetextAI'
+    : 'Latest VoicetextAI releases';
 });
 
 const openSourceIcons = [
@@ -46,8 +100,37 @@ const openSourceIcons = [
             {{ t('nav.viewOnGithub') }}
           </v-btn>
 
+          <div v-if="releaseTimeline.length" class="opensource-section__release-strip">
+            <div class="opensource-section__release-strip-header">
+              <span class="opensource-section__release-strip-title">{{ releaseLabel.title }}</span>
+              <span class="opensource-section__release-strip-cadence">{{ releaseCadenceLabel }}</span>
+            </div>
+
+            <div class="opensource-section__release-list" :aria-label="releaseTimelineLabel">
+              <a
+                v-for="release in releaseTimeline"
+                :key="release.version || release.name || release.pubDate"
+                class="opensource-section__release-card"
+                :href="release.href"
+                target="_blank"
+                rel="noopener"
+              >
+                <span class="opensource-section__release-card-top">
+                  <span class="opensource-section__release-version">v{{ release.version }}</span>
+                  <span v-if="release.isLatest" class="opensource-section__release-badge">
+                    {{ releaseLabel.latest }}
+                  </span>
+                </span>
+                <span class="opensource-section__release-date">{{ release.date }}</span>
+                <span class="opensource-section__release-summary">
+                  {{ release.summary || releaseSummaryFallback }}
+                </span>
+              </a>
+            </div>
+          </div>
+
           <!-- Code visual -->
-          <div class="opensource-section__visual">
+          <div v-else class="opensource-section__visual">
             <div class="opensource-section__visual-inner">
               <v-icon size="48" class="opensource-section__visual-icon" :icon="mdiOpenSourceInitiative" />
             </div>
@@ -98,12 +181,13 @@ const openSourceIcons = [
 /* --- Header (Left) --- */
 .opensource-section__header {
   position: relative;
+  min-width: 0;
 }
 
 .opensource-section__title {
   font-size: 2.4rem;
   font-weight: 800;
-  letter-spacing: -0.03em;
+  letter-spacing: 0;
   line-height: 1.15;
   margin-bottom: 16px;
   background: linear-gradient(135deg, currentColor 0%, rgba(139, 92, 246, 0.8) 100%);
@@ -124,14 +208,14 @@ const openSourceIcons = [
   font-weight: 500;
   opacity: 0.4;
   margin-top: 12px;
-  letter-spacing: 0.01em;
+  letter-spacing: 0;
 }
 
 .opensource-section__btn {
   background: linear-gradient(135deg, rgba(139, 92, 246, 0.9), rgba(99, 102, 241, 0.9)) !important;
   color: white !important;
   font-weight: 600;
-  letter-spacing: 0.02em;
+  letter-spacing: 0;
   padding: 0 24px;
   height: 44px;
   border-radius: 12px;
@@ -141,6 +225,112 @@ const openSourceIcons = [
 .opensource-section__btn:hover {
   transform: translateY(-2px);
   box-shadow: 0 8px 24px rgba(139, 92, 246, 0.3);
+}
+
+/* --- Release Strip --- */
+.opensource-section__release-strip {
+  position: relative;
+  z-index: 1;
+  margin-top: 28px;
+  max-width: 100%;
+}
+
+.opensource-section__release-strip-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.opensource-section__release-strip-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  color: #8b5cf6;
+}
+
+.opensource-section__release-strip-cadence {
+  font-size: 0.82rem;
+  font-weight: 600;
+  opacity: 0.55;
+}
+
+.opensource-section__release-list {
+  width: 100%;
+  max-width: 100%;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(220px, 1fr);
+  gap: 14px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+  padding: 2px 0 8px;
+}
+
+.opensource-section__release-card {
+  min-height: 148px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 18px;
+  border-radius: 14px;
+  text-decoration: none;
+  color: inherit;
+  background: rgba(255, 255, 255, 0.58);
+  border: 1px solid rgba(139, 92, 246, 0.1);
+  scroll-snap-align: start;
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.opensource-section__release-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(139, 92, 246, 0.24);
+  box-shadow: 0 12px 32px rgba(139, 92, 246, 0.08);
+}
+
+.opensource-section__release-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 26px;
+}
+
+.opensource-section__release-version {
+  font-size: 0.98rem;
+  font-weight: 800;
+  color: #312e81;
+}
+
+.opensource-section__release-badge {
+  flex-shrink: 0;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: #6d28d9;
+  background: rgba(139, 92, 246, 0.12);
+}
+
+.opensource-section__release-date {
+  font-size: 0.78rem;
+  font-weight: 600;
+  opacity: 0.52;
+}
+
+.opensource-section__release-summary {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 0.86rem;
+  line-height: 1.45;
+  opacity: 0.76;
 }
 
 /* --- Visual --- */
@@ -270,7 +460,7 @@ const openSourceIcons = [
   display: block;
   font-size: 0.7rem;
   font-weight: 700;
-  letter-spacing: 0.1em;
+  letter-spacing: 0;
   text-transform: uppercase;
   color: #8b5cf6;
   margin-bottom: 4px;
@@ -311,6 +501,34 @@ const openSourceIcons = [
 
 .v-theme--dark .opensource-section__release-info {
   color: #64748b;
+}
+
+.v-theme--dark .opensource-section__release-strip-title {
+  color: #c4b5fd;
+}
+
+.v-theme--dark .opensource-section__release-card {
+  background: rgba(255, 255, 255, 0.045);
+  border-color: rgba(167, 139, 250, 0.1);
+}
+
+.v-theme--dark .opensource-section__release-card:hover {
+  background: rgba(255, 255, 255, 0.065);
+  border-color: rgba(167, 139, 250, 0.24);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(167, 139, 250, 0.08);
+}
+
+.v-theme--dark .opensource-section__release-version {
+  color: #e9d5ff;
+}
+
+.v-theme--dark .opensource-section__release-badge {
+  color: #ddd6fe;
+  background: rgba(167, 139, 250, 0.16);
+}
+
+.v-theme--dark .opensource-section__release-summary {
+  color: #cbd5e1;
 }
 
 .v-theme--dark .opensource-section__visual-inner {
@@ -381,6 +599,15 @@ const openSourceIcons = [
   color: #94a3b8;
 }
 
+.v-theme--light .opensource-section__release-card {
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 4px 16px rgba(0, 0, 0, 0.02);
+}
+
+.v-theme--light .opensource-section__release-summary {
+  color: #334155;
+}
+
 /* --- Responsive --- */
 @media (max-width: 960px) {
   .opensource-section__layout {
@@ -406,6 +633,10 @@ const openSourceIcons = [
   .opensource-section__visual {
     margin-top: 32px;
   }
+
+  .opensource-section__release-strip {
+    margin-top: 36px;
+  }
 }
 
 @media (max-width: 600px) {
@@ -427,6 +658,21 @@ const openSourceIcons = [
   .opensource-section__visual {
     width: 110px;
     height: 110px;
+  }
+
+  .opensource-section__release-strip-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .opensource-section__release-list {
+    grid-auto-columns: minmax(236px, 82vw);
+  }
+
+  .opensource-section__release-card {
+    min-height: 142px;
+    padding: 16px;
   }
 }
 </style>

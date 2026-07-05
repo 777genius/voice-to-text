@@ -111,14 +111,8 @@
       "name": "Free",
       "price": "$0",
       "period": "forever",
-      "description": "Get started with real-time voice-to-text — no credit card required.",
-      "features": [
-        "Deepgram Nova-3",
-        "Real-time transcription",
-        "Global hotkeys",
-        "Auto-copy & auto-paste",
-        "Community support"
-      ]
+      "description": "Start with real-time voice-to-text for free. No credit card required.",
+      "features": []
     },
     {
       "id": "pro",

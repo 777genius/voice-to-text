@@ -111,14 +111,8 @@
       "name": "Kostenlos",
       "price": "$0",
       "period": "für immer",
-      "description": "Starte mit Echtzeit-Spracheingabe — ohne Kreditkarte.",
-      "features": [
-        "Deepgram Nova-3",
-        "Echtzeit-Transkription",
-        "Globale Hotkeys",
-        "Auto-Kopie & Auto-Einfügen",
-        "Community-Support"
-      ]
+      "description": "Starte kostenlos mit Sprache-zu-Text in Echtzeit. Keine Kreditkarte nötig.",
+      "features": []
     },
     {
       "id": "pro",

@@ -75,7 +75,7 @@ const { t } = useI18n();
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  //background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(236, 72, 153, 0.1));
+  /* background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(236, 72, 153, 0.1)); */
   color: #6366f1;
   border: 1px solid rgba(99, 102, 241, 0.15);
   margin-bottom: 20px;

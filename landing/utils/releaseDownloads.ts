@@ -10,6 +10,7 @@ export type GitHubRelease = {
   tag_name: string;
   name?: string;
   body?: string;
+  html_url?: string;
   published_at: string;
   assets?: ReleaseAsset[];
 };
@@ -21,6 +22,14 @@ export type ReleaseVariant = {
   pubDate: string | null;
 };
 
+export type ReleaseSummary = {
+  version: string | null;
+  name: string | null;
+  summary: string | null;
+  pubDate: string | null;
+  url: string | null;
+};
+
 export type DownloadsApiResponse = {
   ok: boolean;
   source: "github-releases";
@@ -28,6 +37,7 @@ export type DownloadsApiResponse = {
   version: string | null;
   notes: string | null;
   pubDate: string | null;
+  releases: ReleaseSummary[];
   variants: {
     macos: { arm64: ReleaseVariant; x64: ReleaseVariant; universal: ReleaseVariant };
     windows: { x64: ReleaseVariant };
@@ -55,6 +65,74 @@ const sortReleasesByDateDesc = (releases: GitHubRelease[]): GitHubRelease[] =>
     const bTime = Date.parse(b.published_at || "");
     return (Number.isFinite(bTime) ? bTime : 0) - (Number.isFinite(aTime) ? aTime : 0);
   });
+
+const stripMarkdown = (value: string): string =>
+  value
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/<[^>]+>/g, "")
+    .replace(/[*_~>#]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const shouldStopSummaryAtHeading = (heading: string): boolean =>
+  ["installation", "install", "downloads", "download", "checksums", "assets"].includes(
+    heading.toLowerCase()
+  );
+
+const shortenSummary = (value: string, maxLength = 150): string => {
+  const trimmed = value.trim();
+  if (trimmed.length <= maxLength) return trimmed;
+  const clipped = trimmed.slice(0, maxLength - 1).trimEnd();
+  return `${clipped}...`;
+};
+
+const summarizeReleaseBody = (body?: string): string | null => {
+  if (!body?.trim()) return null;
+
+  const summaries: string[] = [];
+  let currentHeading = "";
+
+  for (const rawLine of body.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    const heading = line.match(/^#{1,6}\s+(.+)$/);
+    if (heading) {
+      const cleanHeading = stripMarkdown(heading[1]);
+      if (shouldStopSummaryAtHeading(cleanHeading)) break;
+      currentHeading = cleanHeading;
+      continue;
+    }
+
+    const bullet = line.match(/^[-*]\s+(.+)$/);
+    if (!bullet) continue;
+
+    const item = stripMarkdown(bullet[1]);
+    if (!item) continue;
+
+    summaries.push(currentHeading ? `${currentHeading}: ${item}` : item);
+    if (summaries.length >= 2) break;
+  }
+
+  if (summaries.length > 0) return shortenSummary(summaries.join(" "));
+
+  const fallback = body
+    .split(/\r?\n/)
+    .map(stripMarkdown)
+    .find((line) => line && !shouldStopSummaryAtHeading(line));
+
+  return fallback ? shortenSummary(fallback) : null;
+};
+
+const toReleaseSummary = (release: GitHubRelease): ReleaseSummary => ({
+  version: getVersion(release),
+  name: release.name || release.tag_name || null,
+  summary: summarizeReleaseBody(release.body),
+  pubDate: release.published_at || null,
+  url: release.html_url || null,
+});
 
 const isInstallerAsset = (asset: ReleaseAsset): boolean => {
   const name = asset.name.toLowerCase();
@@ -112,6 +190,7 @@ export const createEmptyDownloadsResponse = (): DownloadsApiResponse => ({
   version: null,
   notes: null,
   pubDate: null,
+  releases: [],
   variants: {
     macos: { arm64: { ...emptyVariant }, x64: { ...emptyVariant }, universal: { ...emptyVariant } },
     windows: { x64: { ...emptyVariant } },
@@ -160,6 +239,7 @@ export const normalizeGitHubReleases = (input: GitHubRelease | GitHubRelease[]):
     version: getVersion(latestInstallableRelease),
     notes: latestInstallableRelease.body || null,
     pubDate: latestInstallableRelease.published_at || null,
+    releases: releases.slice(0, 8).map(toReleaseSummary),
     variants,
     all,
   };

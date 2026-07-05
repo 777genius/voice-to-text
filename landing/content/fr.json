@@ -111,14 +111,8 @@
       "name": "Gratuit",
       "price": "$0",
       "period": "pour toujours",
-      "description": "Commencez avec la saisie vocale en temps réel — sans carte bancaire.",
-      "features": [
-        "Deepgram Nova-3",
-        "Transcription en temps réel",
-        "Raccourcis globaux",
-        "Copie auto & collage auto",
-        "Support communautaire"
-      ]
+      "description": "Commencez gratuitement avec la voix en texte en temps réel. Aucune carte requise.",
+      "features": []
     },
     {
       "id": "pro",

@@ -178,6 +178,7 @@ function openCheckout() {
             class="pricing-card"
             :class="{
               'pricing-card--highlighted': plan.highlighted,
+              'pricing-card--compact': plan.features.length === 0,
             }"
             :style="{ '--delay': `${index * 0.1}s` }"
           >
@@ -194,9 +195,9 @@ function openCheckout() {
               <p class="pricing-card__description">{{ plan.description }}</p>
             </div>
 
-            <div class="pricing-card__divider" />
+            <div v-if="plan.features.length" class="pricing-card__divider" />
 
-            <ul class="pricing-card__features">
+            <ul v-if="plan.features.length" class="pricing-card__features">
               <li
                 v-for="(feature, fIndex) in plan.features"
                 :key="fIndex"
@@ -404,6 +405,37 @@ function openCheckout() {
   margin: 0;
 }
 
+.pricing-card--compact {
+  padding: 42px 34px;
+}
+
+.pricing-card--compact .pricing-card__header {
+  margin-bottom: 28px;
+}
+
+.pricing-card--compact .pricing-card__name {
+  font-size: 1.35rem;
+  margin-bottom: 16px;
+}
+
+.pricing-card--compact .pricing-card__price-wrap {
+  margin-bottom: 18px;
+}
+
+.pricing-card--compact .pricing-card__price {
+  font-size: clamp(4rem, 7vw, 5.8rem);
+}
+
+.pricing-card--compact .pricing-card__period {
+  font-size: 1.05rem;
+  opacity: 0.58;
+}
+
+.pricing-card--compact .pricing-card__description {
+  font-size: 1rem;
+  opacity: 0.68;
+}
+
 /* Divider */
 .pricing-card__divider {
   height: 1px;
@@ -448,6 +480,7 @@ function openCheckout() {
 /* Button */
 .pricing-card__btn {
   width: 100%;
+  margin-top: auto;
   padding: 14px 24px;
   border-radius: 12px;
   font-size: 0.95rem;

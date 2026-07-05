@@ -111,14 +111,8 @@
       "name": "Gratis",
       "price": "$0",
       "period": "para siempre",
-      "description": "Empieza con entrada de voz en tiempo real — sin tarjeta de crédito.",
-      "features": [
-        "Deepgram Nova-3",
-        "Transcripción en tiempo real",
-        "Atajos globales",
-        "Copia automática y pegado automático",
-        "Soporte comunitario"
-      ]
+      "description": "Empieza gratis con voz a texto en tiempo real. No hace falta tarjeta.",
+      "features": []
     },
     {
       "id": "pro",

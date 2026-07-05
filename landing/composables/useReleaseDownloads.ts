@@ -6,7 +6,7 @@ import {
   resolveReleaseDownload,
 } from "~/utils/releaseDownloads";
 
-const CACHE_KEY = "vtai_releases_v2";
+const CACHE_KEY = "vtai_releases_v3";
 const CACHE_TTL = 10 * 60 * 1000;
 const RELEASES_PER_PAGE = 30;
 
@@ -51,40 +51,67 @@ export const useReleaseDownloads = () => {
     return await $fetch<DownloadsApiResponse>("/releases.json");
   };
 
-  const { data, pending, error, execute } = useAsyncData<DownloadsApiResponse>("releases", async () => {
-    const cached = readCache();
-    if (cached) return cached;
+  const data = useState<DownloadsApiResponse | null>("release-downloads:data", () => null);
+  const pending = useState<boolean>("release-downloads:pending", () => false);
+  const error = useState<unknown | null>("release-downloads:error", () => null);
 
+  const load = async (force = false): Promise<DownloadsApiResponse | null> => {
+    if (data.value && !force) return data.value;
+    if (pending.value) return data.value;
+
+    pending.value = true;
+    error.value = null;
+
+    try {
+      const cached = !force ? readCache() : null;
+      if (cached) {
+        data.value = cached;
+        return cached;
+      }
+
+      try {
+        const snapshot = await fetchFromStaticSnapshot();
+        if (snapshot.ok) {
+          writeCache(snapshot);
+          data.value = snapshot;
+          return snapshot;
+        }
+      } catch {
+        // Fall back to GitHub below.
+      }
+
+      const fresh = await fetchFromGitHub();
+      writeCache(fresh);
+      data.value = fresh;
+      return fresh;
+    } catch (err) {
+      error.value = err;
+      const empty = createEmptyDownloadsResponse();
+      data.value = empty;
+      return empty;
+    } finally {
+      pending.value = false;
+    }
+  };
+
+  const refreshFromGitHub = async (): Promise<void> => {
     try {
       const fresh = await fetchFromGitHub();
       writeCache(fresh);
-      return fresh;
+      data.value = fresh;
     } catch {
-      try {
-        const snapshot = await fetchFromStaticSnapshot();
-        writeCache(snapshot);
-        return snapshot;
-      } catch {
-        return createEmptyDownloadsResponse();
-      }
+      // Static release snapshot stays visible if GitHub is slow or rate-limited.
     }
-  }, {
-    server: false,
-    immediate: true,
-    lazy: true,
-  });
+  };
 
   onMounted(() => {
-    if (!data.value && !pending.value) {
-      void execute();
-    }
+    void load().then((loaded) => {
+      if (loaded?.ok) void refreshFromGitHub();
+    });
   });
 
   const ensureLoaded = async (): Promise<DownloadsApiResponse | null> => {
-    if (!data.value) {
-      await execute();
-    }
-    return data.value || null;
+    return await load();
   };
 
   const resolve = (os: DownloadOs, arch: DownloadArch | "unknown"): ResolveResult => {
