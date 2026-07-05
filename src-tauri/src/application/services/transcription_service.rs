@@ -16,6 +16,8 @@ type Result<T> = anyhow::Result<T>;
 
 const AUDIO_PROCESSOR_STOP_DRAIN_TIMEOUT: Duration = Duration::from_millis(2500);
 const PRESTART_VISUALIZER_QUEUE_CAPACITY: usize = 64;
+const AUDIO_LEVEL_EMIT_EVERY_CHUNKS: usize = 2;
+const AUDIO_SPECTRUM_EMIT_EVERY_CHUNKS: usize = 3;
 
 struct PreparedAudioChunk {
     max_amplitude: i32,
@@ -63,13 +65,15 @@ fn emit_audio_visualization(
     on_audio_spectrum: &AudioSpectrumCallback,
 ) {
     // На первом чанке эмитим сразу, чтобы mini-window ожило ещё во время STT startup.
-    if chunk_count == 1 || chunk_count % 2 == 0 {
+    if chunk_count == 1 || chunk_count % AUDIO_LEVEL_EMIT_EVERY_CHUNKS == 0 {
         on_audio_level(prepared.normalized_level);
     }
 
-    // Берем усиленный звук, чтобы визуализация соответствовала тому, что слышит STT.
-    if let Some(bars) = spectrum.push_samples(&prepared.amplified_chunk.data) {
-        on_audio_spectrum(bars);
+    // Спектр нужен только для UI. STT получает каждый чанк ниже без throttle.
+    if chunk_count == 1 || chunk_count % AUDIO_SPECTRUM_EMIT_EVERY_CHUNKS == 0 {
+        if let Some(bars) = spectrum.push_samples(&prepared.amplified_chunk.data) {
+            on_audio_spectrum(bars);
+        }
     }
 }
 

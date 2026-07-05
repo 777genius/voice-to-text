@@ -270,10 +270,10 @@ impl SystemAudioCapture {
         channels: usize,
     ) -> AudioResult<SincFixedIn<f32>> {
         let params = SincInterpolationParameters {
-            sinc_len: 256,
+            sinc_len: 64,
             f_cutoff: 0.95,
             interpolation: SincInterpolationType::Linear,
-            oversampling_factor: 256,
+            oversampling_factor: 64,
             window: WindowFunction::BlackmanHarris2,
         };
 
@@ -321,6 +321,22 @@ impl SystemAudioCapture {
             })
             .collect()
     }
+
+    /// Fast speech-oriented downsample for exact integer ratios like 48k -> 16k.
+    #[inline]
+    pub(crate) fn downsample_integer_average(samples: &[i16], factor: usize) -> Vec<i16> {
+        if factor <= 1 {
+            return samples.to_vec();
+        }
+
+        samples
+            .chunks_exact(factor)
+            .map(|frame| {
+                let sum: i32 = frame.iter().map(|&v| v as i32).sum();
+                (sum / factor as i32) as i16
+            })
+            .collect()
+    }
 }
 
 // SAFETY: SystemAudioCapture содержит cpal::Stream который не Send/Sync на macOS.
@@ -360,17 +376,32 @@ impl AudioCapture for SystemAudioCapture {
                 target_channels
             );
 
-            // Create resampler if needed (wrapped in Arc<Mutex<>> for thread safety)
             let needs_resampling = native_sample_rate != target_sample_rate;
-            let resampler: Option<Arc<Mutex<SincFixedIn<f32>>>> = if needs_resampling {
-                Some(Arc::new(Mutex::new(Self::create_resampler(
-                    native_sample_rate,
-                    target_sample_rate,
-                    1, // mono after conversion
-                )?)))
+            let integer_downsample_factor = if native_sample_rate > target_sample_rate
+                && native_sample_rate % target_sample_rate == 0
+            {
+                Some((native_sample_rate / target_sample_rate) as usize)
             } else {
                 None
             };
+            let fast_downsample_input_chunk_size = integer_downsample_factor
+                .map(|factor| (RESAMPLER_CHUNK_SIZE / factor).max(1) * factor);
+
+            if let Some(factor) = integer_downsample_factor {
+                log::info!("Using fast integer audio downsample: {}:1", factor);
+            }
+
+            // Create resampler if needed (wrapped in Arc<Mutex<>> for thread safety)
+            let resampler: Option<Arc<Mutex<SincFixedIn<f32>>>> =
+                if needs_resampling && integer_downsample_factor.is_none() {
+                    Some(Arc::new(Mutex::new(Self::create_resampler(
+                        native_sample_rate,
+                        target_sample_rate,
+                        1, // mono after conversion
+                    )?)))
+                } else {
+                    None
+                };
 
             // Input buffer for accumulating samples before resampling
             // Shared between callback invocations via Arc<Mutex<>>
@@ -400,6 +431,22 @@ impl AudioCapture for SystemAudioCapture {
                 };
 
                 buffer.extend_from_slice(&pcm_samples);
+
+                if let (Some(factor), Some(input_chunk_size)) =
+                    (integer_downsample_factor, fast_downsample_input_chunk_size)
+                {
+                    while buffer.len() >= input_chunk_size {
+                        let chunk: Vec<i16> = buffer.drain(..input_chunk_size).collect();
+                        let final_samples = Self::downsample_integer_average(&chunk, factor);
+
+                        if !final_samples.is_empty() {
+                            let audio_chunk =
+                                AudioChunk::new(final_samples, target_sample_rate, target_channels);
+                            on_chunk_cb(audio_chunk);
+                        }
+                    }
+                    return;
+                }
 
                 while buffer.len() >= RESAMPLER_CHUNK_SIZE {
                     let chunk: Vec<i16> = buffer.drain(..RESAMPLER_CHUNK_SIZE).collect();
@@ -669,6 +716,14 @@ mod tests {
         assert_eq!(mono.len(), 2);
         assert_eq!(mono[0], i16::MAX);
         assert_eq!(mono[1], i16::MIN);
+    }
+
+    #[test]
+    fn test_integer_downsample_average_drops_incomplete_tail() {
+        let input = vec![3, 6, 9, -3, -6, -9, 100];
+        let output = SystemAudioCapture::downsample_integer_average(&input, 3);
+
+        assert_eq!(output, vec![6, -6]);
     }
 
     #[test]

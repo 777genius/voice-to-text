@@ -15,16 +15,62 @@ type AudioSpectrumPayload = {
   bars: number[];
 };
 
+const AUDIO_VISUALIZER_DEBUG = false;
+const SPECTRUM_APPLY_INTERVAL_MS = 50;
+
+function debugLog(...args: unknown[]) {
+  if (AUDIO_VISUALIZER_DEBUG) {
+    console.log(...args);
+  }
+}
+
 class TauriAudioSpectrumSource implements AudioVisualizerSource {
   private unlisten: UnlistenFn | null = null;
   private receivedCount = 0;
   private lastLogAt = 0;
+  private lastAppliedAt = 0;
+  private pendingBars: number[] | null = null;
+  private pendingTimer: number | null = null;
+
+  private clearPendingTimer() {
+    if (this.pendingTimer !== null) {
+      window.clearTimeout(this.pendingTimer);
+      this.pendingTimer = null;
+    }
+  }
+
+  private applyThrottled(bars: number[], onBars: (bars: number[]) => void) {
+    const now = performance.now();
+    const elapsed = now - this.lastAppliedAt;
+
+    if (elapsed >= SPECTRUM_APPLY_INTERVAL_MS) {
+      this.clearPendingTimer();
+      this.pendingBars = null;
+      this.lastAppliedAt = now;
+      onBars(bars);
+      return;
+    }
+
+    this.pendingBars = bars;
+    if (this.pendingTimer !== null) return;
+
+    this.pendingTimer = window.setTimeout(() => {
+      this.pendingTimer = null;
+      const pending = this.pendingBars;
+      this.pendingBars = null;
+      if (!pending) return;
+
+      this.lastAppliedAt = performance.now();
+      onBars(pending);
+    }, Math.max(0, SPECTRUM_APPLY_INTERVAL_MS - elapsed));
+  }
 
   async start(onBars: (bars: number[]) => void): Promise<void> {
     if (!isTauriAvailable()) return;
     if (this.unlisten) return;
 
-    console.log('[AudioVisualizer] Подписываюсь на событие audio:spectrum (Tauri)');
+    debugLog('[AudioVisualizer] Подписываюсь на событие audio:spectrum (Tauri)');
+    this.lastAppliedAt = 0;
     this.unlisten = await listen<AudioSpectrumPayload>('audio:spectrum', (event) => {
       const bars = Array.isArray(event.payload?.bars) ? event.payload.bars : [];
       this.receivedCount += 1;
@@ -39,20 +85,23 @@ class TauriAudioSpectrumSource implements AudioVisualizerSource {
           for (let i = 0; i < len; i++) avg += Number(bars[i] ?? 0);
           avg /= len;
         }
-        console.log(
+        debugLog(
           `[AudioVisualizer] audio:spectrum получен (#${this.receivedCount}), bars=${len}, avg=${avg.toFixed(3)}`
         );
       }
 
-      onBars(bars);
+      this.applyThrottled(bars, onBars);
     });
   }
 
   stop(): void {
     if (!this.unlisten) return;
-    console.log('[AudioVisualizer] Отписываюсь от audio:spectrum (Tauri)');
+    debugLog('[AudioVisualizer] Отписываюсь от audio:spectrum (Tauri)');
     this.unlisten();
     this.unlisten = null;
+    this.clearPendingTimer();
+    this.pendingBars = null;
+    this.lastAppliedAt = 0;
     this.receivedCount = 0;
     this.lastLogAt = 0;
   }
@@ -110,17 +159,17 @@ export function useAudioVisualizer(
       let avg = 0;
       for (let i = 0; i < out.length; i++) avg += out[i];
       avg /= out.length || 1;
-      console.log(`[AudioVisualizer] applyBars (#${applyCount}) avg=${avg.toFixed(3)}`);
+      debugLog(`[AudioVisualizer] applyBars (#${applyCount}) avg=${avg.toFixed(3)}`);
     }
   }
 
   async function start() {
-    console.log('[AudioVisualizer] start()');
+    debugLog('[AudioVisualizer] start()');
     await source.start((next) => applyBars(next));
   }
 
   function stop() {
-    console.log('[AudioVisualizer] stop()');
+    debugLog('[AudioVisualizer] stop()');
     source.stop();
     // Оставляем последние значения — они плавно "погаснут" через opacity в компоненте
   }
@@ -128,7 +177,7 @@ export function useAudioVisualizer(
   watch(
     () => active.value,
     (isActive) => {
-      console.log('[AudioVisualizer] active изменился →', isActive);
+      debugLog('[AudioVisualizer] active изменился →', isActive);
       if (isActive) {
         start();
       } else {
@@ -148,4 +197,3 @@ export function useAudioVisualizer(
     stop,
   };
 }
-

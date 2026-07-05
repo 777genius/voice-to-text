@@ -11,6 +11,8 @@ const props = defineProps<{
 const { active } = toRefs(props);
 const visualBarCount = props.variant === 'mini' ? 32 : 48;
 const isMiniVariant = props.variant === 'mini';
+const renderFrameIntervalMs = isMiniVariant ? 50 : 40;
+const AUDIO_VISUALIZER_DEBUG = false;
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const containerRef = ref<HTMLElement | null>(null);
@@ -31,6 +33,8 @@ let unlistenWindowResize: (() => void) | null = null;
 let hasRenderErrorLogged = false;
 let hasLoggedLoopStart = false;
 let lastSizeLogAt = 0;
+let lastRenderAt = 0;
+let unlistenVisibilityChange: (() => void) | null = null;
 
 type Size = { width: number; height: number };
 const size = ref<Size>({ width: 0, height: 0 });
@@ -40,6 +44,12 @@ let gain = 1;
 
 function clamp(v: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, v));
+}
+
+function debugLog(...args: unknown[]) {
+  if (AUDIO_VISUALIZER_DEBUG) {
+    console.log(...args);
+  }
 }
 
 function computeVisualBars(input: number[]): number[] {
@@ -131,7 +141,7 @@ function updateCanvasSize() {
   const now = Date.now();
   if (now - lastSizeLogAt > 1500) {
     lastSizeLogAt = now;
-    console.log(
+    debugLog(
       `[AudioVisualizer] canvas size: css=${Math.round(width)}x${Math.round(height)}, px=${canvas.width}x${canvas.height}, dpr=${dpr}`
     );
   }
@@ -244,9 +254,28 @@ function render() {
   ctx.restore();
 }
 
-function loop() {
+function stopRenderLoop() {
+  if (rafId !== null) {
+    cancelAnimationFrame(rafId);
+    rafId = null;
+  }
+}
+
+function shouldRenderLoopRun() {
+  return active.value && !document.hidden;
+}
+
+function loop(now: number) {
+  if (!shouldRenderLoopRun()) {
+    rafId = null;
+    return;
+  }
+
   try {
-    render();
+    if (now - lastRenderAt >= renderFrameIntervalMs) {
+      lastRenderAt = now;
+      render();
+    }
   } catch (err) {
     // Если что-то пошло не так (например, странный цвет), не "убиваем" цикл навсегда.
     if (!hasRenderErrorLogged) {
@@ -256,13 +285,20 @@ function loop() {
   }
   if (!hasLoggedLoopStart) {
     hasLoggedLoopStart = true;
-    console.log('[AudioVisualizer] RAF loop запущен');
+    debugLog('[AudioVisualizer] RAF loop запущен');
   }
   rafId = window.requestAnimationFrame(loop);
 }
 
+function startRenderLoop() {
+  if (rafId !== null || !shouldRenderLoopRun()) return;
+  updateCanvasSize();
+  lastRenderAt = 0;
+  rafId = window.requestAnimationFrame(loop);
+}
+
 onMounted(() => {
-  console.log('[AudioVisualizer] mounted');
+  debugLog('[AudioVisualizer] mounted');
   updateCanvasSize();
   // На всякий случай: после первого layout ещё раз пересчитаем размеры.
   window.requestAnimationFrame(() => updateCanvasSize());
@@ -273,12 +309,12 @@ onMounted(() => {
     if (containerRef.value) {
       resizeObserver.observe(containerRef.value);
     }
-    console.log('[AudioVisualizer] ResizeObserver включён');
+    debugLog('[AudioVisualizer] ResizeObserver включён');
   } else {
     const onResize = () => updateCanvasSize();
     window.addEventListener('resize', onResize, { passive: true });
     unlistenWindowResize = () => window.removeEventListener('resize', onResize);
-    console.log('[AudioVisualizer] ResizeObserver нет, использую window.resize');
+    debugLog('[AudioVisualizer] ResizeObserver нет, использую window.resize');
   }
 
   // Если тема переключилась (меняется class/html), перечитаем акцент
@@ -286,16 +322,24 @@ onMounted(() => {
     accentColor = readAccentColor();
   });
   mo.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style'] });
-  console.log('[AudioVisualizer] MutationObserver включён (слушаю смену темы)');
+  debugLog('[AudioVisualizer] MutationObserver включён (слушаю смену темы)');
 
-  loop();
+  const onVisibilityChange = () => {
+    if (shouldRenderLoopRun()) {
+      startRenderLoop();
+    } else {
+      stopRenderLoop();
+    }
+  };
+  document.addEventListener('visibilitychange', onVisibilityChange);
+  unlistenVisibilityChange = () =>
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+
+  startRenderLoop();
 });
 
 onUnmounted(() => {
-  if (rafId) {
-    cancelAnimationFrame(rafId);
-    rafId = null;
-  }
+  stopRenderLoop();
   if (resizeObserver) {
     resizeObserver.disconnect();
     resizeObserver = null;
@@ -308,14 +352,23 @@ onUnmounted(() => {
     mo.disconnect();
     mo = null;
   }
+  if (unlistenVisibilityChange) {
+    unlistenVisibilityChange();
+    unlistenVisibilityChange = null;
+  }
 });
 
 watch(
   () => active.value,
-  () => {
+  (isActive) => {
     // При старте/остановке нам не нужно дергать loop — opacity сделает плавный эффект.
     // Просто обновим цвет на всякий случай.
     accentColor = readAccentColor();
+    if (isActive) {
+      startRenderLoop();
+    } else {
+      stopRenderLoop();
+    }
   }
 );
 </script>
