@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.13.0] - 2026-07-05
+
+### Added
+- Added an optional double Space recording hotkey that can start or stop recording from the focused app and removes the inserted spaces automatically.
+- Added a landing-page release timeline based on recent GitHub releases, with static snapshot fallback when GitHub is slow or rate-limited.
+- Added an isolated Tauri dev config with a separate dev bundle identifier, dev deep-link scheme, disabled debug updater, and prod-backend dev script.
+
+### Changed
+- Reduced recording CPU load by using a fast speech-oriented integer downsample path for 48 kHz to 16 kHz microphone capture.
+- Throttled audio spectrum UI updates and paused visualizer rendering while inactive or hidden.
+- Simplified the free pricing card on the landing page and made release-download data reuse a safer shared cache.
+
+### Fixed
+- Blocked microphone test startup while a recording session is active, preventing two microphone captures from racing each other.
+- Show recording error details from the mini recording window when a recording failure happens.
+- Avoided using the production bundle id while running local debug builds, reducing dev/prod focus and updater interference.
+
 ## [0.12.1] - 2026-06-12
 
 ### Fixed

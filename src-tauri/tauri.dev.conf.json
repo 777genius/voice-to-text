@@ -1,0 +1,19 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "VoicetextAI Dev",
+  "identifier": "com.voicetotext.app.dev",
+  "bundle": {
+    "active": false,
+    "createUpdaterArtifacts": false
+  },
+  "plugins": {
+    "updater": {
+      "active": false
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": ["voicetotext-dev"]
+      }
+    }
+  }
+}

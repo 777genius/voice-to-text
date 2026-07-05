@@ -1,6 +1,6 @@
 {
   "name": "voice-to-text",
-  "version": "0.12.1",
+  "version": "0.13.0",
   "type": "module",
   "description": "Privacy-focused voice-to-text application with offline support",
   "scripts": {
@@ -13,9 +13,10 @@
     "typecheck": "vue-tsc --noEmit",
     "release:notes": "node scripts/prepare-release-notes.mjs",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev",
+    "tauri:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
     "tauri:build": "tauri build",
-    "tauri:dev:whisper": "tauri dev --features whisper",
+    "tauri:dev:prod-backend": "VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site tauri dev --config src-tauri/tauri.dev.conf.json",
+    "tauri:dev:whisper": "tauri dev --config src-tauri/tauri.dev.conf.json --features whisper",
     "tauri:build:whisper": "tauri build --features whisper",
     "e2e:tauri": "node e2e-tests/run-e2e.mjs"
   },

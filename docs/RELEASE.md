@@ -16,56 +16,55 @@
 
 ---
 
-## Текущий релиз: v0.11.2
+## Текущий релиз: v0.13.0
 
-Patch-релиз для mini-window startup, hold-to-record и backend STT finalize после `v0.11.1`.
+Minor-релиз для double Space hotkey, снижения CPU при записи, landing release timeline и изоляции dev runtime после `v0.12.1`.
 
 ### Что говорить в статье
 
 - Скачать приложение можно с [voicetext.site](https://voicetext.site).
-- Нужна авторизация в VoicetextAI, потому что фича встроена в приложение.
-- В режиме voice-to-text mini-window теперь открывается сразу и сразу принимает речь.
-- Анимированные полоски в mini-window реагируют на голос уже во время подключения STT stream.
-- Кнопки profile, minimize и settings в mini-window скрыты до hover, чтобы оставить больше места для текста.
-- Короткие фразы, сказанные сразу после hotkey, больше не должны теряться при быстром stop.
+- Новый double Space hotkey включается в Settings и по умолчанию выключен.
+- Запись стала легче для CPU на частом пути `48 kHz -> 16 kHz`.
+- Проверка микрофона больше не стартует поверх активной записи.
+- Landing теперь показывает последние GitHub releases и устойчивее подгружает download links.
+- Debug build отделен от production bundle id, deep link и updater.
 
 ### Ссылки на код для статьи
 
-- Mini-window UI: `src/presentation/components/RecordingPopover.vue`
-- STT startup/prebuffer flow: `src-tauri/src/application/services/transcription_service.rs`
-- Backend finalize/drain flow: `src-tauri/src/infrastructure/stt/backend.rs`
-- Hotkey/session guards: `src-tauri/src/presentation/commands.rs`
-- App/session state: `src-tauri/src/presentation/state.rs`
-- VAD capture restart: `src-tauri/src/infrastructure/audio/vad_capture_wrapper.rs`
+- Double Space hotkey: `src-tauri/src/presentation/commands.rs`
+- Hotkey setting UI: `src/features/settings/presentation/components/sections/AutoActionsSection.vue`
+- Audio capture downsample: `src-tauri/src/infrastructure/audio/system_capture.rs`
+- Visualizer throttling: `src/presentation/components/AudioVisualizer.vue`
+- Landing release timeline: `landing/components/sections/PrivacySection.vue`
+- Release downloads data: `landing/utils/releaseDownloads.ts`
 
 ### Release notes для GitHub
 
 ```markdown
 ## What changed
 
-- The mini recording window now opens immediately in the listening state.
-- The mini-window visualizer reacts to speech during STT startup instead of waiting for the backend stream to finish connecting.
-- Profile, minimize, and settings controls are hidden until hover, leaving more room for recognized text.
-- Long mini-window text now stays pinned to the latest phrase with a soft left fade.
-- The mini-window opening bounce has extra invisible gutter space, so the animation is no longer clipped.
+- Added an optional double Space recording hotkey, disabled by default.
+- Reduced recording CPU load on 48 kHz microphones by using fast integer downsampling.
+- Throttled UI-only audio visualizer updates while keeping STT audio unchanged.
+- Added a recent releases timeline to the landing page.
+- Added an isolated Tauri dev config with a dev bundle id and updater disabled in debug builds.
 
 ## What is fixed
 
-- Speech captured immediately after the hotkey press is preserved while the backend STT stream is still connecting.
-- Backend STT stop now finalizes and drains late final results before closing the WebSocket.
-- Stale stop/idle events from older sessions can no longer hide a newer reopened mini window.
-- VAD capture is restarted cleanly between sessions so speech detection and the visualizer do not get stuck.
+- Microphone test can no longer start while recording is active.
+- Recording error details are available from the mini recording window.
+- Debug builds no longer share production updater/deep-link identity.
 ```
 
 ### Команды релиза
 
 ```bash
-pnpm release:notes v0.11.2
+pnpm release:notes v0.13.0
 git add CHANGELOG.md docs package.json src-tauri src
-git commit -m "chore(release): v0.11.2"
-git tag v0.11.2
+git commit -m "chore(release): v0.13.0"
+git tag v0.13.0
 git push origin HEAD
-git push origin v0.11.2
+git push origin v0.13.0
 ```
 
 ---
