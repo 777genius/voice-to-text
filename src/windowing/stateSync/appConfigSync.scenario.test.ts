@@ -48,6 +48,7 @@ describe('scenario: app-config sync across windows (mocked tauri)', () => {
       show_mini_recording_window: false,
       keep_recording_until_manual_stop: false,
       hold_to_record: false,
+      double_space_hotkey_enabled: false,
       microphone_sensitivity: 100,
       selected_audio_device: null,
     };
@@ -84,6 +85,12 @@ describe('scenario: app-config sync across windows (mocked tauri)', () => {
           currentData = {
             ...currentData,
             hold_to_record: args.holdToRecord,
+          };
+        }
+        if (typeof args?.doubleSpaceHotkeyEnabled === 'boolean') {
+          currentData = {
+            ...currentData,
+            double_space_hotkey_enabled: args.doubleSpaceHotkeyEnabled,
           };
         }
         currentRevision = String(BigInt(currentRevision) + BigInt(1));

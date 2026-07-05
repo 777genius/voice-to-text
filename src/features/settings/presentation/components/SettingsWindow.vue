@@ -73,6 +73,7 @@ function snapshotSettingsState(): SettingsState {
     showMiniRecordingWindow: settingsStore.showMiniRecordingWindow,
     keepRecordingUntilManualStop: settingsStore.keepRecordingUntilManualStop,
     holdToRecord: settingsStore.holdToRecord,
+    doubleSpaceHotkeyEnabled: settingsStore.doubleSpaceHotkeyEnabled,
     streamingKeyterms: settingsStore.streamingKeyterms,
     recordingMode: settingsStore.recordingMode,
   };

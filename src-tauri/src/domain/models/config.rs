@@ -227,6 +227,9 @@ pub struct AppConfig {
     /// Record only while the global hotkey is physically held down.
     pub hold_to_record: bool,
 
+    /// Toggle recording when Space is pressed twice quickly in the focused app.
+    pub double_space_hotkey_enabled: bool,
+
     /// Auto-close window after transcription
     pub auto_close_window: bool,
 
@@ -272,6 +275,7 @@ impl Default for AppConfig {
             recording_window_position: None,
             keep_recording_until_manual_stop: false,
             hold_to_record: false,
+            double_space_hotkey_enabled: false,
             auto_close_window: true,
             vad_silence_timeout_ms: 5000, // 5 секунд тишины перед авто-остановкой
             microphone_sensitivity: 100,  // Нейтральный уровень: как записывает микрофон
@@ -459,6 +463,7 @@ mod tests {
         assert!(config.recording_window_position.is_none());
         assert!(!config.keep_recording_until_manual_stop);
         assert!(!config.hold_to_record);
+        assert!(!config.double_space_hotkey_enabled);
         assert!(config.auto_close_window);
         assert_eq!(config.vad_silence_timeout_ms, 5000);
         assert_eq!(config.microphone_sensitivity, 100);
@@ -505,6 +510,7 @@ mod tests {
         let config: AppConfig =
             serde_json::from_str(legacy).expect("legacy config must deserialize");
         assert_eq!(config.recording_mode, RecordingMode::Dictation);
+        assert!(!config.double_space_hotkey_enabled);
         assert_eq!(config.openai_api_key, None);
     }
 

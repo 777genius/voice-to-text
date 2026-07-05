@@ -16,6 +16,7 @@ const {
   showMiniRecordingWindow,
   keepRecordingUntilManualStop,
   holdToRecord,
+  doubleSpaceHotkeyEnabled,
   hasAccessibilityPermission,
   isMacOS,
   requestAccessibilityPermission,
@@ -147,9 +148,26 @@ const {
       </v-checkbox>
     </div>
 
+    <div class="auto-action-option">
+      <v-checkbox
+        v-model="doubleSpaceHotkeyEnabled"
+        density="compact"
+        hide-details
+        color="primary"
+        class="auto-action-checkbox"
+      >
+        <template #label>
+          <span class="auto-action-copy">
+            <span class="auto-action-label">{{ t('settings.autoActions.doubleSpaceHotkey') }}</span>
+            <span class="auto-action-hint">{{ t('settings.autoActions.hintDoubleSpaceHotkeyBody') }}</span>
+          </span>
+        </template>
+      </v-checkbox>
+    </div>
+
     <!-- Предупреждение о разрешении Accessibility для macOS -->
     <v-alert
-      v-if="autoPasteText && !hasAccessibilityPermission && isMacOS"
+      v-if="(autoPasteText || doubleSpaceHotkeyEnabled) && !hasAccessibilityPermission && isMacOS"
       type="warning"
       variant="tonal"
       class="mt-3"

@@ -32,6 +32,7 @@ const appConfigMock = vi.hoisted(() => ({
   hideRecordingWindowOnHotkey: false,
   showMiniRecordingWindow: false,
   keepRecordingUntilManualStop: false,
+  doubleSpaceHotkeyEnabled: false,
   recordingMode: 'dictation' as 'dictation' | 'live_translation',
 }));
 

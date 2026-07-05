@@ -10,8 +10,14 @@ use crate::domain::RecordingWindowPosition;
 use infrastructure::ConfigStore;
 use presentation::commands;
 use presentation::state::AppState;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tauri::{Emitter, Manager};
+
+#[cfg(debug_assertions)]
+const DEEP_LINK_SCHEME: &str = "voicetotext-dev";
+#[cfg(not(debug_assertions))]
+const DEEP_LINK_SCHEME: &str = "voicetotext";
 
 // Определяем базовый NSPanel класс для macOS (появление поверх fullscreen приложений)
 #[cfg(target_os = "macos")]
@@ -200,7 +206,10 @@ pub fn run() {
         .setup(|app| {
             #[cfg(debug_assertions)]
             {
-                log::info!("VoicetextAI application started in debug mode");
+                log::info!(
+                    "VoicetextAI application started in debug mode, identifier={}",
+                    app.config().identifier
+                );
             }
 
             // E2E режим: нужен для WebDriver тестов (Linux/Windows), чтобы:
@@ -635,6 +644,10 @@ pub fn run() {
 
                         saved_app_config.stt = state.transcription_service.get_config().await;
                         *state.config.write().await = saved_app_config.clone();
+                        state.double_space_hotkey_enabled_runtime.store(
+                            saved_app_config.double_space_hotkey_enabled,
+                            Ordering::SeqCst,
+                        );
 
                         state.transcription_service
                             .set_microphone_sensitivity(saved_app_config.microphone_sensitivity)
@@ -699,7 +712,7 @@ pub fn run() {
                 // и тогда UI показывает новое значение, а реально работает дефолт.
                 if let Some(state) = app_handle.try_state::<AppState>() {
                     let handle = app_handle.clone();
-                    match commands::register_recording_hotkey(state, handle).await {
+                    match commands::register_recording_hotkey(state.clone(), handle).await {
                         Ok(_) => log::info!("Recording hotkey registered successfully"),
                         Err(e) => {
                             log::error!("Failed to register recording hotkey: {}", e);
@@ -710,6 +723,19 @@ pub fn run() {
                             log::warn!("    Recommended: Ctrl+Shift+X, Alt+X, or Ctrl+Shift+R");
                         }
                     }
+
+                    if state
+                        .double_space_hotkey_enabled_runtime
+                        .load(Ordering::SeqCst)
+                    {
+                        if let Err(e) =
+                            commands::start_double_space_hotkey_listener_if_needed(
+                                app_handle.clone(),
+                            )
+                        {
+                            log::error!("Failed to start Double-Space hotkey listener: {}", e);
+                        }
+                    }
                 }
             });
 
@@ -718,9 +744,14 @@ pub fn run() {
                 state.start_vad_timeout_handler(app.handle().clone());
             }
 
-            // Запускаем фоновую проверку обновлений (каждые 6 часов)
-            log::info!("Starting background update checker");
-            infrastructure::updater::start_background_update_check(app.handle().clone());
+            // Release updater must not run from debug builds with a dev bundle id.
+            #[cfg(not(debug_assertions))]
+            {
+                log::info!("Starting background update checker");
+                infrastructure::updater::start_background_update_check(app.handle().clone());
+            }
+            #[cfg(debug_assertions)]
+            log::info!("Skipping background update checker in debug build");
 
             // Настраиваем deep link handler для OAuth callback
             #[cfg(desktop)]
@@ -728,7 +759,7 @@ pub fn run() {
                 use tauri_plugin_deep_link::DeepLinkExt;
 
                 // Регистрируем URL scheme
-                if let Err(e) = app.deep_link().register("voicetotext") {
+                if let Err(e) = app.deep_link().register(DEEP_LINK_SCHEME) {
                     log::warn!("Failed to register deep link: {}", e);
                 }
 

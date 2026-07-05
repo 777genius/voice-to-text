@@ -7,9 +7,17 @@ use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use std::thread;
 use std::time::Duration;
 
-pub const VOICETEXT_BUNDLE_ID: &str = "com.voicetotext.app";
+pub const VOICETEXT_PROD_BUNDLE_ID: &str = "com.voicetotext.app";
+pub const VOICETEXT_DEV_BUNDLE_ID: &str = "com.voicetotext.app.dev";
+
+#[cfg(debug_assertions)]
+pub const VOICETEXT_BUNDLE_ID: &str = VOICETEXT_DEV_BUNDLE_ID;
+#[cfg(not(debug_assertions))]
+pub const VOICETEXT_BUNDLE_ID: &str = VOICETEXT_PROD_BUNDLE_ID;
+
 pub const AUTO_PASTE_CLIPBOARD_THRESHOLD_CHARS: usize = 100;
 
+const VOICETEXT_BUNDLE_IDS: &[&str] = &[VOICETEXT_PROD_BUNDLE_ID, VOICETEXT_DEV_BUNDLE_ID];
 const AUTO_PASTE_PRE_PASTE_DELAY_MS: u64 = 80;
 const AUTO_PASTE_RESTORE_CLIPBOARD_DELAY_MS: u64 = 300;
 
@@ -30,7 +38,7 @@ pub fn normalize_auto_paste_target(bundle_id: String, pid: i32) -> Option<AutoPa
     if bundle_id.is_empty() {
         return None;
     }
-    if bundle_id == VOICETEXT_BUNDLE_ID {
+    if VOICETEXT_BUNDLE_IDS.contains(&bundle_id.as_str()) {
         return None;
     }
     if pid <= 0 {
@@ -433,6 +441,22 @@ pub fn should_use_clipboard_backend(text: &str) -> bool {
     text.chars().count() >= AUTO_PASTE_CLIPBOARD_THRESHOLD_CHARS
 }
 
+pub fn send_backspaces(count: usize) -> Result<()> {
+    if count == 0 {
+        return Ok(());
+    }
+
+    log::info!("Sending {} Backspace key events", count);
+    let mut enigo = Enigo::new(&Settings::default())
+        .context("Failed to initialize Enigo keyboard controller")?;
+    for _ in 0..count {
+        enigo
+            .key(Key::Backspace, Direction::Click)
+            .context("Failed to send Backspace key")?;
+    }
+    Ok(())
+}
+
 pub fn paste_text_hybrid(text: &str) -> Result<AutoPasteMethod> {
     let mut injector = SystemTextInjector;
     let mut delay = ThreadDelay;
@@ -611,6 +635,7 @@ mod tests {
         normalize_auto_paste_target, paste_text_hybrid_with, should_use_clipboard_backend,
         target_matches_bundle_and_pid, AutoPasteMethod, ClipboardAccess, DelayProvider,
         TextInjector, AUTO_PASTE_CLIPBOARD_THRESHOLD_CHARS, VOICETEXT_BUNDLE_ID,
+        VOICETEXT_DEV_BUNDLE_ID, VOICETEXT_PROD_BUNDLE_ID,
     };
     use anyhow::{bail, Result};
     use std::cell::RefCell;
@@ -710,11 +735,17 @@ mod tests {
     }
 
     #[test]
-    fn normalize_auto_paste_target_rejects_self_bundle() {
-        assert_eq!(
-            normalize_auto_paste_target(VOICETEXT_BUNDLE_ID.to_string(), 123),
-            None
-        );
+    fn normalize_auto_paste_target_rejects_voicetext_bundles() {
+        for bundle_id in [
+            VOICETEXT_BUNDLE_ID,
+            VOICETEXT_PROD_BUNDLE_ID,
+            VOICETEXT_DEV_BUNDLE_ID,
+        ] {
+            assert_eq!(
+                normalize_auto_paste_target(bundle_id.to_string(), 123),
+                None
+            );
+        }
     }
 
     #[test]

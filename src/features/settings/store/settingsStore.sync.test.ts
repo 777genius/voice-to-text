@@ -23,6 +23,7 @@ describe('settingsStore cross-window UI sync', () => {
     expect(store.autoPasteText).toBe(true);
     expect(store.showMiniRecordingWindow).toBe(true);
     expect(store.holdToRecord).toBe(false);
+    expect(store.doubleSpaceHotkeyEnabled).toBe(false);
   });
 
   it('setTheme вызывает update_ui_preferences через invoke', () => {

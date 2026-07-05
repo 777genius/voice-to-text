@@ -20,11 +20,13 @@ describe('invokeUpdateAppConfig', () => {
     await invokeUpdateAppConfig({
       holdToRecord: true,
       keepRecordingUntilManualStop: true,
+      doubleSpaceHotkeyEnabled: true,
     });
 
     expect(invokeMock).toHaveBeenCalledWith(CMD_UPDATE_APP_CONFIG, {
       holdToRecord: true,
       keepRecordingUntilManualStop: true,
+      doubleSpaceHotkeyEnabled: true,
     });
   });
 

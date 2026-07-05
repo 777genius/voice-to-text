@@ -1,6 +1,6 @@
 [package]
 name = "voice-to-text"
-version = "0.12.1"
+version = "0.13.0"
 description = "Privacy-focused voice-to-text application with offline support"
 authors = ["VoicetextAI Contributors"]
 license = "MIT"
@@ -83,6 +83,7 @@ num_cpus = { version = "1.16", optional = true }
 
 # Auto-paste functionality (keyboard simulation)
 enigo = "0.2"
+rdev = "0.5.3"
 
 # Clipboard support (кроссплатформенный)
 arboard = "3.6"

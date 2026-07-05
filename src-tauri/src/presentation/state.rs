@@ -209,6 +209,13 @@ pub struct AppState {
     /// На Windows startup/settings пути могут иначе оставить зарегистрированным устаревшее значение.
     pub recording_hotkey_registration_guard: Arc<tokio::sync::Mutex<()>>,
 
+    /// Runtime mirror for the optional double-Space hotkey.
+    /// Read from the global keyboard listener thread without async locks.
+    pub double_space_hotkey_enabled_runtime: AtomicBool,
+
+    /// The rdev global listener is blocking and cannot be stopped cleanly, so it is started once.
+    pub double_space_hotkey_listener_started: AtomicBool,
+
     /// Какое устройство сейчас применено к audio capture.
     /// None снаружи = неизвестно/нужно пересоздать; Some(None) = системный default input.
     pub active_audio_capture_device: Arc<RwLock<Option<Option<String>>>>,
@@ -300,6 +307,8 @@ impl AppState {
                     recording_start_pending_after_stop: AtomicBool::new(false),
                     recording_hotkey_toggle_guard: Arc::new(tokio::sync::Mutex::new(())),
                     recording_hotkey_registration_guard: Arc::new(tokio::sync::Mutex::new(())),
+                    double_space_hotkey_enabled_runtime: AtomicBool::new(false),
+                    double_space_hotkey_listener_started: AtomicBool::new(false),
                     active_audio_capture_device: Arc::new(RwLock::new(None)),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: Arc::new(AtomicU64::new(0)),
@@ -369,6 +378,8 @@ impl AppState {
                     recording_start_pending_after_stop: AtomicBool::new(false),
                     recording_hotkey_toggle_guard: Arc::new(tokio::sync::Mutex::new(())),
                     recording_hotkey_registration_guard: Arc::new(tokio::sync::Mutex::new(())),
+                    double_space_hotkey_enabled_runtime: AtomicBool::new(false),
+                    double_space_hotkey_listener_started: AtomicBool::new(false),
                     active_audio_capture_device: Arc::new(RwLock::new(Some(None))),
                     transcription_session_seq: AtomicU64::new(0),
                     active_transcription_session_id: Arc::new(AtomicU64::new(0)),
@@ -458,6 +469,8 @@ impl AppState {
             recording_start_pending_after_stop: AtomicBool::new(false),
             recording_hotkey_toggle_guard: Arc::new(tokio::sync::Mutex::new(())),
             recording_hotkey_registration_guard: Arc::new(tokio::sync::Mutex::new(())),
+            double_space_hotkey_enabled_runtime: AtomicBool::new(false),
+            double_space_hotkey_listener_started: AtomicBool::new(false),
             active_audio_capture_device: Arc::new(RwLock::new(Some(None))),
             transcription_session_seq: AtomicU64::new(0),
             active_transcription_session_id,

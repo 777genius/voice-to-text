@@ -1758,7 +1758,8 @@ mod snapshot_contract_tests {
         should_cancel_hold_to_record_pending_start,
         should_hide_recording_window_immediately_on_hotkey_stop,
         should_ignore_hotkey_stop_after_start, should_show_recording_window_on_processing_hotkey,
-        validate_auto_paste_target_for_focus, AppConfigSnapshotData, RecordingHotkeyDispatchIntent,
+        validate_auto_paste_target_for_focus, AppConfigSnapshotData, DoubleSpaceHotkeyKey,
+        DoubleSpaceHotkeyState, DoubleSpaceModifierKey, RecordingHotkeyDispatchIntent,
         RecordingWindowPlacement, SnapshotEnvelope, SttConfigSnapshotData,
     };
     use crate::domain::{
@@ -1991,6 +1992,7 @@ mod snapshot_contract_tests {
                 show_mini_recording_window: false,
                 keep_recording_until_manual_stop: false,
                 hold_to_record: false,
+                double_space_hotkey_enabled: false,
                 selected_audio_device: None,
                 recording_mode: crate::domain::RecordingMode::Dictation,
                 openai_api_key: None,
@@ -2026,6 +2028,7 @@ mod snapshot_contract_tests {
         assert!(data.contains_key("show_mini_recording_window"));
         assert!(data.contains_key("keep_recording_until_manual_stop"));
         assert!(data.contains_key("hold_to_record"));
+        assert!(data.contains_key("double_space_hotkey_enabled"));
         assert!(data.contains_key("selected_audio_device"));
         assert!(data.contains_key("openai_api_key"));
     }
@@ -2099,6 +2102,74 @@ mod snapshot_contract_tests {
         assert!(!should_cancel_hold_to_record_pending_start(
             true, None, 2, true
         ));
+    }
+
+    #[test]
+    fn double_space_detector_triggers_on_quick_second_space() {
+        let mut state = DoubleSpaceHotkeyState::default();
+
+        assert!(!state.handle_key_press(DoubleSpaceHotkeyKey::Space, 1_000));
+        state.handle_key_release(DoubleSpaceHotkeyKey::Space);
+        assert!(state.handle_key_press(DoubleSpaceHotkeyKey::Space, 1_250));
+    }
+
+    #[test]
+    fn double_space_detector_ignores_space_key_repeat() {
+        let mut state = DoubleSpaceHotkeyState::default();
+
+        assert!(!state.handle_key_press(DoubleSpaceHotkeyKey::Space, 1_000));
+        assert!(!state.handle_key_press(DoubleSpaceHotkeyKey::Space, 1_030));
+    }
+
+    #[test]
+    fn double_space_detector_resets_when_other_key_is_pressed_between_spaces() {
+        let mut state = DoubleSpaceHotkeyState::default();
+
+        assert!(!state.handle_key_press(DoubleSpaceHotkeyKey::Space, 1_000));
+        state.handle_key_release(DoubleSpaceHotkeyKey::Space);
+        assert!(!state.handle_key_press(DoubleSpaceHotkeyKey::Other, 1_100));
+        assert!(!state.handle_key_press(DoubleSpaceHotkeyKey::Space, 1_200));
+        state.handle_key_release(DoubleSpaceHotkeyKey::Space);
+        assert!(state.handle_key_press(DoubleSpaceHotkeyKey::Space, 1_300));
+    }
+
+    #[test]
+    fn double_space_detector_resets_when_external_other_key_is_pressed_between_spaces() {
+        let mut state = DoubleSpaceHotkeyState::default();
+
+        assert!(!state.handle_space_press_with_external_modifiers(1_000, false));
+        state.handle_space_release();
+        state.handle_non_space_press();
+        assert!(!state.handle_space_press_with_external_modifiers(1_200, false));
+    }
+
+    #[test]
+    fn double_space_detector_resets_when_modifier_is_down() {
+        let mut state = DoubleSpaceHotkeyState::default();
+
+        assert!(!state.handle_key_press(DoubleSpaceHotkeyKey::Space, 1_000));
+        state.handle_key_release(DoubleSpaceHotkeyKey::Space);
+        assert!(!state.handle_key_press(
+            DoubleSpaceHotkeyKey::Modifier(DoubleSpaceModifierKey::MetaLeft),
+            1_100
+        ));
+        assert!(!state.handle_key_press(DoubleSpaceHotkeyKey::Space, 1_200));
+        state.handle_key_release(DoubleSpaceHotkeyKey::Space);
+        state.handle_key_release(DoubleSpaceHotkeyKey::Modifier(
+            DoubleSpaceModifierKey::MetaLeft,
+        ));
+        assert!(!state.handle_key_press(DoubleSpaceHotkeyKey::Space, 1_300));
+    }
+
+    #[test]
+    fn double_space_detector_resets_when_external_modifier_is_down() {
+        let mut state = DoubleSpaceHotkeyState::default();
+
+        assert!(!state.handle_space_press_with_external_modifiers(1_000, false));
+        state.handle_space_release();
+        assert!(!state.handle_space_press_with_external_modifiers(1_200, true));
+        state.handle_space_release();
+        assert!(!state.handle_space_press_with_external_modifiers(1_300, false));
     }
 
     #[test]
@@ -2711,6 +2782,7 @@ pub struct AppConfigSnapshotData {
     pub show_mini_recording_window: bool,
     pub keep_recording_until_manual_stop: bool,
     pub hold_to_record: bool,
+    pub double_space_hotkey_enabled: bool,
     pub selected_audio_device: Option<String>,
     pub recording_mode: crate::domain::RecordingMode,
     pub openai_api_key: Option<String>,
@@ -2732,6 +2804,7 @@ pub async fn get_app_config_snapshot(
         show_mini_recording_window: config.show_mini_recording_window,
         keep_recording_until_manual_stop: config.keep_recording_until_manual_stop,
         hold_to_record: config.hold_to_record,
+        double_space_hotkey_enabled: config.double_space_hotkey_enabled,
         selected_audio_device: config.selected_audio_device,
         recording_mode: config.recording_mode,
         openai_api_key: config.openai_api_key,
@@ -2947,12 +3020,13 @@ pub async fn update_app_config(
     show_mini_recording_window: Option<bool>,
     keep_recording_until_manual_stop: Option<bool>,
     hold_to_record: Option<bool>,
+    double_space_hotkey_enabled: Option<bool>,
     selected_audio_device: Option<String>,
     recording_mode: Option<crate::domain::RecordingMode>,
     openai_api_key: Option<String>,
 ) -> Result<(), String> {
-    log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}, auto_copy: {:?}, auto_paste: {:?}, completion_sound: {:?}, hide_window_on_hotkey: {:?}, mini_window: {:?}, manual_stop_only: {:?}, hold_to_record: {:?}, device: {:?}, mode: {:?}, openai_key: {}",
-        microphone_sensitivity, recording_hotkey, auto_copy_to_clipboard, auto_paste_text, play_completion_sound, hide_recording_window_on_hotkey, show_mini_recording_window, keep_recording_until_manual_stop, hold_to_record, selected_audio_device, recording_mode, openai_api_key.as_ref().is_some_and(|key| !key.trim().is_empty()));
+    log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}, auto_copy: {:?}, auto_paste: {:?}, completion_sound: {:?}, hide_window_on_hotkey: {:?}, mini_window: {:?}, manual_stop_only: {:?}, hold_to_record: {:?}, double_space_hotkey: {:?}, device: {:?}, mode: {:?}, openai_key: {}",
+        microphone_sensitivity, recording_hotkey, auto_copy_to_clipboard, auto_paste_text, play_completion_sound, hide_recording_window_on_hotkey, show_mini_recording_window, keep_recording_until_manual_stop, hold_to_record, double_space_hotkey_enabled, selected_audio_device, recording_mode, openai_api_key.as_ref().is_some_and(|key| !key.trim().is_empty()));
 
     // Защита от "тихих" провалов: если фронт случайно отправил snake_case ключи,
     // Tauri не сматчит аргументы, и сюда придут одни None.
@@ -2966,13 +3040,15 @@ pub async fn update_app_config(
         && show_mini_recording_window.is_none()
         && keep_recording_until_manual_stop.is_none()
         && hold_to_record.is_none()
+        && double_space_hotkey_enabled.is_none()
         && selected_audio_device.is_none()
         && recording_mode.is_none()
         && openai_api_key.is_none()
     {
-        return Err("update_app_config: не получены поля для обновления. Проверьте, что фронтенд отправляет args в camelCase (например microphoneSensitivity, recordingHotkey, autoCopyToClipboard, autoPasteText, playCompletionSound, hideRecordingWindowOnHotkey, showMiniRecordingWindow, keepRecordingUntilManualStop, holdToRecord, selectedAudioDevice, recordingMode, openaiApiKey).".to_string());
+        return Err("update_app_config: не получены поля для обновления. Проверьте, что фронтенд отправляет args в camelCase (например microphoneSensitivity, recordingHotkey, autoCopyToClipboard, autoPasteText, playCompletionSound, hideRecordingWindowOnHotkey, showMiniRecordingWindow, keepRecordingUntilManualStop, holdToRecord, doubleSpaceHotkeyEnabled, selectedAudioDevice, recordingMode, openaiApiKey).".to_string());
     }
 
+    let requested_double_space_hotkey_enabled = double_space_hotkey_enabled;
     let mut config = state.config.write().await;
     let mut hotkey_changed = false;
     let mut any_changed = false;
@@ -3089,6 +3165,18 @@ pub async fn update_app_config(
         }
     }
 
+    if let Some(double_space_hotkey) = double_space_hotkey_enabled {
+        if config.double_space_hotkey_enabled != double_space_hotkey {
+            log::info!(
+                "Updating double_space_hotkey_enabled: {} -> {}",
+                config.double_space_hotkey_enabled,
+                double_space_hotkey
+            );
+            config.double_space_hotkey_enabled = double_space_hotkey;
+            any_changed = true;
+        }
+    }
+
     if let Some(new_mode) = recording_mode {
         if config.recording_mode != new_mode {
             log::info!(
@@ -3149,6 +3237,12 @@ pub async fn update_app_config(
     // Если ничего не менялось — выходим без лишнего I/O и invalidation
     if !any_changed {
         drop(config);
+        if matches!(requested_double_space_hotkey_enabled, Some(true)) {
+            state
+                .double_space_hotkey_enabled_runtime
+                .store(true, Ordering::SeqCst);
+            start_double_space_hotkey_listener_if_needed(app_handle.clone())?;
+        }
         log::info!("App config unchanged, skipping save");
         return Ok(());
     }
@@ -3178,6 +3272,15 @@ pub async fn update_app_config(
         register_recording_hotkey(state.clone(), app_handle.clone()).await?;
     } else {
         drop(config); // освобождаем lock если не было hotkey_changed
+    }
+
+    if let Some(enabled) = requested_double_space_hotkey_enabled {
+        state
+            .double_space_hotkey_enabled_runtime
+            .store(enabled, Ordering::SeqCst);
+        if enabled {
+            start_double_space_hotkey_listener_if_needed(app_handle.clone())?;
+        }
     }
 
     // Если устройство изменилось - пересоздаем audio capture
@@ -3246,6 +3349,18 @@ pub async fn start_microphone_test(
                 );
             }
         }
+    }
+
+    let recording_status = active_recording_status(state.inner()).await;
+    if recording_status != RecordingStatus::Idle {
+        log::warn!(
+            "Microphone test blocked because recording is active: {:?}",
+            recording_status
+        );
+        return Err(format!(
+            "Останови текущую запись перед проверкой микрофона (сейчас: {:?}).",
+            recording_status
+        ));
     }
 
     let mut test_state = state.microphone_test.write().await;
@@ -3438,6 +3553,136 @@ const AUTO_PASTE_HOTKEY_SUPPRESSION_MS: u64 = 450;
 const AUTO_PASTE_HOTKEY_SUPPRESSION_TAIL_MS: u64 = 150;
 const AUTO_PASTE_FOCUS_VERIFY_TIMEOUT_MS: u64 = 300;
 const AUTO_PASTE_FOCUS_VERIFY_POLL_MS: u64 = 50;
+const DOUBLE_SPACE_HOTKEY_WINDOW_MS: u64 = 350;
+const DOUBLE_SPACE_HOTKEY_CLEANUP_DELAY_MS: u64 = 35;
+const DOUBLE_SPACE_HOTKEY_BACKSPACE_COUNT: usize = 2;
+
+#[derive(Debug, Default)]
+struct DoubleSpaceHotkeyState {
+    last_space_press_ms: Option<u64>,
+    space_is_down: bool,
+    #[cfg(any(test, not(target_os = "macos")))]
+    modifiers_down: std::collections::HashSet<DoubleSpaceModifierKey>,
+}
+
+#[cfg(any(test, not(target_os = "macos")))]
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum DoubleSpaceModifierKey {
+    Alt,
+    AltGr,
+    ControlLeft,
+    ControlRight,
+    MetaLeft,
+    MetaRight,
+    ShiftLeft,
+    ShiftRight,
+}
+
+#[cfg(any(test, not(target_os = "macos")))]
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoubleSpaceHotkeyKey {
+    Space,
+    Modifier(DoubleSpaceModifierKey),
+    Other,
+}
+
+impl DoubleSpaceHotkeyState {
+    #[cfg(any(test, not(target_os = "macos")))]
+    fn handle_key_press(&mut self, key: DoubleSpaceHotkeyKey, now_ms: u64) -> bool {
+        if let DoubleSpaceHotkeyKey::Modifier(modifier) = key {
+            self.modifiers_down.insert(modifier);
+            self.handle_non_space_press();
+            return false;
+        }
+
+        if key != DoubleSpaceHotkeyKey::Space {
+            self.handle_non_space_press();
+            return false;
+        }
+
+        if self.space_is_down {
+            return false;
+        }
+        self.space_is_down = true;
+
+        if !self.modifiers_down.is_empty() {
+            self.last_space_press_ms = None;
+            return false;
+        }
+
+        let triggered = self.last_space_press_ms.is_some_and(|last_ms| {
+            now_ms >= last_ms && now_ms.saturating_sub(last_ms) <= DOUBLE_SPACE_HOTKEY_WINDOW_MS
+        });
+
+        self.last_space_press_ms = if triggered { None } else { Some(now_ms) };
+        triggered
+    }
+
+    #[cfg(any(test, not(target_os = "macos")))]
+    fn handle_key_release(&mut self, key: DoubleSpaceHotkeyKey) {
+        if let DoubleSpaceHotkeyKey::Modifier(modifier) = key {
+            self.modifiers_down.remove(&modifier);
+            return;
+        }
+
+        if key == DoubleSpaceHotkeyKey::Space {
+            self.space_is_down = false;
+        }
+    }
+
+    fn handle_space_press_with_external_modifiers(
+        &mut self,
+        now_ms: u64,
+        modifiers_down: bool,
+    ) -> bool {
+        if self.space_is_down {
+            return false;
+        }
+        self.space_is_down = true;
+
+        if modifiers_down {
+            self.last_space_press_ms = None;
+            return false;
+        }
+
+        let triggered = self.last_space_press_ms.is_some_and(|last_ms| {
+            now_ms >= last_ms && now_ms.saturating_sub(last_ms) <= DOUBLE_SPACE_HOTKEY_WINDOW_MS
+        });
+
+        self.last_space_press_ms = if triggered { None } else { Some(now_ms) };
+        triggered
+    }
+
+    fn handle_space_release(&mut self) {
+        self.space_is_down = false;
+    }
+
+    fn handle_non_space_press(&mut self) {
+        self.last_space_press_ms = None;
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn double_space_key_from_rdev(key: rdev::Key) -> DoubleSpaceHotkeyKey {
+    match key {
+        rdev::Key::Space => DoubleSpaceHotkeyKey::Space,
+        rdev::Key::Alt => DoubleSpaceHotkeyKey::Modifier(DoubleSpaceModifierKey::Alt),
+        rdev::Key::AltGr => DoubleSpaceHotkeyKey::Modifier(DoubleSpaceModifierKey::AltGr),
+        rdev::Key::ControlLeft => {
+            DoubleSpaceHotkeyKey::Modifier(DoubleSpaceModifierKey::ControlLeft)
+        }
+        rdev::Key::ControlRight => {
+            DoubleSpaceHotkeyKey::Modifier(DoubleSpaceModifierKey::ControlRight)
+        }
+        rdev::Key::MetaLeft => DoubleSpaceHotkeyKey::Modifier(DoubleSpaceModifierKey::MetaLeft),
+        rdev::Key::MetaRight => DoubleSpaceHotkeyKey::Modifier(DoubleSpaceModifierKey::MetaRight),
+        rdev::Key::ShiftLeft => DoubleSpaceHotkeyKey::Modifier(DoubleSpaceModifierKey::ShiftLeft),
+        rdev::Key::ShiftRight => DoubleSpaceHotkeyKey::Modifier(DoubleSpaceModifierKey::ShiftRight),
+        _ => DoubleSpaceHotkeyKey::Other,
+    }
+}
 
 async fn start_recording_after_queued_hotkey_idle(
     state: State<'_, AppState>,
@@ -4105,6 +4350,342 @@ fn dispatch_recording_hotkey_toggle(app_clone: AppHandle, accepted_press_seq: u6
             log::error!("Failed to toggle recording: {}", e);
         }
     });
+}
+
+fn dispatch_double_space_hotkey_toggle(app_clone: AppHandle) {
+    let _ = tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(DOUBLE_SPACE_HOTKEY_CLEANUP_DELAY_MS)).await;
+
+        let cleanup_result = tokio::task::spawn_blocking(|| {
+            crate::infrastructure::auto_paste::send_backspaces(DOUBLE_SPACE_HOTKEY_BACKSPACE_COUNT)
+        })
+        .await;
+
+        match cleanup_result {
+            Ok(Ok(())) => {
+                log::info!("Double-Space hotkey cleanup completed");
+            }
+            Ok(Err(err)) => {
+                log::warn!("Double-Space hotkey cleanup failed: {}", err);
+            }
+            Err(err) => {
+                log::warn!("Double-Space hotkey cleanup task failed: {}", err);
+            }
+        }
+
+        let Some(state) = app_clone.try_state::<crate::presentation::state::AppState>() else {
+            log::warn!("Double-Space hotkey ignored: AppState is unavailable");
+            return;
+        };
+
+        let accepted_press_seq = accept_recording_hotkey_press(state.inner(), now_ms_u64());
+        log::info!(
+            "Double-Space hotkey accepted (accepted_press_seq={})",
+            accepted_press_seq
+        );
+        dispatch_recording_hotkey_toggle(app_clone, accepted_press_seq);
+    });
+}
+
+pub fn start_double_space_hotkey_listener_if_needed(app_handle: AppHandle) -> Result<(), String> {
+    let Some(state) = app_handle.try_state::<crate::presentation::state::AppState>() else {
+        return Err("AppState не доступен".to_string());
+    };
+
+    if !state
+        .double_space_hotkey_enabled_runtime
+        .load(Ordering::SeqCst)
+    {
+        return Ok(());
+    }
+
+    if state
+        .double_space_hotkey_listener_started
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Ok(());
+    }
+    drop(state);
+
+    let app_for_error_reset = app_handle.clone();
+    std::thread::Builder::new()
+        .name("double-space-hotkey-listener".to_string())
+        .spawn(move || {
+            log::info!("Starting Double-Space global hotkey listener");
+
+            #[cfg(target_os = "macos")]
+            run_macos_double_space_hotkey_listener(app_handle.clone());
+
+            #[cfg(not(target_os = "macos"))]
+            run_rdev_double_space_hotkey_listener(app_handle.clone());
+
+            if let Some(state) = app_handle.try_state::<crate::presentation::state::AppState>() {
+                state
+                    .double_space_hotkey_listener_started
+                    .store(false, Ordering::SeqCst);
+            }
+        })
+        .map_err(|e| {
+            if let Some(state) =
+                app_for_error_reset.try_state::<crate::presentation::state::AppState>()
+            {
+                state
+                    .double_space_hotkey_listener_started
+                    .store(false, Ordering::SeqCst);
+            }
+            format!("Failed to start Double-Space hotkey listener: {}", e)
+        })?;
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_rdev_double_space_hotkey_listener(app_handle: AppHandle) {
+    let detector = Arc::new(std::sync::Mutex::new(DoubleSpaceHotkeyState::default()));
+    let app_for_callback = app_handle.clone();
+    let detector_for_callback = detector.clone();
+
+    let result = rdev::listen(move |event| {
+        let Some(state) = app_for_callback.try_state::<crate::presentation::state::AppState>()
+        else {
+            return;
+        };
+
+        if !state
+            .double_space_hotkey_enabled_runtime
+            .load(Ordering::SeqCst)
+        {
+            if let Ok(mut detector) = detector_for_callback.lock() {
+                *detector = DoubleSpaceHotkeyState::default();
+            }
+            return;
+        }
+
+        let should_trigger = {
+            let Ok(mut detector) = detector_for_callback.lock() else {
+                log::warn!("Double-Space hotkey detector lock is poisoned");
+                return;
+            };
+
+            match event.event_type {
+                rdev::EventType::KeyPress(key) => {
+                    detector.handle_key_press(double_space_key_from_rdev(key), now_ms_u64())
+                }
+                rdev::EventType::KeyRelease(key) => {
+                    detector.handle_key_release(double_space_key_from_rdev(key));
+                    false
+                }
+                _ => false,
+            }
+        };
+
+        if should_trigger {
+            dispatch_double_space_hotkey_toggle(app_for_callback.clone());
+        }
+    });
+
+    if let Err(error) = result {
+        log::error!("Double-Space global hotkey listener stopped: {:?}", error);
+    }
+}
+
+#[cfg(target_os = "macos")]
+type MacCGEventTapProxy = *mut std::ffi::c_void;
+#[cfg(target_os = "macos")]
+type MacCGEventRef = *mut std::ffi::c_void;
+#[cfg(target_os = "macos")]
+type MacCFMachPortRef = *mut std::ffi::c_void;
+#[cfg(target_os = "macos")]
+type MacCFRunLoopSourceRef = *mut std::ffi::c_void;
+#[cfg(target_os = "macos")]
+type MacCFRunLoopRef = *mut std::ffi::c_void;
+#[cfg(target_os = "macos")]
+type MacCFStringRef = *const std::ffi::c_void;
+
+#[cfg(target_os = "macos")]
+const MAC_CG_SESSION_EVENT_TAP: u32 = 1;
+#[cfg(target_os = "macos")]
+const MAC_CG_HEAD_INSERT_EVENT_TAP: u32 = 0;
+#[cfg(target_os = "macos")]
+const MAC_CG_EVENT_TAP_OPTION_LISTEN_ONLY: u32 = 1;
+#[cfg(target_os = "macos")]
+const MAC_CG_EVENT_KEY_DOWN: u32 = 10;
+#[cfg(target_os = "macos")]
+const MAC_CG_EVENT_KEY_UP: u32 = 11;
+#[cfg(target_os = "macos")]
+const MAC_CG_KEYBOARD_EVENT_KEYCODE: u32 = 9;
+#[cfg(target_os = "macos")]
+const MAC_KEY_CODE_SPACE: i64 = 49;
+#[cfg(target_os = "macos")]
+const MAC_MODIFIER_FLAGS_MASK: u64 = 0x0002_0000 | 0x0004_0000 | 0x0008_0000 | 0x0010_0000;
+
+#[cfg(target_os = "macos")]
+struct MacDoubleSpaceHotkeyContext {
+    app_handle: AppHandle,
+    detector: std::sync::Mutex<DoubleSpaceHotkeyState>,
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+extern "C" {
+    fn CGEventTapCreate(
+        tap: u32,
+        place: u32,
+        options: u32,
+        events_of_interest: u64,
+        callback: extern "C" fn(
+            MacCGEventTapProxy,
+            u32,
+            MacCGEventRef,
+            *mut std::ffi::c_void,
+        ) -> MacCGEventRef,
+        user_info: *mut std::ffi::c_void,
+    ) -> MacCFMachPortRef;
+    fn CGEventGetIntegerValueField(event: MacCGEventRef, field: u32) -> i64;
+    fn CGEventGetFlags(event: MacCGEventRef) -> u64;
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    static kCFRunLoopCommonModes: MacCFStringRef;
+
+    fn CFMachPortCreateRunLoopSource(
+        allocator: *const std::ffi::c_void,
+        port: MacCFMachPortRef,
+        order: isize,
+    ) -> MacCFRunLoopSourceRef;
+    fn CFMachPortInvalidate(port: MacCFMachPortRef);
+    fn CFRunLoopGetCurrent() -> MacCFRunLoopRef;
+    fn CFRunLoopAddSource(
+        run_loop: MacCFRunLoopRef,
+        source: MacCFRunLoopSourceRef,
+        mode: MacCFStringRef,
+    );
+    fn CFRunLoopRun();
+    fn CFRelease(cf: *const std::ffi::c_void);
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn mac_double_space_event_tap_callback(
+    _proxy: MacCGEventTapProxy,
+    event_type: u32,
+    event: MacCGEventRef,
+    user_info: *mut std::ffi::c_void,
+) -> MacCGEventRef {
+    if user_info.is_null() {
+        return event;
+    }
+
+    if event_type != MAC_CG_EVENT_KEY_DOWN && event_type != MAC_CG_EVENT_KEY_UP {
+        return event;
+    }
+
+    let context = unsafe { &*(user_info as *mut MacDoubleSpaceHotkeyContext) };
+    let Some(state) = context
+        .app_handle
+        .try_state::<crate::presentation::state::AppState>()
+    else {
+        return event;
+    };
+
+    if !state
+        .double_space_hotkey_enabled_runtime
+        .load(Ordering::SeqCst)
+    {
+        if let Ok(mut detector) = context.detector.lock() {
+            *detector = DoubleSpaceHotkeyState::default();
+        }
+        return event;
+    }
+
+    let should_trigger = {
+        let Ok(mut detector) = context.detector.lock() else {
+            log::warn!("Double-Space hotkey detector lock is poisoned");
+            return event;
+        };
+
+        let key_code = unsafe { CGEventGetIntegerValueField(event, MAC_CG_KEYBOARD_EVENT_KEYCODE) };
+
+        if key_code == MAC_KEY_CODE_SPACE {
+            if event_type == MAC_CG_EVENT_KEY_DOWN {
+                let modifiers_down =
+                    unsafe { CGEventGetFlags(event) & MAC_MODIFIER_FLAGS_MASK != 0 };
+                detector.handle_space_press_with_external_modifiers(now_ms_u64(), modifiers_down)
+            } else {
+                detector.handle_space_release();
+                false
+            }
+        } else if event_type == MAC_CG_EVENT_KEY_DOWN {
+            detector.handle_non_space_press();
+            false
+        } else {
+            false
+        }
+    };
+
+    if should_trigger {
+        dispatch_double_space_hotkey_toggle(context.app_handle.clone());
+    }
+
+    event
+}
+
+#[cfg(target_os = "macos")]
+fn run_macos_double_space_hotkey_listener(app_handle: AppHandle) {
+    let context = Box::new(MacDoubleSpaceHotkeyContext {
+        app_handle: app_handle.clone(),
+        detector: std::sync::Mutex::new(DoubleSpaceHotkeyState::default()),
+    });
+    let context_ptr = Box::into_raw(context);
+    let event_mask = (1_u64 << MAC_CG_EVENT_KEY_DOWN) | (1_u64 << MAC_CG_EVENT_KEY_UP);
+
+    let event_tap = unsafe {
+        CGEventTapCreate(
+            MAC_CG_SESSION_EVENT_TAP,
+            MAC_CG_HEAD_INSERT_EVENT_TAP,
+            MAC_CG_EVENT_TAP_OPTION_LISTEN_ONLY,
+            event_mask,
+            mac_double_space_event_tap_callback,
+            context_ptr.cast::<std::ffi::c_void>(),
+        )
+    };
+
+    if event_tap.is_null() {
+        unsafe {
+            drop(Box::from_raw(context_ptr));
+        }
+        log::error!(
+            "Failed to create Double-Space CGEventTap; check Accessibility/Input Monitoring permissions"
+        );
+        return;
+    }
+
+    let source = unsafe { CFMachPortCreateRunLoopSource(std::ptr::null(), event_tap, 0) };
+    if source.is_null() {
+        unsafe {
+            CFMachPortInvalidate(event_tap);
+            CFRelease(event_tap.cast::<std::ffi::c_void>());
+            drop(Box::from_raw(context_ptr));
+        }
+        log::error!("Failed to create Double-Space run loop source");
+        return;
+    }
+
+    unsafe {
+        let run_loop = CFRunLoopGetCurrent();
+        CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);
+        CFRelease(source.cast::<std::ffi::c_void>());
+    }
+
+    log::info!("Double-Space CGEventTap listener started");
+    unsafe {
+        CFRunLoopRun();
+        CFMachPortInvalidate(event_tap);
+        CFRelease(event_tap.cast::<std::ffi::c_void>());
+        drop(Box::from_raw(context_ptr));
+    }
 }
 
 fn dispatch_recording_hotkey_press(app_clone: AppHandle, accepted_press_seq: u64) {
