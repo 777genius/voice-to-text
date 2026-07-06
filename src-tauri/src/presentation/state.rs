@@ -156,6 +156,10 @@ pub struct AppState {
     /// stale-снапшотом даже если каждое место по отдельности "правильное".
     pub stt_config_guard: Arc<tokio::sync::Mutex<()>>,
 
+    /// Сериализует auto-paste: параллельные вставки перемешали бы между собой
+    /// последовательность clipboard set → Cmd+V → restore, и в целевое окно ушёл бы чужой текст.
+    pub auto_paste_guard: Arc<tokio::sync::Mutex<()>>,
+
     /// Дебаунс для глобального hotkey записи.
     /// Нужен из‑за key repeat / случайных двойных срабатываний, которые выглядят как "мигание" окна.
     pub last_recording_hotkey_ms: AtomicU64,
@@ -293,6 +297,7 @@ impl AppState {
                     auth_refresh_task: Arc::new(RwLock::new(None)),
                     auth_refresh_task_guard: Arc::new(tokio::sync::Mutex::new(())),
                     stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
+                    auto_paste_guard: Arc::new(tokio::sync::Mutex::new(())),
                     last_recording_hotkey_ms: AtomicU64::new(0),
                     recording_hotkey_last_raw_press_ms: AtomicU64::new(0),
                     recording_hotkey_is_pressed: AtomicBool::new(false),
@@ -364,6 +369,7 @@ impl AppState {
                     auth_refresh_task: Arc::new(RwLock::new(None)),
                     auth_refresh_task_guard: Arc::new(tokio::sync::Mutex::new(())),
                     stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
+                    auto_paste_guard: Arc::new(tokio::sync::Mutex::new(())),
                     last_recording_hotkey_ms: AtomicU64::new(0),
                     recording_hotkey_last_raw_press_ms: AtomicU64::new(0),
                     recording_hotkey_is_pressed: AtomicBool::new(false),
@@ -455,6 +461,7 @@ impl AppState {
             auth_refresh_task: Arc::new(RwLock::new(None)),
             auth_refresh_task_guard: Arc::new(tokio::sync::Mutex::new(())),
             stt_config_guard: Arc::new(tokio::sync::Mutex::new(())),
+            auto_paste_guard: Arc::new(tokio::sync::Mutex::new(())),
             last_recording_hotkey_ms: AtomicU64::new(0),
             recording_hotkey_last_raw_press_ms: AtomicU64::new(0),
             recording_hotkey_is_pressed: AtomicBool::new(false),

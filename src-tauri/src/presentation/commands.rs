@@ -403,17 +403,18 @@ async fn apply_recording_window_for_hotkey_start(
     let hide_window_on_hotkey =
         config.hide_recording_window_on_hotkey && !config.show_mini_recording_window;
     let window_visible = window.is_visible().map_err(|e| e.to_string())?;
+    if should_save_auto_paste_target_for_hotkey_start(config.auto_paste_text, window_visible) {
+        save_active_app_target_for_auto_paste(state).await;
+    }
+
     if hide_window_on_hotkey {
         if window_visible {
             window.hide().map_err(|e| e.to_string())?;
-        } else {
-            save_active_app_target_for_auto_paste(state).await;
         }
         return Ok(false);
     }
 
     if config.show_mini_recording_window || !window_visible {
-        save_active_app_target_for_auto_paste(state).await;
         show_webview_window_with_recording_config(&window, &config, state)?;
         return Ok(true);
     }
@@ -1806,10 +1807,15 @@ mod snapshot_contract_tests {
         hotkey_action_is_stale, is_audio_capture_start_failure, point_inside_rect,
         recording_hotkey_press_intent, recording_hotkey_release_intent,
         recording_window_size_from_config, resolve_streaming_keyterms_update,
-        should_cancel_hold_to_record_pending_start,
+        should_cancel_hold_to_record_pending_start, should_hide_recording_window_for_auto_paste,
         should_hide_recording_window_immediately_on_hotkey_stop,
-        should_ignore_hotkey_stop_after_start, should_show_recording_window_on_processing_hotkey,
-        validate_auto_paste_target_for_focus, AppConfigSnapshotData, DoubleSpaceHotkeyKey,
+        should_ignore_hotkey_stop_after_start, should_lower_recording_window_for_auto_paste,
+        should_reassert_recording_window_after_auto_paste,
+        should_restore_recording_window_after_auto_paste,
+        should_restore_recording_window_after_suppression,
+        should_save_auto_paste_target_for_hotkey_start,
+        should_show_recording_window_on_processing_hotkey, validate_auto_paste_target_for_focus,
+        AppConfigSnapshotData, AutoPasteWindowSuppression, DoubleSpaceHotkeyKey,
         DoubleSpaceHotkeyState, DoubleSpaceModifierKey, RecordingHotkeyDispatchIntent,
         RecordingWindowPlacement, SnapshotEnvelope, SttConfigSnapshotData,
     };
@@ -1951,6 +1957,140 @@ mod snapshot_contract_tests {
 
         assert_eq!(target.bundle_id, "com.example.App");
         assert_eq!(target.pid, 123);
+    }
+
+    #[test]
+    fn auto_paste_does_not_reassert_recording_window_while_recording_is_active() {
+        assert!(!should_reassert_recording_window_after_auto_paste(
+            RecordingStatus::Starting
+        ));
+        assert!(!should_reassert_recording_window_after_auto_paste(
+            RecordingStatus::Recording
+        ));
+        assert!(should_reassert_recording_window_after_auto_paste(
+            RecordingStatus::Idle
+        ));
+        assert!(should_reassert_recording_window_after_auto_paste(
+            RecordingStatus::Processing
+        ));
+        assert!(should_reassert_recording_window_after_auto_paste(
+            RecordingStatus::Error
+        ));
+    }
+
+    #[test]
+    fn auto_paste_saves_target_even_when_recording_window_is_visible() {
+        assert!(should_save_auto_paste_target_for_hotkey_start(true, true));
+        assert!(should_save_auto_paste_target_for_hotkey_start(true, false));
+        assert!(!should_save_auto_paste_target_for_hotkey_start(false, true));
+    }
+
+    #[test]
+    fn auto_paste_lowers_visible_recording_window_only_after_active_recording() {
+        assert!(should_lower_recording_window_for_auto_paste(
+            true,
+            RecordingStatus::Idle
+        ));
+        assert!(should_lower_recording_window_for_auto_paste(
+            true,
+            RecordingStatus::Processing
+        ));
+        assert!(!should_lower_recording_window_for_auto_paste(
+            true,
+            RecordingStatus::Starting
+        ));
+        assert!(!should_lower_recording_window_for_auto_paste(
+            true,
+            RecordingStatus::Recording
+        ));
+        assert!(!should_lower_recording_window_for_auto_paste(
+            false,
+            RecordingStatus::Idle
+        ));
+    }
+
+    #[test]
+    fn auto_paste_hides_visible_recording_window_only_after_active_recording() {
+        assert!(should_hide_recording_window_for_auto_paste(
+            true,
+            RecordingStatus::Idle
+        ));
+        assert!(should_hide_recording_window_for_auto_paste(
+            true,
+            RecordingStatus::Processing
+        ));
+        assert!(!should_hide_recording_window_for_auto_paste(
+            true,
+            RecordingStatus::Starting
+        ));
+        assert!(!should_hide_recording_window_for_auto_paste(
+            true,
+            RecordingStatus::Recording
+        ));
+        assert!(!should_hide_recording_window_for_auto_paste(
+            false,
+            RecordingStatus::Idle
+        ));
+    }
+
+    #[test]
+    fn auto_paste_restores_recording_window_when_it_was_visible() {
+        assert!(should_restore_recording_window_after_auto_paste(
+            true,
+            RecordingStatus::Idle
+        ));
+        assert!(should_restore_recording_window_after_auto_paste(
+            true,
+            RecordingStatus::Processing
+        ));
+        assert!(should_restore_recording_window_after_auto_paste(
+            true,
+            RecordingStatus::Starting
+        ));
+        assert!(should_restore_recording_window_after_auto_paste(
+            true,
+            RecordingStatus::Recording
+        ));
+        assert!(!should_restore_recording_window_after_auto_paste(
+            false,
+            RecordingStatus::Idle
+        ));
+    }
+
+    #[test]
+    fn auto_paste_restore_runs_only_after_window_suppression() {
+        assert!(!should_restore_recording_window_after_suppression(
+            AutoPasteWindowSuppression {
+                was_visible: true,
+                lowered: false,
+                hidden: false,
+            },
+            RecordingStatus::Recording
+        ));
+        assert!(should_restore_recording_window_after_suppression(
+            AutoPasteWindowSuppression {
+                was_visible: true,
+                lowered: true,
+                hidden: false,
+            },
+            RecordingStatus::Idle
+        ));
+        assert!(should_restore_recording_window_after_suppression(
+            AutoPasteWindowSuppression {
+                was_visible: true,
+                lowered: false,
+                hidden: true,
+            },
+            RecordingStatus::Processing
+        ));
+        assert!(!should_restore_recording_window_after_suppression(
+            AutoPasteWindowSuppression {
+                was_visible: false,
+                lowered: true,
+                hidden: true,
+            },
+            RecordingStatus::Idle
+        ));
     }
 
     #[test]
@@ -3602,6 +3742,7 @@ const HOTKEY_PENDING_START_TIMEOUT_MS: u64 = 3_000;
 const HOTKEY_PENDING_START_POLL_MS: u64 = 25;
 const AUTO_PASTE_HOTKEY_SUPPRESSION_MS: u64 = 450;
 const AUTO_PASTE_HOTKEY_SUPPRESSION_TAIL_MS: u64 = 150;
+const AUTO_PASTE_WINDOW_SETTLE_MS: u64 = 80;
 const AUTO_PASTE_FOCUS_VERIFY_TIMEOUT_MS: u64 = 300;
 const AUTO_PASTE_FOCUS_VERIFY_POLL_MS: u64 = 50;
 const DOUBLE_SPACE_HOTKEY_WINDOW_MS: u64 = 350;
@@ -4021,6 +4162,61 @@ fn auto_paste_hotkey_suppression_duration(text: &str, hotkey: &str) -> Duration 
     }
 }
 
+fn should_reassert_recording_window_after_auto_paste(status: RecordingStatus) -> bool {
+    !matches!(
+        status,
+        RecordingStatus::Starting | RecordingStatus::Recording
+    )
+}
+
+fn auto_paste_can_temporarily_suppress_recording_window(status: RecordingStatus) -> bool {
+    !matches!(
+        status,
+        RecordingStatus::Starting | RecordingStatus::Recording
+    )
+}
+
+fn should_lower_recording_window_for_auto_paste(
+    recording_window_visible: bool,
+    recording_status: RecordingStatus,
+) -> bool {
+    recording_window_visible
+        && auto_paste_can_temporarily_suppress_recording_window(recording_status)
+}
+
+fn should_hide_recording_window_for_auto_paste(
+    recording_window_visible: bool,
+    recording_status: RecordingStatus,
+) -> bool {
+    recording_window_visible
+        && auto_paste_can_temporarily_suppress_recording_window(recording_status)
+}
+
+fn should_restore_recording_window_after_auto_paste(
+    window_was_visible: bool,
+    _recording_status: RecordingStatus,
+) -> bool {
+    window_was_visible
+}
+
+fn should_restore_recording_window_after_suppression(
+    suppression: AutoPasteWindowSuppression,
+    recording_status: RecordingStatus,
+) -> bool {
+    (suppression.lowered || suppression.hidden)
+        && should_restore_recording_window_after_auto_paste(
+            suppression.was_visible,
+            recording_status,
+        )
+}
+
+fn should_save_auto_paste_target_for_hotkey_start(
+    auto_paste_text: bool,
+    _recording_window_visible: bool,
+) -> bool {
+    auto_paste_text
+}
+
 fn validate_auto_paste_target_for_focus(
     target: Option<AutoPasteTarget>,
 ) -> Result<AutoPasteTarget, String> {
@@ -4065,6 +4261,112 @@ async fn wait_for_auto_paste_target_focus(target: &AutoPasteTarget) -> bool {
     }
 
     false
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct AutoPasteWindowSuppression {
+    was_visible: bool,
+    lowered: bool,
+    hidden: bool,
+}
+
+async fn suppress_recording_window_for_auto_paste(
+    app_handle: &AppHandle,
+    recording_status: RecordingStatus,
+) -> AutoPasteWindowSuppression {
+    let Some(window) = app_handle.get_webview_window("main") else {
+        return AutoPasteWindowSuppression::default();
+    };
+
+    let was_visible = match window.is_visible() {
+        Ok(value) => value,
+        Err(error) => {
+            log::warn!(
+                "Failed to inspect recording window visibility before auto-paste: {}",
+                error
+            );
+            false
+        }
+    };
+    let mut suppression = AutoPasteWindowSuppression {
+        was_visible,
+        ..Default::default()
+    };
+
+    if should_lower_recording_window_for_auto_paste(was_visible, recording_status) {
+        match window.set_always_on_top(false) {
+            Ok(()) => {
+                suppression.lowered = true;
+                log::debug!("Recording window lowered before auto-paste");
+            }
+            Err(error) => log::warn!(
+                "Failed to lower recording window before auto-paste: {}",
+                error
+            ),
+        }
+    }
+
+    if should_hide_recording_window_for_auto_paste(was_visible, recording_status) {
+        match window.hide() {
+            Ok(()) => {
+                suppression.hidden = true;
+                log::debug!(
+                    "Recording window hidden before auto-paste while status was {:?}",
+                    recording_status
+                );
+            }
+            Err(error) => log::warn!(
+                "Failed to hide recording window before auto-paste: {}",
+                error
+            ),
+        }
+    }
+
+    if suppression.lowered || suppression.hidden {
+        tokio::time::sleep(Duration::from_millis(AUTO_PASTE_WINDOW_SETTLE_MS)).await;
+    }
+
+    suppression
+}
+
+async fn restore_recording_window_after_auto_paste(
+    app_handle: &AppHandle,
+    state: &AppState,
+    suppression: AutoPasteWindowSuppression,
+    recording_status: RecordingStatus,
+) {
+    if !should_restore_recording_window_after_suppression(suppression, recording_status) {
+        if suppression.was_visible {
+            log::debug!(
+                "Recording window restore skipped after auto-paste while status is {:?}",
+                recording_status
+            );
+        }
+        return;
+    }
+
+    let Some(window) = app_handle.get_webview_window("main") else {
+        return;
+    };
+
+    if suppression.hidden {
+        let config = state.config.read().await.clone();
+        if let Err(error) = show_webview_window_with_recording_config(&window, &config, state) {
+            log::warn!(
+                "Failed to show recording window after auto-paste: {}",
+                error
+            );
+        }
+    }
+
+    if let Err(error) = window.set_always_on_top(true) {
+        log::warn!(
+            "Failed to restore recording window always-on-top after auto-paste: {}",
+            error
+        );
+    } else {
+        log::debug!("Recording window restored after auto-paste");
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -5542,6 +5844,10 @@ pub async fn auto_paste_text(
 ) -> Result<(), String> {
     log::info!("Command: auto_paste_text - text length: {}", text.len());
 
+    // Вставки выполняем строго по одной: параллельный вызов перемешал бы
+    // clipboard set → Cmd+V → restore двух вставок, и в окно ушёл бы чужой текст.
+    let _paste_guard = state.auto_paste_guard.lock().await;
+
     let recording_hotkey = state.config.read().await.recording_hotkey.clone();
     let suppression_duration = auto_paste_hotkey_suppression_duration(&text, &recording_hotkey);
     if suppression_duration.as_millis() > 0 {
@@ -5566,6 +5872,14 @@ pub async fn auto_paste_text(
         }
     }
 
+    let recording_status_before_paste = state.transcription_service.get_status().await;
+    #[cfg(target_os = "macos")]
+    let window_suppression: AutoPasteWindowSuppression;
+    #[cfg(target_os = "macos")]
+    let target_for_paste: AutoPasteTarget;
+    #[cfg(not(target_os = "macos"))]
+    let window_suppression = AutoPasteWindowSuppression::default();
+
     #[cfg(target_os = "macos")]
     {
         let target = validate_auto_paste_target_for_focus(
@@ -5581,20 +5895,21 @@ pub async fn auto_paste_text(
             target.bundle_id,
             target.pid
         );
+        target_for_paste = target.clone();
+
+        window_suppression =
+            suppress_recording_window_for_auto_paste(&app_handle, recording_status_before_paste)
+                .await;
 
         if crate::infrastructure::auto_paste::frontmost_app_matches_target(&target) {
             log::debug!("Auto-paste target is already frontmost; skipping activation");
-        } else {
-            crate::infrastructure::auto_paste::activate_running_app_by_target(&target).map_err(
-                |e| {
-                    let message = format!(
-                        "Failed to activate auto-paste target without launching app: {}",
-                        e
-                    );
-                    log::warn!("{}", message);
-                    message
-                },
-            )?;
+        } else if let Err(e) =
+            crate::infrastructure::auto_paste::activate_running_app_by_target(&target)
+        {
+            log::warn!(
+                "Failed to activate auto-paste target without launching app; will verify focus before refusing paste: {}",
+                e
+            );
         }
 
         if !wait_for_auto_paste_target_focus(&target).await {
@@ -5603,8 +5918,19 @@ pub async fn auto_paste_text(
                 target.bundle_id, target.pid
             );
             log::warn!("{}", message);
+            let recording_status_after_focus_failure =
+                state.transcription_service.get_status().await;
+            restore_recording_window_after_auto_paste(
+                &app_handle,
+                state.inner(),
+                window_suppression,
+                recording_status_after_focus_failure,
+            )
+            .await;
             return Err(message);
         }
+
+        crate::infrastructure::auto_paste::log_focused_element_diagnostics(&target);
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -5614,23 +5940,52 @@ pub async fn auto_paste_text(
 
     // Вставляем текст в blocking thread (enigo работает с синхронными нативными API)
     let text_clone = text.clone();
-    let paste_result = tokio::task::spawn_blocking(move || {
+    #[cfg(target_os = "macos")]
+    let paste_result = {
+        let target = target_for_paste.clone();
+        match tokio::task::spawn_blocking(move || {
+            crate::infrastructure::auto_paste::paste_text_for_target(&text_clone, &target)
+        })
+        .await
+        {
+            Ok(result) => result.map_err(|e| format!("Failed to paste text: {}", e)),
+            Err(error) => Err(format!("Failed to join blocking task: {}", error)),
+        }
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    let paste_result = match tokio::task::spawn_blocking(move || {
         crate::infrastructure::auto_paste::paste_text_hybrid(&text_clone)
     })
     .await
-    .map_err(|e| format!("Failed to join blocking task: {}", e))?
-    .map_err(|e| format!("Failed to paste text: {}", e));
+    {
+        Ok(result) => result.map_err(|e| format!("Failed to paste text: {}", e)),
+        Err(error) => Err(format!("Failed to join blocking task: {}", error)),
+    };
     if suppression_duration.as_millis() > 0 {
         state.suppress_recording_hotkey_for(Duration::from_millis(
             AUTO_PASTE_HOTKEY_SUPPRESSION_TAIL_MS,
         ));
     }
+
+    let recording_status_after_paste = state.transcription_service.get_status().await;
+    restore_recording_window_after_auto_paste(
+        &app_handle,
+        state.inner(),
+        window_suppression,
+        recording_status_after_paste,
+    )
+    .await;
+
     let paste_method = paste_result?;
 
-    // Возвращаем окно VoicetextAI поверх всех окон (но без фокуса)
-    if let Some(window) = app_handle.get_webview_window("main") {
-        let _ = window.set_always_on_top(true);
-        log::debug!("VoicetextAI window kept on top");
+    if should_reassert_recording_window_after_auto_paste(recording_status_after_paste) {
+        log::debug!("VoicetextAI window kept on top after auto-paste");
+    } else {
+        log::debug!(
+            "Skipping VoicetextAI always-on-top reassert while recording is active: {:?}",
+            recording_status_after_paste
+        );
     }
 
     log::info!(
