@@ -66,6 +66,20 @@ fn clear_active_transcription_session_id_if_current(state: &AppState, session_id
     );
 }
 
+/// Возвращает вытесненный id активной сессии, если провалившийся старт всё ещё числится активным.
+///
+/// Нужен для конкурентных стартов (кнопка + hotkey): провалившийся старт не должен
+/// обнулять id живой сессии, иначе её Idle при остановке уйдёт с session_id=0
+/// и фронт его проигнорирует.
+fn restore_displaced_transcription_session_id(state: &AppState, session_id: u64, displaced: u64) {
+    let _ = state.active_transcription_session_id.compare_exchange(
+        session_id,
+        displaced,
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    );
+}
+
 fn emit_idle_recording_status(
     app_handle: &AppHandle,
     session_id: u64,
@@ -555,6 +569,7 @@ async fn start_live_translation_recording(
     state: &AppState,
     app_handle: AppHandle,
     session_id: u64,
+    displaced_session_id: u64,
 ) -> Result<String, String> {
     use crate::application::services::{
         LiveTranslationCallbacks, LiveTranslationConfig, LiveTranslationError,
@@ -667,6 +682,10 @@ async fn start_live_translation_recording(
 
     match service.start_translation(translation_cfg, callbacks).await {
         Ok(()) => {
+            // Сессия принята сервисом — фиксируем её id безусловно (см. dictation-путь).
+            state
+                .active_transcription_session_id
+                .store(session_id, Ordering::Relaxed);
             *state.active_recording_mode.write().await = Some(RecordingMode::LiveTranslation);
             let _ = app_handle.emit(
                 EVENT_RECORDING_STATUS,
@@ -696,7 +715,7 @@ async fn start_live_translation_recording(
                     mode: Some(RecordingMode::LiveTranslation),
                 },
             );
-            clear_active_transcription_session_id_if_current(state, session_id);
+            restore_displaced_transcription_session_id(state, session_id, displaced_session_id);
             let mut active_mode = state.active_recording_mode.write().await;
             if matches!(*active_mode, Some(RecordingMode::LiveTranslation)) {
                 *active_mode = None;
@@ -982,16 +1001,25 @@ pub async fn start_recording(
         .transcription_session_seq
         .fetch_add(1, Ordering::Relaxed)
         + 1;
-    state
+    // fetch_max вместо store: при конкурентных стартах (кнопка + hotkey) опоздавший store
+    // младшего id не может затереть уже застолблённую более новую сессию. Вытесненное
+    // значение запоминаем, чтобы вернуть его, если ЭТОТ старт провалится.
+    let displaced_session_id = state
         .active_transcription_session_id
-        .store(session_id, Ordering::Relaxed);
+        .fetch_max(session_id, Ordering::AcqRel);
     log::info!("Recording session started: session_id={}", session_id);
 
     // Dispatcher: если в Settings выбран live_translation, направляем в отдельный сервис
     // и НЕ запускаем STT pipeline. Dictation идёт по прежнему пути ниже.
     let selected_mode = state.config.read().await.recording_mode;
     if selected_mode == crate::domain::RecordingMode::LiveTranslation {
-        return start_live_translation_recording(state.inner(), app_handle, session_id).await;
+        return start_live_translation_recording(
+            state.inner(),
+            app_handle,
+            session_id,
+            displaced_session_id,
+        )
+        .await;
     }
     // Dictation mode: помечаем active_recording_mode, чтобы stop корректно роутил.
     *state.active_recording_mode.write().await = Some(crate::domain::RecordingMode::Dictation);
@@ -1031,70 +1059,86 @@ pub async fn start_recording(
                         mode: None,
                     },
                 );
-                clear_active_transcription_session_id_if_current(state.inner(), session_id);
+                restore_displaced_transcription_session_id(
+                    state.inner(),
+                    session_id,
+                    displaced_session_id,
+                );
                 return Err(error_msg);
             }
         }
     }
 
-    let app_handle_clone = app_handle.clone();
+    // Partial/final должны уходить во фронт строго в порядке получения от STT.
+    // Раньше каждый callback делал свой tokio::spawn, и на многопоточном рантайме
+    // две задачи могли выполниться в обратном порядке: фронт получал speech_final
+    // раньше сегмента и собирал текст с перестановкой/дублированием. Поэтому все
+    // события идут через один канал и обрабатываются одной задачей последовательно.
+    enum TranscriptEvent {
+        Partial(crate::domain::Transcription),
+        Final(crate::domain::Transcription),
+    }
+
+    let (transcript_tx, mut transcript_rx) =
+        tokio::sync::mpsc::unbounded_channel::<TranscriptEvent>();
+
+    let app_handle_transcripts = app_handle.clone();
     let state_partial = state.partial_transcription.clone();
-
-    // Callback for partial transcriptions
-    let on_partial = Arc::new(move |transcription: crate::domain::Transcription| {
-        let text = transcription.text.clone();
-        let app_handle = app_handle_clone.clone();
-        let state_partial = state_partial.clone();
-
-        tokio::spawn(async move {
-            // Update state
-            *state_partial.write().await = Some(text.clone());
-
-            // Emit event to frontend
-            let payload =
-                PartialTranscriptionPayload::from_transcription(transcription, session_id);
-            if let Err(e) = app_handle.emit(EVENT_TRANSCRIPTION_PARTIAL, payload) {
-                log::error!("Failed to emit partial transcription event: {}", e);
-            }
-        });
-    });
-
-    let app_handle_final = app_handle.clone();
     let state_final = state.final_transcription.clone();
     let state_history = state.history.clone();
     let state_config = state.config.clone();
 
+    tokio::spawn(async move {
+        while let Some(event) = transcript_rx.recv().await {
+            match event {
+                TranscriptEvent::Partial(transcription) => {
+                    *state_partial.write().await = Some(transcription.text.clone());
+
+                    let payload =
+                        PartialTranscriptionPayload::from_transcription(transcription, session_id);
+                    if let Err(e) =
+                        app_handle_transcripts.emit(EVENT_TRANSCRIPTION_PARTIAL, payload)
+                    {
+                        log::error!("Failed to emit partial transcription event: {}", e);
+                    }
+                }
+                TranscriptEvent::Final(transcription) => {
+                    // Пустой финал — это только сигнал конца utterance (flush от Finalize
+                    // или endpointing на тишине); в историю и last-final его не пишем.
+                    if !transcription.text.is_empty() {
+                        *state_final.write().await = Some(transcription.text.clone());
+
+                        state_history.write().await.push(transcription.clone());
+
+                        let max_items = state_config.read().await.max_history_items;
+                        let mut history = state_history.write().await;
+                        let len = history.len();
+                        if len > max_items {
+                            history.drain(0..len - max_items);
+                        }
+                    }
+
+                    let payload =
+                        FinalTranscriptionPayload::from_transcription(transcription, session_id);
+                    if let Err(e) = app_handle_transcripts.emit(EVENT_TRANSCRIPTION_FINAL, payload)
+                    {
+                        log::error!("Failed to emit final transcription event: {}", e);
+                    }
+                }
+            }
+        }
+    });
+
+    // Callback for partial transcriptions
+    let partial_tx = transcript_tx.clone();
+    let on_partial = Arc::new(move |transcription: crate::domain::Transcription| {
+        let _ = partial_tx.send(TranscriptEvent::Partial(transcription));
+    });
+
     // Callback for final transcription
+    let final_tx = transcript_tx;
     let on_final = Arc::new(move |transcription: crate::domain::Transcription| {
-        let text = transcription.text.clone();
-        let app_handle = app_handle_final.clone();
-        let state_final = state_final.clone();
-        let state_history = state_history.clone();
-        let state_config = state_config.clone();
-
-        tokio::spawn(async move {
-            // Update state
-            *state_final.write().await = Some(text.clone());
-
-            // Add to history
-            state_history.write().await.push(transcription.clone());
-
-            // Keep only last N items
-            let max_items = state_config.read().await.max_history_items;
-            let mut history = state_history.write().await;
-            let len = history.len();
-            if len > max_items {
-                history.drain(0..len - max_items);
-            }
-            drop(history);
-
-            // Emit event to frontend
-            let payload =
-                FinalTranscriptionPayload::from_transcription(transcription.clone(), session_id);
-            if let Err(e) = app_handle.emit(EVENT_TRANSCRIPTION_FINAL, payload) {
-                log::error!("Failed to emit final transcription event: {}", e);
-            }
-        });
+        let _ = final_tx.send(TranscriptEvent::Final(transcription));
     });
 
     let app_handle_level = app_handle.clone();
@@ -1244,7 +1288,7 @@ pub async fn start_recording(
                 mode: None,
             },
         );
-        clear_active_transcription_session_id_if_current(state.inner(), session_id);
+        restore_displaced_transcription_session_id(state.inner(), session_id, displaced_session_id);
         return Err(error_msg);
     }
 
@@ -1325,10 +1369,17 @@ pub async fn start_recording(
 
         // Сначала transcription:error, потом recording:status=Error (во фронте есть логика suppression/retry).
         on_error(stt);
-        clear_active_transcription_session_id_if_current(state.inner(), session_id);
+        restore_displaced_transcription_session_id(state.inner(), session_id, displaced_session_id);
 
         return Err(error);
     }
+
+    // Старт принят сервисом — теперь эта сессия точно живая, фиксируем её id безусловно.
+    // Это закрывает редкий случай, когда конкурентный провалившийся старт со старшим id
+    // успел вытеснить наш id и вернуть на его место устаревшее значение.
+    state
+        .active_transcription_session_id
+        .store(session_id, Ordering::Relaxed);
 
     // Emit Recording status after successful start
     log::debug!("Emitting status: Recording (stopped_via_hotkey: false)");
