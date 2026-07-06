@@ -59,6 +59,30 @@ fn build_deepgram_listen_url(model: &str, language: &str, keyterms: &Option<Stri
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+/// Актуальные callbacks текущей сессии записи.
+///
+/// Receiver task живёт дольше одной сессии (keep-alive), поэтому callbacks нельзя
+/// один раз склонировать в задачу: при resume фронт передаёт новые замыкания с новым
+/// session_id, и события со старыми callbacks фронт отбросит как "закрытую" сессию.
+/// Держим их в общем Arc<Mutex<...>>, receiver читает актуальные на каждое сообщение.
+#[derive(Clone)]
+struct ActiveCallbacks {
+    on_partial: TranscriptionCallback,
+    on_final: TranscriptionCallback,
+    on_error: ErrorCallback,
+    on_connection_quality: ConnectionQualityCallback,
+}
+
+async fn quality_callback(
+    callbacks: &Arc<Mutex<Option<ActiveCallbacks>>>,
+) -> Option<ConnectionQualityCallback> {
+    callbacks
+        .lock()
+        .await
+        .as_ref()
+        .map(|c| c.on_connection_quality.clone())
+}
+
 pub struct DeepgramProvider {
     config: Option<SttConfig>,
     is_streaming: bool,
@@ -69,6 +93,8 @@ pub struct DeepgramProvider {
     receiver_task: Option<JoinHandle<()>>,
     keepalive_task: Option<JoinHandle<()>>, // отдельная задача для отправки KeepAlive
     session_ready: Arc<Notify>,
+    callbacks: Arc<Mutex<Option<ActiveCallbacks>>>, // общий держатель callbacks, обновляется при resume
+    finalize_flush_rx: Option<tokio::sync::watch::Receiver<u64>>, // сигнал от receiver: пришёл from_finalize
     audio_buffer: Vec<i16>,
     on_partial_callback: Option<TranscriptionCallback>, // сохраняем для resume
     on_final_callback: Option<TranscriptionCallback>,
@@ -101,6 +127,8 @@ impl DeepgramProvider {
             receiver_task: None,
             keepalive_task: None,
             session_ready: Arc::new(Notify::new()),
+            callbacks: Arc::new(Mutex::new(None)),
+            finalize_flush_rx: None,
             audio_buffer: Vec::new(),
             on_partial_callback: None,
             on_final_callback: None,
@@ -250,11 +278,19 @@ impl SttProvider for DeepgramProvider {
         // Пересоздаем Notify для новой сессии (фикс повторного использования)
         self.session_ready = Arc::new(Notify::new());
 
-        // Клонируем callbacks для передачи в receiver задачу
-        let on_partial_for_receiver = on_partial.clone();
-        let on_final_for_receiver = on_final.clone();
-        let on_error_for_receiver = on_error.clone();
-        let on_connection_quality_for_receiver = on_connection_quality.clone();
+        // Callbacks кладём в общий держатель: receiver task читает их на каждое сообщение,
+        // поэтому keep-alive resume может подменить их (новый session_id) без пересоздания задач.
+        *self.callbacks.lock().await = Some(ActiveCallbacks {
+            on_partial: on_partial.clone(),
+            on_final: on_final.clone(),
+            on_error: on_error.clone(),
+            on_connection_quality: on_connection_quality.clone(),
+        });
+        let callbacks_for_receiver = self.callbacks.clone();
+
+        // Канал, через который receiver сообщает pause_stream, что сервер прислал from_finalize
+        // (т.е. flush после Finalize завершён и финальные результаты уже доставлены).
+        let (finalize_flush_tx, finalize_flush_rx) = tokio::sync::watch::channel(0u64);
 
         // Инициализируем мониторинг качества связи
         self.consecutive_errors = 0;
@@ -273,7 +309,7 @@ impl SttProvider for DeepgramProvider {
             // Запускаем отдельную задачу для мониторинга качества связи
             let last_server_response_monitor = last_server_response_for_receiver.clone();
             let current_quality_monitor = current_quality_for_receiver.clone();
-            let on_connection_quality_monitor = on_connection_quality_for_receiver.clone();
+            let callbacks_for_monitor = callbacks_for_receiver.clone();
             let is_paused_flag_for_monitor = is_paused_flag_for_receiver.clone();
 
             let monitor_task = tokio::spawn(async move {
@@ -298,27 +334,33 @@ impl SttProvider for DeepgramProvider {
                                 elapsed.as_secs_f64()
                             );
                             *current_quality = "Poor".to_string();
-                            on_connection_quality_monitor(
-                                "Poor".to_string(),
-                                Some("No server response for 3+ seconds".to_string()),
-                            );
+                            if let Some(cb) = quality_callback(&callbacks_for_monitor).await {
+                                cb(
+                                    "Poor".to_string(),
+                                    Some("No server response for 3+ seconds".to_string()),
+                                );
+                            }
                         }
                         // Если связь восстановилась (получили ответ после плохой связи)
                         else if elapsed <= Duration::from_secs(2) && *current_quality == "Poor" {
                             log::info!("Connection quality recovering: server responding again");
                             *current_quality = "Recovering".to_string();
-                            on_connection_quality_monitor("Recovering".to_string(), None);
+                            if let Some(cb) = quality_callback(&callbacks_for_monitor).await {
+                                cb("Recovering".to_string(), None);
+                            }
 
                             // Через 2 секунды стабильной работы считаем что всё хорошо
                             let quality_for_check = current_quality_monitor.clone();
-                            let callback_for_check = on_connection_quality_monitor.clone();
+                            let callbacks_for_check = callbacks_for_monitor.clone();
                             tokio::spawn(async move {
                                 tokio::time::sleep(Duration::from_secs(2)).await;
                                 let mut q = quality_for_check.lock().await;
                                 if *q == "Recovering" {
                                     log::info!("Connection fully recovered");
                                     *q = "Good".to_string();
-                                    callback_for_check("Good".to_string(), None);
+                                    if let Some(cb) = quality_callback(&callbacks_for_check).await {
+                                        cb("Good".to_string(), None);
+                                    }
                                 }
                             });
                         }
@@ -352,11 +394,19 @@ impl SttProvider for DeepgramProvider {
                                     session_notify.notify_one();
                                 }
 
-                                Self::handle_message(
-                                    json,
-                                    &on_partial_for_receiver,
-                                    &on_final_for_receiver,
-                                );
+                                let is_finalize_flush =
+                                    json["from_finalize"].as_bool().unwrap_or(false);
+
+                                let session_callbacks = callbacks_for_receiver.lock().await.clone();
+                                if let Some(cbs) = session_callbacks {
+                                    Self::handle_message(json, &cbs.on_partial, &cbs.on_final);
+                                }
+
+                                // Сигналим после handle_message: pause_stream должен продолжиться
+                                // только когда финальный результат уже доставлен в callbacks.
+                                if is_finalize_flush {
+                                    finalize_flush_tx.send_modify(|v| *v += 1);
+                                }
                             }
                             Err(e) => {
                                 log::error!("Failed to parse Deepgram message: {}", e);
@@ -406,7 +456,14 @@ impl SttProvider for DeepgramProvider {
                                     reason,
                                     code_u16
                                 );
-                                on_error_for_receiver(stt_err);
+                                let error_cb = callbacks_for_receiver
+                                    .lock()
+                                    .await
+                                    .as_ref()
+                                    .map(|c| c.on_error.clone());
+                                if let Some(cb) = error_cb {
+                                    cb(stt_err);
+                                }
                             }
                         }
 
@@ -466,6 +523,7 @@ impl SttProvider for DeepgramProvider {
         self.ws_write = Some(ws_write);
         self.receiver_task = Some(receiver_task);
         self.keepalive_task = Some(keepalive_task);
+        self.finalize_flush_rx = Some(finalize_flush_rx);
         self.is_streaming = true;
         self.is_paused = false;
 
@@ -537,8 +595,8 @@ impl SttProvider for DeepgramProvider {
                 .flat_map(|&sample| sample.to_le_bytes())
                 .collect();
 
-            // Очищаем буфер ПЕРЕД отправкой (фикс утечки памяти)
-            self.audio_buffer.clear();
+            // Буфер чистим только после успешной отправки: если очистить заранее,
+            // при ошибке send этот кусок речи теряется безвозвратно.
 
             // Отправляем бинарные данные (обрабатываем ошибку если соединение закрыто)
             let send_start = std::time::Instant::now();
@@ -547,6 +605,7 @@ impl SttProvider for DeepgramProvider {
             let mut write_guard = write.lock().await;
             match write_guard.send(Message::Binary(bytes)).await {
                 Ok(_) => {
+                    self.audio_buffer.clear();
                     let send_duration = send_start.elapsed();
 
                     // Обновляем счетчики
@@ -611,6 +670,18 @@ impl SttProvider for DeepgramProvider {
                     // Инкрементируем счетчик последовательных ошибок
                     self.consecutive_errors += 1;
 
+                    // Семплы остаются в audio_buffer и уйдут при следующей успешной отправке.
+                    // Ограничиваем рост буфера, чтобы мёртвая сеть не съела память.
+                    const MAX_RETAINED_SAMPLES: usize = 16_000 * 10; // ~10 секунд @ 16kHz
+                    if self.audio_buffer.len() > MAX_RETAINED_SAMPLES {
+                        let excess = self.audio_buffer.len() - MAX_RETAINED_SAMPLES;
+                        log::warn!(
+                            "Audio retry buffer overflow, dropping {} oldest samples",
+                            excess
+                        );
+                        self.audio_buffer.drain(0..excess);
+                    }
+
                     // Если 3 или более ошибок подряд - пытаемся переподключиться
                     if self.consecutive_errors >= 3 {
                         log::warn!(
@@ -621,11 +692,8 @@ impl SttProvider for DeepgramProvider {
                         // Освобождаем write_guard перед вызовом reconnect (иначе будет ошибка borrow checker)
                         drop(write_guard);
 
-                        // Буферизуем текущий чанк перед попыткой reconnect
-                        self.audio_buffer_during_reconnect
-                            .lock()
-                            .await
-                            .push(chunk.clone());
+                        // Текущий чанк уже лежит в audio_buffer (мы его не очищаем при ошибке),
+                        // так что отдельно буферизовать его перед reconnect не нужно.
 
                         // Пытаемся переподключиться
                         match self.reconnect().await {
@@ -754,6 +822,8 @@ impl SttProvider for DeepgramProvider {
         self.on_final_callback = None;
         self.on_error_callback = None;
         self.on_connection_quality_callback = None;
+        *self.callbacks.lock().await = None;
+        self.finalize_flush_rx = None;
         self.sent_chunks_count = 0;
         self.sent_bytes_total = 0;
         self.consecutive_errors = 0;
@@ -799,6 +869,8 @@ impl SttProvider for DeepgramProvider {
         self.on_final_callback = None;
         self.on_error_callback = None;
         self.on_connection_quality_callback = None;
+        *self.callbacks.lock().await = None;
+        self.finalize_flush_rx = None;
         self.sent_chunks_count = 0;
         self.sent_bytes_total = 0;
         self.consecutive_errors = 0;
@@ -857,8 +929,15 @@ impl SttProvider for DeepgramProvider {
             self.audio_buffer.clear();
         }
 
-        // По документации Deepgram Finalize форсирует обработку уже отправленного аудио.
+        // По документации Deepgram Finalize форсирует обработку уже отправленного аудио,
+        // а завершение flush'а сервер помечает ответом с from_finalize=true.
         // Receiver ещё не ставим на pause, чтобы не проигнорировать финальный Results.
+        let mut finalize_flush_rx = self.finalize_flush_rx.clone();
+        if let Some(rx) = finalize_flush_rx.as_mut() {
+            // Помечаем текущее значение как увиденное: ждать будем именно новый flush.
+            rx.borrow_and_update();
+        }
+
         if let Some(write) = self.ws_write.as_ref() {
             let finalize_msg = json!({"type": "Finalize"});
             let mut write_guard = write.lock().await;
@@ -869,8 +948,37 @@ impl SttProvider for DeepgramProvider {
                 Ok(_) => {
                     log::debug!("Finalize sent before Deepgram pause");
                     drop(write_guard);
-                    tokio::time::sleep(Duration::from_millis(DEEPGRAM_FINALIZE_SETTLE_TIMEOUT_MS))
-                        .await;
+
+                    let settle_timeout = Duration::from_millis(DEEPGRAM_FINALIZE_SETTLE_TIMEOUT_MS);
+                    match finalize_flush_rx.as_mut() {
+                        Some(rx) => {
+                            // Ждём from_finalize от сервера, но не дольше таймаута: если
+                            // буфер аудио был пуст, Deepgram может не прислать ответ вовсе.
+                            // Раньше здесь был фиксированный sleep, и на медленной сети
+                            // финальный Results приходил после паузы и молча выбрасывался.
+                            match tokio::time::timeout(settle_timeout, rx.changed()).await {
+                                Ok(Ok(())) => {
+                                    log::debug!(
+                                        "Finalize flush confirmed by from_finalize response"
+                                    );
+                                }
+                                Ok(Err(_)) => {
+                                    log::debug!(
+                                        "Finalize flush channel closed before confirmation"
+                                    );
+                                }
+                                Err(_) => {
+                                    log::debug!(
+                                        "No from_finalize within {:?}, pausing anyway",
+                                        settle_timeout
+                                    );
+                                }
+                            }
+                        }
+                        None => {
+                            tokio::time::sleep(settle_timeout).await;
+                        }
+                    }
                 }
                 Err(e) => {
                     log::debug!("Could not send Finalize before Deepgram pause: {}", e);
@@ -944,7 +1052,15 @@ impl SttProvider for DeepgramProvider {
         *self.is_paused_flag.lock().await = false; // снимаем флаг для receiver_task
         self.audio_buffer.clear();
 
-        // Обновляем callbacks
+        // Обновляем callbacks: и поля провайдера, и общий держатель для receiver task.
+        // Без обновления держателя receiver продолжал бы слать события со старым session_id,
+        // и фронт отбрасывал бы их как события уже закрытой сессии — текст просто пропадал.
+        *self.callbacks.lock().await = Some(ActiveCallbacks {
+            on_partial: on_partial.clone(),
+            on_final: on_final.clone(),
+            on_error: on_error.clone(),
+            on_connection_quality: on_connection_quality.clone(),
+        });
         self.on_partial_callback = Some(on_partial);
         self.on_final_callback = Some(on_final);
         self.on_error_callback = Some(on_error);
@@ -1078,22 +1194,13 @@ impl DeepgramProvider {
             let _ = task.await;
         }
 
-        // Сохраняем callbacks для восстановления
-        let on_partial = self.on_partial_callback.clone().ok_or_else(|| {
-            SttError::Internal("on_partial callback not set during reconnect".to_string())
-        })?;
-        let on_final = self.on_final_callback.clone().ok_or_else(|| {
-            SttError::Internal("on_final callback not set during reconnect".to_string())
-        })?;
-        let _on_error = self.on_error_callback.clone().ok_or_else(|| {
-            SttError::Internal("on_error callback not set during reconnect".to_string())
-        })?;
-        let on_connection_quality =
-            self.on_connection_quality_callback.clone().ok_or_else(|| {
-                SttError::Internal(
-                    "on_connection_quality callback not set during reconnect".to_string(),
-                )
-            })?;
+        // Callbacks живут в общем держателе — receiver после reconnect читает их оттуда же,
+        // что и основной receiver. Здесь только проверяем, что сессия была настроена.
+        if self.callbacks.lock().await.is_none() {
+            return Err(SttError::Internal(
+                "callbacks not set during reconnect".to_string(),
+            ));
+        }
 
         let config = self
             .config
@@ -1189,10 +1296,11 @@ impl DeepgramProvider {
             // Пересоздаем Notify для новой сессии
             self.session_ready = Arc::new(Notify::new());
 
-            // Клонируем callbacks для receiver задачи
-            let on_partial_for_receiver = on_partial.clone();
-            let on_final_for_receiver = on_final.clone();
-            let on_connection_quality_for_receiver = on_connection_quality.clone();
+            // Receiver читает callbacks из общего держателя (см. ActiveCallbacks)
+            let callbacks_for_receiver = self.callbacks.clone();
+
+            // Новый канал для сигнала from_finalize (старый умер вместе со старым receiver)
+            let (finalize_flush_tx, finalize_flush_rx) = tokio::sync::watch::channel(0u64);
 
             // Запускаем фоновую задачу для приема сообщений
             let session_notify = self.session_ready.clone();
@@ -1206,7 +1314,7 @@ impl DeepgramProvider {
                 // Мониторинг качества связи
                 let last_server_response_monitor = last_server_response_for_receiver.clone();
                 let current_quality_monitor = current_quality_for_receiver.clone();
-                let on_connection_quality_monitor = on_connection_quality_for_receiver.clone();
+                let callbacks_for_monitor = callbacks_for_receiver.clone();
                 let is_paused_flag_for_monitor = is_paused_flag_for_receiver.clone();
 
                 let monitor_task = tokio::spawn(async move {
@@ -1227,26 +1335,34 @@ impl DeepgramProvider {
                             if elapsed > Duration::from_secs(3) && *current_quality == "Good" {
                                 log::warn!("Connection quality degraded after reconnect: no server response for {:.1}s", elapsed.as_secs_f64());
                                 *current_quality = "Poor".to_string();
-                                on_connection_quality_monitor(
-                                    "Poor".to_string(),
-                                    Some("No server response for 3+ seconds".to_string()),
-                                );
+                                if let Some(cb) = quality_callback(&callbacks_for_monitor).await {
+                                    cb(
+                                        "Poor".to_string(),
+                                        Some("No server response for 3+ seconds".to_string()),
+                                    );
+                                }
                             } else if elapsed <= Duration::from_secs(2)
                                 && *current_quality == "Poor"
                             {
                                 log::info!("Connection quality recovering after reconnect");
                                 *current_quality = "Recovering".to_string();
-                                on_connection_quality_monitor("Recovering".to_string(), None);
+                                if let Some(cb) = quality_callback(&callbacks_for_monitor).await {
+                                    cb("Recovering".to_string(), None);
+                                }
 
                                 let quality_for_check = current_quality_monitor.clone();
-                                let callback_for_check = on_connection_quality_monitor.clone();
+                                let callbacks_for_check = callbacks_for_monitor.clone();
                                 tokio::spawn(async move {
                                     tokio::time::sleep(Duration::from_secs(2)).await;
                                     let mut q = quality_for_check.lock().await;
                                     if *q == "Recovering" {
                                         log::info!("Connection fully recovered");
                                         *q = "Good".to_string();
-                                        callback_for_check("Good".to_string(), None);
+                                        if let Some(cb) =
+                                            quality_callback(&callbacks_for_check).await
+                                        {
+                                            cb("Good".to_string(), None);
+                                        }
                                     }
                                 });
                             }
@@ -1278,11 +1394,18 @@ impl DeepgramProvider {
                                         session_notify.notify_one();
                                     }
 
-                                    Self::handle_message(
-                                        json,
-                                        &on_partial_for_receiver,
-                                        &on_final_for_receiver,
-                                    );
+                                    let is_finalize_flush =
+                                        json["from_finalize"].as_bool().unwrap_or(false);
+
+                                    let session_callbacks =
+                                        callbacks_for_receiver.lock().await.clone();
+                                    if let Some(cbs) = session_callbacks {
+                                        Self::handle_message(json, &cbs.on_partial, &cbs.on_final);
+                                    }
+
+                                    if is_finalize_flush {
+                                        finalize_flush_tx.send_modify(|v| *v += 1);
+                                    }
                                 }
                                 Err(e) => {
                                     log::error!(
@@ -1336,6 +1459,7 @@ impl DeepgramProvider {
             self.ws_write = Some(ws_write);
             self.receiver_task = Some(receiver_task);
             self.keepalive_task = Some(keepalive_task);
+            self.finalize_flush_rx = Some(finalize_flush_rx);
 
             // Сбрасываем счетчики ошибок
             self.consecutive_errors = 0;
@@ -1431,6 +1555,12 @@ impl DeepgramProvider {
                             let text = first_alt["transcript"].as_str().unwrap_or("");
                             log::debug!("Extracted transcript: '{}' (start={:.2}s)", text, start);
 
+                            let closes_utterance = speech_final || from_finalize;
+                            let timestamp = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_else(|_| std::time::Duration::from_secs(0))
+                                .as_millis() as i64;
+
                             if !text.is_empty() {
                                 let confidence = first_alt["confidence"].as_f64().map(|v| v as f32);
 
@@ -1447,17 +1577,12 @@ impl DeepgramProvider {
                                 // - is_final=true, speech_final=false: сегмент завершен, но речь продолжается
                                 // - is_final=true, speech_final=true: вся речь завершена
 
-                                let closes_utterance = speech_final || from_finalize;
                                 let transcription = Transcription {
                                     text: text.to_string(),
                                     confidence,
                                     is_final: is_final || closes_utterance,
                                     language: detected_language,
-                                    timestamp: std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap_or_else(|_| std::time::Duration::from_secs(0))
-                                        .as_millis()
-                                        as i64,
+                                    timestamp,
                                     start,    // передаем start время из Deepgram
                                     duration, // передаем duration из Deepgram
                                 };
@@ -1483,6 +1608,25 @@ impl DeepgramProvider {
                                     }
                                     on_partial(transcription);
                                 }
+                            } else if closes_utterance {
+                                // Пустой transcript при speech_final/from_finalize — обычный кейс:
+                                // endpointing срабатывает на тишине после последнего сегмента,
+                                // и закрывающий Results приходит без текста. Терять этот сигнал
+                                // нельзя — UI не закроет utterance и не закоммитит накопленное.
+                                log::info!(
+                                    "✅ Empty closing transcript (speech_final={}, from_finalize={}) → вызываем on_final callback",
+                                    speech_final,
+                                    from_finalize
+                                );
+                                on_final(Transcription {
+                                    text: String::new(),
+                                    confidence: None,
+                                    is_final: true,
+                                    language: None,
+                                    timestamp,
+                                    start,
+                                    duration,
+                                });
                             } else {
                                 log::trace!("Skipping empty transcript");
                             }
@@ -1883,6 +2027,50 @@ mod tests {
 
         DeepgramProvider::handle_message(json, &on_partial, &on_final);
         assert!(!*called.lock().unwrap());
+    }
+
+    #[test]
+    fn test_handle_message_empty_speech_final_closes_utterance() {
+        let partial_called = Arc::new(std::sync::Mutex::new(false));
+        let final_result: Arc<std::sync::Mutex<Option<Transcription>>> =
+            Arc::new(std::sync::Mutex::new(None));
+
+        let p = partial_called.clone();
+        let on_partial: TranscriptionCallback = Arc::new(move |_: Transcription| {
+            *p.lock().unwrap() = true;
+        });
+        let f = final_result.clone();
+        let on_final: TranscriptionCallback = Arc::new(move |t: Transcription| {
+            *f.lock().unwrap() = Some(t);
+        });
+
+        // Endpointing может закрыть utterance пустым Results (speech_final=true, transcript="").
+        // Такой сигнал обязан дойти до on_final, иначе UI не закоммитит накопленный текст.
+        let json = json!({
+            "type": "Results",
+            "is_final": true,
+            "speech_final": true,
+            "start": 3.5,
+            "duration": 0.8,
+            "channel": {
+                "alternatives": [
+                    {"transcript": ""}
+                ]
+            }
+        });
+
+        DeepgramProvider::handle_message(json, &on_partial, &on_final);
+
+        assert!(!*partial_called.lock().unwrap());
+        let result = final_result
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("on_final must be called");
+        assert_eq!(result.text, "");
+        assert!(result.is_final);
+        assert_eq!(result.start, 3.5);
+        assert_eq!(result.duration, 0.8);
     }
 
     #[test]
