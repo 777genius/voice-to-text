@@ -33,6 +33,7 @@ const DEV_BACKEND_URL: &str = "ws://localhost:8080";
 const WS_CONNECT_TIMEOUT_SECS: u64 = 8;
 const WS_SEND_TIMEOUT_SECS: u64 = 3;
 const FINALIZE_DRAIN_ACK_TIMEOUT_MS: u64 = 1800;
+const FINALIZE_POST_ACK_TEXT_GRACE_MS: u64 = 350;
 const CAPABILITY_FINALIZE_ACK: &str = "finalize_ack";
 
 /// Проверяем, что URL указывает на локальный бэкенд (localhost/loopback).
@@ -151,6 +152,7 @@ struct CallbackState {
 struct FinalizeDrainComplete {
     status: String,
     saw_result: bool,
+    text_results_seen: usize,
 }
 
 impl CallbackState {
@@ -350,11 +352,21 @@ impl BackendProvider {
         {
             Ok(Ok(done)) => {
                 log::info!(
-                    "[ReconnectDiag] BackendProvider finalize drain ack received on {}: status={}, saw_result={}",
+                    "[ReconnectDiag] BackendProvider finalize drain ack received on {}: status={}, saw_result={}, text_results_seen={}",
                     context,
                     done.status,
-                    done.saw_result
+                    done.saw_result,
+                    done.text_results_seen
                 );
+                if done.saw_result && done.text_results_seen == 0 {
+                    log::info!(
+                        "[ReconnectDiag] BackendProvider waiting {}ms for post-ack finalize text on {}",
+                        FINALIZE_POST_ACK_TEXT_GRACE_MS,
+                        context
+                    );
+                    tokio::time::sleep(Duration::from_millis(FINALIZE_POST_ACK_TEXT_GRACE_MS))
+                        .await;
+                }
             }
             Ok(Err(_)) => {
                 log::warn!(
@@ -768,6 +780,7 @@ impl SttProvider for BackendProvider {
 
             const LIMIT_REMAINING_THRESHOLD: f32 = 5.0;
             let mut server_error_reported = false;
+            let mut finalize_text_results_seen = 0usize;
 
             while let Some(msg_result) = read.next().await {
                 match msg_result {
@@ -821,6 +834,11 @@ impl SttProvider for BackendProvider {
                                         duration_ms,
                                     } => {
                                         log::debug!("Partial: {} (conf: {:?})", text, confidence);
+                                        let has_text = !text.trim().is_empty();
+                                        if has_text && finalize_waiter.lock().await.is_some() {
+                                            finalize_text_results_seen =
+                                                finalize_text_results_seen.saturating_add(1);
+                                        }
                                         let mut transcription = Transcription::new(
                                             text,
                                             is_segment_final.unwrap_or(false),
@@ -853,6 +871,11 @@ impl SttProvider for BackendProvider {
                                             confidence,
                                             duration_ms
                                         );
+                                        let has_text = !text.trim().is_empty();
+                                        if has_text && finalize_waiter.lock().await.is_some() {
+                                            finalize_text_results_seen =
+                                                finalize_text_results_seen.saturating_add(1);
+                                        }
                                         let mut transcription = Transcription::final_result(text)
                                             .with_timing(
                                                 start_ms.unwrap_or(0) as f64 / 1000.0,
@@ -934,14 +957,20 @@ impl SttProvider for BackendProvider {
 
                                     ServerMessage::FinalizeComplete { status, saw_result } => {
                                         log::debug!(
-                                            "Finalize drain complete: status={}, saw_result={}",
+                                            "Finalize drain complete: status={}, saw_result={}, text_results_seen={}",
                                             status,
-                                            saw_result
+                                            saw_result,
+                                            finalize_text_results_seen
                                         );
+                                        let text_results_seen = finalize_text_results_seen;
+                                        finalize_text_results_seen = 0;
                                         let waiter = finalize_waiter.lock().await.take();
                                         if let Some(waiter) = waiter {
-                                            let _ = waiter
-                                                .send(FinalizeDrainComplete { status, saw_result });
+                                            let _ = waiter.send(FinalizeDrainComplete {
+                                                status,
+                                                saw_result,
+                                                text_results_seen,
+                                            });
                                         }
                                     }
                                 }
@@ -1773,6 +1802,77 @@ mod tests {
         (format!("ws://{addr}"), task)
     }
 
+    async fn spawn_finalize_ack_before_late_final_mock_backend(
+    ) -> (String, JoinHandle<LifecycleCapture>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local websocket listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept websocket tcp");
+            let mut ws = accept_async(stream).await.expect("accept websocket");
+            let mut config: Option<serde_json::Value> = None;
+            let mut binary_lengths = Vec::new();
+            let mut saw_finalize = false;
+
+            while let Some(next) = ws.next().await {
+                let msg = next.expect("websocket message");
+                match msg {
+                    Message::Text(text) => {
+                        let value: serde_json::Value =
+                            serde_json::from_str(&text).expect("client json message");
+                        match value.get("type").and_then(|v| v.as_str()) {
+                            Some("config") => {
+                                config = Some(value);
+                                ws.send(Message::Text(
+                                    r#"{"type":"ready","session_id":"mock-session"}"#.to_string(),
+                                ))
+                                .await
+                                .expect("send ready");
+                            }
+                            Some("finalize") => {
+                                saw_finalize = true;
+                                ws.send(Message::Text(
+                                    r#"{"type":"finalize_complete","status":"flushed","saw_result":true}"#
+                                        .to_string(),
+                                ))
+                                .await
+                                .expect("send finalize_complete");
+                                tokio::time::sleep(Duration::from_millis(50)).await;
+                                let _ = ws
+                                    .send(Message::Text(
+                                        r#"{"type":"final","text":"post ack final","confidence":0.94,"start_ms":0,"duration_ms":360}"#
+                                            .to_string(),
+                                    ))
+                                    .await;
+                            }
+                            Some("close") => break,
+                            _ => {}
+                        }
+                    }
+                    Message::Binary(bytes) => {
+                        binary_lengths.push(bytes.len());
+                        let seq = binary_lengths.len();
+                        ws.send(Message::Text(format!(r#"{{"type":"ack","seq":{seq}}}"#)))
+                            .await
+                            .expect("send ack");
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+
+            LifecycleCapture {
+                config: config.expect("client config"),
+                binary_lengths,
+                saw_finalize,
+            }
+        });
+
+        (format!("ws://{addr}"), task)
+    }
+
     #[tokio::test]
     async fn test_backend_provider_sends_selected_streaming_provider_in_config_message() {
         for (selected, expected) in [
@@ -1950,6 +2050,51 @@ mod tests {
             .expect("final callback timeout")
             .expect("final callback");
         assert_eq!(final_result.text, "late final");
+        assert!(final_result.is_final);
+
+        let capture = tokio::time::timeout(Duration::from_secs(3), server_task)
+            .await
+            .expect("mock backend timeout")
+            .expect("mock backend task");
+        assert_eq!(capture.binary_lengths, vec![960]);
+        assert!(capture.saw_finalize);
+    }
+
+    #[tokio::test]
+    async fn stop_stream_waits_for_post_ack_finalize_text_before_closing_receiver() {
+        let (backend_url, server_task) = spawn_finalize_ack_before_late_final_mock_backend().await;
+        let mut config = SttConfig::new(SttProviderType::Backend);
+        config.backend_url = Some(backend_url);
+        config.backend_auth_token = Some("test-token".to_string());
+        config.backend_streaming_provider = crate::domain::BackendStreamingProvider::Deepgram;
+        config.language = "en".to_string();
+
+        let (final_tx, mut final_rx) = tokio::sync::mpsc::unbounded_channel::<Transcription>();
+        let mut provider = BackendProvider::new();
+        provider.initialize(&config).await.unwrap();
+        provider
+            .start_stream(
+                Arc::new(|_| {}),
+                Arc::new(move |t| {
+                    let _ = final_tx.send(t);
+                }),
+                Arc::new(|err| panic!("unexpected backend provider error: {err}")),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .unwrap();
+
+        provider
+            .send_audio(&AudioChunk::new(vec![1000; 480], 16_000, 1))
+            .await
+            .unwrap();
+        provider.stop_stream().await.unwrap();
+
+        let final_result = tokio::time::timeout(Duration::from_secs(3), final_rx.recv())
+            .await
+            .expect("post-ack final callback timeout")
+            .expect("post-ack final callback");
+        assert_eq!(final_result.text, "post ack final");
         assert!(final_result.is_final);
 
         let capture = tokio::time::timeout(Duration::from_secs(3), server_task)
