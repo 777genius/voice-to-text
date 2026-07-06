@@ -18,6 +18,9 @@ const AUDIO_PROCESSOR_STOP_DRAIN_TIMEOUT: Duration = Duration::from_millis(2500)
 const PRESTART_VISUALIZER_QUEUE_CAPACITY: usize = 64;
 const AUDIO_LEVEL_EMIT_EVERY_CHUNKS: usize = 2;
 const AUDIO_SPECTRUM_EMIT_EVERY_CHUNKS: usize = 3;
+const AUDIO_LOW_SIGNAL_MIN_CHUNKS: usize = 50;
+const AUDIO_RAW_NOISE_FLOOR_MAX_AMPLITUDE: i32 = 300;
+const AUDIO_SENT_SPEECH_LIKELY_AMPLITUDE: i32 = 1500;
 
 struct PreparedAudioChunk {
     max_amplitude: i32,
@@ -55,6 +58,70 @@ fn prepare_audio_chunk_for_processing(chunk: &AudioChunk, sensitivity: u8) -> Pr
             timestamp: chunk.timestamp,
         },
     }
+}
+
+#[derive(Debug, Default, Clone, PartialEq)]
+struct AudioSessionStats {
+    chunks: usize,
+    samples: usize,
+    peak_raw_amplitude: i32,
+    peak_sent_amplitude: i32,
+    chunks_above_raw_noise_floor: usize,
+    chunks_above_sent_speech_floor: usize,
+    effective_gain_sum: f64,
+}
+
+impl AudioSessionStats {
+    fn observe(
+        &mut self,
+        raw_max_amplitude: i32,
+        sent_max_amplitude: i32,
+        sent_samples: usize,
+        effective_gain: f32,
+    ) {
+        self.chunks += 1;
+        self.samples += sent_samples;
+        self.peak_raw_amplitude = self.peak_raw_amplitude.max(raw_max_amplitude);
+        self.peak_sent_amplitude = self.peak_sent_amplitude.max(sent_max_amplitude);
+        self.effective_gain_sum += effective_gain as f64;
+
+        if raw_max_amplitude > AUDIO_RAW_NOISE_FLOOR_MAX_AMPLITUDE {
+            self.chunks_above_raw_noise_floor += 1;
+        }
+        if sent_max_amplitude >= AUDIO_SENT_SPEECH_LIKELY_AMPLITUDE {
+            self.chunks_above_sent_speech_floor += 1;
+        }
+    }
+
+    fn average_effective_gain(&self) -> f32 {
+        if self.chunks == 0 {
+            return 0.0;
+        }
+        (self.effective_gain_sum / self.chunks as f64) as f32
+    }
+
+    fn looks_too_quiet_for_stt(&self) -> bool {
+        self.chunks >= AUDIO_LOW_SIGNAL_MIN_CHUNKS
+            && self.peak_raw_amplitude <= AUDIO_RAW_NOISE_FLOOR_MAX_AMPLITUDE
+            && self.chunks_above_sent_speech_floor == 0
+    }
+}
+
+fn max_abs_amplitude(samples: &[i16]) -> i32 {
+    samples.iter().map(|&s| (s as i32).abs()).max().unwrap_or(0)
+}
+
+fn log_audio_session_summary(stats: &AudioSessionStats) {
+    log::info!(
+        "Audio session summary: chunks={}, samples={}, peak_raw={}, peak_sent={}, raw_noise_chunks={}, sent_speech_chunks={}, avg_gain={:.2}x",
+        stats.chunks,
+        stats.samples,
+        stats.peak_raw_amplitude,
+        stats.peak_sent_amplitude,
+        stats.chunks_above_raw_noise_floor,
+        stats.chunks_above_sent_speech_floor,
+        stats.average_effective_gain()
+    );
 }
 
 fn emit_audio_visualization(
@@ -481,6 +548,7 @@ impl TranscriptionService {
             let mut last_dropped_seen: usize = 0;
             let mut last_audio_at = Instant::now();
             let mut stall_restarts: u32 = 0;
+            let mut audio_stats = AudioSessionStats::default();
 
             // На macOS/некоторых девайсах при отсутствии разрешения на микрофон или при "пустом" input
             // CoreAudio может отдавать строго нулевые семплы. Это выглядит как "всё работает", но речи нет.
@@ -635,16 +703,17 @@ impl TranscriptionService {
                     &on_audio_level,
                     &on_audio_spectrum,
                 );
+                let amplified_max = max_abs_amplitude(&prepared.amplified_chunk.data);
+                audio_stats.observe(
+                    max_amplitude,
+                    amplified_max,
+                    prepared.amplified_chunk.data.len(),
+                    prepared.effective_gain,
+                );
                 let amplified_chunk = prepared.amplified_chunk;
 
                 // Логируем каждый 20-й чанк для отладки
                 if chunk_count % 20 == 0 {
-                    let amplified_max: i32 = amplified_chunk
-                        .data
-                        .iter()
-                        .map(|&s| (s as i32).abs())
-                        .max()
-                        .unwrap_or(0);
                     log::debug!("Audio processing: chunk #{}, original_max={}, amplified_max={}, gain={:.2}x",
                         chunk_count, max_amplitude, amplified_max, prepared.effective_gain);
                 }
@@ -822,6 +891,24 @@ impl TranscriptionService {
                 if *status_arc.read().await == RecordingStatus::Processing && rx.is_empty() {
                     log::debug!("Audio processor queue drained after recording stop");
                     break;
+                }
+            }
+            log_audio_session_summary(&audio_stats);
+            if audio_stats.looks_too_quiet_for_stt() {
+                log::warn!(
+                    "Audio session looked too quiet for STT: peak_raw={}, peak_sent={}, chunks={}. Empty transcript is likely caused by the selected input device or microphone level.",
+                    audio_stats.peak_raw_amplitude,
+                    audio_stats.peak_sent_amplitude,
+                    audio_stats.chunks
+                );
+                if last_quality != Some("Poor") {
+                    on_connection_quality_for_processor(
+                        "Poor".to_string(),
+                        Some(
+                            "Очень тихий сигнал с микрофона. Проверьте выбранный input device и уровень микрофона."
+                                .to_string(),
+                        ),
+                    );
                 }
             }
             log::info!(
@@ -1642,6 +1729,43 @@ mod tests {
                 is_closed: false,
             }))
         }
+    }
+
+    #[test]
+    fn audio_session_stats_flags_long_low_signal_session() {
+        let mut stats = AudioSessionStats::default();
+        for _ in 0..AUDIO_LOW_SIGNAL_MIN_CHUNKS {
+            stats.observe(120, 480, 480, 4.0);
+        }
+
+        assert!(stats.looks_too_quiet_for_stt());
+        assert_eq!(stats.peak_raw_amplitude, 120);
+        assert_eq!(stats.peak_sent_amplitude, 480);
+        assert_eq!(stats.chunks_above_sent_speech_floor, 0);
+    }
+
+    #[test]
+    fn audio_session_stats_does_not_flag_speech_like_peak() {
+        let mut stats = AudioSessionStats::default();
+        for _ in 0..(AUDIO_LOW_SIGNAL_MIN_CHUNKS - 1) {
+            stats.observe(120, 480, 480, 4.0);
+        }
+        stats.observe(1200, 4800, 480, 4.0);
+
+        assert!(!stats.looks_too_quiet_for_stt());
+        assert_eq!(stats.peak_raw_amplitude, 1200);
+        assert_eq!(stats.peak_sent_amplitude, 4800);
+        assert_eq!(stats.chunks_above_sent_speech_floor, 1);
+    }
+
+    #[test]
+    fn audio_session_stats_does_not_warn_for_short_prebuffer() {
+        let mut stats = AudioSessionStats::default();
+        for _ in 0..(AUDIO_LOW_SIGNAL_MIN_CHUNKS - 1) {
+            stats.observe(0, 0, 480, 4.0);
+        }
+
+        assert!(!stats.looks_too_quiet_for_stt());
     }
 
     #[tokio::test]
