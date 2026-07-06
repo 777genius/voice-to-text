@@ -766,51 +766,61 @@ describe('transcription connect-retry reliability', () => {
   });
 
   it('auto-copy копирует весь видимый текст при остановке записи', async () => {
-    const handlers = new Map<string, any>();
-    appConfigMock.autoCopyToClipboard = true;
+    vi.useFakeTimers();
+    try {
+      const handlers = new Map<string, any>();
+      appConfigMock.autoCopyToClipboard = true;
 
-    listenMock.mockImplementation(async (eventName: string, handler: any) => {
-      handlers.set(eventName, handler);
-      return () => {};
-    });
+      listenMock.mockImplementation(async (eventName: string, handler: any) => {
+        handlers.set(eventName, handler);
+        return () => {};
+      });
 
-    invokeMock.mockResolvedValue(null);
+      invokeMock.mockResolvedValue(null);
 
-    const store = useTranscriptionStore();
-    await store.initialize();
+      const store = useTranscriptionStore();
+      await store.initialize();
 
-    await handlers.get('recording:status')({
-      payload: { session_id: 31, status: 'Recording', stopped_via_hotkey: false },
-    });
+      await handlers.get('recording:status')({
+        payload: { session_id: 31, status: 'Recording', stopped_via_hotkey: false },
+      });
 
-    await handlers.get('transcription:partial')({
-      payload: {
-        session_id: 31,
-        text: 'первый ответ',
-        timestamp: 1,
-        is_segment_final: true,
-        start: 0,
-        duration: 1,
-      },
-    });
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 31,
+          text: 'первый ответ',
+          timestamp: 1,
+          is_segment_final: true,
+          start: 0,
+          duration: 1,
+        },
+      });
 
-    await handlers.get('transcription:final')({
-      payload: {
-        session_id: 31,
-        text: 'второй ответ',
-        timestamp: 2,
-        start: 1,
-        duration: 1,
-      },
-    });
+      await handlers.get('transcription:final')({
+        payload: {
+          session_id: 31,
+          text: 'второй ответ',
+          timestamp: 2,
+          start: 1,
+          duration: 1,
+        },
+      });
 
-    await handlers.get('recording:status')({
-      payload: { session_id: 31, status: 'Idle', stopped_via_hotkey: false },
-    });
+      await handlers.get('recording:status')({
+        payload: { session_id: 31, status: 'Idle', stopped_via_hotkey: false },
+      });
 
-    expect(invokeMock.mock.calls.filter((call) => call[0] === 'copy_to_clipboard_native')).toEqual([
-      ['copy_to_clipboard_native', { text: 'первый ответ второй ответ' }],
-    ]);
+      expect(invokeMock.mock.calls.filter((call) => call[0] === 'copy_to_clipboard_native')).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(500);
+      await flushMicrotasks();
+
+      expect(invokeMock.mock.calls.filter((call) => call[0] === 'copy_to_clipboard_native')).toEqual([
+        ['copy_to_clipboard_native', { text: 'первый ответ второй ответ' }],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('auto-paste вставляет segment-final сразу и не дублирует его на speech-final/Idle', async () => {
@@ -999,6 +1009,350 @@ describe('transcription connect-retry reliability', () => {
       ['auto_paste_text', { text: 'Старый текст' }],
       ['auto_paste_text', { text: 'Новый текст' }],
     ]);
+  });
+
+  it('hotkey stop не вставляет stale partial, если late speech-final пришел пока paste queue занята', async () => {
+    vi.useFakeTimers();
+    try {
+      const handlers = new Map<string, any>();
+      const firstPaste = deferred<null>();
+      appConfigMock.autoPasteText = true;
+
+      listenMock.mockImplementation(async (eventName: string, handler: any) => {
+        handlers.set(eventName, handler);
+        return () => {};
+      });
+
+      let pasteCallCount = 0;
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'auto_paste_text') {
+          pasteCallCount++;
+          return pasteCallCount === 1 ? firstPaste.promise : Promise.resolve(null);
+        }
+        return Promise.resolve(null);
+      });
+
+      const store = useTranscriptionStore();
+      await store.initialize();
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 36, status: 'Recording', stopped_via_hotkey: false },
+      });
+
+      const firstSegment = handlers.get('transcription:partial')({
+        payload: {
+          session_id: 36,
+          text: 'Первый кусок',
+          timestamp: 1,
+          is_segment_final: true,
+          start: 0,
+          duration: 1,
+        },
+      });
+      await flushMicrotasks();
+
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 36,
+          text: 'сырой хвост',
+          timestamp: 2,
+          is_segment_final: false,
+          start: 1,
+          duration: 1,
+        },
+      });
+
+      const idleStop = handlers.get('recording:status')({
+        payload: { session_id: 36, status: 'Idle', stopped_via_hotkey: true },
+      });
+      await flushMicrotasks();
+
+      expect(invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text')).toEqual([
+        ['auto_paste_text', { text: 'Первый кусок' }],
+      ]);
+
+      const lateFinal = handlers.get('transcription:final')({
+        payload: {
+          session_id: 36,
+          text: 'чистовой хвост',
+          timestamp: 3,
+          start: 1,
+          duration: 1,
+        },
+      });
+      await flushMicrotasks();
+
+      firstPaste.resolve(null);
+      await Promise.all([firstSegment, idleStop, lateFinal]);
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      await flushMicrotasks();
+
+      const pasteCalls = invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text');
+      expect(pasteCalls).toEqual([
+        ['auto_paste_text', { text: 'Первый кусок' }],
+        ['auto_paste_text', { text: ' чистовой хвост' }],
+      ]);
+      expect(pasteCalls).not.toContainEqual(['auto_paste_text', { text: ' сырой хвост' }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('hotkey stop вставляет partial после grace, если late final не пришел', async () => {
+    vi.useFakeTimers();
+    try {
+      const handlers = new Map<string, any>();
+      appConfigMock.autoPasteText = true;
+
+      listenMock.mockImplementation(async (eventName: string, handler: any) => {
+        handlers.set(eventName, handler);
+        return () => {};
+      });
+
+      invokeMock.mockResolvedValue(null);
+
+      const store = useTranscriptionStore();
+      await store.initialize();
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 37, status: 'Recording', stopped_via_hotkey: false },
+      });
+
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 37,
+          text: 'последний распознанный текст',
+          timestamp: 1,
+          is_segment_final: false,
+          start: 0,
+          duration: 1,
+        },
+      });
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 37, status: 'Idle', stopped_via_hotkey: true },
+      });
+
+      expect(invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text')).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      await flushMicrotasks();
+
+      expect(invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text')).toEqual([
+        ['auto_paste_text', { text: 'последний распознанный текст' }],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('hotkey stop auto-copy ждёт late speech-final и копирует чистовой текст', async () => {
+    vi.useFakeTimers();
+    try {
+      const handlers = new Map<string, any>();
+      appConfigMock.autoCopyToClipboard = true;
+
+      listenMock.mockImplementation(async (eventName: string, handler: any) => {
+        handlers.set(eventName, handler);
+        return () => {};
+      });
+
+      invokeMock.mockResolvedValue(null);
+
+      const store = useTranscriptionStore();
+      await store.initialize();
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 38, status: 'Recording', stopped_via_hotkey: false },
+      });
+
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 38,
+          text: 'сырой текст',
+          timestamp: 1,
+          is_segment_final: false,
+          start: 0,
+          duration: 1,
+        },
+      });
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 38, status: 'Idle', stopped_via_hotkey: true },
+      });
+
+      expect(invokeMock.mock.calls.filter((call) => call[0] === 'copy_to_clipboard_native')).toEqual([]);
+
+      await handlers.get('transcription:final')({
+        payload: {
+          session_id: 38,
+          text: 'чистовой текст',
+          timestamp: 2,
+          start: 0,
+          duration: 1,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      await flushMicrotasks();
+
+      expect(invokeMock.mock.calls.filter((call) => call[0] === 'copy_to_clipboard_native')).toEqual([
+        ['copy_to_clipboard_native', { text: 'чистовой текст' }],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('non-hotkey Idle вставляет текущий partial после короткого grace, если late final не пришел', async () => {
+    vi.useFakeTimers();
+    try {
+      const handlers = new Map<string, any>();
+      appConfigMock.autoPasteText = true;
+
+      listenMock.mockImplementation(async (eventName: string, handler: any) => {
+        handlers.set(eventName, handler);
+        return () => {};
+      });
+
+      invokeMock.mockResolvedValue(null);
+
+      const store = useTranscriptionStore();
+      await store.initialize();
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 39, status: 'Recording', stopped_via_hotkey: false },
+      });
+
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 39,
+          text: 'текст перед vad stop',
+          timestamp: 1,
+          is_segment_final: false,
+          start: 0,
+          duration: 1,
+        },
+      });
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 39, status: 'Idle', stopped_via_hotkey: false },
+      });
+
+      expect(invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text')).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(500);
+      await flushMicrotasks();
+
+      expect(invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text')).toEqual([
+        ['auto_paste_text', { text: 'текст перед vad stop' }],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('non-hotkey Idle ждёт late speech-final и вставляет чистовой текст вместо partial', async () => {
+    vi.useFakeTimers();
+    try {
+      const handlers = new Map<string, any>();
+      appConfigMock.autoPasteText = true;
+
+      listenMock.mockImplementation(async (eventName: string, handler: any) => {
+        handlers.set(eventName, handler);
+        return () => {};
+      });
+
+      invokeMock.mockResolvedValue(null);
+
+      const store = useTranscriptionStore();
+      await store.initialize();
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 39, status: 'Recording', stopped_via_hotkey: false },
+      });
+
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 39,
+          text: 'сырой vad текст',
+          timestamp: 1,
+          is_segment_final: false,
+          start: 0,
+          duration: 1,
+        },
+      });
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 39, status: 'Idle', stopped_via_hotkey: false },
+      });
+
+      await handlers.get('transcription:final')({
+        payload: {
+          session_id: 39,
+          text: 'чистовой vad текст',
+          timestamp: 2,
+          start: 0,
+          duration: 1,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(500);
+      await flushMicrotasks();
+
+      expect(invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text')).toEqual([
+        ['auto_paste_text', { text: 'чистовой vad текст' }],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('hotkey stop grace не дублирует уже вставленный segment-final', async () => {
+    vi.useFakeTimers();
+    try {
+      const handlers = new Map<string, any>();
+      appConfigMock.autoPasteText = true;
+
+      listenMock.mockImplementation(async (eventName: string, handler: any) => {
+        handlers.set(eventName, handler);
+        return () => {};
+      });
+
+      invokeMock.mockResolvedValue(null);
+
+      const store = useTranscriptionStore();
+      await store.initialize();
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 40, status: 'Recording', stopped_via_hotkey: false },
+      });
+
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 40,
+          text: 'готовый сегмент',
+          timestamp: 1,
+          is_segment_final: true,
+          start: 0,
+          duration: 1,
+        },
+      });
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 40, status: 'Idle', stopped_via_hotkey: true },
+      });
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      await flushMicrotasks();
+
+      expect(invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text')).toEqual([
+        ['auto_paste_text', { text: 'готовый сегмент' }],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('не переводит UI в Idle от позднего Idle старой сессии после нового Recording', async () => {

@@ -263,6 +263,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   let hotkeyStopFinalizeTimer: ReturnType<typeof setTimeout> | null = null;
 
   const HOTKEY_STOP_LATE_FINAL_GRACE_MS = 1_500;
+  const IDLE_STOP_LATE_FINAL_GRACE_MS = 500;
 
   function clientLog(
     event: string,
@@ -740,21 +741,46 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         currentText: normalizedCurrent,
         alreadyPasted: lastPastedFinalText.value,
       });
+      clientLog('auto_paste_skipped', {
+        reason,
+        currentLength: normalizedCurrent.length,
+        alreadyPastedLength: lastPastedFinalText.value.length,
+      }, 'debug');
       return true;
     }
 
     try {
       console.log('[AutoPaste] Pasting new text:', { reason, textToInsert });
+      clientLog('auto_paste_attempt', {
+        reason,
+        textLength: textToInsert.length,
+        currentLength: normalizedCurrent.length,
+        alreadyPastedLength: lastPastedFinalText.value.length,
+      }, 'info');
       await invoke('auto_paste_text', { text: textToInsert });
       if (generation !== autoPasteGeneration) {
         console.log('[AutoPaste] Paste completed after reset, keeping current session baseline:', { reason });
+        clientLog('auto_paste_completed_after_reset', {
+          reason,
+          textLength: textToInsert.length,
+        }, 'warn');
         return true;
       }
       lastPastedFinalText.value = normalizedCurrent;
       console.log('✅ Auto-pasted successfully');
+      clientLog('auto_paste_success', {
+        reason,
+        textLength: textToInsert.length,
+        baselineLength: normalizedCurrent.length,
+      }, 'info');
       return true;
     } catch (err) {
       console.error('❌ Failed to auto-paste:', err);
+      clientLog('auto_paste_failed', {
+        reason,
+        textLength: textToInsert.length,
+        error: String(err),
+      }, 'error');
       return false;
     }
   }
@@ -839,6 +865,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     const currentText = buildCurrentTranscriptionText();
     if (!currentText) {
       console.log('[STT] No transcription text to process after stop:', { reason });
+      clientLog('recording_stop_text_empty', {
+        reason,
+        accumulatedLength: accumulatedText.value.length,
+        partialLength: partialText.value.length,
+        finalLength: finalText.value.length,
+        sessionId: sessionId.value,
+      }, 'warn');
       return false;
     }
 
@@ -860,7 +893,62 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     return true;
   }
 
-  function scheduleHotkeyStopFinalize(payloadSessionId: number): void {
+  /**
+   * Досылает незапечатанный хвост прошлой сессии, если grace-таймер hotkey-стопа
+   * ещё не успел сработать, а новая сессия уже стартует.
+   *
+   * Без этого clearHotkeyStopFinalizeTimer() при быстром рестарте (< grace-окна)
+   * молча выбрасывал поздние финалы: текст оставался в буферах и терялся при reset.
+   * Дельту считаем сразу (baseline вот-вот сбросится), а в очередь ставим задачу
+   * без generation-проверки — этот paste принадлежит уже завершившейся сессии.
+   */
+  function flushPendingHotkeyStopTailBeforeReset(reason: string): void {
+    if (!hotkeyStopFinalizeTimer) return;
+    clearHotkeyStopFinalizeTimer();
+
+    const currentText = buildCurrentTranscriptionText();
+    if (!currentText) return;
+
+    clientLog('hotkey_stop_tail_flush', {
+      reason,
+      textLength: currentText.length,
+      sessionId: sessionId.value,
+    }, 'info');
+
+    if (autoCopyEnabled.value) {
+      invoke('copy_to_clipboard_native', { text: currentText }).catch((err) => {
+        console.error('❌ Failed to auto-copy pending tail before reset:', err);
+      });
+    }
+
+    if (!autoPasteEnabled.value) return;
+
+    const textToInsert = getAutoPasteDelta(currentText);
+    if (!textToInsert.trim()) return;
+
+    const task = autoPasteQueue
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          console.log('[AutoPaste] Pasting pending tail from previous session:', { reason, textToInsert });
+          await invoke('auto_paste_text', { text: textToInsert });
+        } catch (err) {
+          console.error('❌ Failed to paste pending tail before reset:', err);
+        }
+      });
+
+    autoPasteQueue = task.then(
+      () => undefined,
+      () => undefined
+    );
+  }
+
+  function scheduleStopFinalize(
+    payloadSessionId: number,
+    reason: string,
+    delayMs: number,
+    closeReason: string
+  ): void {
     clearHotkeyStopFinalizeTimer();
 
     hotkeyStopFinalizeTimer = setTimeout(async () => {
@@ -870,13 +958,39 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         return;
       }
 
-      await processCurrentTextAfterStop('hotkey_stop_grace');
+      clientLog('hotkey_stop_grace_elapsed', {
+        reason,
+        payloadSessionId,
+        textLength: buildCurrentTranscriptionText().length,
+        accumulatedLength: accumulatedText.value.length,
+        partialLength: partialText.value.length,
+        finalLength: finalText.value.length,
+      }, 'info');
+      await processCurrentTextAfterStop(reason);
 
-      markSessionsClosed(payloadSessionId, 'stopped_via_hotkey:grace');
+      markSessionsClosed(payloadSessionId, closeReason);
       sessionId.value = null;
       awaitingSessionStart.value = false;
       resetTextStateBeforeStart();
-    }, HOTKEY_STOP_LATE_FINAL_GRACE_MS);
+    }, delayMs);
+  }
+
+  function scheduleHotkeyStopFinalize(payloadSessionId: number): void {
+    scheduleStopFinalize(
+      payloadSessionId,
+      'hotkey_stop_grace',
+      HOTKEY_STOP_LATE_FINAL_GRACE_MS,
+      'stopped_via_hotkey:grace'
+    );
+  }
+
+  function scheduleIdleStopFinalize(payloadSessionId: number): void {
+    scheduleStopFinalize(
+      payloadSessionId,
+      'idle_grace',
+      IDLE_STOP_LATE_FINAL_GRACE_MS,
+      'stopped:idle_grace'
+    );
   }
 
   // Actions
@@ -915,6 +1029,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             current_partial: partialText.value,
             last_finalized: lastFinalizedSegmentKey.value
           });
+          clientLog('transcription_partial_event_received', {
+            textLength: event.payload.text.length,
+            isSegmentFinal: event.payload.is_segment_final,
+            start: event.payload.start,
+            duration: event.payload.duration,
+            accumulatedLength: accumulatedText.value.length,
+            partialLength: partialText.value.length,
+            finalLength: finalText.value.length,
+          }, 'debug');
 
           // Если сегмент финализирован (is_final=true, но не speech_final)
           if (event.payload.is_segment_final) {
@@ -1031,6 +1154,14 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             current_final: finalText.value,
             current_partial: partialText.value
           });
+          clientLog('transcription_final_event_received', {
+            textLength: event.payload.text.length,
+            start: event.payload.start,
+            duration: event.payload.duration,
+            accumulatedLength: accumulatedText.value.length,
+            partialLength: partialText.value.length,
+            finalLength: finalText.value.length,
+          }, 'debug');
 
           // `speech_final=true` закрывает текущий utterance/диапазон транскрипта, но не запись.
           // Жизненным циклом записи владеет Rust/VAD или явная команда пользователя.
@@ -1259,6 +1390,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               (status.value !== RecordingStatus.Starting && status.value !== RecordingStatus.Recording))
           ) {
             console.log('Recording starting/started - clearing all text');
+            // Если grace-таймер hotkey-стопа ещё не сработал, досылаем хвост прошлой
+            // сессии до очистки буферов — иначе он молча потеряется.
+            flushPendingHotkeyStopTailBeforeReset('new_session_status');
             clearRecordingErrorState();
             resetTranscriptionBuffersForNewSession();
           }
@@ -1278,12 +1412,16 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               previousStatus,
             }, 'info');
 
-            await processCurrentTextAfterStop('idle');
-
             if (event.payload.stopped_via_hotkey) {
               // Final/partial события могут прийти чуть позже Idle из другой async-задачи.
-              // Не закрываем session_id сразу, иначе потеряем хвост фразы при ручной остановке.
+              // Не обрабатываем partial сразу, иначе можем вставить черновик, а поздний final
+              // исправит только UI. Grace-таймер обработает самый свежий текст один раз.
               scheduleHotkeyStopFinalize(payloadSessionId);
+            } else {
+              // VAD/non-hotkey stop проходит тот же async event pipeline: final может
+              // доехать сразу после Idle. Короткое окно сохраняет прежнюю отзывчивость,
+              // но не вставляет черновой partial перед чистовым speech_final.
+              scheduleIdleStopFinalize(payloadSessionId);
             }
           }
 
@@ -2357,7 +2495,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   }
 
   function prepareForRustHotkeyStart(warmStartExpected = false): void {
-    clearHotkeyStopFinalizeTimer();
+    flushPendingHotkeyStopTailBeforeReset('rust_hotkey_start');
 
     suppressPreviousTranscriptionDisplay('rust_hotkey_start');
     activeRecordingMode.value = appConfig.recordingMode ?? 'dictation';
