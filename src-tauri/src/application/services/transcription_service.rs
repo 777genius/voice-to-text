@@ -1105,62 +1105,6 @@ impl TranscriptionService {
         }
     }
 
-    /// Жёсткая остановка: всегда закрывает STT stream и выкидывает провайдера, без keep-alive.
-    ///
-    /// Нужна для hotkey сценария: пользователь ожидает новую "сессию" с чистого листа при следующем открытии окна,
-    /// и мы не должны получать отложенные partial/final от предыдущей речи после возобновления соединения.
-    pub async fn stop_recording_hard(&self) -> Result<String> {
-        let mut status = self.status.write().await;
-
-        if *status != RecordingStatus::Recording {
-            anyhow::bail!("Not recording");
-        }
-
-        *status = RecordingStatus::Processing;
-        drop(status);
-
-        // Stop audio capture
-        let stop_capture_result = self.audio_capture.write().await.stop_capture().await;
-
-        if let Err(e) = stop_capture_result {
-            log::error!("Failed to stop audio capture: {}", e);
-
-            self.abort_audio_processor_task("audio capture failed to stop during hard stop")
-                .await;
-
-            // Жёсткий фоллбек: закрываем провайдера, чтобы гарантировать чистое состояние.
-            if let Some(mut provider) = self.stt_provider.write().await.take() {
-                let _ = provider.abort().await;
-            }
-
-            *self.status.write().await = RecordingStatus::Idle;
-            return Err(anyhow::anyhow!("Failed to stop audio capture: {}", e));
-        }
-
-        // Даже при hard-stop сначала досылаем уже принятый хвост аудио в STT,
-        // потом закрываем stream. Иначе последние слова могут не попасть в финализацию.
-        self.drain_audio_processor_task("hard-stopping recording")
-            .await;
-
-        // Отменяем таймер неактивности, если он был запущен (на всякий случай)
-        if let Some(timer) = self.inactivity_timer_task.write().await.take() {
-            timer.abort();
-            let _ = timer.await;
-        }
-
-        // Жёстко закрываем провайдера и соединение
-        if let Some(mut provider) = self.stt_provider.write().await.take() {
-            if let Err(e) = provider.stop_stream().await {
-                log::warn!("Failed to stop STT stream cleanly, aborting: {}", e);
-                let _ = provider.abort().await;
-            }
-        }
-
-        *self.status.write().await = RecordingStatus::Idle;
-        log::info!("Recording stopped (hard), provider connection closed");
-        Ok("Transcription completed".to_string())
-    }
-
     /// Get current recording status
     pub async fn get_status(&self) -> RecordingStatus {
         *self.status.read().await
