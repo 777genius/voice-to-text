@@ -26,7 +26,7 @@ pub const AUTO_PASTE_MACOS_CLIPBOARD_THRESHOLD_CHARS: usize = 1;
 
 const VOICETEXT_BUNDLE_IDS: &[&str] = &[VOICETEXT_PROD_BUNDLE_ID, VOICETEXT_DEV_BUNDLE_ID];
 const AUTO_PASTE_PRE_PASTE_DELAY_MS: u64 = 80;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 const AUTO_PASTE_POST_PASTE_COMMIT_DELAY_MS: u64 = 250;
 const AUTO_PASTE_RESTORE_CLIPBOARD_DELAY_MS: u64 = 2_500;
 #[cfg(target_os = "macos")]
@@ -3147,7 +3147,9 @@ end tell"#
                 "sleep:80".to_string(),
                 "paste".to_string(),
             ];
-            if !super::restore_clipboard_after_successful_paste_enabled() {
+            if super::restore_clipboard_after_successful_paste_enabled() {
+                expected.push(format!("sleep:{}", AUTO_PASTE_RESTORE_CLIPBOARD_DELAY_MS));
+            } else {
                 expected.push(format!(
                     "sleep:{}",
                     super::AUTO_PASTE_POST_PASTE_COMMIT_DELAY_MS
