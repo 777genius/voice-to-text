@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.14.0] - 2026-07-07
+
+### Added
+- Added quiet-session detection for recording sessions that receive microphone audio but produce no useful STT transcript.
+
+### Changed
+- Made Deepgram streaming more resilient when keep-alive, finalize, and close events overlap during longer recording sessions.
+- Removed an unused hard-stop transcription path so recording shutdown follows the same safer drain flow.
+
+### Fixed
+- Preserved late finalize transcript text after drain acknowledgement so the last spoken words are less likely to disappear.
+- Delivered transcript updates in order and claimed recording session ids more defensively to avoid stale session races.
+- Improved macOS auto-paste by preferring clipboard paste with focus and window guards.
+- Kept hotkey-stopped recording text visible through the short grace window while final STT events arrive.
+
 ## [0.13.0] - 2026-07-05
 
 ### Added
