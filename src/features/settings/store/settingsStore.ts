@@ -13,7 +13,7 @@ import {
   invokeUpdateSttConfig,
   invokeUpdateUiPreferences,
 } from '@/windowing/stateSync';
-import { normalizeUiLocale, normalizeUiTheme } from '@/i18n.locales';
+import { normalizeUiTheme } from '@/i18n.locales';
 import type { AppTheme, RecordingMode, SaveStatus, SettingsState } from '../domain/types';
 
 export const useSettingsStore = defineStore('settings', () => {
@@ -212,11 +212,12 @@ export const useSettingsStore = defineStore('settings', () => {
     // Синхронизация через state-sync: сохраняем в Rust и уведомляем другие окна
     if (isTauriAvailable() && shouldPersist) {
       if (!changed) return;
+      const preferences = readUiPreferencesFromStorage();
       void invokeUpdateUiPreferences({
-          theme: next,
-          locale: normalizeUiLocale(localStorage.getItem('uiLocale')),
-          useSystemTheme: readUiPreferencesFromStorage().useSystemTheme,
-        }).catch(() => {});
+        theme: next,
+        locale: preferences.locale,
+        useSystemTheme: preferences.useSystemTheme,
+      }).catch(() => {});
     }
   }
 
@@ -236,11 +237,12 @@ export const useSettingsStore = defineStore('settings', () => {
 
     if (isTauriAvailable() && shouldPersist) {
       if (!changed) return;
+      const preferences = readUiPreferencesFromStorage();
       void invokeUpdateUiPreferences({
-          theme: normalizeUiTheme(localStorage.getItem('uiTheme')),
-          locale: normalizeUiLocale(localStorage.getItem('uiLocale')),
-          useSystemTheme: next,
-        }).catch(() => {});
+        theme: preferences.theme,
+        locale: preferences.locale,
+        useSystemTheme: next,
+      }).catch(() => {});
     }
   }
 
