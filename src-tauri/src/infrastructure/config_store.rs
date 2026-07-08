@@ -330,7 +330,16 @@ impl ConfigStore {
         // Best-effort: если файл битый или не читается — всё равно удаляем,
         // чтобы не зацикливаться на каждом старте.
         let marker = match tokio::fs::read_to_string(&path).await {
-            Ok(json) => serde_json::from_str::<PostUpdateMarker>(&json).ok(),
+            Ok(json) => match serde_json::from_str::<PostUpdateMarker>(&json) {
+                Ok(marker) => Some(marker),
+                Err(e) => {
+                    log::warn!("Failed to parse post-update marker: {}", e);
+                    Some(PostUpdateMarker {
+                        version: "unknown".to_string(),
+                        created_at_ms: 0,
+                    })
+                }
+            },
             Err(e) => {
                 log::warn!("Failed to read post-update marker: {}", e);
                 // Файл существует → считаем что апдейт был, даже если payload не удалось прочитать.
@@ -527,6 +536,21 @@ mod tests {
         // Второй раз маркера уже быть не должно.
         let marker2 = ConfigStore::take_post_update_marker().await.unwrap();
         assert!(marker2.is_none());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn invalid_post_update_marker_still_counts_as_update() {
+        let _guard = TestConfigDir::new();
+        let marker_path = ConfigStore::post_update_marker_path().unwrap();
+        std::fs::create_dir_all(marker_path.parent().unwrap()).unwrap();
+        std::fs::write(&marker_path, "{not json").unwrap();
+
+        let marker = ConfigStore::take_post_update_marker().await.unwrap();
+
+        assert!(marker.is_some());
+        assert_eq!(marker.unwrap().version, "unknown");
+        assert!(!marker_path.exists());
     }
 
     #[test]

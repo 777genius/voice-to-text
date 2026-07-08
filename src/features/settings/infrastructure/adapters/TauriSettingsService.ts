@@ -96,7 +96,7 @@ class TauriSettingsService {
       args.doubleSpaceHotkeyEnabled = config.double_space_hotkey_enabled;
     }
     if (typeof config.selected_audio_device === 'string' || config.selected_audio_device === null) {
-      args.selectedAudioDevice = config.selected_audio_device;
+      args.selectedAudioDevice = config.selected_audio_device ?? '';
     }
     if (config.recording_mode === 'dictation' || config.recording_mode === 'live_translation') {
       args.recordingMode = config.recording_mode;
@@ -122,7 +122,7 @@ class TauriSettingsService {
   ): Promise<void> {
     await invoke('start_microphone_test', {
       sensitivity,
-      device_name: deviceName,
+      deviceName,
     });
   }
 
@@ -151,7 +151,7 @@ class TauriSettingsService {
   // Whisper модели
 
   async checkWhisperModel(modelName: string): Promise<boolean> {
-    return invoke<boolean>('check_whisper_model', { model_name: modelName });
+    return invoke<boolean>('check_whisper_model', { modelName });
   }
 }
 

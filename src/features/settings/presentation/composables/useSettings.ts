@@ -6,11 +6,10 @@
 import { computed, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { BackendStreamingProviderType, SttProviderType } from '@/types';
-import { invoke } from '@tauri-apps/api/core';
 import { isTauriAvailable } from '@/utils/tauri';
 import {
   bumpUiPrefsRevision,
-  CMD_UPDATE_UI_PREFERENCES,
+  invokeUpdateUiPreferences,
   readUiPreferencesFromStorage,
   writeUiPreferencesCacheToStorage,
 } from '@/windowing/stateSync';
@@ -184,7 +183,7 @@ export function useSettings() {
           store.setRecordingMode(appConfigStoreInstance.recordingMode);
           store.setOpenaiApiKey(appConfigStoreInstance.openaiApiKey);
         } else {
-          store.setMicrophoneSensitivity(95, { persist: false });
+          store.setMicrophoneSensitivity(100, { persist: false });
           store.setRecordingHotkey('CmdOrCtrl+Shift+X');
           store.setAutoCopyToClipboard(true);
           store.setAutoPasteText(true);
@@ -587,7 +586,7 @@ export function useSettings() {
       }
 
       // UI preferences (theme/locale/system-theme) сохраняем только по "Save".
-      persistUiPreferences();
+      await persistUiPreferences();
       store.capturePersistedState();
 
       store.setSaveStatus('success');
@@ -643,17 +642,15 @@ export function useSettings() {
 
     // Синхронизация через state-sync: сохраняем в Rust и уведомляем другие окна
     if (isTauriAvailable()) {
-      try {
-        void invoke(CMD_UPDATE_UI_PREFERENCES, {
+      void invokeUpdateUiPreferences({
           theme: normalizeUiTheme(store.theme),
           locale: uiLocale,
-          use_system_theme: Boolean(store.useSystemTheme),
-        });
-      } catch {}
+          useSystemTheme: Boolean(store.useSystemTheme),
+        }).catch(() => {});
     }
   }
 
-  function persistUiPreferences(): void {
+  async function persistUiPreferences(): Promise<void> {
     const uiLocale = sttLangToUiLocale(store.language);
 
     // Применяем локально (preview уже мог быть, но это идемпотентно)
@@ -676,13 +673,11 @@ export function useSettings() {
       return;
     }
 
-    try {
-      void invoke(CMD_UPDATE_UI_PREFERENCES, {
-        theme: normalizeUiTheme(store.theme),
-        locale: uiLocale,
-        use_system_theme: Boolean(store.useSystemTheme),
-      });
-    } catch {}
+    await invokeUpdateUiPreferences({
+      theme: normalizeUiTheme(store.theme),
+      locale: uiLocale,
+      useSystemTheme: Boolean(store.useSystemTheme),
+    });
   }
 
   return {

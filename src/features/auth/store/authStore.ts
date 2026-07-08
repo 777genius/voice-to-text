@@ -41,6 +41,11 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function setUnauthenticated(): void {
+    session.value = null;
+    pendingEmail.value = null;
+    userEmail.value = null;
+    error.value = null;
+    errorCode.value = null;
     status.value = 'unauthenticated';
   }
 

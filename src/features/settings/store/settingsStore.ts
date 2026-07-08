@@ -5,14 +5,13 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { BackendStreamingProviderType, SttProviderType } from '@/types';
-import { invoke } from '@tauri-apps/api/core';
 import { isTauriAvailable } from '@/utils/tauri';
 import {
   bumpUiPrefsRevision,
-  CMD_UPDATE_UI_PREFERENCES,
   readUiPreferencesFromStorage,
   writeUiPreferencesCacheToStorage,
   invokeUpdateSttConfig,
+  invokeUpdateUiPreferences,
 } from '@/windowing/stateSync';
 import { normalizeUiLocale, normalizeUiTheme } from '@/i18n.locales';
 import type { AppTheme, RecordingMode, SaveStatus, SettingsState } from '../domain/types';
@@ -213,13 +212,11 @@ export const useSettingsStore = defineStore('settings', () => {
     // Синхронизация через state-sync: сохраняем в Rust и уведомляем другие окна
     if (isTauriAvailable() && shouldPersist) {
       if (!changed) return;
-      try {
-        void invoke(CMD_UPDATE_UI_PREFERENCES, {
+      void invokeUpdateUiPreferences({
           theme: next,
           locale: normalizeUiLocale(localStorage.getItem('uiLocale')),
-          use_system_theme: readUiPreferencesFromStorage().useSystemTheme,
-        });
-      } catch {}
+          useSystemTheme: readUiPreferencesFromStorage().useSystemTheme,
+        }).catch(() => {});
     }
   }
 
@@ -239,13 +236,11 @@ export const useSettingsStore = defineStore('settings', () => {
 
     if (isTauriAvailable() && shouldPersist) {
       if (!changed) return;
-      try {
-        void invoke(CMD_UPDATE_UI_PREFERENCES, {
+      void invokeUpdateUiPreferences({
           theme: normalizeUiTheme(localStorage.getItem('uiTheme')),
           locale: normalizeUiLocale(localStorage.getItem('uiLocale')),
-          use_system_theme: next,
-        });
-      } catch {}
+          useSystemTheme: next,
+        }).catch(() => {});
     }
   }
 

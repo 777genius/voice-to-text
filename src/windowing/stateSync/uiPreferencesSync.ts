@@ -14,9 +14,9 @@ import { createTauriRevisionSync } from '@statesync/tauri';
 
 import {
   CMD_GET_UI_PREFERENCES_SNAPSHOT,
-  CMD_UPDATE_UI_PREFERENCES,
   STATE_SYNC_INVALIDATION_EVENT,
 } from './tauri';
+import { invokeUpdateUiPreferences } from './uiPreferencesWrite';
 import { TOPIC_UI_PREFERENCES } from './topics';
 import type { UiPreferencesSnapshotData } from './contracts';
 import {
@@ -82,11 +82,11 @@ export function createUiPreferencesSync(
             applyUseSystemTheme(stored.useSystemTheme);
 
             try {
-              await invoke(CMD_UPDATE_UI_PREFERENCES, {
+              await invokeUpdateUiPreferences({
                 theme: stored.theme,
                 locale: stored.locale,
-                use_system_theme: stored.useSystemTheme,
-              });
+                useSystemTheme: stored.useSystemTheme,
+              }, invoke);
               localStorage.setItem(UI_PREFS_MIGRATED_TO_RUST_KEY, '1');
             } catch (err: unknown) {
               console.error('[ui-preferences] migration failed:', err);

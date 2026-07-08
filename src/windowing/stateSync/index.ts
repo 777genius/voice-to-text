@@ -25,6 +25,7 @@ export {
 
 export { invokeUpdateAppConfig, type UpdateAppConfigInvokeArgs } from './appConfigWrite';
 export { invokeUpdateSttConfig, type UpdateSttConfigInvokeArgs } from './sttConfigWrite';
+export { invokeUpdateUiPreferences, type UpdateUiPreferencesInvokeArgs } from './uiPreferencesWrite';
 
 export {
   UI_PREFS_THEME_KEY,

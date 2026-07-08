@@ -59,7 +59,7 @@ describe('createUiPreferencesSync', () => {
         return { revision: '5', data: { theme: 'dark', locale: 'ru', use_system_theme: false } };
       }
       if (cmd === CMD_UPDATE_UI_PREFERENCES) {
-        expect(args).toEqual({ theme: 'light', locale: 'en', use_system_theme: true });
+        expect(args).toEqual({ theme: 'light', locale: 'en', useSystemTheme: true });
         return null;
       }
       throw new Error(`unexpected invoke: ${cmd}`);
