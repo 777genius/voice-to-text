@@ -14,42 +14,57 @@ const { t } = useI18n();
 const profile = useProfile();
 
 let unlistenOpened: UnlistenFn | null = null;
+let isUnmounted = false;
 
-function handleClose() {
+async function handleClose() {
   try {
-    invoke('show_recording_window');
-  } catch {}
+    await invoke('show_recording_window');
+  } catch (err) {
+    console.error('Failed to show recording window from profile window:', err);
+  }
 }
 
 function onKeyDown(e: KeyboardEvent) {
   if (e.key === 'Escape') {
-    handleClose();
+    void handleClose();
   }
 }
 
 onMounted(async () => {
+  isUnmounted = false;
   document.addEventListener('keydown', onKeyDown);
 
-  unlistenOpened = await listen<ProfileWindowOpenedPayload>('profile-window-opened', async (event) => {
-    const section = (event.payload?.initialSection ?? 'none') as ProfileSection;
-    // Сбрасываем состояние и подтягиваем свежие данные
-    profile.activeSection.value = 'none';
-    profile.claimError.value = null;
-    profile.giftError.value = null;
-    profile.giftSuccessMessage.value = null;
-    profile.licenseKeyInput.value = '';
-    profile.giftCodeInput.value = '';
-    await profile.fetchProfile(section);
-  });
+  try {
+    const unlisten = await listen<ProfileWindowOpenedPayload>('profile-window-opened', async (event) => {
+      const section = (event.payload?.initialSection ?? 'none') as ProfileSection;
+      // Сбрасываем состояние и подтягиваем свежие данные
+      profile.activeSection.value = 'none';
+      profile.claimError.value = null;
+      profile.giftError.value = null;
+      profile.giftSuccessMessage.value = null;
+      profile.licenseKeyInput.value = '';
+      profile.giftCodeInput.value = '';
+      await profile.fetchProfile(section);
+    });
+    if (isUnmounted) {
+      unlisten();
+      return;
+    }
+    unlistenOpened = unlisten;
+  } catch (err) {
+    console.error('Failed to listen profile window open event:', err);
+  }
 
   // Первоначальная загрузка данных
   await profile.fetchProfile();
 });
 
 onUnmounted(() => {
+  isUnmounted = true;
   document.removeEventListener('keydown', onKeyDown);
   if (unlistenOpened) {
     unlistenOpened();
+    unlistenOpened = null;
   }
 });
 </script>

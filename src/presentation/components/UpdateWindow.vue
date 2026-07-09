@@ -11,6 +11,7 @@ const { t } = useI18n();
 const { loadCachedAvailableUpdate } = useUpdater();
 
 let unlistenOpened: UnlistenFn | null = null;
+let isUnmounted = false;
 
 async function refreshUpdateState() {
   await loadCachedAvailableUpdate();
@@ -27,20 +28,28 @@ async function hideWindow() {
 }
 
 onMounted(async () => {
+  isUnmounted = false;
   await refreshUpdateState();
+  if (isUnmounted) return;
 
   if (!isTauriAvailable()) return;
 
   try {
-    unlistenOpened = await listen('update-window-opened', () => {
+    const unlisten = await listen('update-window-opened', () => {
       void refreshUpdateState();
     });
+    if (isUnmounted) {
+      unlisten();
+      return;
+    }
+    unlistenOpened = unlisten;
   } catch (err) {
     console.error('Failed to listen update window open event:', err);
   }
 });
 
 onUnmounted(() => {
+  isUnmounted = true;
   if (unlistenOpened) {
     unlistenOpened();
     unlistenOpened = null;

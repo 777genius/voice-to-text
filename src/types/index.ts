@@ -75,6 +75,20 @@ export interface IncomingTranslationErrorPayload {
   error_type: string;
 }
 
+export interface LiveTranslationHealthCheckItem {
+  id: string;
+  label: string;
+  ok: boolean;
+  required: boolean;
+  message: string;
+}
+
+export interface LiveTranslationHealthCheck {
+  ok: boolean;
+  checked_at_ms: number;
+  items: LiveTranslationHealthCheckItem[];
+}
+
 export interface ErrorPayload {
   message: string;
   code?: string;

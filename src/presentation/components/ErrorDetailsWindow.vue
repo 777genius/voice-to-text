@@ -15,6 +15,7 @@ const { t } = useI18n();
 const summary = ref('');
 const details = ref('');
 let unlistenOpened: UnlistenFn | null = null;
+let isUnmounted = false;
 
 async function hideWindow() {
   if (!isTauriAvailable()) return;
@@ -38,21 +39,28 @@ function onKeyDown(event: KeyboardEvent) {
 }
 
 onMounted(async () => {
+  isUnmounted = false;
   applyPayload();
   window.addEventListener('keydown', onKeyDown);
 
   if (!isTauriAvailable()) return;
 
   try {
-    unlistenOpened = await listen<ErrorDetailsPayload>('error-details-window-opened', (event) => {
+    const unlisten = await listen<ErrorDetailsPayload>('error-details-window-opened', (event) => {
       applyPayload(event.payload);
     });
+    if (isUnmounted) {
+      unlisten();
+      return;
+    }
+    unlistenOpened = unlisten;
   } catch (err) {
     console.error('Failed to listen error details window open event:', err);
   }
 });
 
 onUnmounted(() => {
+  isUnmounted = true;
   window.removeEventListener('keydown', onKeyDown);
 
   if (unlistenOpened) {

@@ -4,12 +4,13 @@
  * Объединяет все секции и управляет загрузкой/сохранением
  */
 
-import { ref, computed, nextTick, onMounted, watch } from 'vue';
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import UpdateDialog from '@/presentation/components/UpdateDialog.vue';
 import { useUpdater } from '@/composables/useUpdater';
 import { useSettings } from '../composables/useSettings';
 import { useSettingsTheme } from '../composables/useSettingsTheme';
+import { createSettingsSectionFlashController } from '../composables/useSettingsScrollToSection';
 import { useSettingsStore } from '../../store/settingsStore';
 import type { SettingsState } from '../../domain/types';
 import { areSettingsStatesEqual } from '../../domain/settingsState';
@@ -51,6 +52,7 @@ const { openUpdateWindow } = useUpdater();
 const showUpdateDialog = ref(false);
 const settingsStore = useSettingsStore();
 const settingsContentRef = ref<HTMLElement | null>(null);
+const sectionFlash = createSettingsSectionFlashController();
 
 // Загрузка конфигурации при монтировании
 onMounted(async () => {
@@ -70,8 +72,7 @@ async function scrollToPendingSection(): Promise<void> {
   );
   if (el) {
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    el.classList.add('settings-section-flash');
-    setTimeout(() => el.classList.remove('settings-section-flash'), 2200);
+    sectionFlash.flash(el);
   }
 }
 
@@ -82,6 +83,10 @@ watch(
   },
   { immediate: true }
 );
+
+onUnmounted(() => {
+  sectionFlash.cleanup();
+});
 
 const baselineState = ref<SettingsState | null>(null);
 const baselineUiLocale = ref<string>('');

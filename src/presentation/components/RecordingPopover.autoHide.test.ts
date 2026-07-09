@@ -128,6 +128,14 @@ function flushMicrotasks() {
   return Promise.resolve().then(() => Promise.resolve()).then(() => Promise.resolve());
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 async function waitForListenerCount(eventName: string, count: number) {
   for (let i = 0; i < 20; i++) {
     await flushMicrotasks();
@@ -166,6 +174,7 @@ function mountRecordingPopover() {
           errorGeneric: 'Error',
           connecting: 'Connecting',
           listening: 'Listening',
+          incomingTranslationEmpty: 'Incoming subtitles will appear here',
           minimize: 'Minimize',
           close: 'Close',
           settings: 'Settings',
@@ -278,6 +287,76 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     wrapper.unmount();
   });
 
+  it('cleans pending hotkey debounce timer on unmount', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('hotkey:toggle-recording', 1);
+
+    await emitTauriEvent('hotkey:toggle-recording', {});
+    expect(invokeMock).toHaveBeenCalledWith('toggle_recording_with_window');
+
+    wrapper.unmount();
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('cleans pending mini open animation frame on unmount', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:window-shown', 1);
+
+    await emitTauriEvent('recording:window-shown', {});
+    await flushMicrotasks();
+    await nextTick();
+
+    wrapper.unmount();
+
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('disposes recording listener if listen resolves after unmount', async () => {
+    const pendingListen = deferred<() => void>();
+    const unlisten = vi.fn();
+    tauriEventMock.listen.mockImplementation((eventName: string, handler: TauriEventHandler) => {
+      if (eventName === 'recording:window-shown') {
+        return pendingListen.promise;
+      }
+
+      const handlers = tauriEventMock.handlers.get(eventName) ?? [];
+      handlers.push(handler);
+      tauriEventMock.handlers.set(eventName, handlers);
+
+      return Promise.resolve(() => {
+        const current = tauriEventMock.handlers.get(eventName) ?? [];
+        tauriEventMock.handlers.set(
+          eventName,
+          current.filter((item) => item !== handler),
+        );
+      });
+    });
+
+    const wrapper = mountRecordingPopover();
+    for (
+      let i = 0;
+      i < 20 && !tauriEventMock.listen.mock.calls.some((call) => call[0] === 'recording:window-shown');
+      i++
+    ) {
+      await flushMicrotasks();
+      await nextTick();
+    }
+    expect(tauriEventMock.listen.mock.calls.some((call) => call[0] === 'recording:window-shown')).toBe(true);
+
+    wrapper.unmount();
+    pendingListen.resolve(unlisten);
+    await flushMicrotasks();
+    await nextTick();
+
+    expect(unlisten).toHaveBeenCalledTimes(1);
+    expect(
+      tauriEventMock.listen.mock.calls.filter((call) => call[0] === 'recording:window-shown'),
+    ).toHaveLength(1);
+  });
+
   it('blurs mini action buttons after click so focus does not stick across reopen', async () => {
     authStoreMock.isAuthenticated = true;
     cursorOverRecordingWindowMock.value = true;
@@ -329,6 +408,102 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     expect(visibleText).toContain('А должно показывать весь последний текст');
     expect(visibleText.split(/\s+/).length).toBeGreaterThan(18);
     expect(textEl!.classList.contains('overflowing')).toBe(true);
+
+    wrapper.unmount();
+  });
+
+  it('shows incoming subtitles in mini mode instead of the hotkey prompt', async () => {
+    const wrapper = mountRecordingPopover();
+    await flushMicrotasks();
+    await nextTick();
+
+    const store = useTranscriptionStore();
+    const textInner = document.querySelector<HTMLElement>('.mini-transcription-text-inner');
+    const statusDot = document.querySelector<HTMLElement>('.mini-status-dot');
+    expect(textInner).not.toBeNull();
+    expect(statusDot).not.toBeNull();
+
+    store.incomingTranslationStatus = RecordingStatus.Recording;
+    await nextTick();
+    expect(textInner!.textContent?.trim()).toBe('Incoming subtitles will appear here');
+    expect(textInner!.textContent).not.toContain('Press');
+    expect(statusDot!.classList.contains('recording')).toBe(true);
+
+    store.incomingTranslationText = 'перевод собеседника';
+    await nextTick();
+    expect(textInner!.textContent?.trim()).toBe('перевод собеседника');
+
+    store.incomingTranslationError = 'temporary incoming translation failure';
+    await nextTick();
+    expect(textInner!.textContent?.trim()).toBe('temporary incoming translation failure');
+    expect(statusDot!.classList.contains('error')).toBe(true);
+
+    wrapper.unmount();
+  });
+
+  it('keeps the mini window visible when dictation stops while incoming subtitles are active', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:status', 2);
+
+    const store = useTranscriptionStore();
+    store.incomingTranslationStatus = RecordingStatus.Recording;
+    await nextTick();
+
+    await emitTauriEvent('recording:status', {
+      session_id: 42,
+      status: RecordingStatus.Recording,
+      stopped_via_hotkey: false,
+      mode: 'dictation',
+    });
+
+    hideWindowMock.mockClear();
+
+    await emitTauriEvent('recording:status', {
+      session_id: 42,
+      status: RecordingStatus.Idle,
+      stopped_via_hotkey: false,
+      mode: null,
+    });
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(hideWindowMock).not.toHaveBeenCalled();
+    expect(document.querySelector('.mini-transcription-text-inner')?.textContent).toContain(
+      'Incoming subtitles will appear here',
+    );
+
+    wrapper.unmount();
+  });
+
+  it('cancels pending mini hide if incoming subtitles become visible before the timeout fires', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:status', 2);
+
+    await emitTauriEvent('recording:status', {
+      session_id: 51,
+      status: RecordingStatus.Recording,
+      stopped_via_hotkey: false,
+      mode: 'dictation',
+    });
+
+    hideWindowMock.mockClear();
+
+    await emitTauriEvent('recording:status', {
+      session_id: 51,
+      status: RecordingStatus.Idle,
+      stopped_via_hotkey: false,
+      mode: null,
+    });
+
+    const store = useTranscriptionStore();
+    store.incomingTranslationStatus = RecordingStatus.Recording;
+    store.incomingTranslationText = 'late incoming subtitle';
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(hideWindowMock).not.toHaveBeenCalled();
+    expect(document.querySelector('.mini-transcription-text-inner')?.textContent).toContain(
+      'late incoming subtitle',
+    );
 
     wrapper.unmount();
   });

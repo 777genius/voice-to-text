@@ -38,6 +38,18 @@ export function useSettings() {
   const { locale } = useI18n();
   const store = useSettingsStore();
 
+  async function persistUiPreferencesToBackend(payload: {
+    theme: string;
+    locale: string;
+    use_system_theme: boolean;
+  }): Promise<void> {
+    try {
+      await invoke(CMD_UPDATE_UI_PREFERENCES, payload);
+    } catch (err) {
+      console.warn('Failed to persist UI preferences:', err);
+    }
+  }
+
   // Computed для реактивных свойств
   const provider = computed({
     get: () => store.provider,
@@ -608,11 +620,18 @@ export function useSettings() {
       await tauriSettingsService.requestAccessibilityPermission();
 
       // Проверяем разрешение через 2 секунды
-      setTimeout(async () => {
+      setTimeout(() => {
         if (IS_MACOS) {
-          const hasPermission =
-            await tauriSettingsService.checkAccessibilityPermission();
-          store.setAccessibilityPermission(hasPermission);
+          void (async () => {
+            try {
+              const hasPermission =
+                await tauriSettingsService.checkAccessibilityPermission();
+              store.setAccessibilityPermission(hasPermission);
+            } catch (err) {
+              console.error('Ошибка проверки Accessibility:', err);
+              store.setError(String(err));
+            }
+          })();
         }
       }, 2000);
     } catch (err) {
@@ -643,13 +662,11 @@ export function useSettings() {
 
     // Синхронизация через state-sync: сохраняем в Rust и уведомляем другие окна
     if (isTauriAvailable()) {
-      try {
-        void invoke(CMD_UPDATE_UI_PREFERENCES, {
-          theme: normalizeUiTheme(store.theme),
-          locale: uiLocale,
-          use_system_theme: Boolean(store.useSystemTheme),
-        });
-      } catch {}
+      void persistUiPreferencesToBackend({
+        theme: normalizeUiTheme(store.theme),
+        locale: uiLocale,
+        use_system_theme: Boolean(store.useSystemTheme),
+      });
     }
   }
 
@@ -676,13 +693,11 @@ export function useSettings() {
       return;
     }
 
-    try {
-      void invoke(CMD_UPDATE_UI_PREFERENCES, {
-        theme: normalizeUiTheme(store.theme),
-        locale: uiLocale,
-        use_system_theme: Boolean(store.useSystemTheme),
-      });
-    } catch {}
+    void persistUiPreferencesToBackend({
+      theme: normalizeUiTheme(store.theme),
+      locale: uiLocale,
+      use_system_theme: Boolean(store.useSystemTheme),
+    });
   }
 
   return {

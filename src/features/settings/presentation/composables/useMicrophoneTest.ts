@@ -14,6 +14,10 @@ export function useMicrophoneTest() {
 
   // Listener для события уровня громкости
   let levelUnlisten: UnlistenFn | null = null;
+  let startPromise: Promise<void> | null = null;
+  let stopPromise: Promise<number[]> | null = null;
+  let backendStarted = false;
+  let disposed = false;
 
   // AudioContext должен быть "разблокирован" жестом пользователя.
   // Если создавать/стартовать его после await (IPC/таймеры) — WebView может заблокировать звук.
@@ -74,6 +78,20 @@ export function useMicrophoneTest() {
     sensitivity: number,
     deviceName: string | null
   ): Promise<void> {
+    if (disposed) return;
+    if (isTesting.value) return;
+    if (startPromise) return startPromise;
+
+    startPromise = startInternal(sensitivity, deviceName).finally(() => {
+      startPromise = null;
+    });
+    return startPromise;
+  }
+
+  async function startInternal(
+    sensitivity: number,
+    deviceName: string | null
+  ): Promise<void> {
     try {
       error.value = null;
       audioLevel.value = 0;
@@ -84,9 +102,19 @@ export function useMicrophoneTest() {
           audioLevel.value = level;
         }
       );
+      if (disposed) {
+        cleanup();
+        return;
+      }
 
       // Запускаем тест
       await tauriSettingsService.startMicrophoneTest(sensitivity, deviceName);
+      backendStarted = true;
+      if (disposed) {
+        cleanup();
+        await stopBackendTest().catch(() => []);
+        return;
+      }
       isTesting.value = true;
     } catch (err) {
       console.error('Ошибка запуска теста микрофона:', err);
@@ -100,9 +128,10 @@ export function useMicrophoneTest() {
    */
   async function stop(): Promise<number[]> {
     try {
-      const audioSamples = await tauriSettingsService.stopMicrophoneTest();
+      const audioSamples = await stopBackendTest();
 
       isTesting.value = false;
+      backendStarted = false;
       audioLevel.value = 0;
       cleanup();
 
@@ -111,6 +140,7 @@ export function useMicrophoneTest() {
       console.error('Ошибка остановки теста микрофона:', err);
       error.value = String(err);
       isTesting.value = false;
+      backendStarted = false;
       cleanup();
       return [];
     }
@@ -146,9 +176,24 @@ export function useMicrophoneTest() {
     }
   }
 
+  function stopBackendTest(): Promise<number[]> {
+    if (stopPromise) return stopPromise;
+    stopPromise = tauriSettingsService.stopMicrophoneTest().finally(() => {
+      stopPromise = null;
+    });
+    return stopPromise;
+  }
+
   // Очистка при размонтировании компонента
   onUnmounted(() => {
+    disposed = true;
+    const shouldStopBackend = isTesting.value || backendStarted;
+    isTesting.value = false;
+    audioLevel.value = 0;
     cleanup();
+    if (shouldStopBackend) {
+      void stopBackendTest().catch(() => []);
+    }
     if (audioContext && audioContext.state !== 'closed') {
       void audioContext.close().catch(() => {});
     }

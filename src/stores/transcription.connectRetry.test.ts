@@ -1,9 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import { useTranscriptionStore } from './transcription';
 
 const invokeMock = vi.fn();
 const listenMock = vi.fn();
+let consoleSpies: Array<{ mockRestore: () => void }> = [];
 
 const tokenRepoMock = vi.hoisted(() => ({
   get: vi.fn(),
@@ -50,6 +51,22 @@ async function flushMicrotasks() {
   await Promise.resolve();
 }
 
+function liveTranslationHealthCheckOk() {
+  return {
+    ok: true,
+    checked_at_ms: 123,
+    items: [
+      {
+        id: 'openai',
+        label: 'OpenAI key',
+        ok: true,
+        required: true,
+        message: 'OpenAI probe succeeded',
+      },
+    ],
+  };
+}
+
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args: any[]) => invokeMock(...args),
 }));
@@ -85,6 +102,10 @@ vi.mock('../features/auth/domain/entities/Session', () => ({
 
 describe('transcription connect-retry reliability', () => {
   beforeEach(() => {
+    consoleSpies = (['log', 'info', 'warn', 'error'] as const).map((method) =>
+      vi.spyOn(console, method).mockImplementation(() => {})
+    );
+
     setActivePinia(createPinia());
 
     invokeMock.mockReset();
@@ -116,6 +137,47 @@ describe('transcription connect-retry reliability', () => {
     authContainerMock.refreshTokensUseCase.execute.mockResolvedValue({
       accessToken: 'access_new',
     });
+  });
+
+  afterEach(() => {
+    for (const spy of consoleSpies) {
+      spy.mockRestore();
+    }
+    consoleSpies = [];
+  });
+
+  it('cleanup отписывает listener, если initialize listen завершился после cleanup', async () => {
+    const pendingListen = deferred<() => void>();
+    const unlisten = vi.fn();
+    listenMock.mockReturnValueOnce(pendingListen.promise);
+    const store = useTranscriptionStore();
+
+    const initialize = store.initialize();
+    for (let i = 0; i < 20 && listenMock.mock.calls.length === 0; i++) {
+      await flushMicrotasks();
+    }
+    expect(listenMock).toHaveBeenCalledTimes(1);
+
+    store.cleanup();
+    pendingListen.resolve(unlisten);
+    await initialize;
+
+    expect(unlisten).toHaveBeenCalledTimes(1);
+    expect(listenMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('cleanup отписывает уже зарегистрированные listeners, если initialize упал на следующем listen', async () => {
+    const unlistenFirst = vi.fn();
+    listenMock
+      .mockResolvedValueOnce(unlistenFirst)
+      .mockRejectedValueOnce(new Error('listen unavailable'));
+
+    const store = useTranscriptionStore();
+
+    await store.initialize();
+
+    expect(unlistenFirst).toHaveBeenCalledTimes(1);
+    expect(store.error).toContain('listen unavailable');
   });
 
   it('не залипает на "Подключение..." при 401 даже после refresh', async () => {
@@ -188,6 +250,45 @@ describe('transcription connect-retry reliability', () => {
     expect(store.activeRecordingMode).toBe('live_translation');
   });
 
+  it('отменяет отложенный 429 retry при новом Rust hotkey start', async () => {
+    vi.useFakeTimers();
+    const handlers = new Map<string, any>();
+
+    try {
+      listenMock.mockImplementation(async (eventName: string, handler: any) => {
+        handlers.set(eventName, handler);
+        return () => {};
+      });
+      invokeMock.mockResolvedValue(null);
+
+      const store = useTranscriptionStore();
+      await store.initialize();
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 81, status: 'Starting', stopped_via_hotkey: false },
+      });
+      await handlers.get('transcription:error')({
+        payload: {
+          session_id: 81,
+          error: 'Too many active sessions',
+          error_type: 'connection',
+          error_details: {
+            category: 'rate_limited',
+            httpStatus: 429,
+            serverCode: 'TOO_MANY_SESSIONS',
+          },
+        },
+      });
+
+      store.prepareForRustHotkeyStart(false);
+      await vi.advanceTimersByTimeAsync(2_100);
+
+      expect(invokeMock.mock.calls.filter((call) => call[0] === 'start_recording')).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('принимает translation delta как live mode fallback если status event потерялся', async () => {
     const handlers = new Map<string, any>();
     appConfigMock.recordingMode = 'live_translation';
@@ -214,6 +315,32 @@ describe('transcription connect-retry reliability', () => {
     expect(store.activeRecordingMode).toBe('live_translation');
     expect(store.translationText).toBe('Hello world');
     expect(store.displayText).toBe('Hello world');
+  });
+
+  it('не переключает текущую dictation-сессию в live mode из stale translation event', async () => {
+    const handlers = new Map<string, any>();
+    appConfigMock.recordingMode = 'dictation';
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 72, status: 'Recording', stopped_via_hotkey: false },
+    });
+    await handlers.get('translation:delta')({
+      payload: { session_id: 71, text: 'late live translation', is_final: false },
+    });
+
+    expect(store.sessionId).toBe(72);
+    expect(store.status).toBe('Recording');
+    expect(store.activeRecordingMode).toBe('dictation');
+    expect(store.translationText).toBe('');
   });
 
   it('завершает live translation connect-loop сразу по translation:error', async () => {
@@ -251,6 +378,428 @@ describe('transcription connect-retry reliability', () => {
     expect(store.errorType).toBe('authentication');
     expect(authContainerMock.refreshTokensUseCase.execute).not.toHaveBeenCalled();
     expect(authStoreMock.reset).not.toHaveBeenCalled();
+  });
+
+  it('toggle incoming translation вызывает явные start/stop команды и показывает invoke error', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'start_incoming_translation') return Promise.resolve('Incoming translation started');
+      return Promise.resolve(null);
+    });
+
+    const store = useTranscriptionStore();
+    await store.toggleIncomingTranslation();
+
+    expect(invokeMock).toHaveBeenCalledWith('start_incoming_translation');
+    expect(store.incomingTranslationError).toBeNull();
+
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'start_incoming_translation') return Promise.reject('screen audio permission denied');
+      return Promise.resolve(null);
+    });
+
+    await store.toggleIncomingTranslation();
+
+    expect(store.incomingTranslationStatus).toBe('Error');
+    expect(store.incomingTranslationError).toContain('screen audio permission denied');
+  });
+
+  it('incoming translation игнорирует повторный toggle пока команда выполняется', async () => {
+    const pendingStart = deferred<string>();
+
+    listenMock.mockResolvedValue(() => {});
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'start_incoming_translation') return pendingStart.promise;
+      return Promise.resolve(null);
+    });
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    const firstToggle = store.toggleIncomingTranslation();
+    await store.toggleIncomingTranslation();
+
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledWith('start_incoming_translation');
+
+    pendingStart.resolve('Incoming translation started');
+    await firstToggle;
+  });
+
+  it('incoming translation после terminal error повторно запускается через start, а не backend toggle/stop', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue('ok');
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('incoming_translation:error')({
+      payload: { session_id: 610, error: 'OpenAI API key missing', error_type: 'authentication' },
+    });
+
+    await store.toggleIncomingTranslation();
+
+    expect(invokeMock).toHaveBeenCalledWith('start_incoming_translation');
+    expect(invokeMock).not.toHaveBeenCalledWith('toggle_incoming_translation');
+    expect(invokeMock).not.toHaveBeenCalledWith('stop_incoming_translation');
+    expect(store.incomingTranslationError).toBeNull();
+  });
+
+  it('incoming translation active toggle останавливает явной stop командой', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue('ok');
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 611, status: 'Recording' },
+    });
+
+    await store.toggleIncomingTranslation();
+
+    expect(invokeMock).toHaveBeenCalledWith('stop_incoming_translation');
+    expect(invokeMock).not.toHaveBeenCalledWith('toggle_incoming_translation');
+  });
+
+  it('показывает incoming subtitles из source-final и translated delta events', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 201, status: 'Starting' },
+    });
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 201, status: 'Recording' },
+    });
+    await handlers.get('incoming_translation:source-final')({
+      payload: { session_id: 201, text: 'hello from zoom', timestamp: 1 },
+    });
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 201, text: 'привет из zoom', timestamp: 2 },
+    });
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 201, text: 'как дела', timestamp: 3 },
+    });
+
+    expect(store.incomingTranslationSessionId).toBe(201);
+    expect(store.incomingTranslationStatus).toBe('Recording');
+    expect(store.isIncomingTranslationActive).toBe(true);
+    expect(store.incomingSourceText).toBe('hello from zoom');
+    expect(store.incomingTranslationText).toBe('привет из zoom как дела');
+    expect(store.hasIncomingTranslationText).toBe(true);
+    expect(store.incomingTranslationError).toBeNull();
+  });
+
+  it('запускает live translation health-check и сохраняет checklist', async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'run_live_translation_health_check') {
+        return Promise.resolve(liveTranslationHealthCheckOk());
+      }
+      return Promise.resolve(null);
+    });
+
+    const store = useTranscriptionStore();
+
+    const pending = store.runLiveTranslationHealthCheck();
+    expect(store.liveTranslationHealthCheckLoading).toBe(true);
+    await pending;
+
+    expect(invokeMock).toHaveBeenCalledWith('run_live_translation_health_check');
+    expect(store.liveTranslationHealthCheck?.ok).toBe(true);
+    expect(store.liveTranslationHealthCheckSummary).toMatch(/Ready|Готово/);
+    expect(store.liveTranslationHealthCheckError).toBeNull();
+    expect(store.liveTranslationHealthCheckLoading).toBe(false);
+  });
+
+  it('показывает ошибку live translation health-check', async () => {
+    invokeMock.mockRejectedValue('system audio permission denied');
+    const store = useTranscriptionStore();
+
+    await store.runLiveTranslationHealthCheck();
+
+    expect(store.liveTranslationHealthCheck).toBeNull();
+    expect(store.liveTranslationHealthCheckError).toContain('system audio permission denied');
+    expect(store.liveTranslationHealthCheckSummary).toContain('system audio permission denied');
+    expect(store.liveTranslationHealthCheckLoading).toBe(false);
+  });
+
+  it('показывает live translation startup configuration error без ручного health-check', async () => {
+    appConfigMock.recordingMode = 'live_translation';
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'start_recording') {
+        return Promise.reject(
+          'configuration: Virtual microphone output: BlackHole is not ready'
+        );
+      }
+      return Promise.resolve(null);
+    });
+
+    const store = useTranscriptionStore();
+
+    await store.startRecording();
+
+    expect(invokeMock).toHaveBeenCalledWith('start_recording');
+    expect(invokeMock).not.toHaveBeenCalledWith('run_live_translation_health_check');
+    expect(store.status).toBe('Error');
+    expect(store.errorType).toBe('configuration');
+    expect(store.error).toContain('BlackHole');
+  });
+
+  it('изолирует incoming subtitles sessions и игнорирует поздние events старой сессии', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 301, status: 'Recording' },
+    });
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 301, text: 'старый перевод', timestamp: 1 },
+    });
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 302, status: 'Starting' },
+    });
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 301, text: 'поздний старый текст', timestamp: 2 },
+    });
+    await handlers.get('incoming_translation:source-final')({
+      payload: { session_id: 302, text: 'new call audio', timestamp: 3 },
+    });
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 302, text: 'новый перевод', timestamp: 4 },
+    });
+
+    expect(store.incomingTranslationSessionId).toBe(302);
+    expect(store.incomingSourceText).toBe('new call audio');
+    expect(store.incomingTranslationText).toBe('новый перевод');
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 302, status: 'Idle' },
+    });
+
+    expect(store.incomingTranslationStatus).toBe('Idle');
+    expect(store.incomingTranslationSessionId).toBeNull();
+    expect(store.hasIncomingTranslationText).toBe(true);
+  });
+
+  it('incoming translation игнорирует поздние events после Idle закрытой сессии', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 501, status: 'Recording' },
+    });
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 501, text: 'первый перевод', timestamp: 1 },
+    });
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 501, status: 'Idle' },
+    });
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 501, status: 'Recording' },
+    });
+    await handlers.get('incoming_translation:source-final')({
+      payload: { session_id: 501, text: 'late source', timestamp: 2 },
+    });
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 501, text: 'поздний перевод', timestamp: 3 },
+    });
+    await handlers.get('incoming_translation:error')({
+      payload: { session_id: 501, error: 'late auth error', error_type: 'authentication' },
+    });
+
+    expect(store.incomingTranslationStatus).toBe('Idle');
+    expect(store.incomingTranslationSessionId).toBeNull();
+    expect(store.incomingSourceText).toBe('');
+    expect(store.incomingTranslationText).toBe('первый перевод');
+    expect(store.incomingTranslationError).toBeNull();
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 502, status: 'Recording' },
+    });
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 502, text: 'новая сессия', timestamp: 4 },
+    });
+
+    expect(store.incomingTranslationSessionId).toBe(502);
+    expect(store.incomingTranslationStatus).toBe('Recording');
+    expect(store.incomingTranslationText).toBe('новая сессия');
+  });
+
+  it('incoming translation закрывает exact session id, а не весь диапазон ниже него', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 900, status: 'Recording' },
+    });
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 900, text: 'synthetic session', timestamp: 1 },
+    });
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 900, status: 'Idle' },
+    });
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 1, status: 'Recording' },
+    });
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 1, text: 'real backend session', timestamp: 2 },
+    });
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 900, text: 'late synthetic leak', timestamp: 3 },
+    });
+
+    expect(store.incomingTranslationSessionId).toBe(1);
+    expect(store.incomingTranslationStatus).toBe('Recording');
+    expect(store.incomingTranslationText).toBe('real backend session');
+    expect(store.incomingTranslationText).not.toContain('late synthetic leak');
+  });
+
+  it('incoming translation не оживляет terminal Error поздними status/delta events', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 601, status: 'Recording' },
+    });
+    await handlers.get('incoming_translation:source-final')({
+      payload: { session_id: 601, text: 'first source', timestamp: 1 },
+    });
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 601, text: 'первый перевод', timestamp: 2 },
+    });
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 601, status: 'Error' },
+    });
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 601, status: 'Recording' },
+    });
+    await handlers.get('incoming_translation:source-final')({
+      payload: { session_id: 601, text: 'late source', timestamp: 3 },
+    });
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 601, text: 'поздний перевод', timestamp: 4 },
+    });
+
+    expect(store.incomingTranslationStatus).toBe('Error');
+    expect(store.incomingSourceText).toBe('first source');
+    expect(store.incomingTranslationText).toBe('первый перевод');
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 602, status: 'Recording' },
+    });
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 602, text: 'новая сессия', timestamp: 5 },
+    });
+
+    expect(store.incomingTranslationSessionId).toBe(602);
+    expect(store.incomingTranslationStatus).toBe('Recording');
+    expect(store.incomingTranslationText).toBe('новая сессия');
+  });
+
+  it('incoming translation transient errors не ломают subtitles, но terminal status показывает последнюю ошибку', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 401, status: 'Recording' },
+    });
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 401, text: 'первый перевод', timestamp: 1 },
+    });
+    await handlers.get('incoming_translation:error')({
+      payload: { session_id: 401, error: 'temporary network blip', error_type: 'connection' },
+    });
+
+    expect(store.incomingTranslationStatus).toBe('Recording');
+    expect(store.incomingTranslationError).toBeNull();
+    expect(store.incomingTranslationText).toBe('первый перевод');
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 401, status: 'Error' },
+    });
+
+    expect(store.incomingTranslationStatus).toBe('Error');
+    expect(store.incomingTranslationError).toContain('temporary network blip');
+    expect(store.isIncomingTranslationActive).toBe(false);
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 402, status: 'Recording' },
+    });
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 402, text: 'новый перевод', timestamp: 2 },
+    });
+
+    expect(store.incomingTranslationStatus).toBe('Recording');
+    expect(store.incomingTranslationError).toBeNull();
+    expect(store.incomingTranslationText).toBe('новый перевод');
+
+    await handlers.get('incoming_translation:error')({
+      payload: { session_id: 402, error: 'OpenAI API key missing', error_type: 'authentication' },
+    });
+
+    expect(store.incomingTranslationStatus).toBe('Error');
+    expect(store.incomingTranslationError).toContain('OpenAI API key missing');
   });
 
   it('очищает скрытый старый текст, когда приходит новая recording session', async () => {
@@ -1142,6 +1691,60 @@ describe('transcription connect-retry reliability', () => {
       expect(invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text')).toEqual([
         ['auto_paste_text', { text: 'последний распознанный текст' }],
       ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('hotkey stop закрывает session даже если delayed post-stop processing неожиданно упал', async () => {
+    vi.useFakeTimers();
+    try {
+      const handlers = new Map<string, any>();
+
+      listenMock.mockImplementation(async (eventName: string, handler: any) => {
+        handlers.set(eventName, handler);
+        return () => {};
+      });
+
+      invokeMock.mockResolvedValue(null);
+
+      const store = useTranscriptionStore();
+      await store.initialize();
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 137, status: 'Recording', stopped_via_hotkey: false },
+      });
+
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 137,
+          text: 'текст перед неожиданной ошибкой',
+          timestamp: 1,
+          is_segment_final: false,
+          start: 0,
+          duration: 1,
+        },
+      });
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 137, status: 'Idle', stopped_via_hotkey: true },
+      });
+
+      expect(store.sessionId).toBe(137);
+      vi.mocked(console.log).mockImplementationOnce(() => {
+        throw new Error('console down during stop processing');
+      });
+
+      await vi.advanceTimersByTimeAsync(1_500);
+      await flushMicrotasks();
+
+      expect(store.sessionId).toBeNull();
+      expect(store.partialText).toBe('');
+      expect(store.closedSessionIdFloor).toBeGreaterThanOrEqual(137);
+      expect(console.error).toHaveBeenCalledWith(
+        '[STT] Failed to process text after stop:',
+        expect.any(Error)
+      );
     } finally {
       vi.useRealTimers();
     }

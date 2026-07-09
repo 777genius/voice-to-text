@@ -7,6 +7,37 @@ import { BackendStreamingProviderType, SttProviderType } from '@/types';
 const invokeMock = vi.fn();
 const listenMock = vi.fn();
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+async function flushMicrotasks() {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+function makeSnapshotData(overrides: Partial<any> = {}) {
+  return {
+    provider: 'backend',
+    backend_streaming_provider: 'deepgram',
+    language: 'en',
+    auto_detect_language: false,
+    enable_punctuation: true,
+    filter_profanity: false,
+    deepgram_api_key: null,
+    assemblyai_api_key: null,
+    model: null,
+    keep_connection_alive: false,
+    streaming_keyterms: null,
+    ...overrides,
+  };
+}
+
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args: any[]) => invokeMock(...args),
 }));
@@ -234,5 +265,51 @@ describe('useSttConfigStore sync', () => {
     await store.refresh();
     expect(store.revision).toBe('2');
     expect(store.language).toBe('ja');
+  });
+
+  it('concurrent startSync переиспользует in-flight start и не создает второй handle', async () => {
+    const pendingListen = deferred<() => void>();
+    const unlistenFn = vi.fn();
+    listenMock.mockReturnValue(pendingListen.promise);
+    invokeMock.mockResolvedValue({
+      revision: '1',
+      data: makeSnapshotData(),
+    });
+
+    const store = useSttConfigStore();
+    const first = store.startSync();
+    const second = store.startSync();
+
+    for (let i = 0; i < 20 && listenMock.mock.calls.length === 0; i++) {
+      await flushMicrotasks();
+    }
+    expect(listenMock).toHaveBeenCalledTimes(1);
+
+    pendingListen.resolve(unlistenFn);
+    await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
+    expect(store.isSyncing).toBe(true);
+  });
+
+  it('stopSync останавливает late handle, если startSync завершился после stop', async () => {
+    const pendingListen = deferred<() => void>();
+    const unlistenFn = vi.fn();
+    listenMock.mockReturnValueOnce(pendingListen.promise);
+    invokeMock.mockResolvedValue({
+      revision: '1',
+      data: makeSnapshotData(),
+    });
+
+    const store = useSttConfigStore();
+    const start = store.startSync();
+    for (let i = 0; i < 20 && listenMock.mock.calls.length === 0; i++) {
+      await flushMicrotasks();
+    }
+
+    store.stopSync();
+    pendingListen.resolve(unlistenFn);
+
+    await expect(start).resolves.toBe(false);
+    expect(unlistenFn).toHaveBeenCalledTimes(1);
+    expect(store.isSyncing).toBe(false);
   });
 });

@@ -24,6 +24,7 @@ import {
   IncomingTranslationStatusPayload,
   IncomingTranslationTextPayload,
   IncomingTranslationErrorPayload,
+  LiveTranslationHealthCheck,
   EVENT_TRANSCRIPTION_PARTIAL,
   EVENT_TRANSCRIPTION_FINAL,
   EVENT_RECORDING_STATUS,
@@ -75,9 +76,19 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   // Incoming subtitles: system audio -> STT -> text translation. Separate lifecycle.
   const incomingTranslationStatus = ref<RecordingStatus>(RecordingStatus.Idle);
   const incomingTranslationSessionId = ref<number | null>(null);
+  const incomingClosedSessionIds = ref<Set<number>>(new Set());
   const incomingSourceText = ref<string>('');
   const incomingTranslationText = ref<string>('');
   const incomingTranslationError = ref<string | null>(null);
+  const incomingTranslationCommandInFlight = ref(false);
+  const lastIncomingTranslationError = ref<{
+    sessionId: number;
+    error: string;
+    errorType: string;
+  } | null>(null);
+  const liveTranslationHealthCheck = ref<LiveTranslationHealthCheck | null>(null);
+  const liveTranslationHealthCheckLoading = ref<boolean>(false);
+  const liveTranslationHealthCheckError = ref<string | null>(null);
 
   // Retry логика подключения (когда запись ещё не стартанула и мы пытаемся подключиться к STT)
   const isConnecting = ref<boolean>(false);
@@ -93,6 +104,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   // Счётчик auto-retry при 429 (rate limit). Не даём ретраить бесконечно — максимум 2 раза подряд.
   let rateLimitRetryCount = 0;
+  let rateLimitRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let rateLimitRetryGeneration = 0;
   const RATE_LIMIT_MAX_RETRIES = 2;
   let isForcingLogout = false;
   let refreshAuthForSttPromise: Promise<boolean> | null = null;
@@ -158,6 +171,14 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     lastConnectFailureRaw.value = '';
     lastConnectFailureDetails.value = null;
     suppressNextErrorStatus = false;
+  }
+
+  function clearRateLimitRetryTimer(): void {
+    rateLimitRetryGeneration++;
+    if (rateLimitRetryTimer) {
+      clearTimeout(rateLimitRetryTimer);
+      rateLimitRetryTimer = null;
+    }
   }
 
   // После успешной авторизации (или смены пользователя) очищаем "залипшую" ошибку на экране записи.
@@ -293,6 +314,20 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   let unlistenIncomingSourceFinal: UnlistenFn | null = null;
   let unlistenIncomingDelta: UnlistenFn | null = null;
   let unlistenIncomingError: UnlistenFn | null = null;
+  let listenerGeneration = 0;
+
+  async function registerStoreListener<T>(
+    generation: number,
+    eventName: string,
+    handler: Parameters<typeof listen<T>>[1],
+  ): Promise<UnlistenFn | null> {
+    const unlisten = await listen<T>(eventName, handler);
+    if (generation !== listenerGeneration) {
+      unlisten();
+      return null;
+    }
+    return unlisten;
+  }
 
   function bumpLastSeenSessionId(next: number): void {
     if (next > lastSeenSessionId.value) {
@@ -313,6 +348,33 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     // Если текущая сессия попала под "закрытую" — принудительно сбрасываем её.
     if (sessionId.value !== null && sessionId.value <= closedSessionIdFloor.value) {
       sessionId.value = null;
+    }
+  }
+
+  function isIncomingTranslationSessionClosed(payloadSessionId: number): boolean {
+    return payloadSessionId > 0 && incomingClosedSessionIds.value.has(payloadSessionId);
+  }
+
+  function markIncomingTranslationSessionClosed(sessionIdToClose: number, reason: string): void {
+    if (!sessionIdToClose || sessionIdToClose <= 0) return;
+
+    if (!incomingClosedSessionIds.value.has(sessionIdToClose)) {
+      const next = new Set(incomingClosedSessionIds.value);
+      next.add(sessionIdToClose);
+      while (next.size > 128) {
+        const oldest = next.values().next().value;
+        if (typeof oldest !== 'number') break;
+        next.delete(oldest);
+      }
+      incomingClosedSessionIds.value = next;
+      console.warn('[IncomingTranslation] Marked session closed', sessionIdToClose, 'reason:', reason);
+    }
+
+    if (
+      incomingTranslationSessionId.value !== null &&
+      incomingTranslationSessionId.value === sessionIdToClose
+    ) {
+      incomingTranslationSessionId.value = null;
     }
   }
 
@@ -386,11 +448,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       }
     }
 
-    if (isTranslationEvent) {
+    const isActiveSessionEvent = payloadSessionId === sessionId.value;
+    if (isTranslationEvent && isActiveSessionEvent) {
       activeRecordingMode.value = 'live_translation';
     }
 
-    return payloadSessionId === sessionId.value;
+    return isActiveSessionEvent;
   }
 
   async function reconcileBackendStatus(reason: string): Promise<RecordingStatus | null> {
@@ -951,27 +1014,38 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   ): void {
     clearHotkeyStopFinalizeTimer();
 
-    hotkeyStopFinalizeTimer = setTimeout(async () => {
+    hotkeyStopFinalizeTimer = setTimeout(() => {
       hotkeyStopFinalizeTimer = null;
 
       if (sessionId.value !== payloadSessionId) {
         return;
       }
 
-      clientLog('hotkey_stop_grace_elapsed', {
-        reason,
-        payloadSessionId,
-        textLength: buildCurrentTranscriptionText().length,
-        accumulatedLength: accumulatedText.value.length,
-        partialLength: partialText.value.length,
-        finalLength: finalText.value.length,
-      }, 'info');
-      await processCurrentTextAfterStop(reason);
-
-      markSessionsClosed(payloadSessionId, closeReason);
-      sessionId.value = null;
-      awaitingSessionStart.value = false;
-      resetTextStateBeforeStart();
+      void (async () => {
+        try {
+          clientLog('hotkey_stop_grace_elapsed', {
+            reason,
+            payloadSessionId,
+            textLength: buildCurrentTranscriptionText().length,
+            accumulatedLength: accumulatedText.value.length,
+            partialLength: partialText.value.length,
+            finalLength: finalText.value.length,
+          }, 'info');
+          await processCurrentTextAfterStop(reason);
+        } catch (err) {
+          console.error('[STT] Failed to process text after stop:', err);
+          clientLog('recording_stop_text_processing_failed', {
+            reason,
+            payloadSessionId,
+            error: String(err),
+          }, 'error');
+        } finally {
+          markSessionsClosed(payloadSessionId, closeReason);
+          sessionId.value = null;
+          awaitingSessionStart.value = false;
+          resetTextStateBeforeStart();
+        }
+      })();
     }, delayMs);
   }
 
@@ -1008,10 +1082,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     // Отписываемся от старых listeners перед регистрацией новых
     // Это предотвращает дублирование событий при повторной инициализации
     cleanup();
+    const generation = listenerGeneration;
 
     try {
       // Listen to partial transcription events
-      unlistenPartial = await listen<PartialTranscriptionPayload>(
+      unlistenPartial = await registerStoreListener<PartialTranscriptionPayload>(
+        generation,
         EVENT_TRANSCRIPTION_PARTIAL,
         async (event) => {
           if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:partial')) {
@@ -1135,9 +1211,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
         }
       );
+      if (!unlistenPartial) return;
 
       // Listen to final transcription events
-      unlistenFinal = await listen<FinalTranscriptionPayload>(
+      unlistenFinal = await registerStoreListener<FinalTranscriptionPayload>(
+        generation,
         EVENT_TRANSCRIPTION_FINAL,
         async (event) => {
           if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:final')) {
@@ -1264,9 +1342,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
         }
       );
+      if (!unlistenFinal) return;
 
       // Listen to recording status events
-      unlistenStatus = await listen<RecordingStatusPayload>(
+      unlistenStatus = await registerStoreListener<RecordingStatusPayload>(
+        generation,
         EVENT_RECORDING_STATUS,
         async (event) => {
           console.log('Recording status changed:', event.payload);
@@ -1485,9 +1565,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
         }
       );
+      if (!unlistenStatus) return;
 
       // Listen to transcription error events
-      unlistenError = await listen<TranscriptionErrorPayload>(
+      unlistenError = await registerStoreListener<TranscriptionErrorPayload>(
+        generation,
         EVENT_TRANSCRIPTION_ERROR,
         async (event) => {
           if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:error')) {
@@ -1595,11 +1677,19 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             if (wasStarting && rateLimitRetryCount < RATE_LIMIT_MAX_RETRIES) {
               rateLimitRetryCount++;
               const delaySec = serverCode === 'TOO_MANY_SESSIONS' ? 2 : 5;
+              const retrySessionId = event.payload.session_id;
               console.warn(`[STT] 429 (${serverCode ?? 'unknown'}), auto-retry #${rateLimitRetryCount} через ${delaySec}с`);
               suppressNextErrorStatus = true;
               status.value = RecordingStatus.Starting;
-              setTimeout(() => {
-                if (status.value === RecordingStatus.Starting) {
+              clearRateLimitRetryTimer();
+              const retryGeneration = ++rateLimitRetryGeneration;
+              rateLimitRetryTimer = setTimeout(() => {
+                rateLimitRetryTimer = null;
+                if (
+                  retryGeneration === rateLimitRetryGeneration &&
+                  status.value === RecordingStatus.Starting &&
+                  (retrySessionId <= 0 || sessionId.value === null || sessionId.value === retrySessionId)
+                ) {
                   // Важно: вызываем напрямую startRecordingWithRetry, а не startRecording,
                   // чтобы не сбросить rateLimitRetryCount (он нужен для защиты от бесконечных ретраев).
                   void startRecordingWithRetry(3);
@@ -1713,9 +1803,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           status.value = RecordingStatus.Error;
         }
       );
+      if (!unlistenError) return;
 
       // Listen to connection quality events
-      unlistenConnectionQuality = await listen<ConnectionQualityPayload>(
+      unlistenConnectionQuality = await registerStoreListener<ConnectionQualityPayload>(
+        generation,
         EVENT_CONNECTION_QUALITY,
         (event) => {
           if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'connection:quality')) {
@@ -1732,9 +1824,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
         }
       );
+      if (!unlistenConnectionQuality) return;
 
       // Live translation events. Идут параллельно STT — не пересекаются с auto-paste/copy/history.
-      unlistenTranslationDelta = await listen<TranslationDeltaPayload>(
+      unlistenTranslationDelta = await registerStoreListener<TranslationDeltaPayload>(
+        generation,
         EVENT_TRANSLATION_DELTA,
         (event) => {
           if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'translation:delta')) {
@@ -1745,8 +1839,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
         }
       );
+      if (!unlistenTranslationDelta) return;
 
-      unlistenTranslationError = await listen<TranslationErrorPayload>(
+      unlistenTranslationError = await registerStoreListener<TranslationErrorPayload>(
+        generation,
         EVENT_TRANSLATION_ERROR,
         (event) => {
           if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'translation:error')) {
@@ -1770,12 +1866,27 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           console.error('[translation:error]', event.payload);
         }
       );
+      if (!unlistenTranslationError) return;
 
-      unlistenIncomingStatus = await listen<IncomingTranslationStatusPayload>(
+      unlistenIncomingStatus = await registerStoreListener<IncomingTranslationStatusPayload>(
+        generation,
         EVENT_INCOMING_TRANSLATION_STATUS,
         (event) => {
           const payloadSessionId = event.payload.session_id;
           const nextStatus = event.payload.status;
+          if (isIncomingTranslationSessionClosed(payloadSessionId)) {
+            return;
+          }
+
+          if (
+            incomingTranslationStatus.value === RecordingStatus.Error &&
+            incomingTranslationSessionId.value === payloadSessionId &&
+            nextStatus !== RecordingStatus.Idle &&
+            nextStatus !== RecordingStatus.Error
+          ) {
+            return;
+          }
+
           const isNewStart =
             nextStatus === RecordingStatus.Starting || nextStatus === RecordingStatus.Recording;
 
@@ -1784,6 +1895,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             incomingSourceText.value = '';
             incomingTranslationText.value = '';
             incomingTranslationError.value = null;
+            lastIncomingTranslationError.value = null;
           }
 
           if (
@@ -1794,16 +1906,26 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
 
           incomingTranslationStatus.value = nextStatus;
+          if (nextStatus === RecordingStatus.Error) {
+            const lastError = lastIncomingTranslationError.value;
+            if (lastError?.sessionId === payloadSessionId && !incomingTranslationError.value) {
+              incomingTranslationError.value = lastError.error;
+            }
+          }
           if (nextStatus === RecordingStatus.Idle) {
-            incomingTranslationSessionId.value = null;
+            markIncomingTranslationSessionClosed(payloadSessionId, 'status:idle');
           }
         }
       );
+      if (!unlistenIncomingStatus) return;
 
-      unlistenIncomingSourceFinal = await listen<IncomingTranslationTextPayload>(
+      unlistenIncomingSourceFinal = await registerStoreListener<IncomingTranslationTextPayload>(
+        generation,
         EVENT_INCOMING_TRANSLATION_SOURCE_FINAL,
         (event) => {
+          if (isIncomingTranslationSessionClosed(event.payload.session_id)) return;
           if (event.payload.session_id !== incomingTranslationSessionId.value) return;
+          if (incomingTranslationStatus.value === RecordingStatus.Error) return;
           if (event.payload.text) {
             incomingSourceText.value = appendTranscriptText(
               incomingSourceText.value,
@@ -1812,16 +1934,18 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
         }
       );
+      if (!unlistenIncomingSourceFinal) return;
 
-      unlistenIncomingDelta = await listen<IncomingTranslationTextPayload>(
+      unlistenIncomingDelta = await registerStoreListener<IncomingTranslationTextPayload>(
+        generation,
         EVENT_INCOMING_TRANSLATION_DELTA,
         (event) => {
+          if (isIncomingTranslationSessionClosed(event.payload.session_id)) return;
           if (event.payload.session_id !== incomingTranslationSessionId.value) return;
+          if (incomingTranslationStatus.value === RecordingStatus.Error) return;
           if (event.payload.text) {
             incomingTranslationError.value = null;
-            if (incomingTranslationStatus.value === RecordingStatus.Error) {
-              incomingTranslationStatus.value = RecordingStatus.Recording;
-            }
+            lastIncomingTranslationError.value = null;
             incomingTranslationText.value = appendTranscriptText(
               incomingTranslationText.value,
               event.payload.text
@@ -1829,10 +1953,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
         }
       );
+      if (!unlistenIncomingDelta) return;
 
-      unlistenIncomingError = await listen<IncomingTranslationErrorPayload>(
+      unlistenIncomingError = await registerStoreListener<IncomingTranslationErrorPayload>(
+        generation,
         EVENT_INCOMING_TRANSLATION_ERROR,
         (event) => {
+          if (isIncomingTranslationSessionClosed(event.payload.session_id)) return;
           if (
             incomingTranslationSessionId.value !== null &&
             event.payload.session_id !== incomingTranslationSessionId.value
@@ -1842,16 +1969,25 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           incomingTranslationSessionId.value = event.payload.session_id;
           if (['configuration', 'authentication', 'rate_limited'].includes(event.payload.error_type)) {
             incomingTranslationError.value = event.payload.error;
+            lastIncomingTranslationError.value = null;
             incomingTranslationStatus.value = RecordingStatus.Error;
+            markIncomingTranslationSessionClosed(event.payload.session_id, 'terminal_error');
           } else {
+            lastIncomingTranslationError.value = {
+              sessionId: event.payload.session_id,
+              error: event.payload.error,
+              errorType: event.payload.error_type,
+            };
             console.warn('[incoming_translation:transient_error]', event.payload);
           }
         }
       );
+      if (!unlistenIncomingError) return;
 
       console.log('Event listeners initialized successfully');
     } catch (err) {
       console.error('Failed to initialize event listeners:', err);
+      cleanup();
       const raw = formatUnknownError(err);
       setRecordingError(null, raw, null, `Failed to initialize: ${raw}`);
     }
@@ -1878,6 +2014,18 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   function detectErrorTypeFromRaw(raw: string): TranscriptionErrorPayload['error_type'] | null {
     const lower = raw.toLowerCase();
+    if (lower.startsWith('configuration:') || lower.includes('(type: configuration)')) {
+      return 'configuration';
+    }
+    if (lower.startsWith('processing:')) {
+      return 'processing';
+    }
+    if (lower.startsWith('connection:')) {
+      return 'connection';
+    }
+    if (lower.startsWith('timeout:')) {
+      return 'timeout';
+    }
     // Ошибки захвата аудио/микрофона часто прилетают как raw строка из invoke('start_recording'),
     // в т.ч. с суффиксом "(type: processing)".
     if (
@@ -1898,6 +2046,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
     if (isLicenseInactiveFromRaw(raw)) {
       return 'limit_exceeded';
+    }
+    if (
+      lower.includes('live translation health check failed') ||
+      lower.includes('health check failed')
+    ) {
+      return 'configuration';
     }
     if (
       lower.includes('authentication error') ||
@@ -2490,11 +2644,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   async function startRecording(): Promise<void> {
     // Пользовательский вызов — сбрасываем счётчик rate limit,
     // чтобы прошлые авто-ретраи не блокировали новый запуск.
+    clearRateLimitRetryTimer();
     rateLimitRetryCount = 0;
     await startRecordingWithRetry(3);
   }
 
   function prepareForRustHotkeyStart(warmStartExpected = false): void {
+    clearRateLimitRetryTimer();
     flushPendingHotkeyStopTailBeforeReset('rust_hotkey_start');
 
     suppressPreviousTranscriptionDisplay('rust_hotkey_start');
@@ -2509,11 +2665,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   }
 
   async function reconnect(): Promise<void> {
+    clearRateLimitRetryTimer();
     rateLimitRetryCount = 0;
     await startRecordingWithRetry(3);
   }
 
   async function stopRecording(reason = 'manual') {
+    clearRateLimitRetryTimer();
     try {
       clientLog('recording_stop_requested', {
         reason,
@@ -2576,16 +2734,62 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   async function toggleIncomingTranslation(): Promise<void> {
     if (!isTauriAvailable()) return;
+    if (incomingTranslationStatus.value === RecordingStatus.Processing) return;
+    if (incomingTranslationCommandInFlight.value) return;
+
+    const shouldStop =
+      incomingTranslationStatus.value === RecordingStatus.Starting ||
+      incomingTranslationStatus.value === RecordingStatus.Recording;
+    const command = shouldStop ? 'stop_incoming_translation' : 'start_incoming_translation';
+
     incomingTranslationError.value = null;
+    incomingTranslationCommandInFlight.value = true;
     try {
-      await invoke<string>('toggle_incoming_translation');
+      await invoke<string>(command);
     } catch (err) {
       incomingTranslationError.value = String(err);
       incomingTranslationStatus.value = RecordingStatus.Error;
+    } finally {
+      incomingTranslationCommandInFlight.value = false;
+    }
+  }
+
+  async function runLiveTranslationHealthCheck(): Promise<void> {
+    if (!isTauriAvailable() || liveTranslationHealthCheckLoading.value) return;
+    const recordingBusy =
+      status.value === RecordingStatus.Starting ||
+      status.value === RecordingStatus.Recording ||
+      status.value === RecordingStatus.Processing;
+    const incomingBusy =
+      incomingTranslationStatus.value === RecordingStatus.Starting ||
+      incomingTranslationStatus.value === RecordingStatus.Recording ||
+      incomingTranslationStatus.value === RecordingStatus.Processing;
+    if (recordingBusy || incomingBusy) return;
+    await executeLiveTranslationHealthCheck();
+  }
+
+  async function executeLiveTranslationHealthCheck(): Promise<LiveTranslationHealthCheck | null> {
+    if (!isTauriAvailable() || liveTranslationHealthCheckLoading.value) return null;
+    liveTranslationHealthCheckLoading.value = true;
+    liveTranslationHealthCheckError.value = null;
+    try {
+      liveTranslationHealthCheck.value = await invoke<LiveTranslationHealthCheck>(
+        'run_live_translation_health_check',
+      );
+      return liveTranslationHealthCheck.value;
+    } catch (err) {
+      liveTranslationHealthCheckError.value = formatUnknownError(err);
+      liveTranslationHealthCheck.value = null;
+      return null;
+    } finally {
+      liveTranslationHealthCheckLoading.value = false;
     }
   }
 
   function cleanup() {
+    listenerGeneration++;
+    clearRateLimitRetryTimer();
+
     if (unlistenPartial) {
       unlistenPartial();
       unlistenPartial = null;
@@ -2664,6 +2868,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     incomingSourceText,
     incomingTranslationText,
     incomingTranslationError,
+    liveTranslationHealthCheck,
+    liveTranslationHealthCheckLoading,
+    liveTranslationHealthCheckError,
 
     // Computed
     isStarting,
@@ -2693,6 +2900,14 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         incomingTranslationStatus.value === RecordingStatus.Processing
     ),
     hasIncomingTranslationText: computed(() => incomingTranslationText.value.trim().length > 0),
+    liveTranslationHealthCheckSummary: computed(() => {
+      if (liveTranslationHealthCheckLoading.value) return i18n.global.t('main.healthCheckRunning');
+      if (liveTranslationHealthCheckError.value) return liveTranslationHealthCheckError.value;
+      if (!liveTranslationHealthCheck.value) return '';
+      return liveTranslationHealthCheck.value.ok
+        ? i18n.global.t('main.healthCheckReady')
+        : i18n.global.t('main.healthCheckNeedsAttention');
+    }),
 
     // Actions
     initialize,
@@ -2705,6 +2920,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     clearText,
     toggleRecording,
     toggleIncomingTranslation,
+    runLiveTranslationHealthCheck,
     reconcileBackendStatus,
     cleanup,
   };

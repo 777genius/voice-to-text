@@ -20,8 +20,11 @@ export function useOAuth() {
   const state = useAuthState();
 
   let unsubscribeDeepLink: UnsubscribeFn | null = null;
+  let subscribeDeepLinkPromise: Promise<UnsubscribeFn | null> | null = null;
+  let startOAuthPromise: Promise<void> | null = null;
   let oauthTimeoutId: ReturnType<typeof setTimeout> | null = null;
   let pollIntervalId: ReturnType<typeof setInterval> | null = null;
+  let oauthGeneration = 0;
 
   // Для защиты от двойной обработки
   const lastProcessedCode = ref<string | null>(null);
@@ -88,9 +91,14 @@ export function useOAuth() {
     };
   }
 
+  function isCurrentOAuthGeneration(generation: number): boolean {
+    return generation === oauthGeneration;
+  }
+
   async function handleDeepLink(urlString: string): Promise<void> {
+    const generation = oauthGeneration;
     const result = parseOAuthCallback(urlString);
-    if (!result) return;
+    if (!result || oauthCompleted || !isCurrentOAuthGeneration(generation)) return;
 
     clearOAuthTimeout();
     stopPolling();
@@ -116,19 +124,53 @@ export function useOAuth() {
         const response = await container.exchangeOAuthCodeUseCase.execute({
           exchangeCode: result.exchangeCode,
         });
+        if (!isCurrentOAuthGeneration(generation)) return;
         store.setAuthenticated(response.session);
       } catch (e) {
-        handleError(e);
+        if (isCurrentOAuthGeneration(generation)) {
+          handleError(e);
+        }
       }
     }
   }
 
-  function startPolling(): void {
+  async function ensureDeepLinkSubscribed(generation: number): Promise<boolean> {
+    if (unsubscribeDeepLink) return true;
+    if (subscribeDeepLinkPromise) {
+      return Boolean(await subscribeDeepLinkPromise);
+    }
+
+    const subscribePromise = container.deepLinkListener
+      .subscribe(handleDeepLink)
+      .then((unsubscribe) => {
+        if (generation !== oauthGeneration) {
+          unsubscribe();
+          return null;
+        }
+        unsubscribeDeepLink = unsubscribe;
+        return unsubscribe;
+      })
+      .finally(() => {
+        if (subscribeDeepLinkPromise === subscribePromise) {
+          subscribeDeepLinkPromise = null;
+        }
+      });
+    subscribeDeepLinkPromise = subscribePromise;
+
+    return Boolean(await subscribeDeepLinkPromise);
+  }
+
+  function startPolling(generation: number): void {
     stopPolling();
 
     const deviceId = container.tokenRepository.getDeviceId();
 
     pollIntervalId = setInterval(async () => {
+      if (generation !== oauthGeneration) {
+        stopPolling();
+        return;
+      }
+
       // Если OAuth уже завершён (через deep link), прекращаем
       if (oauthCompleted) {
         stopPolling();
@@ -137,14 +179,16 @@ export function useOAuth() {
 
       try {
         const result = await container.authRepository.pollOAuth(deviceId);
+        if (!isCurrentOAuthGeneration(generation) || oauthCompleted) return;
 
-        if (result.status === 'completed' && result.session && !oauthCompleted) {
+        if (result.status === 'completed' && result.session) {
           oauthCompleted = true;
           stopPolling();
           clearOAuthTimeout();
 
           // Сохраняем сессию
           await container.tokenRepository.save(result.session);
+          if (!isCurrentOAuthGeneration(generation)) return;
           store.setAuthenticated(result.session);
 
           // Переключаем фокус на окно приложения
@@ -161,23 +205,37 @@ export function useOAuth() {
   }
 
   async function startGoogleOAuth(): Promise<void> {
+    if (startOAuthPromise) return startOAuthPromise;
+
+    const generation = ++oauthGeneration;
     store.setLoading();
     oauthCompleted = false;
 
+    const promise = startGoogleOAuthInternal(generation).finally(() => {
+      if (startOAuthPromise === promise) {
+        startOAuthPromise = null;
+      }
+    });
+    startOAuthPromise = promise;
+    return promise;
+  }
+
+  async function startGoogleOAuthInternal(generation: number): Promise<void> {
     try {
       // Подписываемся на deep link события
-      if (!unsubscribeDeepLink) {
-        unsubscribeDeepLink = await container.deepLinkListener.subscribe(handleDeepLink);
-      }
+      const subscribed = await ensureDeepLinkSubscribed(generation);
+      if (!subscribed || generation !== oauthGeneration) return;
 
       await container.startGoogleOAuthUseCase.execute();
+      if (generation !== oauthGeneration) return;
 
       // Запускаем polling параллельно с deep link
-      startPolling();
+      startPolling(generation);
 
       // Timeout на случай если ни deep link, ни polling не сработает
       clearOAuthTimeout();
       oauthTimeoutId = setTimeout(() => {
+        if (generation !== oauthGeneration) return;
         stopPolling();
         if (store.isLoading) {
           store.setUnauthenticated();
@@ -185,11 +243,16 @@ export function useOAuth() {
         oauthTimeoutId = null;
       }, OAUTH_TIMEOUT_MS);
     } catch (e) {
-      handleError(e);
+      if (generation === oauthGeneration) {
+        handleError(e);
+      }
     }
   }
 
   function cancelOAuth(): void {
+    oauthGeneration++;
+    startOAuthPromise = null;
+    subscribeDeepLinkPromise = null;
     clearOAuthTimeout();
     stopPolling();
     oauthCompleted = true;
@@ -199,8 +262,12 @@ export function useOAuth() {
   }
 
   function cleanup(): void {
+    oauthGeneration++;
+    startOAuthPromise = null;
+    subscribeDeepLinkPromise = null;
     clearOAuthTimeout();
     stopPolling();
+    oauthCompleted = true;
     if (unsubscribeDeepLink) {
       unsubscribeDeepLink();
       unsubscribeDeepLink = null;

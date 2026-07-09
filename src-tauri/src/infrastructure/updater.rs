@@ -233,9 +233,15 @@ pub async fn check_and_install_update<R: Runtime>(app: AppHandle<R>) -> Result<S
                         // - либо "сколько скачано всего"
                         // - либо "размер последнего чанка"
                         // Поэтому используем простую эвристику, чтобы корректно считать прогресс.
-                        let mut downloaded_total = downloaded_total_progress
-                            .lock()
-                            .expect("update downloaded_total mutex poisoned");
+                        let mut downloaded_total = match downloaded_total_progress.lock() {
+                            Ok(guard) => guard,
+                            Err(poisoned) => {
+                                log::warn!(
+                                    "update downloaded_total mutex poisoned; recovering progress state"
+                                );
+                                poisoned.into_inner()
+                            }
+                        };
 
                         let previous = *downloaded_total;
                         let downloaded = if let Some(total) = content_length {

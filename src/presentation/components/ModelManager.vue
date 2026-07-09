@@ -24,6 +24,22 @@ const { t } = useI18n();
 let unlistenProgress: UnlistenFn | null = null;
 let unlistenStarted: UnlistenFn | null = null;
 let unlistenCompleted: UnlistenFn | null = null;
+let isUnmounted = false;
+
+function cleanupDownloadListeners() {
+  if (unlistenProgress) {
+    unlistenProgress();
+    unlistenProgress = null;
+  }
+  if (unlistenStarted) {
+    unlistenStarted();
+    unlistenStarted = null;
+  }
+  if (unlistenCompleted) {
+    unlistenCompleted();
+    unlistenCompleted = null;
+  }
+}
 
 // Загрузка списка моделей
 const loadModels = async () => {
@@ -92,39 +108,64 @@ const formatQuality = (qualityFactor: number): string => {
   return t('modelManager.qualityValue', { value: percent });
 };
 
-onMounted(async () => {
-  await loadModels();
-
-  // Слушаем события загрузки
-  unlistenStarted = await listen<string>(EVENT_WHISPER_DOWNLOAD_STARTED, (event) => {
-    console.log('Download started:', event.payload);
-    downloadingModel.value = event.payload;
-    downloadProgress.value = 0;
-  });
-
-  unlistenProgress = await listen<WhisperModelDownloadProgress>(
-    EVENT_WHISPER_DOWNLOAD_PROGRESS,
-    (event) => {
-      if (downloadingModel.value === event.payload.model_name) {
-        downloadProgress.value = event.payload.progress;
-      }
+async function setupDownloadListeners() {
+  try {
+    const started = await listen<string>(EVENT_WHISPER_DOWNLOAD_STARTED, (event) => {
+      console.log('Download started:', event.payload);
+      downloadingModel.value = event.payload;
+      downloadProgress.value = 0;
+    });
+    if (isUnmounted) {
+      started();
+      return;
     }
-  );
+    unlistenStarted = started;
 
-  unlistenCompleted = await listen<string>(EVENT_WHISPER_DOWNLOAD_COMPLETED, async (event) => {
-    console.log('Download completed:', event.payload);
-    downloadingModel.value = null;
-    downloadProgress.value = 0;
+    const progress = await listen<WhisperModelDownloadProgress>(
+      EVENT_WHISPER_DOWNLOAD_PROGRESS,
+      (event) => {
+        if (downloadingModel.value === event.payload.model_name) {
+          downloadProgress.value = event.payload.progress;
+        }
+      }
+    );
+    if (isUnmounted) {
+      progress();
+      return;
+    }
+    unlistenProgress = progress;
 
-    // Перезагружаем список моделей чтобы обновить статус
-    await loadModels();
-  });
+    const completed = await listen<string>(EVENT_WHISPER_DOWNLOAD_COMPLETED, async (event) => {
+      console.log('Download completed:', event.payload);
+      downloadingModel.value = null;
+      downloadProgress.value = 0;
+
+      // Перезагружаем список моделей чтобы обновить статус
+      await loadModels();
+    });
+    if (isUnmounted) {
+      completed();
+      return;
+    }
+    unlistenCompleted = completed;
+  } catch (err) {
+    cleanupDownloadListeners();
+    console.error('Failed to listen whisper model download events:', err);
+    errorMessage.value = String(err);
+  }
+}
+
+onMounted(async () => {
+  isUnmounted = false;
+  await loadModels();
+  if (isUnmounted) return;
+
+  await setupDownloadListeners();
 });
 
 onUnmounted(() => {
-  if (unlistenProgress) unlistenProgress();
-  if (unlistenStarted) unlistenStarted();
-  if (unlistenCompleted) unlistenCompleted();
+  isUnmounted = true;
+  cleanupDownloadListeners();
 });
 </script>
 
