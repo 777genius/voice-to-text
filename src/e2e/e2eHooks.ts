@@ -1,6 +1,7 @@
 import type { Pinia } from 'pinia';
 
 import { invoke } from '@tauri-apps/api/core';
+import { emit } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
 import { useAppConfigStore } from '@/stores/appConfig';
@@ -12,6 +13,7 @@ import { createSession } from '@/features/auth/domain/entities/Session';
 type E2eApi = {
   getWindowLabel: () => string;
   invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
+  emitEvent: (event: string, payload?: unknown) => Promise<void>;
 
   getAppConfig: () => {
     revision: string;
@@ -92,6 +94,7 @@ export function installE2eHooks(pinia: Pinia): void {
   window.__E2E__ = {
     getWindowLabel: () => String(getCurrentWindow().label),
     invoke: (command, args) => invoke(command, args as any),
+    emitEvent: (event, payload) => emit(event, payload),
     getAppConfig: () => ({
       revision: appConfig.revision,
       recordingHotkey: appConfig.recordingHotkey,

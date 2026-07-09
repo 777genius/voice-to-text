@@ -1,5 +1,14 @@
 import { spawnSync } from 'node:child_process';
+import path from 'node:path';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = fileURLToPath(new URL('.', import.meta.url));
+
+function resolveNodeBin(name) {
+  const suffix = process.platform === 'win32' ? '.cmd' : '';
+  return path.resolve(__dirname, '../node_modules/.bin', `${name}${suffix}`);
+}
 
 /**
  * Tauri WebDriver e2e:
@@ -14,9 +23,9 @@ if (process.platform === 'darwin') {
   process.exit(0);
 }
 
-const result = spawnSync('pnpm', ['wdio', 'run', 'e2e-tests/wdio.conf.mjs'], {
+const result = spawnSync(resolveNodeBin('wdio'), ['run', 'e2e-tests/wdio.conf.mjs'], {
   stdio: 'inherit',
-  shell: true,
+  shell: process.platform === 'win32',
   env: {
     ...process.env,
     // Включаем e2e hooks и упрощаем авторизацию в debug режиме.
@@ -25,5 +34,9 @@ const result = spawnSync('pnpm', ['wdio', 'run', 'e2e-tests/wdio.conf.mjs'], {
   },
 });
 
-process.exit(result.status ?? 1);
+if (result.error) {
+  console.error(`[e2e] failed to run local WebdriverIO binary: ${result.error.message}`);
+  process.exit(1);
+}
 
+process.exit(result.status ?? 1);

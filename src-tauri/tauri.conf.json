@@ -6,8 +6,8 @@
     "build": {
         "frontendDist": "../dist",
         "devUrl": "http://localhost:1420",
-        "beforeDevCommand": "pnpm dev",
-        "beforeBuildCommand": "pnpm build",
+        "beforeDevCommand": "npm run dev",
+        "beforeBuildCommand": "npm run build",
         "beforeBundleCommand": "node src-tauri/scripts/prepare-swift-runtime.mjs"
     },
     "app": {
