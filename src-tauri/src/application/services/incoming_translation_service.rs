@@ -59,6 +59,18 @@ impl IncomingTranslationConfig {
     }
 }
 
+fn normalize_incoming_translation_target_language(value: &str) -> String {
+    let language = value.trim();
+    if language.is_empty()
+        || language.eq_ignore_ascii_case("auto")
+        || language.eq_ignore_ascii_case("multi")
+    {
+        TARGET_LANGUAGE_DEFAULT.to_string()
+    } else {
+        language.to_string()
+    }
+}
+
 #[derive(Clone)]
 pub struct IncomingTranslationCallbacks {
     pub on_source_final: Arc<dyn Fn(String) + Send + Sync>,
@@ -314,6 +326,8 @@ impl IncomingTranslationService {
                     .to_string(),
             ));
         }
+        let target_language =
+            normalize_incoming_translation_target_language(&config.target_language);
 
         *self.status.write().await = RecordingStatus::Starting;
         (callbacks.on_status)(RecordingStatus::Starting);
@@ -381,7 +395,7 @@ impl IncomingTranslationService {
             translation_rx,
             translator,
             callbacks.clone(),
-            config.target_language.clone(),
+            target_language.clone(),
             running.clone(),
             pending_translations.clone(),
             self.status.clone(),
@@ -524,7 +538,7 @@ impl IncomingTranslationService {
             log::info!(
                 "IncomingTranslationService: session {} started, target={}",
                 config.session_id,
-                config.target_language
+                target_language
             );
         } else {
             log::warn!(
@@ -1758,6 +1772,20 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn incoming_translation_target_language_is_trimmed_and_defaulted() {
+        assert_eq!(
+            normalize_incoming_translation_target_language("  de\n"),
+            "de"
+        );
+        assert_eq!(normalize_incoming_translation_target_language(""), "ru");
+        assert_eq!(normalize_incoming_translation_target_language("auto"), "ru");
+        assert_eq!(
+            normalize_incoming_translation_target_language("MULTI"),
+            "ru"
+        );
+    }
+
     #[tokio::test]
     async fn start_cleans_stt_stream_when_loopback_capture_start_fails() {
         let provider_state = std::sync::Arc::new(TrackingProviderState::default());
@@ -1910,7 +1938,7 @@ mod tests {
 
         let mut config = IncomingTranslationConfig::new_with_defaults(SttConfig::default(), 102);
         config.openai_api_key = "sk-test".to_string();
-        config.target_language = "ru".to_string();
+        config.target_language = "  ru\n".to_string();
 
         service.start(config, callbacks).await.unwrap();
 

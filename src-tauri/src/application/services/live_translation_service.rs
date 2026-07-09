@@ -69,6 +69,18 @@ impl LiveTranslationConfig {
     }
 }
 
+fn normalize_live_translation_target_language(value: &str) -> String {
+    let language = value.trim();
+    if language.is_empty()
+        || language.eq_ignore_ascii_case("auto")
+        || language.eq_ignore_ascii_case("multi")
+    {
+        TRANSLATION_TARGET_LANGUAGE_DEFAULT.to_string()
+    } else {
+        language.to_string()
+    }
+}
+
 #[derive(Clone)]
 pub struct LiveTranslationCallbacks {
     pub on_transcript_delta: Arc<dyn Fn(String) + Send + Sync>,
@@ -267,6 +279,7 @@ impl LiveTranslationService {
             self.transition_to_error().await;
             return Err(err);
         }
+        let target_language = normalize_live_translation_target_language(&config.target_language);
 
         // 2. Output device - fail cheap, before OpenAI session creation.
         let mut output_concrete = match self.audio_factory.create_translation_output() {
@@ -326,10 +339,9 @@ impl LiveTranslationService {
         }
 
         // 4. OpenAI client connect
-        let mut client = self.client_factory.create(
-            config.openai_api_key.clone(),
-            config.target_language.clone(),
-        );
+        let mut client = self
+            .client_factory
+            .create(config.openai_api_key.clone(), target_language.clone());
         let openai_rx = match client.connect().await {
             Ok(rx) => rx,
             Err(e) => {
@@ -402,7 +414,7 @@ impl LiveTranslationService {
             log::info!(
                 "LiveTranslationService: session {} started, target={}, sensitivity={}",
                 config.session_id,
-                config.target_language,
+                target_language,
                 config.microphone_sensitivity
             );
         } else {
@@ -1015,6 +1027,14 @@ mod tests {
             RecordingStatus::Processing
         ));
         assert!(!should_mark_live_recording_started(RecordingStatus::Idle));
+    }
+
+    #[test]
+    fn live_translation_target_language_is_trimmed_and_defaulted() {
+        assert_eq!(normalize_live_translation_target_language("  es\n"), "es");
+        assert_eq!(normalize_live_translation_target_language(""), "en");
+        assert_eq!(normalize_live_translation_target_language("auto"), "en");
+        assert_eq!(normalize_live_translation_target_language("MULTI"), "en");
     }
 
     #[tokio::test]
@@ -1717,9 +1737,9 @@ mod tests {
             },
         };
 
-        svc.start_translation(valid_config(91), callbacks)
-            .await
-            .unwrap();
+        let mut config = valid_config(91);
+        config.target_language = "  es\n".to_string();
+        svc.start_translation(config, callbacks).await.unwrap();
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         while tokio::time::Instant::now() < deadline {
@@ -1750,7 +1770,7 @@ mod tests {
         );
         assert_eq!(
             realtime_state.target_language.lock().unwrap().as_deref(),
-            Some("en")
+            Some("es")
         );
         assert!(
             realtime_state.received_samples.lock().unwrap().len() >= OPENAI_INPUT_FRAME_SAMPLES
