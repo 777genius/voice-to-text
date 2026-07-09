@@ -503,6 +503,140 @@ describe('transcription connect-retry reliability', () => {
     expect(store.closedSessionIdFloor).toBeLessThan(10);
   });
 
+  it('connect error закрывает failed attempt session и игнорирует поздний partial', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'start_recording') return Promise.resolve('Recording started');
+      return Promise.resolve(null);
+    });
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    const startPromise = store.startRecording();
+    await flushMicrotasks();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 31, status: 'Starting', stopped_via_hotkey: false },
+    });
+    await handlers.get('transcription:error')({
+      payload: {
+        session_id: 31,
+        error: 'Invalid STT configuration',
+        error_type: 'configuration',
+      },
+    });
+    await handlers.get('transcription:partial')({
+      payload: {
+        session_id: 31,
+        text: 'late partial from failed connect attempt',
+        timestamp: 2,
+        is_segment_final: false,
+        start: 0,
+        duration: 1,
+      },
+    });
+
+    await startPromise;
+
+    expect(store.status).toBe('Error');
+    expect(store.sessionId).toBeNull();
+    expect(store.closedSessionIdFloor).toBeLessThan(31);
+    expect(store.partialText).toBe('');
+    expect(store.errorType).toBe('configuration');
+  });
+
+  it('new start закрывает previous session до adoption поздних transcription events', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'start_recording') return Promise.resolve('Recording started');
+      return Promise.resolve(null);
+    });
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 61, status: 'Recording', stopped_via_hotkey: false },
+    });
+    await handlers.get('transcription:partial')({
+      payload: {
+        session_id: 61,
+        text: 'old live text',
+        timestamp: 1,
+        is_segment_final: false,
+        start: 0,
+        duration: 1,
+      },
+    });
+
+    const startPromise = store.startRecording();
+    await flushMicrotasks();
+
+    await handlers.get('transcription:partial')({
+      payload: {
+        session_id: 61,
+        text: 'late old text after new start',
+        timestamp: 2,
+        is_segment_final: false,
+        start: 1,
+        duration: 1,
+      },
+    });
+
+    expect(store.sessionId).toBeNull();
+    expect(store.status).toBe('Starting');
+    expect(store.partialText).toBe('');
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 62, status: 'Recording', stopped_via_hotkey: false },
+    });
+    await startPromise;
+
+    expect(store.sessionId).toBe(62);
+    expect(store.status).toBe('Recording');
+  });
+
+  it('не усыновляет invalid session_id=0 из transcription event во время start', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    store.prepareForRustHotkeyStart(false);
+
+    await handlers.get('transcription:partial')({
+      payload: {
+        session_id: 0,
+        text: 'invalid zero session text',
+        timestamp: 1,
+        is_segment_final: false,
+        start: 0,
+        duration: 1,
+      },
+    });
+
+    expect(store.sessionId).toBeNull();
+    expect(store.status).toBe('Starting');
+    expect(store.partialText).toBe('');
+  });
+
   it('toggle incoming translation вызывает явные start/stop команды и показывает invoke error', async () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'start_incoming_translation') return Promise.resolve('Incoming translation started');
@@ -592,6 +726,70 @@ describe('transcription connect-retry reliability', () => {
 
     expect(invokeMock).toHaveBeenCalledWith('stop_incoming_translation');
     expect(invokeMock).not.toHaveBeenCalledWith('toggle_incoming_translation');
+  });
+
+  it('incoming translation stop error сохраняет active state и следующий toggle снова делает stop', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'stop_incoming_translation') return Promise.reject('stop failed');
+      return Promise.resolve('ok');
+    });
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 612, status: 'Recording' },
+    });
+
+    await store.toggleIncomingTranslation();
+
+    expect(store.incomingTranslationStatus).toBe('Recording');
+    expect(store.incomingTranslationError).toContain('stop failed');
+
+    await store.toggleIncomingTranslation();
+
+    expect(invokeMock.mock.calls.filter((call) => call[0] === 'stop_incoming_translation')).toHaveLength(2);
+    expect(invokeMock).not.toHaveBeenCalledWith('start_incoming_translation');
+  });
+
+  it('incoming translation stop success закрывает session даже если Idle event потерян', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'stop_incoming_translation') return Promise.resolve('Incoming translation stopped');
+      return Promise.resolve('ok');
+    });
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 613, status: 'Recording' },
+    });
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 613, text: 'перевод до стопа', timestamp: 1 },
+    });
+
+    await store.toggleIncomingTranslation();
+
+    expect(store.incomingTranslationStatus).toBe('Idle');
+    expect(store.incomingTranslationSessionId).toBeNull();
+
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 613, text: ' поздний хвост', timestamp: 2 },
+    });
+
+    expect(store.incomingTranslationText).toBe('перевод до стопа');
   });
 
   it('показывает incoming subtitles из source-final и translated delta events', async () => {
@@ -1104,6 +1302,65 @@ describe('transcription connect-retry reliability', () => {
     expect(store.sessionId).toBeNull();
     expect(store.closedSessionIdFloor).toBeGreaterThanOrEqual(23);
     expect(store.partialText).toBe('');
+    expect(store.error).toBeNull();
+  });
+
+  it('background transcription error после stop закрывает session и игнорирует поздний текст', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'stop_recording') return Promise.resolve('Recording stopped');
+      if (cmd === 'get_recording_status') return Promise.resolve('Idle');
+      return Promise.resolve(null);
+    });
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 24, status: 'Recording', stopped_via_hotkey: false },
+    });
+
+    const stopPromise = store.stopRecording();
+    expect(store.status).toBe('Processing');
+
+    await handlers.get('transcription:error')({
+      payload: {
+        session_id: 24,
+        error: 'provider closed after stop',
+        error_type: 'connection',
+      },
+    });
+    await handlers.get('transcription:partial')({
+      payload: {
+        session_id: 24,
+        text: 'late partial after background transcription error',
+        timestamp: 2,
+        is_segment_final: false,
+        start: 0,
+        duration: 1,
+      },
+    });
+    await handlers.get('transcription:final')({
+      payload: {
+        session_id: 24,
+        text: 'late final after background transcription error',
+        timestamp: 3,
+      },
+    });
+
+    await stopPromise;
+
+    expect(store.status).toBe('Idle');
+    expect(store.sessionId).toBeNull();
+    expect(store.closedSessionIdFloor).toBeGreaterThanOrEqual(24);
+    expect(store.partialText).toBe('');
+    expect(store.finalText).toBe('');
     expect(store.error).toBeNull();
   });
 
