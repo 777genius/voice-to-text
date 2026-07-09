@@ -106,6 +106,30 @@ export const useSettingsStore = defineStore('settings', () => {
   }));
 
   // Действия
+  async function persistSttLanguage(next: string): Promise<boolean> {
+    try {
+      await invokeUpdateSttConfig({
+        provider: SttProviderType.Backend,
+        language: next,
+      });
+      lastPersistedSttLanguage = next;
+      return true;
+    } catch (err) {
+      console.warn('Failed to persist STT language:', err);
+      return false;
+    }
+  }
+
+  async function persistUiPreferencesSafely(
+    next: Parameters<typeof invokeUpdateUiPreferences>[0],
+  ): Promise<void> {
+    try {
+      await invokeUpdateUiPreferences(next);
+    } catch (err) {
+      console.warn('Failed to persist UI preferences:', err);
+    }
+  }
+
   function setProvider(_value: SttProviderType) {
     // Выбор провайдера выключен: всегда используем Backend.
     provider.value = SttProviderType.Backend;
@@ -137,15 +161,12 @@ export const useSettingsStore = defineStore('settings', () => {
 
     // Смена языка — событие редкое, но всё равно делаем debounce чтобы не дергать IPC лишний раз.
     sttLanguagePersistTimer = setTimeout(() => {
-      if (!language.value) return;
-      if (lastPersistedSttLanguage === language.value) return;
-      try {
-        void invokeUpdateSttConfig({
-          provider: SttProviderType.Backend,
-          language: language.value,
-        });
-        lastPersistedSttLanguage = language.value;
-      } catch {}
+      sttLanguagePersistTimer = null;
+      const nextPersistedLanguage = String(language.value ?? '').trim();
+      language.value = nextPersistedLanguage;
+      if (!nextPersistedLanguage) return;
+      if (lastPersistedSttLanguage === nextPersistedLanguage) return;
+      void persistSttLanguage(nextPersistedLanguage);
     }, 150);
   }
 
@@ -161,15 +182,7 @@ export const useSettingsStore = defineStore('settings', () => {
     if (!next) return;
     if (lastPersistedSttLanguage === next) return;
 
-    try {
-      await invokeUpdateSttConfig({
-        provider: SttProviderType.Backend,
-        language: next,
-      });
-      lastPersistedSttLanguage = next;
-    } catch {
-      // Не мешаем UX: если flush не удался при закрытии окна — пользователь увидит это при следующей попытке записи/сохранения.
-    }
+    await persistSttLanguage(next);
   }
 
   function setDeepgramApiKey(value: string) {
@@ -213,11 +226,11 @@ export const useSettingsStore = defineStore('settings', () => {
     if (isTauriAvailable() && shouldPersist) {
       if (!changed) return;
       const preferences = readUiPreferencesFromStorage();
-      void invokeUpdateUiPreferences({
+      void persistUiPreferencesSafely({
         theme: next,
         locale: preferences.locale,
         useSystemTheme: preferences.useSystemTheme,
-      }).catch(() => {});
+      });
     }
   }
 
@@ -238,11 +251,11 @@ export const useSettingsStore = defineStore('settings', () => {
     if (isTauriAvailable() && shouldPersist) {
       if (!changed) return;
       const preferences = readUiPreferencesFromStorage();
-      void invokeUpdateUiPreferences({
+      void persistUiPreferencesSafely({
         theme: preferences.theme,
         locale: preferences.locale,
         useSystemTheme: next,
-      }).catch(() => {});
+      });
     }
   }
 

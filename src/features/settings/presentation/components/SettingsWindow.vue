@@ -11,6 +11,7 @@ import UpdateDialog from '@/presentation/components/UpdateDialog.vue';
 import { useUpdater } from '@/composables/useUpdater';
 import { useSettings } from '../composables/useSettings';
 import { useSettingsTheme } from '../composables/useSettingsTheme';
+import { createSettingsSectionFlashController } from '../composables/useSettingsScrollToSection';
 import { useSettingsStore } from '../../store/settingsStore';
 import type { SettingsState } from '../../domain/types';
 import { areSettingsStatesEqual } from '../../domain/settingsState';
@@ -43,6 +44,8 @@ const showUpdateDialog = ref(false);
 const settingsBodyRef = ref<HTMLElement | null>(null);
 
 let unlistenOpened: UnlistenFn | null = null;
+let isUnmounted = false;
+const sectionFlash = createSettingsSectionFlashController();
 
 const baselineState = ref<SettingsState | null>(null);
 const baselineUiLocale = ref<string>('');
@@ -101,6 +104,11 @@ function disarmLiveApplyAudioDevice(): void {
   liveApplyAudioDeviceArmed.value = false;
 }
 
+function stopSettingsSync(): void {
+  appConfigStore.stopSync();
+  sttConfigStore.stopSync();
+}
+
 async function applySelectedAudioDevice(deviceName: string): Promise<void> {
   if (!isTauriAvailable()) return;
 
@@ -149,6 +157,7 @@ async function finalizeClose(shouldDiscard: boolean): Promise<void> {
 }
 
 onMounted(async () => {
+  isUnmounted = false;
   initializeTheme();
   if (!isTauriAvailable()) {
     await loadConfig();
@@ -158,45 +167,77 @@ onMounted(async () => {
 
   // Запускаем sync (идемпотентно — если уже запущен, сразу выходит)
   await appConfigStore.startSync();
+  if (isUnmounted) {
+    stopSettingsSync();
+    return;
+  }
   await sttConfigStore.startSync();
+  if (isUnmounted) {
+    stopSettingsSync();
+    return;
+  }
 
-  unlistenOpened = await listen<{ scrollToSection?: string | null } | boolean>(
-    'settings-window-opened',
-    async (event) => {
-      if (isLoading.value) return;
-      disarmLiveApplyAudioDevice();
-      await Promise.all([appConfigStore.refresh(), sttConfigStore.refresh()]);
-      await loadConfig();
-      captureBaseline();
-      armLiveApplyAudioDevice();
+  try {
+    const unlisten = await listen<{ scrollToSection?: string | null } | boolean>(
+      'settings-window-opened',
+      async (event) => {
+        if (isLoading.value) return;
+        disarmLiveApplyAudioDevice();
+        await Promise.all([appConfigStore.refresh(), sttConfigStore.refresh()]);
+        await loadConfig();
+        captureBaseline();
+        armLiveApplyAudioDevice();
 
-      const payload = event.payload;
-      const scrollToSection =
-        payload && typeof payload === 'object' && 'scrollToSection' in payload
-          ? (payload as { scrollToSection?: string | null }).scrollToSection
-          : null;
-      if (scrollToSection && settingsBodyRef.value) {
-        const el = settingsBodyRef.value.querySelector<HTMLElement>(
-          `[data-settings-section="${scrollToSection}"]`
-        );
-        if (el) {
-          await nextTick();
-          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          el.classList.add('settings-section-flash');
-          setTimeout(() => el.classList.remove('settings-section-flash'), 2200);
+        const payload = event.payload;
+        const scrollToSection =
+          payload && typeof payload === 'object' && 'scrollToSection' in payload
+            ? (payload as { scrollToSection?: string | null }).scrollToSection
+            : null;
+        if (scrollToSection && settingsBodyRef.value) {
+          const el = settingsBodyRef.value.querySelector<HTMLElement>(
+            `[data-settings-section="${scrollToSection}"]`
+          );
+          if (el) {
+            await nextTick();
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            sectionFlash.flash(el);
+          }
         }
       }
+    );
+    if (isUnmounted) {
+      unlisten();
+      stopSettingsSync();
+      return;
     }
-  );
+    unlistenOpened = unlisten;
+  } catch (err) {
+    console.error('Failed to listen settings window open event:', err);
+    stopSettingsSync();
+  }
+
+  if (isUnmounted) {
+    stopSettingsSync();
+    return;
+  }
 
   await loadConfig();
+  if (isUnmounted) {
+    stopSettingsSync();
+    return;
+  }
   captureBaseline();
   armLiveApplyAudioDevice();
 });
 
 onUnmounted(() => {
+  isUnmounted = true;
+  sectionFlash.cleanup();
+  disarmLiveApplyAudioDevice();
+  stopSettingsSync();
   if (unlistenOpened) {
     unlistenOpened();
+    unlistenOpened = null;
   }
 });
 

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import { useSettings } from './useSettings';
 import { useSettingsStore } from '../../store/settingsStore';
@@ -38,6 +38,8 @@ vi.mock('../../infrastructure/adapters/TauriSettingsService', () => ({
 }));
 
 describe('useSettings saveConfig', () => {
+  let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
+
   beforeEach(() => {
     setActivePinia(createPinia());
     (window as any).__TAURI__ = {};
@@ -48,6 +50,14 @@ describe('useSettings saveConfig', () => {
     tauriSettingsServiceMock.updateSttConfig.mockReset();
     tauriSettingsServiceMock.getAppConfig.mockReset();
     tauriSettingsServiceMock.updateAppConfig.mockReset();
+    tauriSettingsServiceMock.getAudioDevices.mockReset();
+    tauriSettingsServiceMock.checkAccessibilityPermission.mockReset();
+    tauriSettingsServiceMock.requestAccessibilityPermission.mockReset();
+    consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleWarnSpy.mockRestore();
   });
 
   it('при изменении только keyterms использует актуальный backend language и не пишет app-config', async () => {
@@ -100,6 +110,21 @@ describe('useSettings saveConfig', () => {
       streamingKeyterms: 'Kubernetes, VoicetextAI',
     });
     expect(tauriSettingsServiceMock.updateAppConfig).not.toHaveBeenCalled();
+  });
+
+  it('syncLocale ловит rejected update_ui_preferences без unhandled rejection', async () => {
+    invokeMock.mockRejectedValueOnce(new Error('ui prefs ipc down'));
+    const store = useSettingsStore();
+    store.setLanguage('en', { persist: false });
+
+    const { syncLocale } = useSettings();
+    syncLocale();
+    await Promise.resolve();
+
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      'Failed to persist UI preferences:',
+      expect.any(Error)
+    );
   });
 
   it('сохраняет переключение backend streaming provider без app-config write', async () => {

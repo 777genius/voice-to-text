@@ -37,6 +37,16 @@ export function useSettings() {
   const { locale } = useI18n();
   const store = useSettingsStore();
 
+  async function persistUiPreferencesSafely(
+    next: Parameters<typeof invokeUpdateUiPreferences>[0],
+  ): Promise<void> {
+    try {
+      await invokeUpdateUiPreferences(next);
+    } catch (err) {
+      console.warn('Failed to persist UI preferences:', err);
+    }
+  }
+
   // Computed для реактивных свойств
   const provider = computed({
     get: () => store.provider,
@@ -607,11 +617,18 @@ export function useSettings() {
       await tauriSettingsService.requestAccessibilityPermission();
 
       // Проверяем разрешение через 2 секунды
-      setTimeout(async () => {
+      setTimeout(() => {
         if (IS_MACOS) {
-          const hasPermission =
-            await tauriSettingsService.checkAccessibilityPermission();
-          store.setAccessibilityPermission(hasPermission);
+          void (async () => {
+            try {
+              const hasPermission =
+                await tauriSettingsService.checkAccessibilityPermission();
+              store.setAccessibilityPermission(hasPermission);
+            } catch (err) {
+              console.error('Ошибка проверки Accessibility:', err);
+              store.setError(String(err));
+            }
+          })();
         }
       }, 2000);
     } catch (err) {
@@ -642,11 +659,11 @@ export function useSettings() {
 
     // Синхронизация через state-sync: сохраняем в Rust и уведомляем другие окна
     if (isTauriAvailable()) {
-      void invokeUpdateUiPreferences({
-          theme: normalizeUiTheme(store.theme),
-          locale: uiLocale,
-          useSystemTheme: Boolean(store.useSystemTheme),
-        }).catch(() => {});
+      void persistUiPreferencesSafely({
+        theme: normalizeUiTheme(store.theme),
+        locale: uiLocale,
+        useSystemTheme: Boolean(store.useSystemTheme),
+      });
     }
   }
 

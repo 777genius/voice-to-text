@@ -15,6 +15,9 @@ type MicLevelPayload = {
 
 export class MicTestAudioSource implements AudioVisualizerSource {
   private unlisten: UnlistenFn | null = null;
+  private startPromise: Promise<void> | null = null;
+  private desiredActive = false;
+  private onBars: ((bars: number[]) => void) | null = null;
   // Фазы для каждого бара — создают уникальную волнообразную форму
   private readonly phases = Array.from(
     { length: BAR_COUNT },
@@ -22,16 +25,38 @@ export class MicTestAudioSource implements AudioVisualizerSource {
   );
 
   async start(onBars: (bars: number[]) => void): Promise<void> {
+    this.desiredActive = true;
+    this.onBars = onBars;
     if (this.unlisten) return;
+    if (this.startPromise) return this.startPromise;
 
-    this.unlisten = await listen<MicLevelPayload>('microphone_test:level', (event) => {
+    const startPromise = listen<MicLevelPayload>('microphone_test:level', (event) => {
       const level = Math.min(1, Math.max(0, event.payload?.level ?? 0));
       const bars = this.levelToBars(level);
-      onBars(bars);
-    });
+      this.onBars?.(bars);
+    })
+      .then((unlisten) => {
+        if (!this.desiredActive || this.unlisten) {
+          unlisten();
+          return;
+        }
+        this.unlisten = unlisten;
+      })
+      .catch((err) => {
+        console.error('Failed to listen microphone test level events:', err);
+      })
+      .finally(() => {
+        if (this.startPromise === startPromise) {
+          this.startPromise = null;
+        }
+      });
+    this.startPromise = startPromise;
+    return startPromise;
   }
 
   stop(): void {
+    this.desiredActive = false;
+    this.onBars = null;
     if (!this.unlisten) return;
     this.unlisten();
     this.unlisten = null;

@@ -38,7 +38,7 @@ impl TranslationAudioOutputConfig {
         Self {
             source_sample_rate: 24_000,
             source_channels: 1,
-            prebuffer_ms: 400,
+            prebuffer_ms: 200,
             max_buffered_frames: 300_000,
             drain_max_buffered_frames: 720_000,
         }

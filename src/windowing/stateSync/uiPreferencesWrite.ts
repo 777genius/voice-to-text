@@ -37,11 +37,15 @@ function assertValidUpdateUiPreferencesArgs(args: Record<string, unknown>): void
   }
 }
 
-export async function invokeUpdateUiPreferences(
+export function invokeUpdateUiPreferences(
   next: UpdateUiPreferencesInvokeArgs,
   invoke: TauriInvoke = tauriInvoke as TauriInvoke,
 ): Promise<void> {
   const args: Record<string, unknown> = { ...next };
-  assertValidUpdateUiPreferencesArgs(args);
-  await invoke(CMD_UPDATE_UI_PREFERENCES, args);
+  try {
+    assertValidUpdateUiPreferencesArgs(args);
+  } catch (err) {
+    return Promise.reject(err);
+  }
+  return invoke(CMD_UPDATE_UI_PREFERENCES, args) as Promise<void>;
 }

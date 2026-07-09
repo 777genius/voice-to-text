@@ -1,15 +1,19 @@
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use serde::Serialize;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
 
 use crate::domain::{
-    AppConfig, AudioCapture, AudioError, BackendStreamingProvider, PlatformAudioSetupStatus,
-    RecordingMode, RecordingStatus, RecordingWindowPosition, SttConnectionCategory, SttError,
-    SttProviderType,
+    AppConfig, AudioCapture, AudioCaptureTarget, AudioConfig, AudioError, BackendStreamingProvider,
+    PlatformAudioFactory, PlatformAudioSetupState, PlatformAudioSetupStatus, RecordingMode,
+    RecordingStatus, RecordingWindowPosition, SttConnectionCategory, SttError, SttProviderType,
+    Transcription, TranslationAudioOutputConfig,
 };
 use crate::infrastructure::{
-    auto_paste::AutoPasteTarget, AuthSession, AuthStore, AuthUser, ConfigStore,
+    audio::DefaultPlatformAudioFactory, auto_paste::AutoPasteTarget,
+    openai::OpenAITextTranslationClient, AuthSession, AuthStore, AuthUser, ConfigStore,
 };
 use crate::presentation::{
     events::*, AppState, AudioLevelPayload, ConnectionQualityPayload, FinalTranscriptionPayload,
@@ -47,6 +51,169 @@ fn error_details_from_stt(err: &SttError) -> Option<TranscriptionErrorDetailsPay
     }
 }
 
+const TRANSCRIPT_EVENT_QUEUE_CAPACITY: usize = 128;
+
+#[derive(Debug)]
+enum TranscriptEvent {
+    Partial(Transcription),
+    Final(Transcription),
+}
+
+#[derive(Debug)]
+struct TranscriptEventQueue {
+    capacity: usize,
+    items: VecDeque<TranscriptEvent>,
+}
+
+impl TranscriptEventQueue {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            items: VecDeque::new(),
+        }
+    }
+
+    fn push_partial(&mut self, transcription: Transcription) -> bool {
+        if self.items.len() < self.capacity {
+            self.items
+                .push_back(TranscriptEvent::Partial(transcription));
+            return true;
+        }
+
+        // Coalesce only a trailing partial. If the tail is Final, dropping this
+        // partial preserves final ordering and avoids moving newer text before it.
+        if let Some(TranscriptEvent::Partial(existing)) = self.items.back_mut() {
+            *existing = transcription;
+            return true;
+        }
+
+        false
+    }
+
+    fn push_final(&mut self, transcription: Transcription) {
+        if self.items.len() >= self.capacity {
+            if let Some(index) = self
+                .items
+                .iter()
+                .position(|event| matches!(event, TranscriptEvent::Partial(_)))
+            {
+                self.items.remove(index);
+            }
+        }
+
+        self.items.push_back(TranscriptEvent::Final(transcription));
+    }
+
+    fn pop_front(&mut self) -> Option<TranscriptEvent> {
+        self.items.pop_front()
+    }
+}
+
+#[derive(Debug)]
+struct TranscriptEventBridgeInner {
+    queue: Mutex<TranscriptEventQueue>,
+    notify: tokio::sync::Notify,
+    sender_count: AtomicUsize,
+}
+
+#[derive(Debug)]
+struct TranscriptEventSender {
+    inner: Arc<TranscriptEventBridgeInner>,
+}
+
+#[derive(Debug)]
+struct TranscriptEventReceiver {
+    inner: Arc<TranscriptEventBridgeInner>,
+}
+
+fn transcript_event_channel(capacity: usize) -> (TranscriptEventSender, TranscriptEventReceiver) {
+    let inner = Arc::new(TranscriptEventBridgeInner {
+        queue: Mutex::new(TranscriptEventQueue::new(capacity)),
+        notify: tokio::sync::Notify::new(),
+        sender_count: AtomicUsize::new(1),
+    });
+
+    (
+        TranscriptEventSender {
+            inner: inner.clone(),
+        },
+        TranscriptEventReceiver { inner },
+    )
+}
+
+fn lock_transcript_event_queue(
+    inner: &TranscriptEventBridgeInner,
+) -> MutexGuard<'_, TranscriptEventQueue> {
+    match inner.queue.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::warn!("Transcript event queue lock was poisoned; recovering");
+            poisoned.into_inner()
+        }
+    }
+}
+
+impl Clone for TranscriptEventSender {
+    fn clone(&self) -> Self {
+        self.inner.sender_count.fetch_add(1, Ordering::AcqRel);
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl Drop for TranscriptEventSender {
+    fn drop(&mut self) {
+        if self.inner.sender_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.inner.notify.notify_waiters();
+        }
+    }
+}
+
+impl TranscriptEventSender {
+    fn send_partial(&self, transcription: Transcription) -> bool {
+        let accepted = {
+            let mut queue = lock_transcript_event_queue(&self.inner);
+            queue.push_partial(transcription)
+        };
+
+        if accepted {
+            self.inner.notify.notify_one();
+        }
+
+        accepted
+    }
+
+    fn send_final(&self, transcription: Transcription) {
+        {
+            let mut queue = lock_transcript_event_queue(&self.inner);
+            queue.push_final(transcription);
+        }
+        self.inner.notify.notify_one();
+    }
+}
+
+impl TranscriptEventReceiver {
+    async fn recv(&self) -> Option<TranscriptEvent> {
+        loop {
+            let notified = self.inner.notify.notified();
+
+            if let Some(event) = {
+                let mut queue = lock_transcript_event_queue(&self.inner);
+                queue.pop_front()
+            } {
+                return Some(event);
+            }
+
+            if self.inner.sender_count.load(Ordering::Acquire) == 0 {
+                return None;
+            }
+
+            notified.await;
+        }
+    }
+}
+
 fn is_audio_capture_start_failure(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| cause.is::<AudioError>())
 }
@@ -57,13 +224,53 @@ fn take_active_transcription_session_id(state: &AppState) -> u64 {
         .swap(0, Ordering::Relaxed)
 }
 
-fn clear_active_transcription_session_id_if_current(state: &AppState, session_id: u64) {
-    let _ = state.active_transcription_session_id.compare_exchange(
+fn clear_active_transcription_session_id_if_current(state: &AppState, session_id: u64) -> bool {
+    state
+        .active_transcription_session_id
+        .compare_exchange(session_id, 0, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+}
+
+fn should_clear_active_mode_after_session_cleanup(
+    cleaned_session_id: u64,
+    current_session_id: u64,
+    active_mode: Option<RecordingMode>,
+) -> bool {
+    cleaned_session_id == current_session_id
+        && matches!(active_mode, Some(RecordingMode::LiveTranslation))
+}
+
+fn should_clear_active_mode_after_dictation_failure(
+    failed_session_id: u64,
+    current_session_id: u64,
+    active_mode: Option<RecordingMode>,
+) -> bool {
+    failed_session_id == current_session_id && matches!(active_mode, Some(RecordingMode::Dictation))
+}
+
+async fn clear_dictation_failure_state_if_current(state: &AppState, session_id: u64) {
+    let current_session_id = state
+        .active_transcription_session_id
+        .load(Ordering::Relaxed);
+    let active_mode_snapshot = *state.active_recording_mode.read().await;
+    if !should_clear_active_mode_after_dictation_failure(
         session_id,
-        0,
-        Ordering::Relaxed,
-        Ordering::Relaxed,
-    );
+        current_session_id,
+        active_mode_snapshot,
+    ) {
+        return;
+    }
+
+    if clear_active_transcription_session_id_if_current(state, session_id) {
+        let mut active_mode = state.active_recording_mode.write().await;
+        if matches!(*active_mode, Some(RecordingMode::Dictation)) {
+            *active_mode = None;
+        }
+    }
+}
+
+fn incoming_stop_session_id(active_session_id: Option<u64>, sequence_id: u64) -> u64 {
+    active_session_id.unwrap_or_else(|| sequence_id.max(1))
 }
 
 /// Возвращает вытесненный id активной сессии, если провалившийся старт всё ещё числится активным.
@@ -104,14 +311,29 @@ fn emit_idle_recording_status(
 
 async fn active_recording_status(state: &AppState) -> RecordingStatus {
     let active_mode = *state.active_recording_mode.read().await;
-    if matches!(active_mode, Some(RecordingMode::LiveTranslation)) {
-        let svc = state.live_translation_service.read().await;
-        if let Some(service) = svc.as_ref() {
-            return service.get_status().await;
+    let svc = state.live_translation_service.read().await;
+    if let Some(service) = svc.as_ref() {
+        let live_status = service.get_status().await;
+        let has_live_session = service.active_session_id().await.is_some();
+        if should_report_live_translation_status(active_mode, live_status, has_live_session) {
+            return live_status;
         }
     }
 
     state.transcription_service.get_status().await
+}
+
+fn should_report_live_translation_status(
+    active_mode: Option<RecordingMode>,
+    live_status: RecordingStatus,
+    has_live_session: bool,
+) -> bool {
+    matches!(active_mode, Some(RecordingMode::LiveTranslation))
+        || has_live_session
+        || matches!(
+            live_status,
+            RecordingStatus::Starting | RecordingStatus::Recording | RecordingStatus::Processing
+        )
 }
 
 #[tauri::command]
@@ -566,6 +788,31 @@ fn resolve_openai_api_key(config: &AppConfig) -> String {
         .unwrap_or_else(|| std::env::var("OPENAI_API_KEY").unwrap_or_default())
 }
 
+fn normalize_translation_target_language(value: &str, fallback: &str) -> String {
+    let language = value.trim();
+    if language.is_empty()
+        || language.eq_ignore_ascii_case("auto")
+        || language.eq_ignore_ascii_case("multi")
+    {
+        fallback.to_string()
+    } else {
+        language.to_string()
+    }
+}
+
+fn resolve_outgoing_translation_target_language(config: &AppConfig) -> String {
+    let user_language = normalize_translation_target_language(&config.stt.language, "ru");
+    if user_language.eq_ignore_ascii_case("en") {
+        "ru".to_string()
+    } else {
+        "en".to_string()
+    }
+}
+
+fn resolve_incoming_translation_target_language(config: &AppConfig) -> String {
+    normalize_translation_target_language(&config.stt.language, "ru")
+}
+
 async fn start_live_translation_recording(
     state: &AppState,
     app_handle: AppHandle,
@@ -597,7 +844,7 @@ async fn start_live_translation_recording(
 
     let translation_cfg = LiveTranslationConfig {
         openai_api_key: resolve_openai_api_key(&config),
-        target_language: "en".to_string(),
+        target_language: resolve_outgoing_translation_target_language(&config),
         microphone_device: config.selected_audio_device.clone(),
         microphone_sensitivity: config.microphone_sensitivity,
         session_id,
@@ -653,10 +900,20 @@ async fn start_live_translation_recording(
                 let Some(state) = cleanup_handle.try_state::<AppState>() else {
                     return;
                 };
-                clear_active_transcription_session_id_if_current(state.inner(), session_id);
-                let mut active_mode = state.active_recording_mode.write().await;
-                if matches!(*active_mode, Some(RecordingMode::LiveTranslation)) {
-                    *active_mode = None;
+                let current_session_id = state
+                    .active_transcription_session_id
+                    .load(Ordering::Relaxed);
+                let active_mode_snapshot = *state.active_recording_mode.read().await;
+                if should_clear_active_mode_after_session_cleanup(
+                    session_id,
+                    current_session_id,
+                    active_mode_snapshot,
+                ) && clear_active_transcription_session_id_if_current(state.inner(), session_id)
+                {
+                    let mut active_mode = state.active_recording_mode.write().await;
+                    if matches!(*active_mode, Some(RecordingMode::LiveTranslation)) {
+                        *active_mode = None;
+                    }
                 }
             });
         });
@@ -800,8 +1057,12 @@ pub async fn start_incoming_translation(
     };
 
     let service = get_or_create_incoming_translation_service(state.inner()).await;
-    if service.get_status().await != RecordingStatus::Idle {
-        return Ok("Incoming translation already running".to_string());
+    match service.get_status().await {
+        RecordingStatus::Idle => {}
+        RecordingStatus::Error => {
+            service.stop().await.map_err(|err| err.to_string())?;
+        }
+        _ => return Ok("Incoming translation already running".to_string()),
     }
 
     let session_id = state
@@ -813,6 +1074,7 @@ pub async fn start_incoming_translation(
     let app_config = state.config.read().await.clone();
     let mut cfg = IncomingTranslationConfig::new_with_defaults(stt_config, session_id);
     cfg.openai_api_key = resolve_openai_api_key(&app_config);
+    cfg.target_language = resolve_incoming_translation_target_language(&app_config);
 
     let _ = app_handle.emit(
         EVENT_INCOMING_TRANSLATION_STATUS,
@@ -925,10 +1187,16 @@ pub async fn stop_incoming_translation(
         let guard = state.incoming_translation_service.read().await;
         guard.as_ref().cloned()
     };
-    let session_id = state
+    let sequence_session_id = state
         .incoming_translation_session_seq
         .load(Ordering::Relaxed)
         .max(1);
+    let active_session_id = if let Some(service) = &service {
+        service.active_session_id().await
+    } else {
+        None
+    };
+    let session_id = incoming_stop_session_id(active_session_id, sequence_session_id);
 
     let _ = app_handle.emit(
         EVENT_INCOMING_TRANSLATION_STATUS,
@@ -958,11 +1226,15 @@ pub async fn toggle_incoming_translation(
     app_handle: AppHandle,
 ) -> Result<String, String> {
     let service = get_or_create_incoming_translation_service(state.inner()).await;
-    if service.get_status().await == RecordingStatus::Idle {
+    if should_start_incoming_translation_on_toggle(service.get_status().await) {
         start_incoming_translation(state, app_handle).await
     } else {
         stop_incoming_translation(state, app_handle).await
     }
+}
+
+fn should_start_incoming_translation_on_toggle(status: RecordingStatus) -> bool {
+    matches!(status, RecordingStatus::Idle | RecordingStatus::Error)
 }
 
 #[tauri::command]
@@ -986,6 +1258,368 @@ pub async fn get_live_translation_platform_status() -> Result<PlatformAudioSetup
 
     let factory = crate::infrastructure::audio::DefaultPlatformAudioFactory::new();
     Ok(factory.setup_status().await)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LiveTranslationHealthCheck {
+    pub ok: bool,
+    pub checked_at_ms: u64,
+    pub items: Vec<LiveTranslationHealthCheckItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LiveTranslationHealthCheckItem {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub ok: bool,
+    pub required: bool,
+    pub message: String,
+}
+
+fn health_item(
+    id: &'static str,
+    label: &'static str,
+    ok: bool,
+    required: bool,
+    message: impl Into<String>,
+) -> LiveTranslationHealthCheckItem {
+    LiveTranslationHealthCheckItem {
+        id,
+        label,
+        ok,
+        required,
+        message: message.into(),
+    }
+}
+
+fn virtual_output_open_health_item(
+    device: String,
+    close_result: Result<(), String>,
+) -> LiveTranslationHealthCheckItem {
+    match close_result {
+        Ok(()) => health_item(
+            "virtual_output",
+            "Virtual microphone output",
+            true,
+            true,
+            format!("{device} opens successfully"),
+        ),
+        Err(err) => health_item(
+            "virtual_output",
+            "Virtual microphone output",
+            false,
+            true,
+            format!("{device} opened but failed to close: {err}"),
+        ),
+    }
+}
+
+async fn check_virtual_output_open(
+    factory: &DefaultPlatformAudioFactory,
+) -> LiveTranslationHealthCheckItem {
+    let mut output = match factory.create_translation_output() {
+        Ok(output) => output,
+        Err(err) => {
+            return health_item(
+                "virtual_output",
+                "Virtual microphone output",
+                false,
+                true,
+                err.to_string(),
+            );
+        }
+    };
+
+    match output
+        .open(TranslationAudioOutputConfig::openai_translation())
+        .await
+    {
+        Ok(()) => {
+            let device = output
+                .device_name()
+                .unwrap_or_else(|| "virtual output".to_string());
+            virtual_output_open_health_item(
+                device,
+                output.close().await.map_err(|err| err.to_string()),
+            )
+        }
+        Err(err) => health_item(
+            "virtual_output",
+            "Virtual microphone output",
+            false,
+            true,
+            err.to_string(),
+        ),
+    }
+}
+
+async fn check_microphone_capture(
+    factory: &DefaultPlatformAudioFactory,
+    selected_device: Option<String>,
+) -> LiveTranslationHealthCheckItem {
+    if let Err(err) = factory.microphone_preflight() {
+        return health_item("microphone", "Microphone", false, true, err.to_string());
+    }
+
+    let mut capture = match factory
+        .create_microphone_capture(selected_device, AudioCaptureTarget::outgoing_translation())
+    {
+        Ok(capture) => capture,
+        Err(err) => {
+            return health_item("microphone", "Microphone", false, true, err.to_string());
+        }
+    };
+
+    if let Err(err) = capture
+        .initialize(AudioConfig {
+            sample_rate: AudioCaptureTarget::outgoing_translation().sample_rate,
+            channels: AudioCaptureTarget::outgoing_translation().channels,
+            buffer_size: AudioConfig::default().buffer_size,
+        })
+        .await
+    {
+        return health_item("microphone", "Microphone", false, true, err.to_string());
+    }
+
+    match capture.start_capture(Arc::new(|_| {})).await {
+        Ok(()) => {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let stop_result = capture.stop_capture().await;
+            health_item(
+                "microphone",
+                "Microphone",
+                stop_result.is_ok(),
+                true,
+                stop_result
+                    .map(|_| "Microphone capture starts and stops".to_string())
+                    .unwrap_or_else(|err| err.to_string()),
+            )
+        }
+        Err(err) => health_item("microphone", "Microphone", false, true, err.to_string()),
+    }
+}
+
+async fn check_system_audio_capture(
+    factory: &DefaultPlatformAudioFactory,
+) -> LiveTranslationHealthCheckItem {
+    let mut capture =
+        match factory.create_system_loopback_capture(AudioCaptureTarget::incoming_subtitles()) {
+            Ok(capture) => capture,
+            Err(err) => {
+                return health_item(
+                    "system_audio",
+                    "System audio capture",
+                    false,
+                    true,
+                    err.to_string(),
+                );
+            }
+        };
+
+    if let Err(err) = capture
+        .initialize(AudioConfig {
+            sample_rate: AudioCaptureTarget::incoming_subtitles().sample_rate,
+            channels: AudioCaptureTarget::incoming_subtitles().channels,
+            buffer_size: AudioConfig::default().buffer_size,
+        })
+        .await
+    {
+        return health_item(
+            "system_audio",
+            "System audio capture",
+            false,
+            true,
+            err.to_string(),
+        );
+    }
+
+    match capture.start_capture(Arc::new(|_| {})).await {
+        Ok(()) => {
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            let stop_result = capture.stop_capture().await;
+            health_item(
+                "system_audio",
+                "System audio capture",
+                stop_result.is_ok(),
+                true,
+                stop_result
+                    .map(|_| "System audio capture starts and stops".to_string())
+                    .unwrap_or_else(|err| err.to_string()),
+            )
+        }
+        Err(err) => health_item(
+            "system_audio",
+            "System audio capture",
+            false,
+            true,
+            err.to_string(),
+        ),
+    }
+}
+
+async fn check_openai_key(api_key: String) -> LiveTranslationHealthCheckItem {
+    if api_key.trim().is_empty() {
+        return health_item(
+            "openai",
+            "OpenAI key",
+            false,
+            true,
+            "OpenAI API key is missing",
+        );
+    }
+
+    let result = tokio::time::timeout(Duration::from_secs(12), async move {
+        let client = OpenAITextTranslationClient::new(api_key)?;
+        client.translate_text("health check", "English").await
+    })
+    .await;
+
+    match result {
+        Ok(Ok(text)) if !text.trim().is_empty() => {
+            health_item("openai", "OpenAI key", true, true, "OpenAI probe succeeded")
+        }
+        Ok(Ok(_)) => health_item(
+            "openai",
+            "OpenAI key",
+            false,
+            true,
+            "OpenAI probe returned empty text",
+        ),
+        Ok(Err(err)) => health_item("openai", "OpenAI key", false, true, err.to_string()),
+        Err(_) => health_item(
+            "openai",
+            "OpenAI key",
+            false,
+            true,
+            "OpenAI probe timed out",
+        ),
+    }
+}
+
+async fn collect_live_translation_health_check(
+    state: &AppState,
+) -> Result<LiveTranslationHealthCheck, String> {
+    if let Some(message) = live_translation_health_check_busy_reason(state).await {
+        return Ok(live_translation_health_check_busy(message));
+    }
+
+    let app_config = state.config.read().await.clone();
+    let selected_device = app_config
+        .selected_audio_device
+        .clone()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let openai_api_key = resolve_openai_api_key(&app_config);
+    let factory = DefaultPlatformAudioFactory::new();
+    let setup_status = factory.setup_status().await;
+
+    let mut items = Vec::new();
+    let virtual_route_ok =
+        setup_status.status == PlatformAudioSetupState::Ready && setup_status.outgoing_supported;
+    items.push(health_item(
+        "virtual_route",
+        "Virtual microphone route",
+        virtual_route_ok,
+        true,
+        setup_status.message,
+    ));
+
+    let (virtual_output, microphone, system_audio, openai) = tokio::join!(
+        check_virtual_output_open(&factory),
+        check_microphone_capture(&factory, selected_device),
+        check_system_audio_capture(&factory),
+        check_openai_key(openai_api_key),
+    );
+    items.push(virtual_output);
+    items.push(microphone);
+    items.push(system_audio);
+    items.push(openai);
+
+    let ok = items.iter().all(|item| !item.required || item.ok);
+    Ok(LiveTranslationHealthCheck {
+        ok,
+        checked_at_ms: now_ms_u64(),
+        items,
+    })
+}
+
+async fn live_translation_health_check_busy_reason(state: &AppState) -> Option<String> {
+    let recording_status = active_recording_status(state).await;
+    if live_translation_health_check_blocks_recording_status(recording_status) {
+        return Some(format!(
+            "Recording or outgoing live translation is active ({recording_status:?})"
+        ));
+    }
+
+    let live_service = {
+        let guard = state.live_translation_service.read().await;
+        guard.as_ref().cloned()
+    };
+    if let Some(service) = live_service {
+        let live_status = service.get_status().await;
+        let has_active_session = service.active_session_id().await.is_some();
+        if live_translation_health_check_blocks_service_status(live_status, has_active_session) {
+            return Some(format!(
+                "Outgoing live translation is active ({live_status:?})"
+            ));
+        }
+    }
+
+    let incoming_service = {
+        let guard = state.incoming_translation_service.read().await;
+        guard.as_ref().cloned()
+    };
+    if let Some(service) = incoming_service {
+        let incoming_status = service.get_status().await;
+        let has_active_session = service.active_session_id().await.is_some();
+        if live_translation_health_check_blocks_service_status(incoming_status, has_active_session)
+        {
+            return Some(format!(
+                "Incoming translation is active ({incoming_status:?})"
+            ));
+        }
+    }
+
+    None
+}
+
+fn live_translation_health_check_blocks_recording_status(status: RecordingStatus) -> bool {
+    matches!(
+        status,
+        RecordingStatus::Starting | RecordingStatus::Recording | RecordingStatus::Processing
+    )
+}
+
+fn live_translation_health_check_blocks_service_status(
+    status: RecordingStatus,
+    has_active_session: bool,
+) -> bool {
+    live_translation_health_check_blocks_recording_status(status) || has_active_session
+}
+
+fn live_translation_health_check_busy(message: String) -> LiveTranslationHealthCheck {
+    LiveTranslationHealthCheck {
+        ok: false,
+        checked_at_ms: now_ms_u64(),
+        items: vec![health_item(
+            "active_session",
+            "Active audio session",
+            false,
+            true,
+            message,
+        )],
+    }
+}
+
+/// Runs a manual readiness check for real call translation.
+///
+/// This intentionally opens the audio routes for a short time and performs a tiny OpenAI probe.
+/// It does not return API keys and does not persist captured audio.
+#[tauri::command]
+pub async fn run_live_translation_health_check(
+    state: State<'_, AppState>,
+) -> Result<LiveTranslationHealthCheck, String> {
+    collect_live_translation_health_check(state.inner()).await
 }
 
 /// Start recording voice
@@ -1060,6 +1694,7 @@ pub async fn start_recording(
                         mode: None,
                     },
                 );
+                clear_dictation_failure_state_if_current(state.inner(), session_id).await;
                 restore_displaced_transcription_session_id(
                     state.inner(),
                     session_id,
@@ -1075,13 +1710,7 @@ pub async fn start_recording(
     // две задачи могли выполниться в обратном порядке: фронт получал speech_final
     // раньше сегмента и собирал текст с перестановкой/дублированием. Поэтому все
     // события идут через один канал и обрабатываются одной задачей последовательно.
-    enum TranscriptEvent {
-        Partial(crate::domain::Transcription),
-        Final(crate::domain::Transcription),
-    }
-
-    let (transcript_tx, mut transcript_rx) =
-        tokio::sync::mpsc::unbounded_channel::<TranscriptEvent>();
+    let (transcript_tx, transcript_rx) = transcript_event_channel(TRANSCRIPT_EVENT_QUEUE_CAPACITY);
 
     let app_handle_transcripts = app_handle.clone();
     let state_partial = state.partial_transcription.clone();
@@ -1133,13 +1762,13 @@ pub async fn start_recording(
     // Callback for partial transcriptions
     let partial_tx = transcript_tx.clone();
     let on_partial = Arc::new(move |transcription: crate::domain::Transcription| {
-        let _ = partial_tx.send(TranscriptEvent::Partial(transcription));
+        let _ = partial_tx.send_partial(transcription);
     });
 
     // Callback for final transcription
     let final_tx = transcript_tx;
     let on_final = Arc::new(move |transcription: crate::domain::Transcription| {
-        let _ = final_tx.send(TranscriptEvent::Final(transcription));
+        final_tx.send_final(transcription);
     });
 
     let app_handle_level = app_handle.clone();
@@ -1200,7 +1829,7 @@ pub async fn start_recording(
             );
 
             if let Some(state) = app_handle.try_state::<AppState>() {
-                clear_active_transcription_session_id_if_current(state.inner(), session_id);
+                clear_dictation_failure_state_if_current(state.inner(), session_id).await;
             }
         });
     });
@@ -1289,6 +1918,7 @@ pub async fn start_recording(
                 mode: None,
             },
         );
+        clear_dictation_failure_state_if_current(state.inner(), session_id).await;
         restore_displaced_transcription_session_id(state.inner(), session_id, displaced_session_id);
         return Err(error_msg);
     }
@@ -1370,6 +2000,7 @@ pub async fn start_recording(
 
         // Сначала transcription:error, потом recording:status=Error (во фронте есть логика suppression/retry).
         on_error(stt);
+        clear_dictation_failure_state_if_current(state.inner(), session_id).await;
         restore_displaced_transcription_session_id(state.inner(), session_id, displaced_session_id);
 
         return Err(error);
@@ -1804,24 +2435,32 @@ where
 mod snapshot_contract_tests {
     use super::{
         auto_paste_text_can_trigger_recording_hotkey, calculate_recording_window_position,
-        hotkey_action_is_stale, is_audio_capture_start_failure, point_inside_rect,
+        hotkey_action_is_stale, incoming_stop_session_id, is_audio_capture_start_failure,
+        live_translation_health_check_blocks_recording_status,
+        live_translation_health_check_blocks_service_status, point_inside_rect,
         recording_hotkey_press_intent, recording_hotkey_release_intent,
-        recording_window_size_from_config, resolve_streaming_keyterms_update,
-        should_cancel_hold_to_record_pending_start, should_hide_recording_window_for_auto_paste,
+        recording_window_size_from_config, resolve_incoming_translation_target_language,
+        resolve_outgoing_translation_target_language, resolve_streaming_keyterms_update,
+        should_cancel_hold_to_record_pending_start,
+        should_clear_active_mode_after_dictation_failure,
+        should_clear_active_mode_after_session_cleanup,
+        should_hide_recording_window_for_auto_paste,
         should_hide_recording_window_immediately_on_hotkey_stop,
         should_ignore_hotkey_stop_after_start, should_lower_recording_window_for_auto_paste,
-        should_reassert_recording_window_after_auto_paste,
+        should_reassert_recording_window_after_auto_paste, should_report_live_translation_status,
         should_restore_recording_window_after_auto_paste,
         should_restore_recording_window_after_suppression,
         should_save_auto_paste_target_for_hotkey_start,
-        should_show_recording_window_on_processing_hotkey, validate_auto_paste_target_for_focus,
-        AppConfigSnapshotData, AutoPasteWindowSuppression, DoubleSpaceHotkeyKey,
-        DoubleSpaceHotkeyState, DoubleSpaceModifierKey, RecordingHotkeyDispatchIntent,
-        RecordingWindowPlacement, SnapshotEnvelope, SttConfigSnapshotData,
+        should_show_recording_window_on_processing_hotkey,
+        should_start_incoming_translation_on_toggle, validate_auto_paste_target_for_focus,
+        virtual_output_open_health_item, AppConfigSnapshotData, AutoPasteWindowSuppression,
+        DoubleSpaceHotkeyKey, DoubleSpaceHotkeyState, DoubleSpaceModifierKey,
+        RecordingHotkeyDispatchIntent, RecordingWindowPlacement, SnapshotEnvelope,
+        SttConfigSnapshotData,
     };
     use crate::domain::{
-        AppConfig, AudioError, BackendStreamingProvider, RecordingStatus, RecordingWindowPosition,
-        SttError, SttProviderType,
+        AppConfig, AudioError, BackendStreamingProvider, RecordingMode, RecordingStatus,
+        RecordingWindowPosition, SttError, SttProviderType,
     };
     use crate::infrastructure::auto_paste::{AutoPasteTarget, VOICETEXT_BUNDLE_ID};
     use tauri::{PhysicalPosition, PhysicalSize};
@@ -1908,6 +2547,192 @@ mod snapshot_contract_tests {
         config.show_mini_recording_window = true;
         assert!(should_show_recording_window_on_processing_hotkey(
             &config, true
+        ));
+    }
+
+    #[test]
+    fn live_translation_targets_language_other_than_user_stt_language() {
+        let mut config = AppConfig::default();
+
+        config.stt.language = "ru".to_string();
+        assert_eq!(resolve_outgoing_translation_target_language(&config), "en");
+
+        config.stt.language = "en".to_string();
+        assert_eq!(resolve_outgoing_translation_target_language(&config), "ru");
+    }
+
+    #[test]
+    fn incoming_translation_targets_user_stt_language() {
+        let mut config = AppConfig::default();
+
+        config.stt.language = "de".to_string();
+        assert_eq!(resolve_incoming_translation_target_language(&config), "de");
+
+        config.stt.language = "multi".to_string();
+        assert_eq!(resolve_incoming_translation_target_language(&config), "ru");
+
+        config.stt.language = "  ".to_string();
+        assert_eq!(resolve_incoming_translation_target_language(&config), "ru");
+    }
+
+    #[test]
+    fn incoming_translation_toggle_restarts_from_error() {
+        assert!(should_start_incoming_translation_on_toggle(
+            RecordingStatus::Idle
+        ));
+        assert!(should_start_incoming_translation_on_toggle(
+            RecordingStatus::Error
+        ));
+        assert!(!should_start_incoming_translation_on_toggle(
+            RecordingStatus::Starting
+        ));
+        assert!(!should_start_incoming_translation_on_toggle(
+            RecordingStatus::Recording
+        ));
+        assert!(!should_start_incoming_translation_on_toggle(
+            RecordingStatus::Processing
+        ));
+    }
+
+    #[test]
+    fn live_translation_health_check_blocks_active_recording_statuses() {
+        assert!(!live_translation_health_check_blocks_recording_status(
+            RecordingStatus::Idle
+        ));
+        assert!(live_translation_health_check_blocks_recording_status(
+            RecordingStatus::Starting
+        ));
+        assert!(live_translation_health_check_blocks_recording_status(
+            RecordingStatus::Recording
+        ));
+        assert!(live_translation_health_check_blocks_recording_status(
+            RecordingStatus::Processing
+        ));
+        assert!(!live_translation_health_check_blocks_recording_status(
+            RecordingStatus::Error
+        ));
+    }
+
+    #[test]
+    fn live_translation_health_check_blocks_orphaned_service_session() {
+        assert!(!live_translation_health_check_blocks_service_status(
+            RecordingStatus::Idle,
+            false
+        ));
+        assert!(!live_translation_health_check_blocks_service_status(
+            RecordingStatus::Error,
+            false
+        ));
+        assert!(live_translation_health_check_blocks_service_status(
+            RecordingStatus::Recording,
+            false
+        ));
+        assert!(live_translation_health_check_blocks_service_status(
+            RecordingStatus::Idle,
+            true
+        ));
+        assert!(live_translation_health_check_blocks_service_status(
+            RecordingStatus::Error,
+            true
+        ));
+    }
+
+    #[test]
+    fn active_status_reports_live_translation_even_if_active_mode_was_cleared() {
+        assert!(should_report_live_translation_status(
+            None,
+            RecordingStatus::Recording,
+            false
+        ));
+        assert!(should_report_live_translation_status(
+            None,
+            RecordingStatus::Error,
+            true
+        ));
+        assert!(should_report_live_translation_status(
+            Some(RecordingMode::LiveTranslation),
+            RecordingStatus::Idle,
+            false
+        ));
+    }
+
+    #[test]
+    fn active_status_ignores_idle_live_service_without_session() {
+        assert!(!should_report_live_translation_status(
+            None,
+            RecordingStatus::Idle,
+            false
+        ));
+        assert!(!should_report_live_translation_status(
+            Some(RecordingMode::Dictation),
+            RecordingStatus::Idle,
+            false
+        ));
+    }
+
+    #[test]
+    fn virtual_output_health_check_reports_close_failure() {
+        let ok_item = virtual_output_open_health_item("BlackHole".to_string(), Ok(()));
+        assert!(ok_item.ok);
+        assert!(ok_item.message.contains("opens successfully"));
+
+        let failed_item = virtual_output_open_health_item(
+            "BlackHole".to_string(),
+            Err("close failed".to_string()),
+        );
+        assert!(!failed_item.ok);
+        assert!(failed_item.message.contains("failed to close"));
+        assert!(failed_item.message.contains("close failed"));
+    }
+
+    #[test]
+    fn incoming_stop_session_id_prefers_active_service_session() {
+        assert_eq!(incoming_stop_session_id(Some(42), 7), 42);
+        assert_eq!(incoming_stop_session_id(None, 7), 7);
+        assert_eq!(incoming_stop_session_id(None, 0), 1);
+    }
+
+    #[test]
+    fn live_translation_cleanup_only_clears_mode_for_current_session() {
+        assert!(should_clear_active_mode_after_session_cleanup(
+            10,
+            10,
+            Some(RecordingMode::LiveTranslation)
+        ));
+        assert!(!should_clear_active_mode_after_session_cleanup(
+            10,
+            11,
+            Some(RecordingMode::LiveTranslation)
+        ));
+        assert!(!should_clear_active_mode_after_session_cleanup(
+            10,
+            10,
+            Some(RecordingMode::Dictation)
+        ));
+        assert!(!should_clear_active_mode_after_session_cleanup(
+            10, 10, None
+        ));
+    }
+
+    #[test]
+    fn dictation_failure_cleanup_only_clears_mode_for_current_session() {
+        assert!(should_clear_active_mode_after_dictation_failure(
+            10,
+            10,
+            Some(RecordingMode::Dictation)
+        ));
+        assert!(!should_clear_active_mode_after_dictation_failure(
+            10,
+            11,
+            Some(RecordingMode::Dictation)
+        ));
+        assert!(!should_clear_active_mode_after_dictation_failure(
+            10,
+            10,
+            Some(RecordingMode::LiveTranslation)
+        ));
+        assert!(!should_clear_active_mode_after_dictation_failure(
+            10, 10, None
         ));
     }
 
@@ -3096,9 +3921,13 @@ pub struct AuthSessionSnapshotUserData {
 
 fn ms_to_rfc3339(ms: i64) -> String {
     // Важно: если ms некорректный — fallback на epoch, чтобы не падать.
-    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms)
-        .unwrap_or_else(|| chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap())
-        .to_rfc3339()
+    if let Some(dt) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms) {
+        return dt.to_rfc3339();
+    }
+    if let Some(epoch) = chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0) {
+        return epoch.to_rfc3339();
+    }
+    "1970-01-01T00:00:00+00:00".to_string()
 }
 
 /// Get current auth session snapshot (for cross-window sync).
@@ -3512,10 +4341,18 @@ pub async fn update_app_config(
 // Microphone Test Commands
 //
 
-use crate::domain::AudioConfig;
 use crate::infrastructure::audio::SystemAudioCapture;
 
 /// Start microphone test
+const MICROPHONE_TEST_CHUNK_QUEUE_CAPACITY: usize = 32;
+
+fn enqueue_microphone_test_chunk(
+    tx: &tokio::sync::mpsc::Sender<crate::domain::AudioChunk>,
+    chunk: crate::domain::AudioChunk,
+) -> bool {
+    tx.try_send(chunk).is_ok()
+}
+
 #[tauri::command]
 pub async fn start_microphone_test(
     state: State<'_, AppState>,
@@ -3605,11 +4442,11 @@ pub async fn start_microphone_test(
         sensitivity
     );
 
-    // Создаем канал для передачи данных из callback
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    // Создаем bounded канал: если UI/async task подвиснет, preview не должен копить память.
+    let (tx, mut rx) = tokio::sync::mpsc::channel(MICROPHONE_TEST_CHUNK_QUEUE_CAPACITY);
 
     let on_chunk = Arc::new(move |chunk: crate::domain::AudioChunk| {
-        let _ = tx.send(chunk);
+        let _ = enqueue_microphone_test_chunk(&tx, chunk);
     });
 
     // Запускаем обработчик чанков в async контексте
@@ -6434,4 +7271,111 @@ pub async fn set_authenticated(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{AudioChunk, Transcription};
+
+    fn partial_text(text: &str) -> Transcription {
+        Transcription::partial(text.to_string())
+    }
+
+    fn final_text(text: &str) -> Transcription {
+        Transcription::final_result(text.to_string())
+    }
+
+    async fn drain_transcript_events(rx: &TranscriptEventReceiver) -> Vec<(bool, String)> {
+        let mut events = Vec::new();
+
+        while let Some(event) = rx.recv().await {
+            match event {
+                TranscriptEvent::Partial(transcription) => {
+                    events.push((false, transcription.text));
+                }
+                TranscriptEvent::Final(transcription) => {
+                    events.push((true, transcription.text));
+                }
+            }
+        }
+
+        events
+    }
+
+    #[tokio::test]
+    async fn microphone_test_chunk_queue_drops_when_full() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+
+        assert!(enqueue_microphone_test_chunk(
+            &tx,
+            AudioChunk::new(vec![1], 16_000, 1),
+        ));
+        assert!(!enqueue_microphone_test_chunk(
+            &tx,
+            AudioChunk::new(vec![2], 16_000, 1),
+        ));
+
+        let chunk = rx.recv().await.expect("first chunk should stay queued");
+        assert_eq!(chunk.data, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn transcript_event_queue_coalesces_tail_partials_when_full() {
+        let (tx, rx) = transcript_event_channel(2);
+
+        assert!(tx.send_partial(partial_text("p1")));
+        assert!(tx.send_partial(partial_text("p2")));
+        assert!(tx.send_partial(partial_text("p3")));
+        drop(tx);
+
+        assert_eq!(
+            drain_transcript_events(&rx).await,
+            vec![(false, "p1".to_string()), (false, "p3".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn transcript_event_queue_preserves_final_by_evicting_old_partial() {
+        let (tx, rx) = transcript_event_channel(2);
+
+        assert!(tx.send_partial(partial_text("p1")));
+        assert!(tx.send_partial(partial_text("p2")));
+        tx.send_final(final_text("f1"));
+        drop(tx);
+
+        assert_eq!(
+            drain_transcript_events(&rx).await,
+            vec![(false, "p2".to_string()), (true, "f1".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn transcript_event_queue_drops_partial_after_queued_final_when_full() {
+        let (tx, rx) = transcript_event_channel(2);
+
+        assert!(tx.send_partial(partial_text("p1")));
+        tx.send_final(final_text("f1"));
+        assert!(!tx.send_partial(partial_text("p2")));
+        drop(tx);
+
+        assert_eq!(
+            drain_transcript_events(&rx).await,
+            vec![(false, "p1".to_string()), (true, "f1".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn transcript_event_queue_preserves_all_final_events_even_when_capacity_full() {
+        let (tx, rx) = transcript_event_channel(1);
+
+        tx.send_final(final_text("f1"));
+        tx.send_final(final_text("f2"));
+        drop(tx);
+
+        assert_eq!(
+            drain_transcript_events(&rx).await,
+            vec![(true, "f1".to_string()), (true, "f2".to_string())]
+        );
+    }
 }

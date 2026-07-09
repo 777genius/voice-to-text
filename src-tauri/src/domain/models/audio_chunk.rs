@@ -20,10 +20,7 @@ impl AudioChunk {
             data,
             sample_rate,
             channels,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64,
+            timestamp: current_unix_timestamp_ms(),
         }
     }
 
@@ -54,6 +51,13 @@ impl AudioChunk {
 
         Self::new(data, sample_rate, channels)
     }
+}
+
+fn current_unix_timestamp_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
 }
 
 /// Audio configuration parameters
@@ -108,7 +112,7 @@ mod tests {
     }
 
     #[test]
-    fn test_audio_chunk_duration_zero_config() {
+    fn test_audio_chunk_duration_zero_config_does_not_panic() {
         let data = vec![0i16; 16000];
         assert_eq!(AudioChunk::new(data.clone(), 0, 1).duration_ms(), 0);
         assert_eq!(AudioChunk::new(data, 16000, 0).duration_ms(), 0);

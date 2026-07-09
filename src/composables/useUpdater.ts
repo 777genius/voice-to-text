@@ -18,6 +18,21 @@ let unlistenUpdateAvailable: UnlistenFn | null = null;
 let unlistenUpdateDownloadStarted: UnlistenFn | null = null;
 let unlistenUpdateDownloadProgress: UnlistenFn | null = null;
 let unlistenUpdateInstalling: UnlistenFn | null = null;
+let updateListenerGeneration = 0;
+let setupUpdateListenerPromise: Promise<void> | null = null;
+
+async function registerUpdateListener<T>(
+  generation: number,
+  eventName: string,
+  handler: Parameters<typeof listen<T>>[1]
+): Promise<UnlistenFn | null> {
+  const unlisten = await listen<T>(eventName, handler);
+  if (generation !== updateListenerGeneration) {
+    unlisten();
+    return null;
+  }
+  return unlisten;
+}
 
 // Composable для работы с обновлениями приложения
 // Единый источник логики обновлений для всех компонентов (DRY)
@@ -145,22 +160,42 @@ export function useUpdater() {
     if (unlistenUpdateAvailable) {
       return;
     }
+    if (setupUpdateListenerPromise) {
+      return setupUpdateListenerPromise;
+    }
 
+    const generation = updateListenerGeneration;
+    const setupPromise = setupUpdateListenerInternal(generation).finally(() => {
+      if (setupUpdateListenerPromise === setupPromise) {
+        setupUpdateListenerPromise = null;
+      }
+    });
+    setupUpdateListenerPromise = setupPromise;
+    return setupPromise;
+  }
+
+  async function setupUpdateListenerInternal(generation: number): Promise<void> {
     try {
-      unlistenUpdateAvailable = await listen<AppUpdateInfo>(EVENT_UPDATE_AVAILABLE, (event) => {
+      unlistenUpdateAvailable = await registerUpdateListener<AppUpdateInfo>(generation, EVENT_UPDATE_AVAILABLE, (event) => {
         console.log('Update available event received:', event.payload);
+        const version = event.payload.version;
         // Сразу фиксируем факт обновления, а "что нового" подтягиваем отдельно.
         // Так мы не показываем пользователю мусор из GitHub Release, если он откроет диалог мгновенно.
-        store.setAvailableUpdate(event.payload.version);
+        store.setAvailableUpdate(version);
         void (async () => {
-          const notes = await resolveUpdateNotes(event.payload.version, event.payload.body);
+          const notes = await resolveUpdateNotes(version, event.payload.body);
+          if (store.availableVersion !== version) {
+            return;
+          }
           if (notes !== store.releaseNotes) {
-            store.setAvailableUpdate(event.payload.version, notes);
+            store.setAvailableUpdate(version, notes);
           }
         })();
       });
+      if (!unlistenUpdateAvailable) return;
 
-      unlistenUpdateDownloadStarted = await listen<{ version: string }>(
+      unlistenUpdateDownloadStarted = await registerUpdateListener<{ version: string }>(
+        generation,
         EVENT_UPDATE_DOWNLOAD_STARTED,
         (event) => {
           // На старте скачивания прогресс может быть неизвестен, но нам важно показать UI,
@@ -172,8 +207,10 @@ export function useUpdater() {
           }
         }
       );
+      if (!unlistenUpdateDownloadStarted) return;
 
-      unlistenUpdateDownloadProgress = await listen<AppUpdateDownloadProgress>(
+      unlistenUpdateDownloadProgress = await registerUpdateListener<AppUpdateDownloadProgress>(
+        generation,
         EVENT_UPDATE_DOWNLOAD_PROGRESS,
         (event) => {
           store.setDownloadProgress({
@@ -183,21 +220,27 @@ export function useUpdater() {
           });
         }
       );
+      if (!unlistenUpdateDownloadProgress) return;
 
-      unlistenUpdateInstalling = await listen<{ version: string }>(EVENT_UPDATE_INSTALLING, () => {
+      unlistenUpdateInstalling = await registerUpdateListener<{ version: string }>(generation, EVENT_UPDATE_INSTALLING, () => {
         // Скачивание закончено — дальше будет установка.
         // Оставляем последний процент, но если его не было — сбрасываем в indeterminate.
         if (store.downloadProgress === null) {
           store.setDownloadProgress({ progress: null });
         }
       });
+      if (!unlistenUpdateInstalling) return;
     } catch (err) {
       console.error('Failed to setup update listener:', err);
+      cleanupUpdateListener();
     }
   }
 
   // Очистка listeners
   function cleanupUpdateListener(): void {
+    updateListenerGeneration++;
+    setupUpdateListenerPromise = null;
+
     if (unlistenUpdateAvailable) {
       unlistenUpdateAvailable();
       unlistenUpdateAvailable = null;

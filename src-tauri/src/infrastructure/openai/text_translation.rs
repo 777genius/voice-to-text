@@ -3,6 +3,8 @@ use serde_json::json;
 use std::error::Error as StdError;
 use std::time::Duration;
 
+use reqwest::StatusCode;
+
 const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
 const DEFAULT_TEXT_TRANSLATION_MODEL: &str = "gpt-5-mini";
 
@@ -95,11 +97,7 @@ impl OpenAITextTranslationClient {
         if !status.is_success() {
             let message = extract_openai_error_message(&text_body)
                 .unwrap_or_else(|| format!("OpenAI HTTP {}", status.as_u16()));
-            return Err(match status.as_u16() {
-                401 | 403 => OpenAITextTranslationError::Authentication(message),
-                429 => OpenAITextTranslationError::RateLimited(message),
-                _ => OpenAITextTranslationError::Connection(message),
-            });
+            return Err(map_openai_http_error(status, message));
         }
 
         let parsed: ResponsesApiResponse = serde_json::from_str(&text_body).map_err(|e| {
@@ -173,7 +171,30 @@ fn extract_openai_error_message(body: &str) -> Option<String> {
     serde_json::from_str::<OpenAIErrorResponse>(body)
         .ok()
         .and_then(|parsed| parsed.error.map(|err| err.message))
-        .filter(|message| !message.trim().is_empty())
+        .map(|message| message.trim().to_string())
+        .filter(|message| !message.is_empty())
+}
+
+fn map_openai_http_error(status: StatusCode, message: String) -> OpenAITextTranslationError {
+    let lower_message = message.to_lowercase();
+    if status == StatusCode::UNAUTHORIZED
+        || status == StatusCode::FORBIDDEN
+        || lower_message.contains("invalid api key")
+        || lower_message.contains("unauthorized")
+    {
+        return OpenAITextTranslationError::Authentication(message);
+    }
+
+    if status == StatusCode::TOO_MANY_REQUESTS
+        || lower_message.contains("rate limit")
+        || lower_message.contains("quota")
+        || lower_message.contains("billing")
+        || lower_message.contains("maximum monthly spend")
+    {
+        return OpenAITextTranslationError::RateLimited(message);
+    }
+
+    OpenAITextTranslationError::Connection(message)
 }
 
 fn format_reqwest_error(err: &reqwest::Error) -> String {
@@ -230,5 +251,35 @@ mod tests {
             extract_response_text(response).as_deref(),
             Some("Здравствуйте")
         );
+    }
+
+    #[test]
+    fn trims_openai_error_message() {
+        let body = r#"{"error":{"message":"  quota exceeded\n"}}"#;
+
+        assert_eq!(
+            extract_openai_error_message(body).as_deref(),
+            Some("quota exceeded")
+        );
+    }
+
+    #[test]
+    fn maps_quota_message_to_rate_limited_even_without_429_status() {
+        let err = map_openai_http_error(
+            StatusCode::BAD_REQUEST,
+            "You exceeded your current quota, please check your billing details".to_string(),
+        );
+
+        assert!(matches!(err, OpenAITextTranslationError::RateLimited(_)));
+    }
+
+    #[test]
+    fn maps_auth_message_to_authentication_even_without_401_status() {
+        let err = map_openai_http_error(
+            StatusCode::BAD_REQUEST,
+            "Invalid API key provided".to_string(),
+        );
+
+        assert!(matches!(err, OpenAITextTranslationError::Authentication(_)));
     }
 }

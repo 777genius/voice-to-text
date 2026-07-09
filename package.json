@@ -8,8 +8,9 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest",
-    "test:run": "vitest run",
+    "test:run": "vitest run && npm run --silent test:e2e-helpers",
     "test:coverage": "vitest run --coverage",
+    "test:e2e-helpers": "node --test e2e-tests/helpers/liveAudioRunner.test.mjs e2e-tests/helpers/processUtils.test.mjs",
     "typecheck": "vue-tsc --noEmit",
     "release:notes": "node scripts/prepare-release-notes.mjs",
     "tauri": "tauri",
@@ -18,7 +19,9 @@
     "tauri:dev:prod-backend": "VITE_API_URL=https://api.voicetext.site VOICE_TO_TEXT_API_URL=https://api.voicetext.site VOICE_TO_TEXT_BACKEND_URL=wss://api.voicetext.site tauri dev --config src-tauri/tauri.dev.conf.json",
     "tauri:dev:whisper": "tauri dev --config src-tauri/tauri.dev.conf.json --features whisper",
     "tauri:build:whisper": "tauri build --features whisper",
-    "e2e:tauri": "node e2e-tests/run-e2e.mjs"
+    "e2e:tauri": "node e2e-tests/run-e2e.mjs",
+    "e2e:live-audio": "node e2e-tests/run-live-audio-smoke.mjs",
+    "e2e:live-audio-soak": "node e2e-tests/run-live-audio-soak.mjs"
   },
   "dependencies": {
     "@mdi/font": "^7.4.47",

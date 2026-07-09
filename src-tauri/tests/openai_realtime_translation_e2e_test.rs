@@ -1,12 +1,62 @@
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use app_lib::infrastructure::audio::{AudioOutput, AudioOutputConfig, CpalAudioOutput};
+use app_lib::application::{
+    LiveTranslationCallbacks, LiveTranslationConfig, LiveTranslationService,
+};
+use app_lib::domain::{
+    AudioCapture, AudioCaptureTarget, AudioChunk, AudioChunkCallback, AudioConfig, AudioError,
+    AudioResult, PlatformAudioFactory, PlatformAudioSetupState, PlatformAudioSetupStatus,
+    RecordingStatus, TranslationAudioOutput, TranslationAudioOutputResult,
+};
+use app_lib::infrastructure::audio::{AudioOutputConfig, CpalAudioOutput};
 use app_lib::infrastructure::openai::{OpenAIRealtimeEvent, OpenAIRealtimeTranslationClient};
+use async_trait::async_trait;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tokio::sync::mpsc;
+
+static NEXT_TEMP_AUDIO_ID: AtomicUsize = AtomicUsize::new(0);
+
+struct TempGeneratedFile {
+    path: PathBuf,
+}
+
+impl TempGeneratedFile {
+    fn new(prefix: &str, extension: &str) -> Self {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let sequence = NEXT_TEMP_AUDIO_ID.fetch_add(1, Ordering::Relaxed);
+        Self {
+            path: std::env::temp_dir().join(format!(
+                "{prefix}_{}_{}_{}.{}",
+                std::process::id(),
+                nanos,
+                sequence,
+                extension
+            )),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn path_str(&self) -> &str {
+        self.path.to_str().expect("valid temp audio path")
+    }
+}
+
+impl Drop for TempGeneratedFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
 
 fn load_openai_api_key() -> String {
     let _ = dotenv::dotenv();
@@ -17,16 +67,15 @@ fn load_openai_api_key() -> String {
 }
 
 fn generate_russian_pcm24() -> Vec<i16> {
-    let tmp_dir = std::env::temp_dir();
-    let aiff_path = tmp_dir.join("voicetext_openai_ru_source.aiff");
-    let raw_path = tmp_dir.join("voicetext_openai_ru_source.s16le");
+    let aiff_path = TempGeneratedFile::new("voicetext_openai_ru_source", "aiff");
+    let raw_path = TempGeneratedFile::new("voicetext_openai_ru_source", "s16le");
 
     let say_status = Command::new("say")
         .args([
             "-v",
             "Milena",
             "-o",
-            aiff_path.to_str().expect("valid aiff path"),
+            aiff_path.path_str(),
             "Привет, меня зовут Алексей. Я проверяю перевод голоса на английский язык.",
         ])
         .status()
@@ -40,20 +89,20 @@ fn generate_russian_pcm24() -> Vec<i16> {
             "-loglevel",
             "error",
             "-i",
-            aiff_path.to_str().expect("valid aiff path"),
+            aiff_path.path_str(),
             "-ac",
             "1",
             "-ar",
             "24000",
             "-f",
             "s16le",
-            raw_path.to_str().expect("valid raw path"),
+            raw_path.path_str(),
         ])
         .status()
         .expect("must run ffmpeg");
     assert!(ffmpeg_status.success(), "ffmpeg conversion failed");
 
-    let bytes = fs::read(raw_path).expect("must read generated pcm");
+    let bytes = fs::read(raw_path.path()).expect("must read generated pcm");
     bytes
         .chunks_exact(2)
         .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
@@ -121,6 +170,80 @@ fn start_blackhole_capture(captured: Arc<Mutex<Vec<f32>>>) -> cpal::Stream {
     }
 }
 
+#[derive(Default)]
+struct AudioStats {
+    samples: usize,
+    sum_sq: f64,
+    peak: f32,
+}
+
+impl AudioStats {
+    fn push_f32(&mut self, sample: f32) {
+        self.samples += 1;
+        self.sum_sq += (sample as f64) * (sample as f64);
+        self.peak = self.peak.max(sample.abs());
+    }
+
+    fn rms(&self) -> f32 {
+        if self.samples == 0 {
+            return 0.0;
+        }
+        (self.sum_sq / self.samples as f64).sqrt() as f32
+    }
+}
+
+fn start_blackhole_stats_capture(stats: Arc<Mutex<AudioStats>>) -> cpal::Stream {
+    let input = find_blackhole_input();
+    let input_config = input
+        .default_input_config()
+        .expect("BlackHole input must have default config");
+    let stream_config: cpal::StreamConfig = input_config.clone().into();
+    let err_fn = |err| eprintln!("BlackHole input stream error: {err}");
+
+    match input_config.sample_format() {
+        cpal::SampleFormat::F32 => input
+            .build_input_stream(
+                &stream_config,
+                move |data: &[f32], _| {
+                    let mut guard = stats.lock().unwrap();
+                    for sample in data {
+                        guard.push_f32(*sample);
+                    }
+                },
+                err_fn,
+                None,
+            )
+            .expect("must build f32 stats input stream"),
+        cpal::SampleFormat::I16 => input
+            .build_input_stream(
+                &stream_config,
+                move |data: &[i16], _| {
+                    let mut guard = stats.lock().unwrap();
+                    for sample in data {
+                        guard.push_f32(*sample as f32 / i16::MAX as f32);
+                    }
+                },
+                err_fn,
+                None,
+            )
+            .expect("must build i16 stats input stream"),
+        cpal::SampleFormat::U16 => input
+            .build_input_stream(
+                &stream_config,
+                move |data: &[u16], _| {
+                    let mut guard = stats.lock().unwrap();
+                    for sample in data {
+                        guard.push_f32((*sample as f32 / u16::MAX as f32) * 2.0 - 1.0);
+                    }
+                },
+                err_fn,
+                None,
+            )
+            .expect("must build u16 stats input stream"),
+        other => panic!("unsupported input sample format: {other:?}"),
+    }
+}
+
 fn rms(samples: &[f32]) -> f32 {
     if samples.is_empty() {
         return 0.0;
@@ -129,8 +252,232 @@ fn rms(samples: &[f32]) -> f32 {
     (sum_sq / samples.len() as f32).sqrt()
 }
 
+fn live_audio_soak_duration() -> Duration {
+    std::env::var("LIVE_AUDIO_SOAK_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(600))
+}
+
+struct SyntheticPcmMicrophone {
+    pcm: Arc<Vec<i16>>,
+    config: AudioConfig,
+    started: Arc<AtomicBool>,
+    stopped: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl AudioCapture for SyntheticPcmMicrophone {
+    async fn initialize(&mut self, config: AudioConfig) -> AudioResult<()> {
+        self.config = config;
+        Ok(())
+    }
+
+    async fn start_capture(&mut self, on_chunk: AudioChunkCallback) -> AudioResult<()> {
+        self.started.store(true, Ordering::SeqCst);
+        for chunk in self.pcm.chunks(4_800) {
+            on_chunk(AudioChunk::new(
+                chunk.to_vec(),
+                self.config.sample_rate,
+                self.config.channels,
+            ));
+        }
+        Ok(())
+    }
+
+    async fn stop_capture(&mut self) -> AudioResult<()> {
+        self.stopped.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn is_capturing(&self) -> bool {
+        self.started.load(Ordering::SeqCst) && !self.stopped.load(Ordering::SeqCst)
+    }
+
+    fn config(&self) -> AudioConfig {
+        self.config
+    }
+}
+
+struct SyntheticMicToBlackholeFactory {
+    pcm: Arc<Vec<i16>>,
+    requested_target: Arc<Mutex<Option<AudioCaptureTarget>>>,
+    mic_started: Arc<AtomicBool>,
+    mic_stopped: Arc<AtomicBool>,
+}
+
+struct LoopingPcmMicrophone {
+    pcm: Arc<Vec<i16>>,
+    config: AudioConfig,
+    started: Arc<AtomicBool>,
+    stopped: Arc<AtomicBool>,
+    emitted_chunks: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl AudioCapture for LoopingPcmMicrophone {
+    async fn initialize(&mut self, config: AudioConfig) -> AudioResult<()> {
+        self.config = config;
+        Ok(())
+    }
+
+    async fn start_capture(&mut self, on_chunk: AudioChunkCallback) -> AudioResult<()> {
+        self.started.store(true, Ordering::SeqCst);
+        self.stopped.store(false, Ordering::SeqCst);
+
+        let pcm = self.pcm.clone();
+        let config = self.config;
+        let stopped = self.stopped.clone();
+        let emitted_chunks = self.emitted_chunks.clone();
+        tokio::spawn(async move {
+            let chunks: Vec<Vec<i16>> = pcm.chunks(4_800).map(|chunk| chunk.to_vec()).collect();
+            if chunks.is_empty() {
+                return;
+            }
+            let mut index = 0usize;
+            while !stopped.load(Ordering::SeqCst) {
+                on_chunk(AudioChunk::new(
+                    chunks[index].clone(),
+                    config.sample_rate,
+                    config.channels,
+                ));
+                emitted_chunks.fetch_add(1, Ordering::SeqCst);
+                index = (index + 1) % chunks.len();
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        });
+        Ok(())
+    }
+
+    async fn stop_capture(&mut self) -> AudioResult<()> {
+        self.stopped.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn is_capturing(&self) -> bool {
+        self.started.load(Ordering::SeqCst) && !self.stopped.load(Ordering::SeqCst)
+    }
+
+    fn config(&self) -> AudioConfig {
+        self.config
+    }
+}
+
+struct LoopingMicToBlackholeFactory {
+    pcm: Arc<Vec<i16>>,
+    requested_target: Arc<Mutex<Option<AudioCaptureTarget>>>,
+    mic_started: Arc<AtomicBool>,
+    mic_stopped: Arc<AtomicBool>,
+    emitted_chunks: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl PlatformAudioFactory for LoopingMicToBlackholeFactory {
+    fn create_microphone_capture(
+        &self,
+        _device_name: Option<String>,
+        target: AudioCaptureTarget,
+    ) -> AudioResult<Box<dyn AudioCapture>> {
+        *self.requested_target.lock().unwrap() = Some(target);
+        Ok(Box::new(LoopingPcmMicrophone {
+            pcm: self.pcm.clone(),
+            config: AudioConfig::default(),
+            started: self.mic_started.clone(),
+            stopped: self.mic_stopped.clone(),
+            emitted_chunks: self.emitted_chunks.clone(),
+        }))
+    }
+
+    fn create_translation_output(
+        &self,
+    ) -> TranslationAudioOutputResult<Box<dyn TranslationAudioOutput>> {
+        Ok(Box::new(CpalAudioOutput::new()))
+    }
+
+    fn create_system_loopback_capture(
+        &self,
+        _target: AudioCaptureTarget,
+    ) -> AudioResult<Box<dyn AudioCapture>> {
+        Err(AudioError::Configuration(
+            "not used by live translation service soak".to_string(),
+        ))
+    }
+
+    async fn setup_status(&self) -> PlatformAudioSetupStatus {
+        PlatformAudioSetupStatus {
+            platform: std::env::consts::OS.to_string(),
+            status: PlatformAudioSetupState::Ready,
+            outgoing_supported: true,
+            incoming_supported: true,
+            virtual_microphone_name: "BlackHole 2ch".to_string(),
+            message: "looping synthetic mic to platform virtual output".to_string(),
+        }
+    }
+
+    fn is_virtual_microphone_input(&self, _name: &str) -> bool {
+        false
+    }
+
+    fn microphone_preflight(&self) -> Result<(), AudioError> {
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl PlatformAudioFactory for SyntheticMicToBlackholeFactory {
+    fn create_microphone_capture(
+        &self,
+        _device_name: Option<String>,
+        target: AudioCaptureTarget,
+    ) -> AudioResult<Box<dyn AudioCapture>> {
+        *self.requested_target.lock().unwrap() = Some(target);
+        Ok(Box::new(SyntheticPcmMicrophone {
+            pcm: self.pcm.clone(),
+            config: AudioConfig::default(),
+            started: self.mic_started.clone(),
+            stopped: self.mic_stopped.clone(),
+        }))
+    }
+
+    fn create_translation_output(
+        &self,
+    ) -> TranslationAudioOutputResult<Box<dyn TranslationAudioOutput>> {
+        Ok(Box::new(CpalAudioOutput::new()))
+    }
+
+    fn create_system_loopback_capture(
+        &self,
+        _target: AudioCaptureTarget,
+    ) -> AudioResult<Box<dyn AudioCapture>> {
+        Err(AudioError::Configuration(
+            "not used by live translation service blackhole e2e".to_string(),
+        ))
+    }
+
+    async fn setup_status(&self) -> PlatformAudioSetupStatus {
+        PlatformAudioSetupStatus {
+            platform: std::env::consts::OS.to_string(),
+            status: PlatformAudioSetupState::Ready,
+            outgoing_supported: true,
+            incoming_supported: true,
+            virtual_microphone_name: "BlackHole 2ch".to_string(),
+            message: "synthetic mic to platform virtual output".to_string(),
+        }
+    }
+
+    fn is_virtual_microphone_input(&self, _name: &str) -> bool {
+        false
+    }
+
+    fn microphone_preflight(&self) -> Result<(), AudioError> {
+        Ok(())
+    }
+}
+
 fn drain_openai_events(
-    rx: &mut mpsc::UnboundedReceiver<OpenAIRealtimeEvent>,
+    rx: &mut mpsc::Receiver<OpenAIRealtimeEvent>,
     translated_text: &mut String,
     pending_audio: &mut Vec<Vec<i16>>,
 ) -> Option<String> {
@@ -162,6 +509,228 @@ fn drain_openai_events(
         }
     }
     failure
+}
+
+#[tokio::test]
+#[ignore = "calls OpenAI realtime translation API and requires BlackHole/VB-CABLE virtual audio route"]
+async fn live_translation_service_synthetic_voice_reaches_blackhole() {
+    let api_key = load_openai_api_key();
+    let source_pcm = Arc::new(generate_russian_pcm24());
+
+    let captured = Arc::new(Mutex::new(Vec::<f32>::new()));
+    let input_stream = start_blackhole_capture(captured.clone());
+    input_stream.play().expect("must start BlackHole capture");
+
+    let requested_target = Arc::new(Mutex::new(None));
+    let mic_started = Arc::new(AtomicBool::new(false));
+    let mic_stopped = Arc::new(AtomicBool::new(false));
+    let service =
+        LiveTranslationService::new_with_audio_factory(Arc::new(SyntheticMicToBlackholeFactory {
+            pcm: source_pcm,
+            requested_target: requested_target.clone(),
+            mic_started: mic_started.clone(),
+            mic_stopped: mic_stopped.clone(),
+        }));
+
+    let translated_text = Arc::new(Mutex::new(String::new()));
+    let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+    let statuses = Arc::new(Mutex::new(Vec::<RecordingStatus>::new()));
+    let callbacks = LiveTranslationCallbacks {
+        on_transcript_delta: {
+            let translated_text = translated_text.clone();
+            Arc::new(move |text| translated_text.lock().unwrap().push_str(&text))
+        },
+        on_audio_spectrum: Arc::new(|_| {}),
+        on_error: {
+            let errors = errors.clone();
+            Arc::new(move |err| errors.lock().unwrap().push(err.to_string()))
+        },
+        on_status: {
+            let statuses = statuses.clone();
+            Arc::new(move |status| statuses.lock().unwrap().push(status))
+        },
+    };
+
+    let mut config = LiveTranslationConfig::new_with_defaults(9_001);
+    config.openai_api_key = api_key;
+    config.target_language = "en".to_string();
+    config.microphone_sensitivity = 100;
+
+    service
+        .start_translation(config, callbacks)
+        .await
+        .expect("service must start live translation");
+    assert_eq!(service.get_status().await, RecordingStatus::Recording);
+    assert!(mic_started.load(Ordering::SeqCst));
+    assert_eq!(
+        requested_target.lock().unwrap().unwrap().sample_rate,
+        AudioCaptureTarget::outgoing_translation().sample_rate
+    );
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    service
+        .stop_translation()
+        .await
+        .expect("service must stop live translation");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drop(input_stream);
+
+    assert_eq!(service.get_status().await, RecordingStatus::Idle);
+    assert!(mic_stopped.load(Ordering::SeqCst));
+    assert!(
+        errors.lock().unwrap().is_empty(),
+        "unexpected service errors: {:?}",
+        errors.lock().unwrap()
+    );
+    assert!(
+        statuses
+            .lock()
+            .unwrap()
+            .contains(&RecordingStatus::Starting)
+            && statuses
+                .lock()
+                .unwrap()
+                .contains(&RecordingStatus::Recording),
+        "service did not emit expected statuses: {:?}",
+        statuses.lock().unwrap()
+    );
+
+    let translated_text = translated_text.lock().unwrap().clone();
+    let captured_samples = captured.lock().unwrap().clone();
+    let measured_rms = rms(&captured_samples);
+    let peak = captured_samples
+        .iter()
+        .fold(0.0f32, |acc, sample| acc.max(sample.abs()));
+
+    println!("service_translated_text={translated_text}");
+    println!(
+        "service_blackhole_samples={}, service_blackhole_rms={measured_rms:.6}, service_blackhole_peak={peak:.6}",
+        captured_samples.len()
+    );
+
+    assert!(
+        translated_text.to_lowercase().contains("english")
+            || translated_text.to_lowercase().contains("voice")
+            || translated_text.to_lowercase().contains("translation")
+            || translated_text.to_lowercase().contains("alex"),
+        "service translated text looks unexpected/empty: {translated_text}"
+    );
+    assert!(
+        measured_rms > 0.005 && peak > 0.03,
+        "service translated audio did not reach BlackHole input: rms={measured_rms:.6}, peak={peak:.6}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "long soak: calls OpenAI realtime translation API and requires BlackHole 2ch"]
+async fn live_translation_service_long_running_synthetic_voice_soak() {
+    let api_key = load_openai_api_key();
+    let soak_duration = live_audio_soak_duration();
+    let source_pcm = Arc::new(generate_russian_pcm24());
+
+    let blackhole_stats = Arc::new(Mutex::new(AudioStats::default()));
+    let input_stream = start_blackhole_stats_capture(blackhole_stats.clone());
+    input_stream.play().expect("must start BlackHole capture");
+
+    let requested_target = Arc::new(Mutex::new(None));
+    let mic_started = Arc::new(AtomicBool::new(false));
+    let mic_stopped = Arc::new(AtomicBool::new(false));
+    let emitted_chunks = Arc::new(AtomicUsize::new(0));
+    let service =
+        LiveTranslationService::new_with_audio_factory(Arc::new(LoopingMicToBlackholeFactory {
+            pcm: source_pcm,
+            requested_target: requested_target.clone(),
+            mic_started: mic_started.clone(),
+            mic_stopped: mic_stopped.clone(),
+            emitted_chunks: emitted_chunks.clone(),
+        }));
+
+    let translated_text = Arc::new(Mutex::new(String::new()));
+    let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+    let statuses = Arc::new(Mutex::new(Vec::<RecordingStatus>::new()));
+    let callbacks = LiveTranslationCallbacks {
+        on_transcript_delta: {
+            let translated_text = translated_text.clone();
+            Arc::new(move |text| translated_text.lock().unwrap().push_str(&text))
+        },
+        on_audio_spectrum: Arc::new(|_| {}),
+        on_error: {
+            let errors = errors.clone();
+            Arc::new(move |err| errors.lock().unwrap().push(err.to_string()))
+        },
+        on_status: {
+            let statuses = statuses.clone();
+            Arc::new(move |status| statuses.lock().unwrap().push(status))
+        },
+    };
+
+    let mut config = LiveTranslationConfig::new_with_defaults(19_001);
+    config.openai_api_key = api_key;
+    config.target_language = "en".to_string();
+    config.microphone_sensitivity = 100;
+
+    service
+        .start_translation(config, callbacks)
+        .await
+        .expect("service must start long live translation soak");
+    assert_eq!(service.get_status().await, RecordingStatus::Recording);
+    assert!(mic_started.load(Ordering::SeqCst));
+    assert_eq!(
+        requested_target.lock().unwrap().unwrap().sample_rate,
+        AudioCaptureTarget::outgoing_translation().sample_rate
+    );
+
+    println!(
+        "live_translation_soak_seconds={}",
+        soak_duration.as_secs_f32()
+    );
+    tokio::time::sleep(soak_duration).await;
+
+    service
+        .stop_translation()
+        .await
+        .expect("service must stop long live translation soak");
+    tokio::time::sleep(Duration::from_millis(750)).await;
+    drop(input_stream);
+
+    assert_eq!(service.get_status().await, RecordingStatus::Idle);
+    assert!(mic_stopped.load(Ordering::SeqCst));
+    assert!(
+        errors.lock().unwrap().is_empty(),
+        "unexpected service errors during soak: {:?}",
+        errors.lock().unwrap()
+    );
+    assert!(
+        statuses
+            .lock()
+            .unwrap()
+            .contains(&RecordingStatus::Recording),
+        "service did not reach Recording during soak: {:?}",
+        statuses.lock().unwrap()
+    );
+
+    let emitted = emitted_chunks.load(Ordering::SeqCst);
+    let translated_len = translated_text.lock().unwrap().trim().len();
+    let stats = blackhole_stats.lock().unwrap();
+    let measured_rms = stats.rms();
+    let peak = stats.peak;
+    println!(
+        "live_translation_soak_chunks={emitted}, translated_chars={translated_len}, blackhole_samples={}, blackhole_rms={measured_rms:.6}, blackhole_peak={peak:.6}",
+        stats.samples
+    );
+
+    assert!(
+        emitted >= (soak_duration.as_millis() / 300) as usize,
+        "synthetic mic emitted too few chunks for soak duration: {emitted}"
+    );
+    assert!(
+        translated_len > 0,
+        "OpenAI did not emit translated transcript during soak"
+    );
+    assert!(
+        measured_rms > 0.003 && peak > 0.02,
+        "translated soak audio did not reach BlackHole input: rms={measured_rms:.6}, peak={peak:.6}"
+    );
 }
 
 #[tokio::test]

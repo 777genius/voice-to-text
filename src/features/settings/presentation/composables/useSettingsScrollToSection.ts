@@ -22,8 +22,43 @@ export const SETTINGS_SECTION_IDS = [
 export type SettingsSectionId = (typeof SETTINGS_SECTION_IDS)[number];
 
 const FLASH_DURATION_MS = 2200;
+const SETTINGS_SECTION_FLASH_CLASS = 'settings-section-flash';
+
+export function createSettingsSectionFlashController(durationMs = FLASH_DURATION_MS) {
+  const timers = new Map<HTMLElement, number>();
+
+  const flash = (el: HTMLElement): void => {
+    const existingTimer = timers.get(el);
+    if (existingTimer !== undefined) {
+      window.clearTimeout(existingTimer);
+    }
+
+    el.classList.remove(SETTINGS_SECTION_FLASH_CLASS);
+    void el.offsetWidth;
+    el.classList.add(SETTINGS_SECTION_FLASH_CLASS);
+
+    const timer = window.setTimeout(() => {
+      if (timers.get(el) !== timer) return;
+      timers.delete(el);
+      el.classList.remove(SETTINGS_SECTION_FLASH_CLASS);
+    }, durationMs);
+    timers.set(el, timer);
+  };
+
+  const cleanup = (): void => {
+    for (const [el, timer] of timers) {
+      window.clearTimeout(timer);
+      el.classList.remove(SETTINGS_SECTION_FLASH_CLASS);
+    }
+    timers.clear();
+  };
+
+  return { flash, cleanup };
+}
 
 export function useSettingsScrollToSection(scrollContainerRef: { value: HTMLElement | null }) {
+  const sectionFlash = createSettingsSectionFlashController();
+
   const scrollToSection = (sectionId: string | null): boolean => {
     if (!sectionId) return false;
     const container = scrollContainerRef.value;
@@ -35,12 +70,13 @@ export function useSettingsScrollToSection(scrollContainerRef: { value: HTMLElem
     if (!el) return false;
 
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    el.classList.add('settings-section-flash');
-    setTimeout(() => {
-      el.classList.remove('settings-section-flash');
-    }, FLASH_DURATION_MS);
+    sectionFlash.flash(el);
     return true;
   };
+
+  onUnmounted(() => {
+    sectionFlash.cleanup();
+  });
 
   return { scrollToSection };
 }
@@ -54,11 +90,13 @@ export function useSettingsScrollToSectionListener(
 ) {
   const { scrollToSection } = useSettingsScrollToSection(scrollContainerRef);
   let unlisten: UnlistenFn | null = null;
+  let isUnmounted = false;
 
   onMounted(async () => {
+    isUnmounted = false;
     if (!isTauriAvailable()) return;
 
-    unlisten = await listen<SettingsWindowOpenedPayload>(
+    const nextUnlisten = await listen<SettingsWindowOpenedPayload>(
       'settings-window-opened',
       async (event) => {
         const payload = event.payload;
@@ -73,9 +111,15 @@ export function useSettingsScrollToSectionListener(
         scrollToSection(targetSection);
       }
     );
+    if (isUnmounted) {
+      nextUnlisten();
+      return;
+    }
+    unlisten = nextUnlisten;
   });
 
   onUnmounted(() => {
+    isUnmounted = true;
     if (unlisten) {
       unlisten();
       unlisten = null;

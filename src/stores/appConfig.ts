@@ -33,6 +33,8 @@ export const useAppConfigStore = defineStore('appConfig', () => {
   const openaiApiKey = ref('');
 
   let syncHandle: RevisionSyncHandle | null = null;
+  let syncStartPromise: Promise<boolean> | null = null;
+  let syncGeneration = 0;
 
   function applySnapshot(data: AppConfigSnapshotData, rev: string): void {
     revision.value = rev;
@@ -65,6 +67,7 @@ export const useAppConfigStore = defineStore('appConfig', () => {
     if (!isTauriAvailable()) return false;
     // Идемпотентность: если уже запущено — считаем, что успешно.
     if (syncHandle) return true;
+    if (syncStartPromise) return syncStartPromise;
 
     const handle = createStoreTauriTopicSync<AppConfigSnapshotData>({
       topic: TOPIC_APP_CONFIG,
@@ -77,19 +80,34 @@ export const useAppConfigStore = defineStore('appConfig', () => {
       },
     });
 
-    try {
-      await handle.start();
-      syncHandle = handle;
-      isSyncing.value = true;
-      return true;
-    } catch (err) {
-      handle.stop();
-      console.error('[appConfig] sync start failed:', err);
-      return false;
-    }
+    const generation = syncGeneration;
+    const startPromise = (async () => {
+      try {
+        await handle.start();
+        if (generation !== syncGeneration || syncHandle) {
+          handle.stop();
+          return false;
+        }
+        syncHandle = handle;
+        isSyncing.value = true;
+        return true;
+      } catch (err) {
+        handle.stop();
+        console.error('[appConfig] sync start failed:', err);
+        return false;
+      }
+    })().finally(() => {
+      if (syncStartPromise === startPromise) {
+        syncStartPromise = null;
+      }
+    });
+    syncStartPromise = startPromise;
+    return startPromise;
   }
 
   function stopSync(): void {
+    syncGeneration++;
+    syncStartPromise = null;
     if (syncHandle) {
       syncHandle.stop();
       syncHandle = null;

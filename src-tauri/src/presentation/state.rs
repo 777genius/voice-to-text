@@ -1060,6 +1060,7 @@ impl AppState {
     }
 
     /// Перезапускает VAD timeout handler (используется при смене устройства)
+    #[allow(dead_code)]
     pub async fn restart_vad_timeout_handler(&self, app_handle: tauri::AppHandle) {
         log::info!("Restarting VAD timeout handler");
 

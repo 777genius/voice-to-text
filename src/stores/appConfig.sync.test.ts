@@ -6,6 +6,20 @@ import { CMD_GET_APP_CONFIG_SNAPSHOT, STATE_SYNC_INVALIDATION_EVENT } from '@/wi
 const invokeMock = vi.fn();
 const listenMock = vi.fn();
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+async function flushMicrotasks() {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args: any[]) => invokeMock(...args),
 }));
@@ -206,5 +220,51 @@ describe('useAppConfigStore sync', () => {
 
     // listen должен быть вызван только один раз
     expect(listenMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('concurrent startSync переиспользует in-flight start и не создает второй handle', async () => {
+    const pendingListen = deferred<() => void>();
+    const unlistenFn = vi.fn();
+    listenMock.mockReturnValue(pendingListen.promise);
+    invokeMock.mockResolvedValue({
+      revision: '1',
+      data: makeSnapshotData(),
+    });
+
+    const store = useAppConfigStore();
+    const first = store.startSync();
+    const second = store.startSync();
+
+    for (let i = 0; i < 20 && listenMock.mock.calls.length === 0; i++) {
+      await flushMicrotasks();
+    }
+    expect(listenMock).toHaveBeenCalledTimes(1);
+
+    pendingListen.resolve(unlistenFn);
+    await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
+    expect(store.isSyncing).toBe(true);
+  });
+
+  it('stopSync останавливает late handle, если startSync завершился после stop', async () => {
+    const pendingListen = deferred<() => void>();
+    const unlistenFn = vi.fn();
+    listenMock.mockReturnValueOnce(pendingListen.promise);
+    invokeMock.mockResolvedValue({
+      revision: '1',
+      data: makeSnapshotData(),
+    });
+
+    const store = useAppConfigStore();
+    const start = store.startSync();
+    for (let i = 0; i < 20 && listenMock.mock.calls.length === 0; i++) {
+      await flushMicrotasks();
+    }
+
+    store.stopSync();
+    pendingListen.resolve(unlistenFn);
+
+    await expect(start).resolves.toBe(false);
+    expect(unlistenFn).toHaveBeenCalledTimes(1);
+    expect(store.isSyncing).toBe(false);
   });
 });

@@ -66,16 +66,31 @@ const isMiniActionsVisible = ref(false);
 
 const recordingHotkey = computed(() => formatHotkeyForDisplay(appConfigStore.recordingHotkey));
 
+const hasMiniError = computed(() => Boolean(store.error || store.hasError));
+const showMiniActions = computed(() => isMiniActionsVisible.value || hasMiniError.value);
+const hasMiniTranslationText = computed(() =>
+  store.activeRecordingMode === 'live_translation' && store.translationText.trim().length > 0
+);
+const hasMiniIncomingTranslationText = computed(() =>
+  Boolean(store.incomingTranslationError) || store.incomingTranslationText.trim().length > 0
+);
+const hasVisibleIncomingTranslation = computed(() =>
+  store.isIncomingTranslationActive || store.hasIncomingTranslationText || Boolean(store.incomingTranslationError)
+);
+const hasMiniIncomingTranslation = computed(() =>
+  hasVisibleIncomingTranslation.value
+);
+const hasMiniRecognizedText = computed(() =>
+  store.hasVisibleTranscriptionText || hasMiniTranslationText.value || hasMiniIncomingTranslationText.value
+);
 const shouldShowMiniHotkeyPrompt = computed(() =>
   store.isIdle &&
-  !store.hasVisibleTranscriptionText &&
+  !hasMiniRecognizedText.value &&
+  !hasMiniIncomingTranslation.value &&
   !store.error &&
   !store.hasError &&
   recordingHotkey.value.length > 0
 );
-
-const hasMiniError = computed(() => Boolean(store.error || store.hasError));
-const showMiniActions = computed(() => isMiniActionsVisible.value || hasMiniError.value);
 
 const miniHotkeyPrompt = computed(() =>
   shouldShowMiniHotkeyPrompt.value
@@ -103,7 +118,11 @@ const miniDisplayText = computed(() => {
     store.visiblePartialText,
   );
 
+  if (store.incomingTranslationError) return store.incomingTranslationError;
+  if (hasMiniTranslationText.value) return store.translationText.trim();
   if (latestRecognized) return latestRecognized;
+  if (store.incomingTranslationText.trim()) return store.incomingTranslationText.trim();
+  if (store.isIncomingTranslationActive) return t('main.incomingTranslationEmpty');
   if (store.isConnecting) return t('main.connecting');
   if (store.isStarting || store.isRecording) return t('main.listening');
   if (store.isProcessing) return store.displayText;
@@ -138,12 +157,28 @@ function alignMiniTextToEnd() {
 // Debouncing для hotkey - блокирует повторные вызовы в течение 500ms
 let hotkeyDebounceTimeout: number | null = null;
 let isHotkeyProcessing = false;
+let isComponentUnmounted = false;
 
 let unlistenHotkey: UnlistenFn | null = null;
 let unlistenAutoHide: UnlistenFn | null = null;
 let unlistenStartRequested: UnlistenFn | null = null;
 let unlistenWindowShown: UnlistenFn | null = null;
 let unlistenWindowWillHideForHotkeyStop: UnlistenFn | null = null;
+
+async function registerRecordingListener<T>(
+  eventName: string,
+  handler: Parameters<typeof listen<T>>[1],
+): Promise<UnlistenFn | null> {
+  if (isComponentUnmounted) return null;
+
+  const unlisten = await listen<T>(eventName, handler);
+  if (isComponentUnmounted) {
+    unlisten();
+    return null;
+  }
+
+  return unlisten;
+}
 
 watch(
   () => appConfigStore.playCompletionSound,
@@ -227,6 +262,7 @@ function applyRecordingWindowSize() {
 }
 
 let hideRecordingWindowTimeout: number | null = null;
+let miniOpeningRaf: number | null = null;
 let miniOpeningTimer: number | null = null;
 let miniCloseResetTimer: number | null = null;
 let miniCursorPollTimer: number | null = null;
@@ -248,6 +284,26 @@ function cancelPendingHideRecordingWindow() {
     miniCloseResetTimer = null;
   }
   isMiniClosing.value = false;
+}
+
+function clearHotkeyDebounceTimeout() {
+  if (hotkeyDebounceTimeout !== null) {
+    window.clearTimeout(hotkeyDebounceTimeout);
+    hotkeyDebounceTimeout = null;
+  }
+  isHotkeyProcessing = false;
+}
+
+function clearMiniOpeningAnimation() {
+  if (miniOpeningRaf !== null) {
+    window.cancelAnimationFrame(miniOpeningRaf);
+    miniOpeningRaf = null;
+  }
+  if (miniOpeningTimer !== null) {
+    window.clearTimeout(miniOpeningTimer);
+    miniOpeningTimer = null;
+  }
+  isMiniOpening.value = false;
 }
 
 function blurMiniActionFocus(event?: Event) {
@@ -291,7 +347,12 @@ async function refreshMiniCursorOverWindow() {
 }
 
 function startMiniCursorPolling() {
-  if (miniCursorPollTimer !== null || !useMiniLayout.value || !isTauriAvailable()) return;
+  if (
+    miniCursorPollTimer !== null ||
+    !useMiniLayout.value ||
+    !isTauriAvailable() ||
+    isComponentUnmounted
+  ) return;
 
   void refreshMiniCursorOverWindow();
   miniCursorPollTimer = window.setInterval(() => {
@@ -331,10 +392,7 @@ async function resolveMiniHideSide(): Promise<'left' | 'right'> {
 async function beginMiniCloseAnimation() {
   resetMiniActionState();
   miniHideSide.value = await resolveMiniHideSide();
-  if (miniOpeningTimer !== null) {
-    window.clearTimeout(miniOpeningTimer);
-    miniOpeningTimer = null;
-  }
+  clearMiniOpeningAnimation();
   if (miniCloseResetTimer !== null) {
     window.clearTimeout(miniCloseResetTimer);
     miniCloseResetTimer = null;
@@ -349,14 +407,11 @@ async function beginMiniCloseAnimation() {
 }
 
 async function playMiniOpenAnimation() {
-  if (!useMiniLayout.value) return;
+  if (!useMiniLayout.value || isComponentUnmounted) return;
 
   resetMiniActionState();
 
-  if (miniOpeningTimer !== null) {
-    window.clearTimeout(miniOpeningTimer);
-    miniOpeningTimer = null;
-  }
+  clearMiniOpeningAnimation();
   if (miniCloseResetTimer !== null) {
     window.clearTimeout(miniCloseResetTimer);
     miniCloseResetTimer = null;
@@ -366,9 +421,12 @@ async function playMiniOpenAnimation() {
   isMiniClosing.value = false;
   isMiniAnimationReset.value = true;
   await nextTick();
+  if (!useMiniLayout.value || isComponentUnmounted) return;
 
   void document.querySelector<HTMLElement>('.popover.mini')?.offsetHeight;
-  window.requestAnimationFrame(() => {
+  miniOpeningRaf = window.requestAnimationFrame(() => {
+    miniOpeningRaf = null;
+    if (!useMiniLayout.value || isComponentUnmounted) return;
     isMiniAnimationReset.value = false;
     isMiniOpening.value = true;
     miniOpeningTimer = window.setTimeout(() => {
@@ -379,6 +437,11 @@ async function playMiniOpenAnimation() {
 }
 
 function scheduleHideRecordingWindow(reason: string) {
+  if (hasVisibleIncomingTranslation.value) {
+    console.log(`[AutoHide] Keeping window visible because incoming subtitles are visible (${reason})`);
+    return;
+  }
+
   if (hideRecordingWindowTimeout !== null) {
     window.clearTimeout(hideRecordingWindowTimeout);
   }
@@ -390,6 +453,12 @@ function scheduleHideRecordingWindow(reason: string) {
 
   hideRecordingWindowTimeout = window.setTimeout(async () => {
     hideRecordingWindowTimeout = null;
+    if (hasVisibleIncomingTranslation.value) {
+      isMiniClosing.value = false;
+      console.log(`[AutoHide] Cancelled hide because incoming subtitles became visible (${reason})`);
+      return;
+    }
+
     try {
       store.suppressPreviousTranscriptionDisplay(`auto_hide:${reason}`);
       const window = getCurrentWebviewWindow();
@@ -458,6 +527,7 @@ watch(
 );
 
 onMounted(async () => {
+  isComponentUnmounted = false;
   if (!isTauriAvailable()) {
     store.error = t('main.tauriUnavailable');
     return;
@@ -469,16 +539,27 @@ onMounted(async () => {
   } catch {}
 
   await store.initialize();
+  if (isComponentUnmounted) return;
   await appConfigStore.startSync();
+  if (isComponentUnmounted) {
+    appConfigStore.stopSync();
+    return;
+  }
   await sttConfigStore.startSync();
+  if (isComponentUnmounted) {
+    appConfigStore.stopSync();
+    sttConfigStore.stopSync();
+    return;
+  }
   await nextTick();
+  if (isComponentUnmounted) return;
   applyRecordingWindowSize();
   alignMiniTextToEnd();
   startMiniCursorPolling();
 
   // Очищаем UI при фактическом показе окна (НЕ через focus: main может быть nonactivating NSPanel).
   // Важно: не очищаем посреди активной записи — иначе можно потерять текст если пользователь скрыл и снова показал окно.
-  unlistenWindowShown = await listen(EVENT_RECORDING_WINDOW_SHOWN, async () => {
+  unlistenWindowShown = await registerRecordingListener(EVENT_RECORDING_WINDOW_SHOWN, async () => {
     resetMiniActionState();
     cancelPendingHideRecordingWindow();
     await nextTick();
@@ -504,7 +585,7 @@ onMounted(async () => {
     }
   });
 
-  unlistenWindowWillHideForHotkeyStop = await listen(
+  unlistenWindowWillHideForHotkeyStop = await registerRecordingListener(
     EVENT_RECORDING_WINDOW_WILL_HIDE_FOR_HOTKEY_STOP,
     () => {
       resetMiniActionState();
@@ -516,13 +597,13 @@ onMounted(async () => {
   );
 
   // Слушаем событие нажатия горячей клавиши для записи
-  unlistenHotkey = await listen('hotkey:toggle-recording', async () => {
+  unlistenHotkey = await registerRecordingListener('hotkey:toggle-recording', async () => {
     await handleHotkeyToggle();
   });
 
   // Rust сам запускает запись по hotkey. Это событие только отменяет старый auto-hide
   // и защищает окно от позднего Idle предыдущей сессии во время быстрого restart.
-  unlistenStartRequested = await listen<{
+  unlistenStartRequested = await registerRecordingListener<{
     source?: string;
     canResumeKeepAlive?: boolean;
     warmStartExpected?: boolean;
@@ -538,7 +619,7 @@ onMounted(async () => {
   });
 
   // Слушаем статус для звука и автоскрытия окна при остановке
-  unlistenAutoHide = await listen<RecordingStatusPayload>('recording:status', async (event) => {
+  unlistenAutoHide = await registerRecordingListener<RecordingStatusPayload>('recording:status', async (event) => {
     if (event.payload.status !== 'Idle') {
       hotkeyStartIntentUntilMs = 0;
       cancelPendingHideRecordingWindow();
@@ -586,6 +667,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  isComponentUnmounted = true;
   store.cleanup();
   appConfigStore.stopSync();
   sttConfigStore.stopSync();
@@ -608,16 +690,14 @@ onUnmounted(() => {
     window.cancelAnimationFrame(miniTextAlignRaf);
     miniTextAlignRaf = null;
   }
-  if (miniOpeningTimer !== null) {
-    window.clearTimeout(miniOpeningTimer);
-    miniOpeningTimer = null;
-  }
+  clearMiniOpeningAnimation();
   if (miniCloseResetTimer !== null) {
     window.clearTimeout(miniCloseResetTimer);
     miniCloseResetTimer = null;
   }
   stopMiniCursorPolling();
   cancelPendingHideRecordingWindow();
+  clearHotkeyDebounceTimeout();
 });
 
 const handleToggle = async () => {
@@ -647,7 +727,7 @@ const handleHotkeyToggle = async () => {
 
   // Очищаем предыдущий таймер если он есть
   if (hotkeyDebounceTimeout !== null) {
-    clearTimeout(hotkeyDebounceTimeout);
+    clearHotkeyDebounceTimeout();
   }
 
   // Устанавливаем флаг что обрабатываем hotkey
@@ -808,10 +888,10 @@ const minimizeWindow = async (event?: Event) => {
           <span
             class="mini-status-dot"
             :class="{
-              recording: store.isStarting || store.isRecording,
-              starting: store.isConnecting,
-              processing: store.isProcessing,
-              error: store.hasError || Boolean(store.error),
+              recording: store.isStarting || store.isRecording || store.incomingTranslationStatus === 'Recording',
+              starting: store.isConnecting || store.incomingTranslationStatus === 'Starting',
+              processing: store.isProcessing || store.incomingTranslationStatus === 'Processing',
+              error: store.hasError || Boolean(store.error) || Boolean(store.incomingTranslationError),
             }"
           ></span>
 
@@ -819,8 +899,8 @@ const minimizeWindow = async (event?: Event) => {
             ref="miniTranscriptionTextRef"
             class="mini-transcription-text"
             :class="{
-              recording: store.hasVisibleTranscriptionText,
-              placeholder: !store.hasVisibleTranscriptionText && !hasMiniError,
+              recording: hasMiniRecognizedText,
+              placeholder: !hasMiniRecognizedText && !hasMiniError,
               prompt: shouldShowMiniHotkeyPrompt,
               error: store.hasError || Boolean(store.error),
               overflowing: isMiniTextOverflowing,
@@ -1003,6 +1083,7 @@ const minimizeWindow = async (event?: Event) => {
         <div
           v-if="store.isIncomingTranslationActive || store.hasIncomingTranslationText || store.incomingTranslationError"
           class="incoming-translation-panel"
+          data-testid="incoming-translation-panel"
         >
           <div class="incoming-translation-header">
             <span>{{ t('main.incomingTranslation') }}</span>
@@ -1016,6 +1097,7 @@ const minimizeWindow = async (event?: Event) => {
           </div>
           <div
             class="incoming-translation-text"
+            data-testid="incoming-translation-text"
             :class="{ placeholder: !store.incomingTranslationText && !store.incomingTranslationError }"
           >
             {{
@@ -1023,6 +1105,36 @@ const minimizeWindow = async (event?: Event) => {
               store.incomingTranslationText ||
               t('main.incomingTranslationEmpty')
             }}
+          </div>
+        </div>
+
+        <div
+          v-if="store.liveTranslationHealthCheckSummary"
+          class="translation-health-panel"
+          :class="{ ok: store.liveTranslationHealthCheck?.ok, error: Boolean(store.liveTranslationHealthCheckError || store.liveTranslationHealthCheck?.ok === false) }"
+          data-testid="translation-health-panel"
+        >
+          <div class="translation-health-header">
+            <span>{{ t('main.healthCheck') }}</span>
+            <span>{{ store.liveTranslationHealthCheckSummary }}</span>
+          </div>
+          <div
+            v-if="store.liveTranslationHealthCheck?.items?.length"
+            class="translation-health-items"
+          >
+            <div
+              v-for="item in store.liveTranslationHealthCheck.items"
+              :key="item.id"
+              class="translation-health-item"
+              :class="{ ok: item.ok, error: !item.ok }"
+            >
+              <span
+                class="mdi"
+                :class="item.ok ? 'mdi-check-circle-outline' : 'mdi-alert-circle-outline'"
+              ></span>
+              <span>{{ item.label }}</span>
+              <small>{{ item.message }}</small>
+            </div>
           </div>
         </div>
       </div>
@@ -1049,6 +1161,7 @@ const minimizeWindow = async (event?: Event) => {
         <button
           v-ripple="{ class: store.isIncomingTranslationActive ? 'text-red' : 'text-blue' }"
           class="incoming-toggle-button no-drag"
+          data-testid="incoming-translation-toggle"
           :class="{ active: store.isIncomingTranslationActive, error: store.incomingTranslationError }"
           :disabled="store.incomingTranslationStatus === 'Processing'"
           @click="store.toggleIncomingTranslation()"
@@ -1059,6 +1172,18 @@ const minimizeWindow = async (event?: Event) => {
             class="mdi mdi-cached record-icon-spin"
           ></span>
           <span v-else class="mdi mdi-closed-caption-outline"></span>
+        </button>
+        <button
+          class="health-check-button no-drag"
+          data-testid="translation-health-check-button"
+          :disabled="store.liveTranslationHealthCheckLoading || store.isRecording || store.isStarting || store.isProcessing || store.isIncomingTranslationActive"
+          @click="store.runLiveTranslationHealthCheck()"
+          :title="t('main.healthCheckStart')"
+        >
+          <span
+            class="mdi"
+            :class="store.liveTranslationHealthCheckLoading ? 'mdi-cached record-icon-spin' : 'mdi-stethoscope'"
+          ></span>
         </button>
       </div>
 
@@ -1629,6 +1754,73 @@ const minimizeWindow = async (event?: Event) => {
   font-style: italic;
 }
 
+.translation-health-panel {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 193, 7, 0.24);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 193, 7, 0.08);
+  box-sizing: border-box;
+}
+
+.translation-health-panel.ok {
+  border-color: rgba(76, 175, 80, 0.26);
+  background: rgba(76, 175, 80, 0.08);
+}
+
+.translation-health-panel.error {
+  border-color: rgba(244, 67, 54, 0.28);
+  background: rgba(244, 67, 54, 0.08);
+}
+
+.translation-health-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-xs);
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.translation-health-items {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.translation-health-item {
+  display: grid;
+  grid-template-columns: 16px minmax(84px, 0.8fr) minmax(0, 1.2fr);
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text);
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.translation-health-item .mdi {
+  font-size: 14px;
+}
+
+.translation-health-item.ok .mdi {
+  color: #4caf50;
+}
+
+.translation-health-item.error .mdi {
+  color: var(--color-error);
+}
+
+.translation-health-item small {
+  min-width: 0;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 @keyframes shake {
   0%, 100% {
     transform: translateX(0);
@@ -1757,6 +1949,32 @@ const minimizeWindow = async (event?: Event) => {
 }
 
 .incoming-toggle-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.health-check-button {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--color-text-secondary);
+  font-size: 19px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform 0.2s ease, background 0.2s ease, color 0.2s ease, opacity 0.2s ease;
+}
+
+.health-check-button:hover:not(:disabled) {
+  transform: scale(1.06);
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--color-text);
+}
+
+.health-check-button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
 }

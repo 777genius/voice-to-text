@@ -24,8 +24,11 @@ function debugLog(...args: unknown[]) {
   }
 }
 
-class TauriAudioSpectrumSource implements AudioVisualizerSource {
+export class TauriAudioSpectrumSource implements AudioVisualizerSource {
   private unlisten: UnlistenFn | null = null;
+  private startPromise: Promise<void> | null = null;
+  private desiredActive = false;
+  private onBars: ((bars: number[]) => void) | null = null;
   private receivedCount = 0;
   private lastLogAt = 0;
   private lastAppliedAt = 0;
@@ -39,7 +42,10 @@ class TauriAudioSpectrumSource implements AudioVisualizerSource {
     }
   }
 
-  private applyThrottled(bars: number[], onBars: (bars: number[]) => void) {
+  private applyThrottled(bars: number[]) {
+    const onBars = this.onBars;
+    if (!this.desiredActive || !onBars) return;
+
     const now = performance.now();
     const elapsed = now - this.lastAppliedAt;
 
@@ -59,6 +65,8 @@ class TauriAudioSpectrumSource implements AudioVisualizerSource {
       const pending = this.pendingBars;
       this.pendingBars = null;
       if (!pending) return;
+      const onBars = this.onBars;
+      if (!this.desiredActive || !onBars) return;
 
       this.lastAppliedAt = performance.now();
       onBars(pending);
@@ -67,11 +75,14 @@ class TauriAudioSpectrumSource implements AudioVisualizerSource {
 
   async start(onBars: (bars: number[]) => void): Promise<void> {
     if (!isTauriAvailable()) return;
+    this.desiredActive = true;
+    this.onBars = onBars;
     if (this.unlisten) return;
+    if (this.startPromise) return this.startPromise;
 
     debugLog('[AudioVisualizer] Подписываюсь на событие audio:spectrum (Tauri)');
     this.lastAppliedAt = 0;
-    this.unlisten = await listen<AudioSpectrumPayload>('audio:spectrum', (event) => {
+    const startPromise = listen<AudioSpectrumPayload>('audio:spectrum', (event) => {
       const bars = Array.isArray(event.payload?.bars) ? event.payload.bars : [];
       this.receivedCount += 1;
 
@@ -90,20 +101,39 @@ class TauriAudioSpectrumSource implements AudioVisualizerSource {
         );
       }
 
-      this.applyThrottled(bars, onBars);
-    });
+      this.applyThrottled(bars);
+    })
+      .then((unlisten) => {
+        if (!this.desiredActive || this.unlisten) {
+          unlisten();
+          return;
+        }
+        this.unlisten = unlisten;
+      })
+      .catch((err) => {
+        console.error('Failed to listen audio spectrum events:', err);
+      })
+      .finally(() => {
+        if (this.startPromise === startPromise) {
+          this.startPromise = null;
+        }
+      });
+    this.startPromise = startPromise;
+    return startPromise;
   }
 
   stop(): void {
-    if (!this.unlisten) return;
-    debugLog('[AudioVisualizer] Отписываюсь от audio:spectrum (Tauri)');
-    this.unlisten();
-    this.unlisten = null;
+    this.desiredActive = false;
+    this.onBars = null;
     this.clearPendingTimer();
     this.pendingBars = null;
     this.lastAppliedAt = 0;
     this.receivedCount = 0;
     this.lastLogAt = 0;
+    if (!this.unlisten) return;
+    debugLog('[AudioVisualizer] Отписываюсь от audio:spectrum (Tauri)');
+    this.unlisten();
+    this.unlisten = null;
   }
 }
 

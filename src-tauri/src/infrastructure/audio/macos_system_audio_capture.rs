@@ -3,6 +3,7 @@ use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 use screencapturekit::prelude::*;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::domain::{
@@ -21,6 +22,7 @@ pub struct MacosSystemAudioCapture {
     stream: Option<SCStream>,
     audio_config: AudioConfig,
     is_capturing: bool,
+    callback_gate: CaptureCallbackGate,
 }
 
 impl MacosSystemAudioCapture {
@@ -29,7 +31,32 @@ impl MacosSystemAudioCapture {
             stream: None,
             audio_config: AudioConfig::default(),
             is_capturing: false,
+            callback_gate: CaptureCallbackGate::default(),
         })
+    }
+}
+
+#[derive(Clone, Default)]
+struct CaptureCallbackGate {
+    running: Arc<AtomicBool>,
+    generation: Arc<AtomicU64>,
+}
+
+impl CaptureCallbackGate {
+    fn begin_capture(&self) -> u64 {
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.running.store(true, Ordering::SeqCst);
+        generation
+    }
+
+    fn stop_capture(&self) {
+        self.running.store(false, Ordering::SeqCst);
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn should_emit(&self, generation: u64) -> bool {
+        self.running.load(Ordering::Relaxed)
+            && self.generation.load(Ordering::Relaxed) == generation
     }
 }
 
@@ -41,6 +68,12 @@ struct ResamplePipeline {
     native_mono: Vec<f32>,
     out_i16: Vec<i16>,
     input_frame_samples: usize,
+}
+
+enum PipelineState {
+    Pending,
+    Ready(ResamplePipeline),
+    Failed,
 }
 
 impl ResamplePipeline {
@@ -173,6 +206,30 @@ impl ResamplePipeline {
     }
 }
 
+fn build_resample_pipeline(
+    sample_rate: u32,
+    is_float: bool,
+    is_big_endian: bool,
+    bits: u32,
+) -> Option<ResamplePipeline> {
+    match ResamplePipeline::new(sample_rate, is_float, is_big_endian, bits) {
+        Ok(pipe) => Some(pipe),
+        Err(primary_err) => {
+            log::error!("Failed to init ScreenCaptureKit resampler: {}", primary_err);
+            match ResamplePipeline::new(48_000, true, false, 32) {
+                Ok(pipe) => Some(pipe),
+                Err(fallback_err) => {
+                    log::error!(
+                        "Failed to init fallback ScreenCaptureKit resampler: {}",
+                        fallback_err
+                    );
+                    None
+                }
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl AudioCapture for MacosSystemAudioCapture {
     async fn initialize(&mut self, config: AudioConfig) -> AudioResult<()> {
@@ -184,16 +241,18 @@ impl AudioCapture for MacosSystemAudioCapture {
         if self.is_capturing {
             return Err(AudioError::Capture("Already capturing audio".to_string()));
         }
+        let capture_generation = self.callback_gate.begin_capture();
 
         let content = SCShareableContent::get().map_err(|e| {
+            self.callback_gate.stop_capture();
             AudioError::AccessDenied(format!(
                 "ScreenCaptureKit unavailable: {e}. Откройте macOS System Settings -> Privacy & Security -> Screen & System Audio Recording и разрешите доступ для приложения."
             ))
         })?;
-        let display =
-            content.displays().into_iter().next().ok_or_else(|| {
-                AudioError::DeviceNotFound("No displays found for capture".into())
-            })?;
+        let display = content.displays().into_iter().next().ok_or_else(|| {
+            self.callback_gate.stop_capture();
+            AudioError::DeviceNotFound("No displays found for capture".into())
+        })?;
 
         let filter = SCContentFilter::create()
             .with_display(&display)
@@ -207,13 +266,18 @@ impl AudioCapture for MacosSystemAudioCapture {
             .with_sample_rate(48_000)
             .with_channel_count(2);
 
-        let pipeline: Arc<Mutex<Option<ResamplePipeline>>> = Arc::new(Mutex::new(None));
+        let pipeline: Arc<Mutex<PipelineState>> = Arc::new(Mutex::new(PipelineState::Pending));
         let pipeline_for_cb = pipeline.clone();
         let on_chunk_cb = on_chunk.clone();
+        let callback_gate = self.callback_gate.clone();
 
         let mut stream = SCStream::new(&filter, &config);
         let added = stream.add_output_handler(
             move |sample: CMSampleBuffer, _output: SCStreamOutputType| {
+                if !callback_gate.should_emit(capture_generation) {
+                    return;
+                }
+
                 let Some(fmt) = sample.format_description() else {
                     return;
                 };
@@ -236,20 +300,32 @@ impl AudioCapture for MacosSystemAudioCapture {
                         return;
                     }
                 };
-                let pipe = guard.get_or_insert_with(|| {
-                    ResamplePipeline::new(sample_rate, is_float, is_big_endian, bits)
-                        .unwrap_or_else(|e| {
-                            log::error!("Failed to init ScreenCaptureKit resampler: {}", e);
-                            ResamplePipeline::new(48_000, true, false, 32)
-                                .expect("fallback ScreenCaptureKit resampler")
-                        })
-                });
+                if matches!(*guard, PipelineState::Failed) {
+                    return;
+                }
+
+                if matches!(*guard, PipelineState::Pending) {
+                    let Some(pipe) =
+                        build_resample_pipeline(sample_rate, is_float, is_big_endian, bits)
+                    else {
+                        *guard = PipelineState::Failed;
+                        return;
+                    };
+                    *guard = PipelineState::Ready(pipe);
+                }
+
+                let PipelineState::Ready(pipe) = &mut *guard else {
+                    return;
+                };
 
                 pipe.decode_and_push_native_mono(&sample);
                 let frames = pipe.drain_frames();
                 drop(guard);
 
                 for frame in frames {
+                    if !callback_gate.should_emit(capture_generation) {
+                        return;
+                    }
                     if !frame.is_empty() {
                         on_chunk_cb(AudioChunk::new(frame, TARGET_SAMPLE_RATE, TARGET_CHANNELS));
                     }
@@ -259,12 +335,14 @@ impl AudioCapture for MacosSystemAudioCapture {
         );
 
         if added.is_none() {
+            self.callback_gate.stop_capture();
             return Err(AudioError::Internal(
                 "Failed to register ScreenCaptureKit audio handler".to_string(),
             ));
         }
 
         stream.start_capture().map_err(|e| {
+            self.callback_gate.stop_capture();
             AudioError::Capture(format!(
                 "Failed to start ScreenCaptureKit capture: {e}. Проверьте macOS Screen & System Audio Recording permission."
             ))
@@ -279,6 +357,7 @@ impl AudioCapture for MacosSystemAudioCapture {
         if !self.is_capturing {
             return Ok(());
         }
+        self.callback_gate.stop_capture();
         if let Some(stream) = self.stream.take() {
             let _ = stream.stop_capture();
         }
@@ -386,6 +465,24 @@ fn decode_non_interleaved_to_mono(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn callback_gate_blocks_stale_callbacks_after_stop_and_restart() {
+        let gate = CaptureCallbackGate::default();
+
+        let first_generation = gate.begin_capture();
+        assert!(gate.should_emit(first_generation));
+
+        gate.stop_capture();
+        assert!(!gate.should_emit(first_generation));
+
+        let second_generation = gate.begin_capture();
+        assert!(!gate.should_emit(first_generation));
+        assert!(gate.should_emit(second_generation));
+
+        gate.stop_capture();
+        assert!(!gate.should_emit(second_generation));
+    }
 
     #[test]
     fn decodes_interleaved_i16_to_mono() {

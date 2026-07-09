@@ -23,6 +23,7 @@ const isHighlighted = ref(false);
 
 let highlightTimer: number | null = null;
 let unlistenFocus: UnlistenFn | null = null;
+let isUnmounted = false;
 
 const SETTINGS_PENDING_FOCUS_KEY = 'settings:pending-focus';
 
@@ -65,19 +66,27 @@ function consumePendingFocusFromStorage(): boolean {
 }
 
 onMounted(async () => {
+  isUnmounted = false;
   if (isTauriAvailable()) {
     await loadCurrentVersion();
+    if (isUnmounted) return;
 
     // Если апдейт уже известен (например, пришли сюда с бейджа) — не дёргаем check повторно.
     if (!updateStore.availableVersion) {
       await checkForUpdates();
+      if (isUnmounted) return;
     }
 
     // Фокус из других окон (бейдж/трей)
     try {
-      unlistenFocus = await listen(EVENT_SETTINGS_FOCUS_UPDATES, async () => {
+      const unlisten = await listen(EVENT_SETTINGS_FOCUS_UPDATES, async () => {
         await focusAndCheckUpdates();
       });
+      if (isUnmounted) {
+        unlisten();
+        return;
+      }
+      unlistenFocus = unlisten;
     } catch {}
   }
 
@@ -89,6 +98,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  isUnmounted = true;
   if (unlistenFocus) {
     unlistenFocus();
     unlistenFocus = null;
