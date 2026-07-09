@@ -6,11 +6,10 @@
 import { computed, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { BackendStreamingProviderType, SttProviderType } from '@/types';
-import { invoke } from '@tauri-apps/api/core';
 import { isTauriAvailable } from '@/utils/tauri';
 import {
   bumpUiPrefsRevision,
-  CMD_UPDATE_UI_PREFERENCES,
+  invokeUpdateUiPreferences,
   readUiPreferencesFromStorage,
   writeUiPreferencesCacheToStorage,
 } from '@/windowing/stateSync';
@@ -38,13 +37,11 @@ export function useSettings() {
   const { locale } = useI18n();
   const store = useSettingsStore();
 
-  async function persistUiPreferencesToBackend(payload: {
-    theme: string;
-    locale: string;
-    use_system_theme: boolean;
-  }): Promise<void> {
+  async function persistUiPreferencesSafely(
+    next: Parameters<typeof invokeUpdateUiPreferences>[0],
+  ): Promise<void> {
     try {
-      await invoke(CMD_UPDATE_UI_PREFERENCES, payload);
+      await invokeUpdateUiPreferences(next);
     } catch (err) {
       console.warn('Failed to persist UI preferences:', err);
     }
@@ -196,7 +193,7 @@ export function useSettings() {
           store.setRecordingMode(appConfigStoreInstance.recordingMode);
           store.setOpenaiApiKey(appConfigStoreInstance.openaiApiKey);
         } else {
-          store.setMicrophoneSensitivity(95, { persist: false });
+          store.setMicrophoneSensitivity(100, { persist: false });
           store.setRecordingHotkey('CmdOrCtrl+Shift+X');
           store.setAutoCopyToClipboard(true);
           store.setAutoPasteText(true);
@@ -599,7 +596,7 @@ export function useSettings() {
       }
 
       // UI preferences (theme/locale/system-theme) сохраняем только по "Save".
-      persistUiPreferences();
+      await persistUiPreferences();
       store.capturePersistedState();
 
       store.setSaveStatus('success');
@@ -662,15 +659,15 @@ export function useSettings() {
 
     // Синхронизация через state-sync: сохраняем в Rust и уведомляем другие окна
     if (isTauriAvailable()) {
-      void persistUiPreferencesToBackend({
+      void persistUiPreferencesSafely({
         theme: normalizeUiTheme(store.theme),
         locale: uiLocale,
-        use_system_theme: Boolean(store.useSystemTheme),
+        useSystemTheme: Boolean(store.useSystemTheme),
       });
     }
   }
 
-  function persistUiPreferences(): void {
+  async function persistUiPreferences(): Promise<void> {
     const uiLocale = sttLangToUiLocale(store.language);
 
     // Применяем локально (preview уже мог быть, но это идемпотентно)
@@ -693,10 +690,10 @@ export function useSettings() {
       return;
     }
 
-    void persistUiPreferencesToBackend({
+    await invokeUpdateUiPreferences({
       theme: normalizeUiTheme(store.theme),
       locale: uiLocale,
-      use_system_theme: Boolean(store.useSystemTheme),
+      useSystemTheme: Boolean(store.useSystemTheme),
     });
   }
 

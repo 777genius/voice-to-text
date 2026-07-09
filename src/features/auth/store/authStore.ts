@@ -40,8 +40,20 @@ export const useAuthStore = defineStore('auth', () => {
     status.value = 'authenticated';
   }
 
-  function setUnauthenticated(): void {
+  function resetUnauthenticatedState(opts?: { preserveError?: boolean }): void {
+    const preservedError = opts?.preserveError ? error.value : null;
+    const preservedErrorCode = opts?.preserveError ? errorCode.value : null;
+
+    session.value = null;
+    pendingEmail.value = null;
+    userEmail.value = null;
+    error.value = preservedError;
+    errorCode.value = preservedErrorCode;
     status.value = 'unauthenticated';
+  }
+
+  function setUnauthenticated(opts?: { preserveError?: boolean }): void {
+    resetUnauthenticatedState(opts);
   }
 
   function setNeedsVerification(email: string): void {
@@ -60,9 +72,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function setSessionExpired(): void {
-    session.value = null;
-    errorCode.value = null;
-    status.value = 'unauthenticated';
+    resetUnauthenticatedState();
   }
 
   function clearError(): void {
@@ -78,12 +88,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function reset(): void {
-    session.value = null;
-    error.value = null;
-    errorCode.value = null;
-    pendingEmail.value = null;
-    userEmail.value = null;
-    status.value = 'unauthenticated';
+    resetUnauthenticatedState();
   }
 
   return {
