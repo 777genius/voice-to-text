@@ -1560,7 +1560,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }, 'info');
           // Если упали в Error — закрываем сессию, чтобы поздние события не перетёрли UI.
           if (nextStatus === RecordingStatus.Error) {
-            sessionId.value = null;
+            markSessionsClosed(payloadSessionId, 'status:error');
             awaitingSessionStart.value = false;
           }
         }
@@ -1863,6 +1863,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
           status.value = RecordingStatus.Error;
           awaitingSessionStart.value = false;
+          markSessionsClosed(event.payload.session_id, 'translation:error');
           console.error('[translation:error]', event.payload);
         }
       );

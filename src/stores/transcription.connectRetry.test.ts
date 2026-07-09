@@ -380,6 +380,48 @@ describe('transcription connect-retry reliability', () => {
     expect(authStoreMock.reset).not.toHaveBeenCalled();
   });
 
+  it('live translation terminal error закрывает session от поздних delta/status events', async () => {
+    const handlers = new Map<string, any>();
+    appConfigMock.recordingMode = 'live_translation';
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+    store.prepareForRustHotkeyStart(true);
+
+    await handlers.get('translation:delta')({
+      payload: { session_id: 91, text: 'before error', is_final: false },
+    });
+    await handlers.get('translation:error')({
+      payload: {
+        session_id: 91,
+        error: 'Authentication: HTTP 401 during WS handshake',
+        error_type: 'authentication',
+      },
+    });
+    await handlers.get('translation:delta')({
+      payload: { session_id: 91, text: ' late delta', is_final: false },
+    });
+    await handlers.get('recording:status')({
+      payload: {
+        session_id: 91,
+        status: 'Recording',
+        stopped_via_hotkey: false,
+        mode: 'live_translation',
+      },
+    });
+
+    expect(store.status).toBe('Error');
+    expect(store.sessionId).toBeNull();
+    expect(store.closedSessionIdFloor).toBeGreaterThanOrEqual(91);
+    expect(store.translationText).toBe('before error');
+  });
+
   it('toggle incoming translation вызывает явные start/stop команды и показывает invoke error', async () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'start_incoming_translation') return Promise.resolve('Incoming translation started');
