@@ -5,9 +5,9 @@ use tokio::time::sleep;
 
 use app_lib::application::services::TranscriptionService;
 use app_lib::domain::{
-    AudioCapture, AudioChunk, AudioConfig, AudioLevelCallback, ConnectionQualityCallback,
-    ErrorCallback, RecordingStatus, SttConfig, SttError, SttProvider, SttProviderFactory,
-    SttProviderType, Transcription, TranscriptionCallback,
+    AudioChunk, AudioConfig, ConnectionQualityCallback, ErrorCallback, RecordingStatus, SttConfig,
+    SttError, SttProvider, SttProviderFactory, SttProviderType, Transcription,
+    TranscriptionCallback,
 };
 use app_lib::infrastructure::audio::MockAudioCapture;
 use async_trait::async_trait;
@@ -50,39 +50,6 @@ impl MockSttProvider {
         self.supports_keep_alive_flag = true;
         self
     }
-
-    fn with_error_simulation(mut self) -> Self {
-        self.simulate_error = Arc::new(RwLock::new(true));
-        self
-    }
-
-    async fn trigger_partial(&self, text: &str) {
-        if let Some(callback) = self.on_partial.read().await.as_ref() {
-            callback(Transcription {
-                text: text.to_string(),
-                confidence: Some(0.95),
-                is_final: false,
-                language: Some("ru".to_string()),
-                timestamp: 0,
-                start: 0.0,
-                duration: 0.0,
-            });
-        }
-    }
-
-    async fn trigger_final(&self, text: &str) {
-        if let Some(callback) = self.on_final.read().await.as_ref() {
-            callback(Transcription {
-                text: text.to_string(),
-                confidence: Some(0.98),
-                is_final: true,
-                language: Some("ru".to_string()),
-                timestamp: 0,
-                start: 0.0,
-                duration: 0.0,
-            });
-        }
-    }
 }
 
 #[async_trait]
@@ -105,7 +72,9 @@ impl SttProvider for MockSttProvider {
 
     fn is_connection_alive(&self) -> bool {
         // Для sync метода используем try_read (лучше чем blocking_read в async context)
-        self.supports_keep_alive_flag && self.paused.try_read().map(|p| *p).unwrap_or(false)
+        self.supports_keep_alive_flag
+            && (self.paused.try_read().map(|p| *p).unwrap_or(false)
+                || self.streaming.try_read().map(|s| *s).unwrap_or(false))
     }
 
     async fn initialize(&mut self, _config: &SttConfig) -> Result<(), SttError> {
@@ -452,6 +421,8 @@ async fn test_keep_alive_mode() {
         .unwrap();
 
     sleep(Duration::from_millis(100)).await;
+    assert_eq!(service.get_status().await, RecordingStatus::Recording);
+    assert!(!service.can_resume_keep_alive_connection().await);
 
     // Стоп с keep-alive
     let result = service.stop_recording().await;
@@ -460,6 +431,7 @@ async fn test_keep_alive_mode() {
     // Статус должен вернуться в Idle (keep-alive режим)
     sleep(Duration::from_millis(50)).await;
     assert_eq!(service.get_status().await, RecordingStatus::Idle);
+    assert!(service.can_resume_keep_alive_connection().await);
 
     // Быстрый повторный старт должен использовать существующее соединение
     let result2 = service

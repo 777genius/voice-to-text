@@ -1139,6 +1139,11 @@ impl TranscriptionService {
     /// Returns true when the next start can resume an already-open keep-alive stream
     /// without creating a new WebSocket connection.
     pub async fn can_resume_keep_alive_connection(&self) -> bool {
+        let status = *self.status.read().await;
+        if status != RecordingStatus::Idle {
+            return false;
+        }
+
         let config = self.config.read().await.clone();
         let keep_alive_enabled = keep_alive_enabled_for_config(&config);
 
