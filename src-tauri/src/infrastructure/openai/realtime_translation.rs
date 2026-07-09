@@ -196,8 +196,7 @@ impl OpenAIRealtimeTranslationClient {
         let mut req = OPENAI_REALTIME_TRANSLATION_URL
             .into_client_request()
             .map_err(|e| OpenAITranslationError::Internal(format!("invalid url: {}", e)))?;
-        let auth_value = HeaderValue::from_str(&format!("Bearer {}", self.api_key))
-            .map_err(|e| OpenAITranslationError::Internal(format!("invalid auth header: {}", e)))?;
+        let auth_value = build_authorization_header_value(&self.api_key)?;
         req.headers_mut().insert(AUTHORIZATION, auth_value);
 
         log::info!(
@@ -375,12 +374,17 @@ fn map_connect_error(err: &tokio_tungstenite::tungstenite::Error) -> OpenAITrans
     }
 }
 
+fn build_authorization_header_value(api_key: &str) -> Result<HeaderValue, OpenAITranslationError> {
+    HeaderValue::from_str(&format!("Bearer {}", api_key.trim()))
+        .map_err(|e| OpenAITranslationError::Internal(format!("invalid auth header: {}", e)))
+}
+
 async fn run_reader(mut source: WsSource, tx: mpsc::Sender<OpenAIRealtimeEvent>) {
     while let Some(next) = source.next().await {
         match next {
             Ok(Message::Text(text)) => {
                 if handle_server_text(&text, &tx).await {
-                    break;
+                    return;
                 }
             }
             Ok(Message::Binary(bin)) => {
@@ -395,7 +399,7 @@ async fn run_reader(mut source: WsSource, tx: mpsc::Sender<OpenAIRealtimeEvent>)
             Ok(Message::Frame(_)) => {}
             Ok(Message::Close(_)) => {
                 let _ = tx.send(OpenAIRealtimeEvent::Closed).await;
-                break;
+                return;
             }
             Err(e) => {
                 let _ = tx
@@ -405,7 +409,7 @@ async fn run_reader(mut source: WsSource, tx: mpsc::Sender<OpenAIRealtimeEvent>)
                         kind: OpenAIErrorKind::Connection,
                     })
                     .await;
-                break;
+                return;
             }
         }
     }
@@ -437,7 +441,7 @@ async fn handle_server_text(text: &str, tx: &mpsc::Sender<OpenAIRealtimeEvent>) 
             match decode_pcm16_base64_payload(payload) {
                 Ok(pcm16) => send_reader_event(tx, OpenAIRealtimeEvent::AudioDelta(pcm16)).await,
                 Err(message) => {
-                    send_reader_event(
+                    let _ = send_reader_event(
                         tx,
                         OpenAIRealtimeEvent::Error {
                             code: None,
@@ -445,7 +449,8 @@ async fn handle_server_text(text: &str, tx: &mpsc::Sender<OpenAIRealtimeEvent>) 
                             kind: OpenAIErrorKind::Protocol,
                         },
                     )
-                    .await
+                    .await;
+                    true
                 }
             }
         }
@@ -468,7 +473,7 @@ async fn handle_server_text(text: &str, tx: &mpsc::Sender<OpenAIRealtimeEvent>) 
         }
         Ok(ServerEvent::Error { error }) => {
             let kind = classify_server_error(&error);
-            send_reader_event(
+            let _ = send_reader_event(
                 tx,
                 OpenAIRealtimeEvent::Error {
                     code: error.code,
@@ -480,7 +485,8 @@ async fn handle_server_text(text: &str, tx: &mpsc::Sender<OpenAIRealtimeEvent>) 
                     kind,
                 },
             )
-            .await
+            .await;
+            true
         }
         Ok(ServerEvent::Unknown) => {
             log::debug!(
@@ -496,7 +502,7 @@ async fn handle_server_text(text: &str, tx: &mpsc::Sender<OpenAIRealtimeEvent>) 
                 e,
                 truncate_for_log(text, 256)
             );
-            send_reader_event(
+            let _ = send_reader_event(
                 tx,
                 OpenAIRealtimeEvent::Error {
                     code: None,
@@ -504,7 +510,8 @@ async fn handle_server_text(text: &str, tx: &mpsc::Sender<OpenAIRealtimeEvent>) 
                     kind: OpenAIErrorKind::Protocol,
                 },
             )
-            .await
+            .await;
+            true
         }
     }
 }
@@ -652,6 +659,13 @@ mod tests {
         assert_eq!(truncate_for_log("🙂🙂", 1), "…");
     }
 
+    #[test]
+    fn authorization_header_trims_api_key_whitespace() {
+        let value = build_authorization_header_value("  test-key\n").expect("valid header");
+
+        assert_eq!(value.to_str().unwrap(), "Bearer test-key");
+    }
+
     #[tokio::test]
     async fn server_event_send_backpressures_when_event_queue_is_full() {
         let (tx, mut rx) = mpsc::channel::<OpenAIRealtimeEvent>(1);
@@ -697,7 +711,7 @@ mod tests {
 
         let should_stop = handle_server_text(&raw, &tx).await;
 
-        assert!(!should_stop);
+        assert!(should_stop);
         assert!(matches!(
             rx.recv().await,
             Some(OpenAIRealtimeEvent::Error {
@@ -714,7 +728,7 @@ mod tests {
 
         let should_stop = handle_server_text(r#"{"event":"missing type"}"#, &tx).await;
 
-        assert!(!should_stop);
+        assert!(should_stop);
         assert!(matches!(
             rx.recv().await,
             Some(OpenAIRealtimeEvent::Error {
@@ -722,6 +736,24 @@ mod tests {
                 message,
                 ..
             }) if message.contains("invalid OpenAI realtime server event")
+        ));
+    }
+
+    #[tokio::test]
+    async fn server_error_event_stops_reader_after_emitting_error() {
+        let (tx, mut rx) = mpsc::channel::<OpenAIRealtimeEvent>(1);
+        let raw = r#"{"type":"error","error":{"code":"invalid_api_key","message":"bad key","type":"auth"}}"#;
+
+        let should_stop = handle_server_text(raw, &tx).await;
+
+        assert!(should_stop);
+        assert!(matches!(
+            rx.recv().await,
+            Some(OpenAIRealtimeEvent::Error {
+                kind: OpenAIErrorKind::Authentication,
+                code,
+                message,
+            }) if code.as_deref() == Some("invalid_api_key") && message == "bad key"
         ));
     }
 
