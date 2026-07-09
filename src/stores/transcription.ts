@@ -394,6 +394,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     awaitingSessionStart.value = false;
   }
 
+  function closeCurrentRecordingSessionForNewStart(reason: string): void {
+    if (sessionId.value !== null) {
+      markRecordingSessionClosed(sessionId.value, reason);
+    }
+  }
+
   function isIncomingTranslationSessionClosed(payloadSessionId: number): boolean {
     return payloadSessionId > 0 && incomingClosedSessionIds.value.has(payloadSessionId);
   }
@@ -438,6 +444,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   function ensureActiveSessionForIncomingEvent(payloadSessionId: number, source: string): boolean {
     bumpLastSeenSessionId(payloadSessionId);
     const isTranslationEvent = source.startsWith('translation:');
+
+    if (payloadSessionId <= 0) {
+      return false;
+    }
 
     // Никогда не принимаем события от "закрытых" сессий.
     if (isRecordingSessionClosed(payloadSessionId)) {
@@ -1641,6 +1651,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             errorRaw.value = event.payload.error;
             errorDetails.value = event.payload.error_details ?? null;
             suppressNextErrorStatus = true;
+            markRecordingSessionClosed(event.payload.session_id, 'transcription:error:authentication');
 
             lastConnectFailure.value = 'authentication';
             lastConnectFailureRaw.value = event.payload.error;
@@ -1731,6 +1742,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               const retrySessionId = event.payload.session_id;
               console.warn(`[STT] 429 (${serverCode ?? 'unknown'}), auto-retry #${rateLimitRetryCount} через ${delaySec}с`);
               suppressNextErrorStatus = true;
+              markRecordingSessionClosed(retrySessionId, 'transcription:error:rate_limited_retry');
               status.value = RecordingStatus.Starting;
               clearRateLimitRetryTimer();
               const retryGeneration = ++rateLimitRetryGeneration;
@@ -1767,6 +1779,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             const current = status.value;
             if (current === RecordingStatus.Idle || current === RecordingStatus.Processing) {
               console.warn('[STT] Ignoring background error while not recording:', event.payload);
+              status.value = RecordingStatus.Idle;
+              markSessionsClosed(event.payload.session_id, 'transcription:error_background_after_stop');
+              awaitingSessionStart.value = false;
               return;
             }
           }
@@ -1834,6 +1849,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               'connection';
             lastConnectFailureRaw.value = event.payload.error;
             lastConnectFailureDetails.value = event.payload.error_details ?? null;
+            markRecordingSessionClosed(event.payload.session_id, 'transcription:error:connect_failure');
             console.warn('[ConnectRetry] Suppressed error during connect:', event.payload);
             return;
           }
@@ -2489,7 +2505,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     // Начинаем новую сессию "с чистого листа": пока не получим Starting/Recording с новым session_id,
     // игнорируем любые поздние события от прошлых запусков.
     awaitingSessionStart.value = true;
-    sessionId.value = null;
+    closeCurrentRecordingSessionForNewStart('start_recording_once');
 
     resetTextStateBeforeStart();
     status.value = RecordingStatus.Starting;
@@ -2716,9 +2732,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     flushPendingHotkeyStopTailBeforeReset('rust_hotkey_start');
 
     suppressPreviousTranscriptionDisplay('rust_hotkey_start');
+    closeCurrentRecordingSessionForNewStart('rust_hotkey_start');
     activeRecordingMode.value = appConfig.recordingMode ?? 'dictation';
     awaitingSessionStart.value = true;
-    sessionId.value = null;
     status.value = warmStartExpected ? RecordingStatus.Recording : RecordingStatus.Starting;
     clearRecordingErrorState();
     lastConnectFailure.value = null;
@@ -2803,14 +2819,22 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       incomingTranslationStatus.value === RecordingStatus.Starting ||
       incomingTranslationStatus.value === RecordingStatus.Recording;
     const command = shouldStop ? 'stop_incoming_translation' : 'start_incoming_translation';
+    const statusBeforeCommand = incomingTranslationStatus.value;
+    const sessionBeforeCommand = incomingTranslationSessionId.value;
 
     incomingTranslationError.value = null;
     incomingTranslationCommandInFlight.value = true;
     try {
       await invoke<string>(command);
+      if (shouldStop) {
+        incomingTranslationStatus.value = RecordingStatus.Idle;
+        if (sessionBeforeCommand !== null) {
+          markIncomingTranslationSessionClosed(sessionBeforeCommand, 'stop_command_success');
+        }
+      }
     } catch (err) {
       incomingTranslationError.value = String(err);
-      incomingTranslationStatus.value = RecordingStatus.Error;
+      incomingTranslationStatus.value = shouldStop ? statusBeforeCommand : RecordingStatus.Error;
     } finally {
       incomingTranslationCommandInFlight.value = false;
     }
