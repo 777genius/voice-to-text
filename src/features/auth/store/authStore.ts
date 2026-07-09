@@ -40,17 +40,20 @@ export const useAuthStore = defineStore('auth', () => {
     status.value = 'authenticated';
   }
 
-  function resetUnauthenticatedState(): void {
+  function resetUnauthenticatedState(opts?: { preserveError?: boolean }): void {
+    const preservedError = opts?.preserveError ? error.value : null;
+    const preservedErrorCode = opts?.preserveError ? errorCode.value : null;
+
     session.value = null;
     pendingEmail.value = null;
     userEmail.value = null;
-    error.value = null;
-    errorCode.value = null;
+    error.value = preservedError;
+    errorCode.value = preservedErrorCode;
     status.value = 'unauthenticated';
   }
 
-  function setUnauthenticated(): void {
-    resetUnauthenticatedState();
+  function setUnauthenticated(opts?: { preserveError?: boolean }): void {
+    resetUnauthenticatedState(opts);
   }
 
   function setNeedsVerification(email: string): void {

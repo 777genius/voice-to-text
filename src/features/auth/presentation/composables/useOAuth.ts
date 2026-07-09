@@ -98,7 +98,7 @@ export function useOAuth() {
     if (result.error) {
       oauthCompleted = true;
       store.setError(t('auth.errors.googleError', { error: decodeURIComponent(result.error) }));
-      store.setUnauthenticated();
+      store.setUnauthenticated({ preserveError: true });
       return;
     }
 

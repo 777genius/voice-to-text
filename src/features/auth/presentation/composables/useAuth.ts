@@ -105,15 +105,17 @@ export function useAuth() {
         store.setAuthenticated(result.session);
       } else if (result.sessionExpired) {
         store.setError(t('auth.errors.sessionExpired'));
-        store.setUnauthenticated();
+        store.setUnauthenticated({ preserveError: true });
       } else {
         store.setUnauthenticated();
       }
     } catch (e) {
       if (e instanceof AuthError && e.code === AuthErrorCode.SessionExpired) {
         store.setError(t('auth.errors.sessionExpired'));
+        store.setUnauthenticated({ preserveError: true });
+      } else {
+        store.setUnauthenticated();
       }
-      store.setUnauthenticated();
     }
   }
 
