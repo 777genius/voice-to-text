@@ -21,6 +21,7 @@ use reqwest::header::CONTENT_TYPE;
 const OPENAI_TRANSCRIPTIONS_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
 const OPENAI_TRANSCRIPTION_MODEL: &str = "gpt-4o-transcribe";
 const TRANSCRIBE_AFTER_SAMPLES: usize = 16_000 * 2;
+const MAX_TRANSLATED_FINALS_PER_SOAK: usize = 3;
 static NEXT_TEMP_AUDIO_ID: AtomicUsize = AtomicUsize::new(0);
 
 fn load_openai_api_key() -> String {
@@ -233,6 +234,8 @@ struct OpenAiLoopbackSttState {
     started: AtomicBool,
     stopped: AtomicBool,
     transcribed: AtomicBool,
+    received_audio_chunks: AtomicUsize,
+    emitted_finals: AtomicUsize,
 }
 
 struct OpenAiLoopbackSttProvider {
@@ -243,6 +246,7 @@ struct OpenAiLoopbackSttProvider {
     sample_rate: u32,
     channels: u16,
     on_final: Option<TranscriptionCallback>,
+    cached_transcript: Option<String>,
 }
 
 #[async_trait]
@@ -266,10 +270,9 @@ impl SttProvider for OpenAiLoopbackSttProvider {
     }
 
     async fn send_audio(&mut self, chunk: &AudioChunk) -> SttResult<()> {
-        if self.state.transcribed.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-
+        self.state
+            .received_audio_chunks
+            .fetch_add(1, Ordering::SeqCst);
         self.sample_rate = chunk.sample_rate;
         self.channels = chunk.channels.max(1);
         self.samples.extend_from_slice(&chunk.data);
@@ -278,20 +281,33 @@ impl SttProvider for OpenAiLoopbackSttProvider {
             return Ok(());
         }
 
-        self.state.transcribed.store(true, Ordering::SeqCst);
-        let samples = self.samples.clone();
-        let transcript = transcribe_with_openai(
-            &self.client,
-            &self.api_key,
-            self.sample_rate,
-            self.channels,
-            &samples,
-        )
-        .await?;
+        if self.state.emitted_finals.load(Ordering::SeqCst) >= MAX_TRANSLATED_FINALS_PER_SOAK {
+            self.samples.clear();
+            return Ok(());
+        }
+
+        let samples = std::mem::take(&mut self.samples);
+        let transcript = if let Some(transcript) = self.cached_transcript.as_ref() {
+            transcript.clone()
+        } else {
+            let transcript = transcribe_with_openai(
+                &self.client,
+                &self.api_key,
+                self.sample_rate,
+                self.channels,
+                &samples,
+            )
+            .await?;
+            self.state.transcribed.store(true, Ordering::SeqCst);
+            self.cached_transcript = Some(transcript.clone());
+            transcript
+        };
 
         if let Some(on_final) = self.on_final.as_ref() {
+            let final_index = self.state.emitted_finals.fetch_add(1, Ordering::SeqCst);
             let duration = samples.len() as f64 / self.sample_rate as f64 / self.channels as f64;
-            on_final(Transcription::final_result(transcript).with_timing(0.0, duration));
+            let start = final_index as f64 * (duration + 0.001);
+            on_final(Transcription::final_result(transcript).with_timing(start, duration));
         }
         Ok(())
     }
@@ -336,6 +352,7 @@ impl SttProviderFactory for OpenAiLoopbackSttFactory {
             sample_rate: 16_000,
             channels: 1,
             on_final: None,
+            cached_transcript: None,
         }))
     }
 }
@@ -522,6 +539,20 @@ async fn incoming_translation_service_long_running_system_audio_soak() {
         "system loopback did not produce enough speech audio during soak"
     );
     assert!(
+        stt_state.received_audio_chunks.load(Ordering::SeqCst) > 1,
+        "system loopback did not keep delivering audio during soak"
+    );
+    let min_expected_finals = if soak_duration >= Duration::from_secs(15) {
+        2
+    } else {
+        1
+    };
+    assert!(
+        stt_state.emitted_finals.load(Ordering::SeqCst) >= min_expected_finals,
+        "incoming soak emitted too few translated finals: {}",
+        stt_state.emitted_finals.load(Ordering::SeqCst)
+    );
+    assert!(
         saw_translation,
         "translated incoming text was not emitted during soak"
     );
@@ -531,9 +562,11 @@ async fn incoming_translation_service_long_running_system_audio_soak() {
         errors.lock().unwrap()
     );
     println!(
-        "incoming_translation_soak_source_chars={}, translated_chars={}",
+        "incoming_translation_soak_source_chars={}, translated_chars={}, audio_chunks={}, finals={}",
         source_text.lock().unwrap().len(),
-        translated_text.lock().unwrap().len()
+        translated_text.lock().unwrap().len(),
+        stt_state.received_audio_chunks.load(Ordering::SeqCst),
+        stt_state.emitted_finals.load(Ordering::SeqCst)
     );
 }
 
