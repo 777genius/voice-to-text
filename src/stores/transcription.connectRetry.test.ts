@@ -418,7 +418,7 @@ describe('transcription connect-retry reliability', () => {
 
     expect(store.status).toBe('Error');
     expect(store.sessionId).toBeNull();
-    expect(store.closedSessionIdFloor).toBeGreaterThanOrEqual(91);
+    expect(store.closedSessionIdFloor).toBeLessThan(91);
     expect(store.translationText).toBe('before error');
   });
 
@@ -461,9 +461,46 @@ describe('transcription connect-retry reliability', () => {
 
     expect(store.status).toBe('Error');
     expect(store.sessionId).toBeNull();
-    expect(store.closedSessionIdFloor).toBeGreaterThanOrEqual(701);
+    expect(store.closedSessionIdFloor).toBeLessThan(701);
     expect(store.partialText).toBe('');
     expect(store.errorType).toBe('provider_quota_exceeded');
+  });
+
+  it('terminal error новой failed session не закрывает восстановленную меньшую session', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    store.prepareForRustHotkeyStart(false);
+
+    await handlers.get('transcription:error')({
+      payload: {
+        session_id: 11,
+        error: 'Provider quota exceeded',
+        error_type: 'provider_quota_exceeded',
+        error_details: { category: 'provider_quota_exceeded' },
+      },
+    });
+
+    expect(store.status).toBe('Error');
+    expect(store.sessionId).toBeNull();
+    expect(store.closedSessionIdFloor).toBeLessThan(10);
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 10, status: 'Recording', stopped_via_hotkey: false },
+    });
+
+    expect(store.status).toBe('Recording');
+    expect(store.sessionId).toBe(10);
+    expect(store.errorType).toBeNull();
+    expect(store.closedSessionIdFloor).toBeLessThan(10);
   });
 
   it('toggle incoming translation вызывает явные start/stop команды и показывает invoke error', async () => {
@@ -1020,6 +1057,53 @@ describe('transcription connect-retry reliability', () => {
     await store.stopRecording();
 
     expect(store.status).toBe('Idle');
+    expect(store.error).toBeNull();
+  });
+
+  it('background Error после stop закрывает session и игнорирует поздний partial', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'stop_recording') return Promise.resolve('Recording stopped');
+      if (cmd === 'get_recording_status') return Promise.resolve('Idle');
+      return Promise.resolve(null);
+    });
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 23, status: 'Recording', stopped_via_hotkey: false },
+    });
+
+    const stopPromise = store.stopRecording();
+    expect(store.status).toBe('Processing');
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 23, status: 'Error', stopped_via_hotkey: false },
+    });
+    await handlers.get('transcription:partial')({
+      payload: {
+        session_id: 23,
+        text: 'late partial after background error',
+        timestamp: 2,
+        is_segment_final: false,
+        start: 0,
+        duration: 1,
+      },
+    });
+
+    await stopPromise;
+
+    expect(store.status).toBe('Idle');
+    expect(store.sessionId).toBeNull();
+    expect(store.closedSessionIdFloor).toBeGreaterThanOrEqual(23);
+    expect(store.partialText).toBe('');
     expect(store.error).toBeNull();
   });
 

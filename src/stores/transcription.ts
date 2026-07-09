@@ -48,6 +48,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   // Сессии с id <= closedSessionIdFloor считаются "закрытыми".
   // Любые отложенные/поздние события от них игнорируем, чтобы UI не возвращался в старое состояние.
   const closedSessionIdFloor = ref<number>(0);
+  // Отдельные session_id, закрытые точечно. Нужно для failed-start ошибок с большим id:
+  // они не должны закрывать восстановленную более старую живую сессию.
+  const closedSessionIds = ref<Set<number>>(new Set());
   // Максимальный session_id, который мы видели в status событиях.
   // Нужен, чтобы уметь "закрывать" последнюю сессию даже если часть событий потерялась.
   const lastSeenSessionId = ref<number>(0);
@@ -342,6 +345,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     const next = Math.max(prev, upToSessionId);
     if (next !== prev) {
       closedSessionIdFloor.value = next;
+      if (closedSessionIds.value.size > 0) {
+        closedSessionIds.value = new Set(
+          [...closedSessionIds.value].filter((session) => session > next)
+        );
+      }
       console.warn('[STT] Marked sessions closed up to', next, 'reason:', reason);
     }
 
@@ -351,9 +359,38 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
+  function isRecordingSessionClosed(payloadSessionId: number): boolean {
+    return (
+      payloadSessionId > 0 &&
+      (payloadSessionId <= closedSessionIdFloor.value ||
+        closedSessionIds.value.has(payloadSessionId))
+    );
+  }
+
+  function markRecordingSessionClosed(payloadSessionId: number, reason: string): void {
+    if (!payloadSessionId || payloadSessionId <= 0) return;
+    if (payloadSessionId <= closedSessionIdFloor.value) return;
+
+    if (!closedSessionIds.value.has(payloadSessionId)) {
+      const next = new Set(closedSessionIds.value);
+      next.add(payloadSessionId);
+      while (next.size > 128) {
+        const oldest = next.values().next().value;
+        if (typeof oldest !== 'number') break;
+        next.delete(oldest);
+      }
+      closedSessionIds.value = next;
+      console.warn('[STT] Marked session closed', payloadSessionId, 'reason:', reason);
+    }
+
+    if (sessionId.value === payloadSessionId) {
+      sessionId.value = null;
+    }
+  }
+
   function setTerminalRecordingErrorStatus(payloadSessionId: number, reason: string): void {
     status.value = RecordingStatus.Error;
-    markSessionsClosed(payloadSessionId, reason);
+    markRecordingSessionClosed(payloadSessionId, reason);
     awaitingSessionStart.value = false;
   }
 
@@ -403,7 +440,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     const isTranslationEvent = source.startsWith('translation:');
 
     // Никогда не принимаем события от "закрытых" сессий.
-    if (payloadSessionId <= closedSessionIdFloor.value) {
+    if (isRecordingSessionClosed(payloadSessionId)) {
       return false;
     }
 
@@ -1380,7 +1417,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
           // Если сессия уже помечена как "закрытая" — игнорируем любые её статусы,
           // иначе UI может "ожить" старым Recording спустя время (на скрытом окне).
-          if (payloadSessionId <= closedSessionIdFloor.value) {
+          if (isRecordingSessionClosed(payloadSessionId)) {
             console.warn('[STT] Ignoring status from closed session:', {
               payloadSessionId,
               closedFloor: closedSessionIdFloor.value,
@@ -1546,6 +1583,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             if (current === RecordingStatus.Idle || current === RecordingStatus.Processing) {
               console.warn('[STT] Ignoring background Error status while not recording:', event.payload);
               status.value = RecordingStatus.Idle;
+              markSessionsClosed(payloadSessionId, 'status:error_background_after_stop');
+              awaitingSessionStart.value = false;
               clientLog('recording_error_status_suppressed', {
                 reason: 'background_error_after_stop',
                 payloadSessionId,
@@ -1884,7 +1923,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
           status.value = RecordingStatus.Error;
           awaitingSessionStart.value = false;
-          markSessionsClosed(event.payload.session_id, 'translation:error');
+          markRecordingSessionClosed(event.payload.session_id, 'translation:error');
           console.error('[translation:error]', event.payload);
         }
       );
