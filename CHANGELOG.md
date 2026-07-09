@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.15.0] - 2026-07-09
+
+### Added
+- Added stabilized live audio smoke coverage for the real-time audio pipeline.
+
+### Changed
+- Stabilized live translation session handling across audio, frontend state, and OpenAI text/translation settings.
+- Hardened async event listeners, settings IPC persistence, external auth URL opening, and live audio runner parsing.
+- Migrated short VAD timeout defaults for safer session recovery.
+
+### Fixed
+- Closed failed live translation and terminal transcription sessions more precisely.
+- Restored recording state after failed starts and guarded keep-alive resume while a session is already active.
+- Hardened realtime translation failures and normalized translation target languages.
+- Trimmed OpenAI text translation model override and API key values before use.
+- Covered late session event regressions and append failure cleanup paths.
+
 ## [0.14.0] - 2026-07-07
 
 ### Added

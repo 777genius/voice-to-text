@@ -16,55 +16,50 @@
 
 ---
 
-## Текущий релиз: v0.13.0
+## Текущий релиз: v0.15.0
 
-Minor-релиз для double Space hotkey, снижения CPU при записи, landing release timeline и изоляции dev runtime после `v0.12.1`.
+Minor-релиз для стабилизации live translation/audio pipeline, восстановления recording state после сбоев и более аккуратного закрытия failed sessions после `v0.14.0`.
 
 ### Что говорить в статье
 
 - Скачать приложение можно с [voicetext.site](https://voicetext.site).
-- Новый double Space hotkey включается в Settings и по умолчанию выключен.
-- Запись стала легче для CPU на частом пути `48 kHz -> 16 kHz`.
-- Проверка микрофона больше не стартует поверх активной записи.
-- Landing теперь показывает последние GitHub releases и устойчивее подгружает download links.
-- Debug build отделен от production bundle id, deep link и updater.
+- Live translation стал устойчивее к failed sessions, realtime translation errors и некорректным language/model/API key настройкам.
+- Recording state восстанавливается после failed starts и не конфликтует с keep-alive resume активной сессии.
+- Terminal transcription и live translation failures закрывают session lifecycle точнее.
+- Добавлены live audio smoke/e2e regression checks для поздних session events.
 
 ### Ссылки на код для статьи
 
-- Double Space hotkey: `src-tauri/src/presentation/commands.rs`
-- Hotkey setting UI: `src/features/settings/presentation/components/sections/AutoActionsSection.vue`
-- Audio capture downsample: `src-tauri/src/infrastructure/audio/system_capture.rs`
-- Visualizer throttling: `src/presentation/components/AudioVisualizer.vue`
-- Landing release timeline: `landing/components/sections/PrivacySection.vue`
-- Release downloads data: `landing/utils/releaseDownloads.ts`
+- Live translation pipeline: `src-tauri/src/`
+- Recording session handling: `src/`
+- Live audio smoke checks: `e2e-tests/`
 
 ### Release notes для GitHub
 
 ```markdown
 ## What changed
 
-- Added an optional double Space recording hotkey, disabled by default.
-- Reduced recording CPU load on 48 kHz microphones by using fast integer downsampling.
-- Throttled UI-only audio visualizer updates while keeping STT audio unchanged.
-- Added a recent releases timeline to the landing page.
-- Added an isolated Tauri dev config with a dev bundle id and updater disabled in debug builds.
+- Stabilized live translation sessions across audio, frontend state, and OpenAI text/translation settings.
+- Hardened async listeners, settings persistence, auth URL opening, and live audio runner parsing.
+- Added live audio smoke coverage and late session event regression tests.
 
 ## What is fixed
 
-- Microphone test can no longer start while recording is active.
-- Recording error details are available from the mini recording window.
-- Debug builds no longer share production updater/deep-link identity.
+- Failed live translation and terminal transcription sessions now close more precisely.
+- Recording state is restored after failed starts.
+- Keep-alive resume is guarded while a recording session is already active.
+- Realtime translation failures, target language values, model overrides, and API keys are handled more defensively.
 ```
 
 ### Команды релиза
 
 ```bash
-pnpm release:notes v0.13.0
+pnpm release:notes v0.15.0
 git add CHANGELOG.md docs package.json src-tauri src
-git commit -m "chore(release): v0.13.0"
-git tag v0.13.0
+git commit -m "release: v0.15.0"
+git tag v0.15.0
 git push origin HEAD
-git push origin v0.13.0
+git push origin v0.15.0
 ```
 
 ---
