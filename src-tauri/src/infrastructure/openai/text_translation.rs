@@ -40,10 +40,9 @@ pub struct OpenAITextTranslationClient {
 
 impl OpenAITextTranslationClient {
     pub fn new(api_key: String) -> Result<Self, OpenAITextTranslationError> {
-        let model = std::env::var("VOICETEXT_INCOMING_TRANSLATION_MODEL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_TEXT_TRANSLATION_MODEL.to_string());
+        let model = resolve_text_translation_model(
+            std::env::var("VOICETEXT_INCOMING_TRANSLATION_MODEL").ok(),
+        );
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(12))
             .build()
@@ -108,6 +107,15 @@ impl OpenAITextTranslationClient {
             OpenAITextTranslationError::Protocol("OpenAI response has no output text".to_string())
         })
     }
+}
+
+fn resolve_text_translation_model(value: Option<String>) -> String {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| DEFAULT_TEXT_TRANSLATION_MODEL.to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -269,6 +277,22 @@ mod tests {
             OpenAITextTranslationClient::new("  test-key\n".to_string()).expect("valid client");
 
         assert_eq!(client.api_key, "test-key");
+    }
+
+    #[test]
+    fn text_translation_model_override_is_trimmed_and_defaulted() {
+        assert_eq!(
+            resolve_text_translation_model(Some("  gpt-5.4-mini\n".to_string())),
+            "gpt-5.4-mini"
+        );
+        assert_eq!(
+            resolve_text_translation_model(Some("  ".to_string())),
+            DEFAULT_TEXT_TRANSLATION_MODEL
+        );
+        assert_eq!(
+            resolve_text_translation_model(None),
+            DEFAULT_TEXT_TRANSLATION_MODEL
+        );
     }
 
     #[test]
