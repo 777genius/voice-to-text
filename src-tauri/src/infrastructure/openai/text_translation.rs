@@ -50,7 +50,7 @@ impl OpenAITextTranslationClient {
             .map_err(|e| OpenAITextTranslationError::Connection(format_reqwest_error(&e)))?;
 
         Ok(Self {
-            api_key,
+            api_key: api_key.trim().to_string(),
             model,
             client,
         })
@@ -261,6 +261,14 @@ mod tests {
             extract_openai_error_message(body).as_deref(),
             Some("quota exceeded")
         );
+    }
+
+    #[test]
+    fn trims_api_key_on_client_creation() {
+        let client =
+            OpenAITextTranslationClient::new("  test-key\n".to_string()).expect("valid client");
+
+        assert_eq!(client.api_key, "test-key");
     }
 
     #[test]
