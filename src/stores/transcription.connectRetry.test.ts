@@ -422,6 +422,50 @@ describe('transcription connect-retry reliability', () => {
     expect(store.translationText).toBe('before error');
   });
 
+  it('terminal transcription:error закрывает session даже без recording:status=Error', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 701, status: 'Recording', stopped_via_hotkey: false },
+    });
+    await handlers.get('transcription:error')({
+      payload: {
+        session_id: 701,
+        error: 'Provider quota exceeded',
+        error_type: 'provider_quota_exceeded',
+        error_details: { category: 'provider_quota_exceeded' },
+      },
+    });
+    await handlers.get('transcription:partial')({
+      payload: {
+        session_id: 701,
+        text: 'late partial after terminal error',
+        timestamp: 2,
+        is_segment_final: false,
+        start: 0,
+        duration: 1,
+      },
+    });
+    await handlers.get('recording:status')({
+      payload: { session_id: 701, status: 'Recording', stopped_via_hotkey: false },
+    });
+
+    expect(store.status).toBe('Error');
+    expect(store.sessionId).toBeNull();
+    expect(store.closedSessionIdFloor).toBeGreaterThanOrEqual(701);
+    expect(store.partialText).toBe('');
+    expect(store.errorType).toBe('provider_quota_exceeded');
+  });
+
   it('toggle incoming translation вызывает явные start/stop команды и показывает invoke error', async () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'start_incoming_translation') return Promise.resolve('Incoming translation started');
@@ -776,6 +820,7 @@ describe('transcription connect-retry reliability', () => {
     });
 
     expect(store.incomingTranslationStatus).toBe('Error');
+    expect(store.incomingTranslationSessionId).toBeNull();
     expect(store.incomingSourceText).toBe('first source');
     expect(store.incomingTranslationText).toBe('первый перевод');
 

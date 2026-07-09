@@ -351,6 +351,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
+  function setTerminalRecordingErrorStatus(payloadSessionId: number, reason: string): void {
+    status.value = RecordingStatus.Error;
+    markSessionsClosed(payloadSessionId, reason);
+    awaitingSessionStart.value = false;
+  }
+
   function isIncomingTranslationSessionClosed(payloadSessionId: number): boolean {
     return payloadSessionId > 0 && incomingClosedSessionIds.value.has(payloadSessionId);
   }
@@ -1638,7 +1644,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               event.payload.error,
               event.payload.error_details
             );
-            status.value = RecordingStatus.Error;
+            setTerminalRecordingErrorStatus(
+              event.payload.session_id,
+              'transcription:error:provider_quota_exceeded'
+            );
             return;
           }
 
@@ -1666,7 +1675,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               event.payload.error_details,
               usageMessage
             );
-            status.value = RecordingStatus.Error;
+            setTerminalRecordingErrorStatus(
+              event.payload.session_id,
+              'transcription:error:limit_exceeded'
+            );
             return;
           }
 
@@ -1702,7 +1714,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               }
               rateLimitRetryCount = 0;
               setRecordingError('connection', event.payload.error, event.payload.error_details);
-              status.value = RecordingStatus.Error;
+              setTerminalRecordingErrorStatus(
+                event.payload.session_id,
+                'transcription:error:rate_limited'
+              );
             }
             return;
           }
@@ -1747,7 +1762,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
                 event.payload.error_details,
                 usageMessage
               );
-              status.value = RecordingStatus.Error;
+              setTerminalRecordingErrorStatus(
+                event.payload.session_id,
+                'transcription:error:connect_limit_exceeded'
+              );
               return;
             }
 
@@ -1762,7 +1780,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
                 event.payload.error,
                 event.payload.error_details
               );
-              status.value = RecordingStatus.Error;
+              setTerminalRecordingErrorStatus(
+                event.payload.session_id,
+                'transcription:error:connect_provider_quota_exceeded'
+              );
               return;
             }
 
@@ -1800,7 +1821,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
 
           setRecordingError(normalizedType, event.payload.error, event.payload.error_details);
-          status.value = RecordingStatus.Error;
+          setTerminalRecordingErrorStatus(event.payload.session_id, 'transcription:error');
         }
       );
       if (!unlistenError) return;
@@ -1912,6 +1933,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             if (lastError?.sessionId === payloadSessionId && !incomingTranslationError.value) {
               incomingTranslationError.value = lastError.error;
             }
+            markIncomingTranslationSessionClosed(payloadSessionId, 'status:error');
           }
           if (nextStatus === RecordingStatus.Idle) {
             markIncomingTranslationSessionClosed(payloadSessionId, 'status:idle');
