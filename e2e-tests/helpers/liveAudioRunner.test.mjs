@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   assertCommandSucceeded,
   assertExpectedTestRan,
+  parsePositiveIntegerEnv,
   readEnvOpenAiKey,
   terminateProcessGroup,
 } from './liveAudioRunner.mjs';
@@ -32,6 +33,17 @@ test('readEnvOpenAiKey parses quoted dotenv values', () => {
   assert.equal(key, 'sk-dotenv-test');
 });
 
+test('readEnvOpenAiKey parses quoted dotenv values with trailing comments', () => {
+  const envName = 'OPENAI' + '_API_KEY';
+  const key = readEnvOpenAiKey({
+    env: {},
+    exists: () => true,
+    readFile: () => `${envName} = "  sk-dotenv-test  " # local key\n`,
+  });
+
+  assert.equal(key, 'sk-dotenv-test');
+});
+
 test('readEnvOpenAiKey strips inline comments from unquoted dotenv values', () => {
   const envName = 'OPENAI' + '_API_KEY';
   const key = readEnvOpenAiKey({
@@ -41,6 +53,15 @@ test('readEnvOpenAiKey strips inline comments from unquoted dotenv values', () =
   });
 
   assert.equal(key, 'sk-dotenv-test');
+});
+
+test('parsePositiveIntegerEnv accepts only complete positive integer strings', () => {
+  assert.equal(parsePositiveIntegerEnv('600', 120), 600);
+  assert.equal(parsePositiveIntegerEnv(' 90 ', 120), 90);
+  assert.equal(parsePositiveIntegerEnv('5m', 120), 120);
+  assert.equal(parsePositiveIntegerEnv('0', 120), 120);
+  assert.equal(parsePositiveIntegerEnv('-5', 120), 120);
+  assert.equal(parsePositiveIntegerEnv('', 120), 120);
 });
 
 test('assertExpectedTestRan accepts escaped cargo test names', () => {

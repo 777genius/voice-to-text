@@ -1,17 +1,16 @@
 import process from 'node:process';
 
 import {
+  parsePositiveIntegerEnv,
   readEnvOpenAiKey,
   runLiveAudioCommand,
 } from './helpers/liveAudioRunner.mjs';
 
 const DEFAULT_SOAK_SECONDS = 600;
-const rawSoakSeconds = process.env.LIVE_AUDIO_SOAK_SECONDS || '';
-const parsedSoakSeconds = Number.parseInt(rawSoakSeconds, 10);
-const soakSeconds =
-  Number.isFinite(parsedSoakSeconds) && parsedSoakSeconds > 0
-    ? parsedSoakSeconds
-    : DEFAULT_SOAK_SECONDS;
+const soakSeconds = parsePositiveIntegerEnv(
+  process.env.LIVE_AUDIO_SOAK_SECONDS,
+  DEFAULT_SOAK_SECONDS,
+);
 const TEST_TIMEOUT_MS = (soakSeconds + 240) * 1000;
 
 const tests = [

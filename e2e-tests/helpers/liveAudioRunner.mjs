@@ -36,6 +36,22 @@ export function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function stripDotenvInlineComment(rawValue) {
+  const value = rawValue.trim();
+  const quote = value[0];
+  if (quote === '"' || quote === "'") {
+    const closingQuote = value.indexOf(quote, 1);
+    if (closingQuote > 0) {
+      const suffix = value.slice(closingQuote + 1).trim();
+      if (!suffix || suffix.startsWith('#')) {
+        return value.slice(0, closingQuote + 1);
+      }
+    }
+  }
+
+  return value.split(/\s+#/)[0].trim();
+}
+
 export function readEnvOpenAiKey({
   env = process.env,
   dotenvPath = 'src-tauri/.env',
@@ -56,7 +72,7 @@ export function readEnvOpenAiKey({
       continue;
     }
 
-    const rawValue = match[1].trim();
+    const rawValue = stripDotenvInlineComment(match[1]);
     if (!rawValue) {
       return '';
     }
@@ -72,6 +88,16 @@ export function readEnvOpenAiKey({
   }
 
   return '';
+}
+
+export function parsePositiveIntegerEnv(value, fallback) {
+  const raw = String(value ?? '').trim();
+  if (!/^\d+$/.test(raw)) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  return parsed > 0 ? parsed : fallback;
 }
 
 export function assertExpectedTestRan(label, testName, output, fail) {
