@@ -183,9 +183,14 @@ pub fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     )?;
 
     // Создаем tray иконку
-    let _tray = TrayIconBuilder::new()
-        .menu(&menu)
-        .icon(app.default_window_icon().unwrap().clone())
+    let mut tray_builder = TrayIconBuilder::new().menu(&menu);
+    if let Some(icon) = app.default_window_icon().cloned() {
+        tray_builder = tray_builder.icon(icon);
+    } else {
+        log::warn!("Default window icon is missing; creating tray without an explicit icon");
+    }
+
+    let _tray = tray_builder
         .tooltip("VoicetextAI")
         .on_menu_event(move |app, event| {
             // Обрабатываем клики по меню

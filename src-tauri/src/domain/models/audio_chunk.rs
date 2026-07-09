@@ -20,16 +20,18 @@ impl AudioChunk {
             data,
             sample_rate,
             channels,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64,
+            timestamp: current_unix_timestamp_ms(),
         }
     }
 
     /// Returns the duration of this chunk in milliseconds
     pub fn duration_ms(&self) -> u64 {
-        (self.data.len() as u64 * 1000) / (self.sample_rate as u64 * self.channels as u64)
+        let denominator = self.sample_rate as u64 * self.channels as u64;
+        if denominator == 0 {
+            return 0;
+        }
+
+        (self.data.len() as u64 * 1000) / denominator
     }
 
     /// Converts to bytes for transmission (little-endian)
@@ -49,6 +51,13 @@ impl AudioChunk {
 
         Self::new(data, sample_rate, channels)
     }
+}
+
+fn current_unix_timestamp_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
 }
 
 /// Audio configuration parameters
@@ -100,6 +109,13 @@ mod tests {
         let data = vec![0i16; 32000]; // 1 секунда @ 16kHz stereo
         let chunk = AudioChunk::new(data, 16000, 2);
         assert_eq!(chunk.duration_ms(), 1000);
+    }
+
+    #[test]
+    fn test_audio_chunk_duration_zero_config_does_not_panic() {
+        let data = vec![0i16; 16000];
+        assert_eq!(AudioChunk::new(data.clone(), 0, 1).duration_ms(), 0);
+        assert_eq!(AudioChunk::new(data, 16000, 0).duration_ms(), 0);
     }
 
     #[test]

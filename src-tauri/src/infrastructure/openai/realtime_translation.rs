@@ -40,6 +40,7 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 const OPENAI_REALTIME_TRANSLATION_URL: &str =
     "wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate";
+const OPENAI_EVENT_QUEUE_CAPACITY: usize = 128;
 
 /// Категории ошибок OpenAI, на которые UI/Service реагируют по-разному.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,7 +164,7 @@ pub struct OpenAIRealtimeTranslationClient {
     reader_task: Option<JoinHandle<()>>,
     /// Канал из reader_task в верхний слой. Receiver отдаётся через connect(); Sender хранится здесь
     /// чтобы close() мог послать synthetic Closed для случая когда WS оборвался без `session.closed`.
-    event_tx: Option<mpsc::UnboundedSender<OpenAIRealtimeEvent>>,
+    event_tx: Option<mpsc::Sender<OpenAIRealtimeEvent>>,
 }
 
 impl OpenAIRealtimeTranslationClient {
@@ -185,7 +186,7 @@ impl OpenAIRealtimeTranslationClient {
     /// Возвращает receiver событий — caller должен читать его в цикле.
     pub async fn connect(
         &mut self,
-    ) -> Result<mpsc::UnboundedReceiver<OpenAIRealtimeEvent>, OpenAITranslationError> {
+    ) -> Result<mpsc::Receiver<OpenAIRealtimeEvent>, OpenAITranslationError> {
         if self.api_key.trim().is_empty() {
             return Err(OpenAITranslationError::Authentication(
                 "OPENAI_API_KEY не задан".to_string(),
@@ -237,7 +238,7 @@ impl OpenAIRealtimeTranslationClient {
         }
 
         // Запускаем reader task
-        let (tx, rx) = mpsc::unbounded_channel::<OpenAIRealtimeEvent>();
+        let (tx, rx) = mpsc::channel::<OpenAIRealtimeEvent>(OPENAI_EVENT_QUEUE_CAPACITY);
         let reader_tx = tx.clone();
         let reader_task = tokio::spawn(async move {
             run_reader(source, reader_tx).await;
@@ -323,7 +324,7 @@ impl OpenAIRealtimeTranslationClient {
                     }
                     task.abort();
                     if let Some(tx) = self.event_tx.as_ref() {
-                        let _ = tx.send(OpenAIRealtimeEvent::Closed);
+                        let _ = tx.try_send(OpenAIRealtimeEvent::Closed);
                     }
                 }
             }
@@ -347,7 +348,7 @@ impl OpenAIRealtimeTranslationClient {
         let mut guard = self.sink.lock().await;
         *guard = None;
         if let Some(tx) = self.event_tx.take() {
-            let _ = tx.send(OpenAIRealtimeEvent::Closed);
+            let _ = tx.try_send(OpenAIRealtimeEvent::Closed);
         }
     }
 }
@@ -374,11 +375,11 @@ fn map_connect_error(err: &tokio_tungstenite::tungstenite::Error) -> OpenAITrans
     }
 }
 
-async fn run_reader(mut source: WsSource, tx: mpsc::UnboundedSender<OpenAIRealtimeEvent>) {
+async fn run_reader(mut source: WsSource, tx: mpsc::Sender<OpenAIRealtimeEvent>) {
     while let Some(next) = source.next().await {
         match next {
             Ok(Message::Text(text)) => {
-                if handle_server_text(&text, &tx) {
+                if handle_server_text(&text, &tx).await {
                     break;
                 }
             }
@@ -393,31 +394,38 @@ async fn run_reader(mut source: WsSource, tx: mpsc::UnboundedSender<OpenAIRealti
             }
             Ok(Message::Frame(_)) => {}
             Ok(Message::Close(_)) => {
-                let _ = tx.send(OpenAIRealtimeEvent::Closed);
+                let _ = tx.send(OpenAIRealtimeEvent::Closed).await;
                 break;
             }
             Err(e) => {
-                let _ = tx.send(OpenAIRealtimeEvent::Error {
-                    code: None,
-                    message: format!("ws stream error: {}", e),
-                    kind: OpenAIErrorKind::Connection,
-                });
+                let _ = tx
+                    .send(OpenAIRealtimeEvent::Error {
+                        code: None,
+                        message: format!("ws stream error: {}", e),
+                        kind: OpenAIErrorKind::Connection,
+                    })
+                    .await;
                 break;
             }
         }
     }
-    let _ = tx.send(OpenAIRealtimeEvent::Closed);
+    let _ = tx.send(OpenAIRealtimeEvent::Closed).await;
 }
 
-fn handle_server_text(text: &str, tx: &mpsc::UnboundedSender<OpenAIRealtimeEvent>) -> bool {
+async fn send_reader_event(
+    tx: &mpsc::Sender<OpenAIRealtimeEvent>,
+    event: OpenAIRealtimeEvent,
+) -> bool {
+    tx.send(event).await.is_err()
+}
+
+async fn handle_server_text(text: &str, tx: &mpsc::Sender<OpenAIRealtimeEvent>) -> bool {
     match serde_json::from_str::<ServerEvent>(text) {
         Ok(ServerEvent::SessionCreated { .. }) => {
-            let _ = tx.send(OpenAIRealtimeEvent::SessionCreated);
-            false
+            send_reader_event(tx, OpenAIRealtimeEvent::SessionCreated).await
         }
         Ok(ServerEvent::SessionUpdated { .. }) => {
-            let _ = tx.send(OpenAIRealtimeEvent::SessionUpdated);
-            false
+            send_reader_event(tx, OpenAIRealtimeEvent::SessionUpdated).await
         }
         Ok(ServerEvent::OutputAudioDelta { delta, audio }) => {
             // Cookbook использует `delta`, но некоторые сборки могут отдавать `audio` —
@@ -426,52 +434,53 @@ fn handle_server_text(text: &str, tx: &mpsc::UnboundedSender<OpenAIRealtimeEvent
             if payload.is_empty() {
                 return false;
             }
-            match base64::engine::general_purpose::STANDARD.decode(payload) {
-                Ok(bytes) => {
-                    let pcm16: Vec<i16> = bytes
-                        .chunks_exact(2)
-                        .map(|b| i16::from_le_bytes([b[0], b[1]]))
-                        .collect();
-                    let _ = tx.send(OpenAIRealtimeEvent::AudioDelta(pcm16));
-                }
-                Err(e) => {
-                    let _ = tx.send(OpenAIRealtimeEvent::Error {
-                        code: None,
-                        message: format!("audio base64 decode: {}", e),
-                        kind: OpenAIErrorKind::Protocol,
-                    });
+            match decode_pcm16_base64_payload(payload) {
+                Ok(pcm16) => send_reader_event(tx, OpenAIRealtimeEvent::AudioDelta(pcm16)).await,
+                Err(message) => {
+                    send_reader_event(
+                        tx,
+                        OpenAIRealtimeEvent::Error {
+                            code: None,
+                            message,
+                            kind: OpenAIErrorKind::Protocol,
+                        },
+                    )
+                    .await
                 }
             }
-            false
         }
         Ok(ServerEvent::OutputTranscriptDelta { delta }) => {
             if !delta.is_empty() {
-                let _ = tx.send(OpenAIRealtimeEvent::TranscriptDelta(delta));
+                return send_reader_event(tx, OpenAIRealtimeEvent::TranscriptDelta(delta)).await;
             }
             false
         }
         Ok(ServerEvent::InputTranscriptDelta { delta }) => {
             if !delta.is_empty() {
-                let _ = tx.send(OpenAIRealtimeEvent::InputTranscriptDelta(delta));
+                return send_reader_event(tx, OpenAIRealtimeEvent::InputTranscriptDelta(delta))
+                    .await;
             }
             false
         }
         Ok(ServerEvent::SessionClosed { .. }) => {
-            let _ = tx.send(OpenAIRealtimeEvent::Closed);
+            let _ = send_reader_event(tx, OpenAIRealtimeEvent::Closed).await;
             true
         }
         Ok(ServerEvent::Error { error }) => {
             let kind = classify_server_error(&error);
-            let _ = tx.send(OpenAIRealtimeEvent::Error {
-                code: error.code,
-                message: if error.message.is_empty() {
-                    error.err_type.unwrap_or_else(|| "unknown".to_string())
-                } else {
-                    error.message
+            send_reader_event(
+                tx,
+                OpenAIRealtimeEvent::Error {
+                    code: error.code,
+                    message: if error.message.is_empty() {
+                        error.err_type.unwrap_or_else(|| "unknown".to_string())
+                    } else {
+                        error.message
+                    },
+                    kind,
                 },
-                kind,
-            });
-            false
+            )
+            .await
         }
         Ok(ServerEvent::Unknown) => {
             log::debug!(
@@ -481,14 +490,41 @@ fn handle_server_text(text: &str, tx: &mpsc::UnboundedSender<OpenAIRealtimeEvent
             false
         }
         Err(e) => {
+            let message = format!("invalid OpenAI realtime server event: {}", e);
             log::warn!(
                 "OpenAI realtime translation: failed to parse server event ({}). raw: {}",
                 e,
                 truncate_for_log(text, 256)
             );
-            false
+            send_reader_event(
+                tx,
+                OpenAIRealtimeEvent::Error {
+                    code: None,
+                    message,
+                    kind: OpenAIErrorKind::Protocol,
+                },
+            )
+            .await
         }
     }
+}
+
+fn decode_pcm16_base64_payload(payload: &str) -> Result<Vec<i16>, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .map_err(|e| format!("audio base64 decode: {}", e))?;
+
+    if bytes.len() % 2 != 0 {
+        return Err(format!(
+            "audio PCM16 payload has odd byte length: {}",
+            bytes.len()
+        ));
+    }
+
+    Ok(bytes
+        .chunks_exact(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]))
+        .collect())
 }
 
 fn classify_server_error(err: &ServerErrorBody) -> OpenAIErrorKind {
@@ -506,7 +542,12 @@ fn classify_server_error(err: &ServerErrorBody) -> OpenAIErrorKind {
     } else if code.contains("rate")
         || msg.contains("rate limit")
         || code.contains("429")
+        || code.contains("quota")
+        || msg.contains("quota")
+        || msg.contains("billing")
+        || msg.contains("maximum monthly spend")
         || ty.contains("rate")
+        || ty.contains("quota")
     {
         OpenAIErrorKind::RateLimited
     } else {
@@ -518,7 +559,13 @@ fn truncate_for_log(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        let mut out = s[..max].to_string();
+        let boundary = s
+            .char_indices()
+            .map(|(idx, _)| idx)
+            .take_while(|idx| *idx <= max)
+            .last()
+            .unwrap_or(0);
+        let mut out = s[..boundary].to_string();
         out.push('…');
         out
     }
@@ -566,6 +613,14 @@ mod tests {
     }
 
     #[test]
+    fn decode_pcm16_base64_payload_rejects_odd_byte_count() {
+        let payload = base64::engine::general_purpose::STANDARD.encode([1_u8, 2, 3]);
+        let err = decode_pcm16_base64_payload(&payload).unwrap_err();
+
+        assert!(err.contains("odd byte length: 3"));
+    }
+
+    #[test]
     fn server_event_parsing_handles_known_types() {
         let texts: &[(&str, &str)] = &[
             (r#"{"type":"session.created"}"#, "session.created"),
@@ -591,6 +646,86 @@ mod tests {
     }
 
     #[test]
+    fn truncate_for_log_handles_unicode_boundaries() {
+        assert_eq!(truncate_for_log("abc", 10), "abc");
+        assert_eq!(truncate_for_log("a🙂b", 2), "a…");
+        assert_eq!(truncate_for_log("🙂🙂", 1), "…");
+    }
+
+    #[tokio::test]
+    async fn server_event_send_backpressures_when_event_queue_is_full() {
+        let (tx, mut rx) = mpsc::channel::<OpenAIRealtimeEvent>(1);
+        tx.send(OpenAIRealtimeEvent::SessionCreated).await.unwrap();
+
+        let audio = base64::engine::general_purpose::STANDARD.encode(1_i16.to_le_bytes());
+        let raw = format!(
+            r#"{{"type":"session.output_audio.delta","delta":"{}"}}"#,
+            audio
+        );
+        let task = tokio::spawn(async move { handle_server_text(&raw, &tx).await });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !task.is_finished(),
+            "full OpenAI event queue should backpressure the reader"
+        );
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(OpenAIRealtimeEvent::SessionCreated)
+        ));
+        let should_stop = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("reader send should resume after queue space is available")
+            .expect("handler task must not panic");
+        assert!(!should_stop);
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(OpenAIRealtimeEvent::AudioDelta(samples)) if samples == vec![1]
+        ));
+    }
+
+    #[tokio::test]
+    async fn server_audio_delta_with_odd_pcm_byte_count_emits_protocol_error() {
+        let (tx, mut rx) = mpsc::channel::<OpenAIRealtimeEvent>(1);
+        let audio = base64::engine::general_purpose::STANDARD.encode([1_u8, 2, 3]);
+        let raw = format!(
+            r#"{{"type":"session.output_audio.delta","delta":"{}"}}"#,
+            audio
+        );
+
+        let should_stop = handle_server_text(&raw, &tx).await;
+
+        assert!(!should_stop);
+        assert!(matches!(
+            rx.recv().await,
+            Some(OpenAIRealtimeEvent::Error {
+                kind: OpenAIErrorKind::Protocol,
+                message,
+                ..
+            }) if message.contains("odd byte length: 3")
+        ));
+    }
+
+    #[tokio::test]
+    async fn malformed_server_event_emits_protocol_error() {
+        let (tx, mut rx) = mpsc::channel::<OpenAIRealtimeEvent>(1);
+
+        let should_stop = handle_server_text(r#"{"event":"missing type"}"#, &tx).await;
+
+        assert!(!should_stop);
+        assert!(matches!(
+            rx.recv().await,
+            Some(OpenAIRealtimeEvent::Error {
+                kind: OpenAIErrorKind::Protocol,
+                message,
+                ..
+            }) if message.contains("invalid OpenAI realtime server event")
+        ));
+    }
+
+    #[test]
     fn error_classification_routes_auth() {
         let err = ServerErrorBody {
             code: Some("invalid_api_key".to_string()),
@@ -606,6 +741,17 @@ mod tests {
             code: Some("rate_limit_exceeded".to_string()),
             message: "Rate limit exceeded".to_string(),
             err_type: Some("rate_limit".to_string()),
+        };
+        assert_eq!(classify_server_error(&err), OpenAIErrorKind::RateLimited);
+    }
+
+    #[test]
+    fn error_classification_routes_quota_and_billing_to_rate_limited() {
+        let err = ServerErrorBody {
+            code: Some("insufficient_quota".to_string()),
+            message: "You exceeded your current quota, please check your plan and billing details"
+                .to_string(),
+            err_type: Some("insufficient_quota".to_string()),
         };
         assert_eq!(classify_server_error(&err), OpenAIErrorKind::RateLimited);
     }

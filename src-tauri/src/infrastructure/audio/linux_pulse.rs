@@ -20,6 +20,9 @@ const DEFAULT_SOURCE_NAME: &str = "voicetext_translation_mic";
 const ENV_LINUX_PULSE_SINK_NAME: &str = "VOICETEXT_LINUX_PULSE_SINK_NAME";
 const ENV_LINUX_PULSE_SOURCE_NAME: &str = "VOICETEXT_LINUX_PULSE_SOURCE_NAME";
 const REQUIRED_COMMANDS: &[&str] = &["pactl", "pacat", "parec"];
+const PULSE_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const PULSE_CHILD_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const PULSE_PLAYBACK_LATENCY_PADDING: Duration = Duration::from_millis(160);
 
 #[derive(Debug, Clone)]
 struct LinuxPulseConfig {
@@ -63,21 +66,19 @@ struct SystemLinuxPulseCommandRunner;
 #[async_trait]
 impl LinuxPulseCommandRunner for SystemLinuxPulseCommandRunner {
     async fn command_spawns(&self, command: &str) -> bool {
-        Command::new(command)
-            .arg("--version")
+        let mut cmd = Command::new(command);
+        cmd.arg("--version")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
+            .stderr(Stdio::null());
+        run_pulse_command_with_timeout(cmd, format!("{} --version", command))
             .await
             .is_ok()
     }
 
     async fn capture(&self, command: &str, args: &[&str]) -> Result<String, String> {
-        let output = Command::new(command)
-            .args(args)
-            .output()
-            .await
-            .map_err(|e| format!("{} spawn failed: {}", command, e))?;
+        let mut cmd = Command::new(command);
+        cmd.args(args);
+        let output = run_pulse_command_with_timeout(cmd, format!("{} {:?}", command, args)).await?;
         if !output.status.success() {
             return Err(format!(
                 "{} {:?} failed: {}",
@@ -90,12 +91,10 @@ impl LinuxPulseCommandRunner for SystemLinuxPulseCommandRunner {
     }
 
     async fn load_module(&self, args: &[String]) -> Result<u32, String> {
-        let output = Command::new("pactl")
-            .arg("load-module")
-            .args(args)
-            .output()
-            .await
-            .map_err(|e| format!("pactl load-module spawn failed: {}", e))?;
+        let mut cmd = Command::new("pactl");
+        cmd.arg("load-module").args(args);
+        let output =
+            run_pulse_command_with_timeout(cmd, format!("pactl load-module {:?}", args)).await?;
         if !output.status.success() {
             return Err(format!(
                 "pactl load-module {:?} failed: {}",
@@ -119,6 +118,39 @@ impl LinuxPulseCommandRunner for SystemLinuxPulseCommandRunner {
         self.capture("pactl", &["unload-module", id.as_str()])
             .await?;
         Ok(())
+    }
+}
+
+async fn run_pulse_command_with_timeout(
+    mut command: Command,
+    label: String,
+) -> Result<std::process::Output, String> {
+    command.kill_on_drop(true);
+    match tokio::time::timeout(PULSE_COMMAND_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(err)) => Err(format!("{} spawn failed: {}", label, err)),
+        Err(_) => Err(format!(
+            "{} timed out after {} ms",
+            label,
+            PULSE_COMMAND_TIMEOUT.as_millis()
+        )),
+    }
+}
+
+async fn stop_pulse_child(mut child: Child, label: &str) {
+    if let Err(err) = child.start_kill() {
+        log::warn!("{} kill failed: {}", label, err);
+        return;
+    }
+
+    match tokio::time::timeout(PULSE_CHILD_SHUTDOWN_TIMEOUT, child.wait()).await {
+        Ok(Ok(_status)) => {}
+        Ok(Err(err)) => log::warn!("{} wait failed after kill: {}", label, err),
+        Err(_) => log::warn!(
+            "{} did not exit within {} ms after kill",
+            label,
+            PULSE_CHILD_SHUTDOWN_TIMEOUT.as_millis()
+        ),
     }
 }
 
@@ -322,21 +354,39 @@ impl LinuxPulseAudioOutput {
 
     fn extend_pending_estimate(&self, samples: usize, config: TranslationAudioOutputConfig) {
         let frames = samples / (config.source_channels as usize).max(1);
-        let audio_ms = if config.source_sample_rate == 0 {
-            0
+        let audio_duration = if config.source_sample_rate == 0 {
+            Duration::ZERO
         } else {
-            (frames as u128).saturating_mul(1000) / config.source_sample_rate as u128
+            let audio_ms =
+                (frames as u128).saturating_mul(1000) / config.source_sample_rate as u128;
+            Duration::from_millis(audio_ms.min(u64::MAX as u128) as u64)
         };
-        let chunk_duration = Duration::from_millis(audio_ms.min(u64::MAX as u128) as u64)
-            + Duration::from_millis(160);
+
         if let Ok(mut pending) = self.pending_until.lock() {
             let now = Instant::now();
-            let base = match *pending {
-                Some(until) if until > now => until,
-                _ => now,
-            };
-            *pending = Some(base + chunk_duration);
+            *pending = extend_pulse_pending_until(
+                *pending,
+                now,
+                audio_duration,
+                PULSE_PLAYBACK_LATENCY_PADDING,
+            );
         }
+    }
+}
+
+fn extend_pulse_pending_until(
+    current: Option<Instant>,
+    now: Instant,
+    audio_duration: Duration,
+    latency_padding: Duration,
+) -> Option<Instant> {
+    if audio_duration.is_zero() {
+        return current.filter(|until| *until > now);
+    }
+
+    match current {
+        Some(until) if until > now => Some(until + audio_duration),
+        _ => Some(now + latency_padding + audio_duration),
     }
 }
 
@@ -382,8 +432,7 @@ impl TranslationAudioOutput for LinuxPulseAudioOutput {
         let stdin = match child.stdin.take() {
             Some(stdin) => stdin,
             None => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
+                stop_pulse_child(child, "pacat").await;
                 let _ =
                     cleanup_virtual_microphone(self.runner.as_ref(), &virtual_device_session).await;
                 return Err(TranslationAudioOutputError::Stream(
@@ -441,9 +490,8 @@ impl TranslationAudioOutput for LinuxPulseAudioOutput {
             if let Some(mut stdin) = state.stdin.take() {
                 let _ = stdin.shutdown().await;
             }
-            if let Some(mut child) = state.child.take() {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
+            if let Some(child) = state.child.take() {
+                stop_pulse_child(child, "pacat").await;
             }
             state.config = None;
             state.virtual_device_session.take()
@@ -593,9 +641,8 @@ impl AudioCapture for LinuxPulseMonitorCapture {
 
     async fn stop_capture(&mut self) -> AudioResult<()> {
         self.running.store(false, Ordering::SeqCst);
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+        if let Some(child) = self.child.take() {
+            stop_pulse_child(child, "parec").await;
         }
         if let Some(task) = self.task.take() {
             task.abort();
@@ -721,6 +768,40 @@ mod tests {
             "voicetext_translation_sink"
         ));
         assert!(!pulse_short_list_contains_name(list, "voicetext"));
+    }
+
+    #[test]
+    fn pulse_pending_estimate_adds_latency_only_when_queue_restarts() {
+        let now = Instant::now();
+        let latency = Duration::from_millis(160);
+        let audio = Duration::from_millis(20);
+
+        let first = extend_pulse_pending_until(None, now, audio, latency).unwrap();
+        assert_eq!(first.duration_since(now), Duration::from_millis(180));
+
+        let second = extend_pulse_pending_until(
+            Some(first),
+            now + Duration::from_millis(10),
+            audio,
+            latency,
+        )
+        .unwrap();
+        assert_eq!(second.duration_since(first), Duration::from_millis(20));
+    }
+
+    #[test]
+    fn pulse_pending_estimate_readds_latency_after_idle_gap() {
+        let now = Instant::now();
+        let expired = now - Duration::from_millis(1);
+        let next = extend_pulse_pending_until(
+            Some(expired),
+            now,
+            Duration::from_millis(20),
+            Duration::from_millis(160),
+        )
+        .unwrap();
+
+        assert_eq!(next.duration_since(now), Duration::from_millis(180));
     }
 
     #[tokio::test]

@@ -6,6 +6,10 @@ use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]
 const SWIFT_CONCURRENCY_DYLIB: &str = "libswift_Concurrency.dylib";
+const BUILD_VERBOSE_ENV: &str = "VOICETEXT_BUILD_VERBOSE";
+#[cfg(target_os = "macos")]
+const COPY_SWIFT_RUNTIME_TO_CARGO_PROFILE_ENV: &str =
+    "VOICETEXT_COPY_SWIFT_RUNTIME_TO_CARGO_PROFILE";
 
 fn main() {
     // Сначала запускаем стандартный билд Tauri
@@ -14,8 +18,10 @@ fn main() {
     #[cfg(target_os = "macos")]
     {
         prepare_swift_runtime_for_cargo();
+        println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
         println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/Frameworks");
         println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
+        println!("cargo:rustc-link-arg-bin=voice-to-text=-Wl,-rpath,/usr/lib/swift");
         println!("cargo:rustc-link-arg-bin=voice-to-text=-Wl,-rpath,@executable_path/Frameworks");
         println!(
             "cargo:rustc-link-arg-bin=voice-to-text=-Wl,-rpath,@executable_path/../Frameworks"
@@ -23,20 +29,12 @@ fn main() {
     }
 
     // Загружаем .env файл если он существует
-    if let Err(e) = dotenv::dotenv() {
-        println!("cargo:warning=No .env file found: {}", e);
-    }
+    let _ = dotenv::dotenv();
 
     // Читаем API ключи из переменных окружения
-    let deepgram_key = env::var("DEEPGRAM_API_KEY").unwrap_or_else(|_| {
-        println!("cargo:warning=DEEPGRAM_API_KEY not found in environment");
-        String::new()
-    });
+    let deepgram_key = env::var("DEEPGRAM_API_KEY").unwrap_or_else(|_| String::new());
 
-    let assemblyai_key = env::var("ASSEMBLYAI_API_KEY").unwrap_or_else(|_| {
-        println!("cargo:warning=ASSEMBLYAI_API_KEY not found in environment");
-        String::new()
-    });
+    let assemblyai_key = env::var("ASSEMBLYAI_API_KEY").unwrap_or_else(|_| String::new());
 
     // Генерируем Rust код с встроенными ключами
     let embedded_keys_code = format!(
@@ -72,8 +70,15 @@ pub fn has_embedded_assemblyai_key() -> bool {{
     println!("cargo:rerun-if-changed=../.env");
     println!("cargo:rerun-if-env-changed=DEEPGRAM_API_KEY");
     println!("cargo:rerun-if-env-changed=ASSEMBLYAI_API_KEY");
+    #[cfg(target_os = "macos")]
+    println!(
+        "cargo:rerun-if-env-changed={}",
+        COPY_SWIFT_RUNTIME_TO_CARGO_PROFILE_ENV
+    );
 
-    println!("✅ Generated embedded_keys.rs with API keys");
+    if is_build_verbose() {
+        println!("cargo:warning=Generated embedded_keys.rs");
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -90,7 +95,11 @@ fn prepare_swift_runtime_for_cargo() {
     };
 
     let frameworks_dir = profile_dir.join("Frameworks");
-    copy_swift_runtime(&source_path, &frameworks_dir);
+    if should_copy_swift_runtime_to_cargo_profile() {
+        copy_swift_runtime(&source_path, &frameworks_dir);
+    } else {
+        remove_profile_swift_runtime_copy(&frameworks_dir);
+    }
 
     if let Some(target_dir) = profile_dir.parent() {
         copy_swift_runtime(&source_path, &target_dir.join("swift-runtime"));
@@ -102,11 +111,47 @@ fn copy_swift_runtime(source_path: &Path, dest_dir: &Path) {
     let dest_path = dest_dir.join(SWIFT_CONCURRENCY_DYLIB);
     fs::create_dir_all(dest_dir).expect("Failed to create Swift runtime destination directory");
     fs::copy(source_path, &dest_path).expect("Failed to copy Swift Concurrency runtime");
-    println!(
-        "cargo:warning=Copied Swift Concurrency runtime: {} -> {}",
-        source_path.display(),
-        dest_path.display()
-    );
+    if is_build_verbose() {
+        println!(
+            "cargo:warning=Copied Swift Concurrency runtime: {} -> {}",
+            source_path.display(),
+            dest_path.display()
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn should_copy_swift_runtime_to_cargo_profile() -> bool {
+    env::var(COPY_SWIFT_RUNTIME_TO_CARGO_PROFILE_ENV)
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+#[cfg(target_os = "macos")]
+fn remove_profile_swift_runtime_copy(frameworks_dir: &Path) {
+    let stale_path = frameworks_dir.join(SWIFT_CONCURRENCY_DYLIB);
+    match fs::remove_file(&stale_path) {
+        Ok(()) => {
+            if is_build_verbose() {
+                println!(
+                    "cargo:warning=Removed stale Cargo profile Swift runtime copy: {}",
+                    stale_path.display()
+                );
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            println!(
+                "cargo:warning=Failed to remove stale Cargo profile Swift runtime copy {}: {}",
+                stale_path.display(),
+                err
+            );
+        }
+    }
+}
+
+fn is_build_verbose() -> bool {
+    env::var(BUILD_VERBOSE_ENV)
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
 }
 
 #[cfg(target_os = "macos")]

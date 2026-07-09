@@ -245,6 +245,23 @@ impl TranscriptionService {
         }
     }
 
+    async fn cleanup_failed_processor_session(
+        status: &Arc<RwLock<RecordingStatus>>,
+        audio_capture: &Arc<RwLock<Box<dyn AudioCapture>>>,
+        stt_provider: &Arc<RwLock<Option<Box<dyn SttProvider>>>>,
+        reason: &str,
+    ) {
+        *status.write().await = RecordingStatus::Idle;
+        if let Err(e) = audio_capture.write().await.stop_capture().await {
+            log::warn!("Failed to stop audio capture after {}: {}", reason, e);
+        }
+        if let Some(mut provider) = stt_provider.write().await.take() {
+            if let Err(e) = provider.abort().await {
+                log::warn!("Failed to abort STT provider after {}: {}", reason, e);
+            }
+        }
+    }
+
     /// Start recording and transcription
     pub async fn start_recording(
         &self,
@@ -625,8 +642,13 @@ impl TranscriptionService {
                                 // и отправляем ошибку в UI.
                                 let raw = format!("Audio device is no longer available: {}", e);
                                 on_error_for_processor(SttError::Processing(raw));
-                                *status_arc.write().await = RecordingStatus::Idle;
-                                let _ = audio_capture.write().await.stop_capture().await;
+                                Self::cleanup_failed_processor_session(
+                                    &status_arc,
+                                    &audio_capture,
+                                    &stt_provider,
+                                    "audio capture stall",
+                                )
+                                .await;
                                 break;
                             }
                         }
@@ -673,8 +695,13 @@ impl TranscriptionService {
                         "Нет аудиосигнала с микрофона (все семплы = 0). Проверьте разрешение на микрофон в macOS и выбранное устройство записи."
                             .to_string(),
                     ));
-                    *status_arc.write().await = RecordingStatus::Idle;
-                    let _ = audio_capture.write().await.stop_capture().await;
+                    Self::cleanup_failed_processor_session(
+                        &status_arc,
+                        &audio_capture,
+                        &stt_provider,
+                        "zero audio input",
+                    )
+                    .await;
                     break;
                 }
 
@@ -737,7 +764,7 @@ impl TranscriptionService {
 
                 // Провайдера нет → это уже "поломанное" состояние.
                 // Лучше остановить запись и показать ошибку, чем молча "писать" в пустоту.
-                if provider_guard.is_none() {
+                let Some(provider) = provider_guard.as_mut() else {
                     drop(provider_guard);
                     on_error_for_processor(SttError::Processing(
                         "STT provider is not available (stream not active)".to_string(),
@@ -748,10 +775,15 @@ impl TranscriptionService {
                             Some("Соединение с провайдером потеряно".to_string()),
                         );
                     }
-                    *status_arc.write().await = RecordingStatus::Idle;
-                    let _ = audio_capture.write().await.stop_capture().await;
+                    Self::cleanup_failed_processor_session(
+                        &status_arc,
+                        &audio_capture,
+                        &stt_provider,
+                        "missing STT provider",
+                    )
+                    .await;
                     break;
-                }
+                };
 
                 if chunk_count == 1 || chunk_count % 50 == 0 {
                     log::debug!(
@@ -762,11 +794,7 @@ impl TranscriptionService {
                     );
                 }
 
-                let send_result = provider_guard
-                    .as_mut()
-                    .expect("checked above")
-                    .send_audio(&amplified_chunk)
-                    .await;
+                let send_result = provider.send_audio(&amplified_chunk).await;
 
                 match send_result {
                     Ok(_) => {
@@ -822,16 +850,14 @@ impl TranscriptionService {
                                 Some("Критическая ошибка соединения".to_string()),
                             );
 
-                            // Критическая ошибка — останавливаем запись аккуратно.
-                            *status_arc.write().await = RecordingStatus::Idle;
-                            let _ = audio_capture.write().await.stop_capture().await;
-
-                            // И выкидываем провайдера, чтобы не оставлять "висящие" WS/таски.
-                            let old_provider = provider_guard.take();
                             drop(provider_guard);
-                            if let Some(mut old) = old_provider {
-                                let _ = old.abort().await;
-                            }
+                            Self::cleanup_failed_processor_session(
+                                &status_arc,
+                                &audio_capture,
+                                &stt_provider,
+                                "critical STT error",
+                            )
+                            .await;
 
                             break;
                         }
@@ -862,14 +888,14 @@ impl TranscriptionService {
                                 Some("Соединение нестабильно, запись остановлена".to_string()),
                             );
 
-                            *status_arc.write().await = RecordingStatus::Idle;
-                            let _ = audio_capture.write().await.stop_capture().await;
-
-                            let old_provider = provider_guard.take();
                             drop(provider_guard);
-                            if let Some(mut old) = old_provider {
-                                let _ = old.abort().await;
-                            }
+                            Self::cleanup_failed_processor_session(
+                                &status_arc,
+                                &audio_capture,
+                                &stt_provider,
+                                "too many STT send errors",
+                            )
+                            .await;
 
                             break;
                         }
@@ -2054,6 +2080,68 @@ mod tests {
         assert!(capture_stopped.load(Ordering::SeqCst));
         assert!(provider_aborted.load(Ordering::SeqCst));
         assert!(got_poor_quality.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn zero_audio_fatal_error_aborts_provider() {
+        let capture_stopped = Arc::new(AtomicBool::new(false));
+        let selected_providers = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let paused_count = Arc::new(AtomicUsize::new(0));
+        let stopped_count = Arc::new(AtomicUsize::new(0));
+        let aborted_count = Arc::new(AtomicUsize::new(0));
+
+        let audio_capture = BurstAudioCapture::new(capture_stopped.clone(), 260);
+        let factory = Arc::new(KeepAliveFactory {
+            selected_providers,
+            paused_count,
+            stopped_count: stopped_count.clone(),
+            aborted_count: aborted_count.clone(),
+        });
+        let service = TranscriptionService::new(Box::new(audio_capture), factory);
+
+        let (err_tx, mut err_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let on_error: ErrorCallback = Arc::new(move |err: SttError| {
+            let _ = err_tx.send(err.to_string());
+        });
+
+        let on_partial: TranscriptionCallback = Arc::new(|_t| {});
+        let on_final: TranscriptionCallback = Arc::new(|_t| {});
+        let on_audio_level: AudioLevelCallback = Arc::new(|_l| {});
+        let on_audio_spectrum: AudioSpectrumCallback = Arc::new(|_b| {});
+        let on_quality: ConnectionQualityCallback = Arc::new(|_q, _r| {});
+
+        service
+            .start_recording(
+                on_partial,
+                on_final,
+                on_audio_level,
+                on_audio_spectrum,
+                on_error,
+                on_quality,
+            )
+            .await
+            .expect("recording must start");
+
+        let msg = tokio::time::timeout(Duration::from_secs(3), err_rx.recv())
+            .await
+            .expect("must not timeout waiting for zero-audio error")
+            .expect("must receive zero-audio error");
+        assert!(msg.contains("Нет аудиосигнала"));
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if service.get_status().await == RecordingStatus::Idle {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("status must become Idle");
+
+        assert!(capture_stopped.load(Ordering::SeqCst));
+        assert_eq!(aborted_count.load(Ordering::SeqCst), 1);
+        assert_eq!(stopped_count.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

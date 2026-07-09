@@ -32,10 +32,7 @@ impl Transcription {
             is_final,
             confidence: None,
             language: None,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64,
+            timestamp: current_unix_timestamp_ms(),
             start: 0.0,
             duration: 0.0,
         }
@@ -66,6 +63,13 @@ impl Transcription {
     pub fn final_result(text: String) -> Self {
         Self::new(text, true)
     }
+}
+
+fn current_unix_timestamp_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
 }
 
 /// Recording status

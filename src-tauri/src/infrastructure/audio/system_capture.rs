@@ -4,6 +4,7 @@ use cpal::{Device, Host, SampleFormat, Stream, StreamConfig, SupportedStreamConf
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::domain::{
@@ -75,6 +76,31 @@ pub struct SystemAudioCapture {
     audio_config: AudioConfig,
     is_capturing: bool,
     options: SystemAudioCaptureOptions,
+    callback_gate: CaptureCallbackGate,
+}
+
+#[derive(Clone, Default)]
+struct CaptureCallbackGate {
+    running: Arc<AtomicBool>,
+    generation: Arc<AtomicU64>,
+}
+
+impl CaptureCallbackGate {
+    fn begin_capture(&self) -> u64 {
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.running.store(true, Ordering::SeqCst);
+        generation
+    }
+
+    fn stop_capture(&self) {
+        self.running.store(false, Ordering::SeqCst);
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn should_emit(&self, generation: u64) -> bool {
+        self.running.load(Ordering::Relaxed)
+            && self.generation.load(Ordering::Relaxed) == generation
+    }
 }
 
 impl SystemAudioCapture {
@@ -130,6 +156,7 @@ impl SystemAudioCapture {
             audio_config: AudioConfig::default(),
             is_capturing: false,
             options,
+            callback_gate: CaptureCallbackGate::default(),
         })
     }
 
@@ -415,7 +442,13 @@ impl AudioCapture for SystemAudioCapture {
             let sample_format = self.native_config.sample_format();
 
             let on_chunk_cb = on_chunk.clone();
+            let capture_generation = self.callback_gate.begin_capture();
+            let callback_gate = self.callback_gate.clone();
             let process_pcm = move |mut pcm_samples: Vec<i16>| {
+                if !callback_gate.should_emit(capture_generation) {
+                    return;
+                }
+
                 // Downmix to mono if needed
                 if native_channels > 1 {
                     pcm_samples = Self::downmix_to_mono(&pcm_samples, native_channels);
@@ -440,9 +473,14 @@ impl AudioCapture for SystemAudioCapture {
                         let final_samples = Self::downsample_integer_average(&chunk, factor);
 
                         if !final_samples.is_empty() {
-                            let audio_chunk =
-                                AudioChunk::new(final_samples, target_sample_rate, target_channels);
-                            on_chunk_cb(audio_chunk);
+                            if !callback_gate.should_emit(capture_generation) {
+                                return;
+                            }
+                            on_chunk_cb(AudioChunk::new(
+                                final_samples,
+                                target_sample_rate,
+                                target_channels,
+                            ));
                         }
                     }
                     return;
@@ -478,6 +516,9 @@ impl AudioCapture for SystemAudioCapture {
 
                     let audio_chunk =
                         AudioChunk::new(final_samples, target_sample_rate, target_channels);
+                    if !callback_gate.should_emit(capture_generation) {
+                        return;
+                    }
                     on_chunk_cb(audio_chunk);
                 }
             };
@@ -535,6 +576,7 @@ impl AudioCapture for SystemAudioCapture {
             let stream = match stream_result {
                 Ok(s) => s,
                 Err(e) => {
+                    self.callback_gate.stop_capture();
                     if attempt == 0 {
                         log::warn!("Failed to build audio stream (attempt 1): {}. Refreshing device/config and retrying...", e);
                         if self.requested_device_name.is_some()
@@ -555,6 +597,7 @@ impl AudioCapture for SystemAudioCapture {
             // Start the stream
             if let Err(e) = stream.play() {
                 let err = AudioError::Capture(format!("Failed to start audio stream: {}", e));
+                self.callback_gate.stop_capture();
                 if attempt == 0 {
                     log::warn!("Failed to start audio stream (attempt 1): {}. Refreshing device/config and retrying...", err);
                     if self.requested_device_name.is_some()
@@ -586,6 +629,7 @@ impl AudioCapture for SystemAudioCapture {
             return Ok(());
         }
 
+        self.callback_gate.stop_capture();
         if let Some(stream) = self.stream.take() {
             drop(stream); // Stream is stopped when dropped
         }
@@ -630,6 +674,24 @@ mod tests {
         assert_eq!(mono[0], 1500); // (1000 + 2000) / 2
         assert_eq!(mono[1], 3500);
         assert_eq!(mono[2], 5500);
+    }
+
+    #[test]
+    fn callback_gate_blocks_stale_callbacks_after_stop_and_restart() {
+        let gate = CaptureCallbackGate::default();
+
+        let first_generation = gate.begin_capture();
+        assert!(gate.should_emit(first_generation));
+
+        gate.stop_capture();
+        assert!(!gate.should_emit(first_generation));
+
+        let second_generation = gate.begin_capture();
+        assert!(!gate.should_emit(first_generation));
+        assert!(gate.should_emit(second_generation));
+
+        gate.stop_capture();
+        assert!(!gate.should_emit(second_generation));
     }
 
     #[tokio::test]

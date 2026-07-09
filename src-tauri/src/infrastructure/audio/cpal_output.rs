@@ -263,10 +263,7 @@ impl CpalAudioOutput {
                     continue;
                 };
                 match r.process(&[mono_f32], None) {
-                    Ok(mut output_per_channel) => output_per_channel
-                        .pop()
-                        .or_else(|| Some(Vec::new()))
-                        .unwrap(),
+                    Ok(mut output_per_channel) => output_per_channel.pop().unwrap_or_default(),
                     Err(e) => {
                         log::error!("Output resample error: {}", e);
                         continue;
@@ -626,7 +623,7 @@ fn fill_output(
 ) {
     let mut pulled = 0usize;
     if let (Ok(mut q), Ok(mut state)) = (queue.lock(), playback_state.lock()) {
-        if state.prebuffering {
+        if state.prebuffering && !state.draining {
             if q.len() < prebuffer_samples {
                 out.fill(0.0);
                 return;
@@ -644,7 +641,7 @@ fn fill_output(
             }
         }
 
-        if pulled < out.len() {
+        if pulled < out.len() && !state.draining {
             state.prebuffering = true;
         }
     }
@@ -697,7 +694,7 @@ mod tests {
         let cfg = AudioOutputConfig::openai_translation();
         assert_eq!(cfg.source_sample_rate, 24_000);
         assert_eq!(cfg.source_channels, 1);
-        assert!((250..=500).contains(&cfg.prebuffer_ms));
+        assert_eq!(cfg.prebuffer_ms, 200);
         assert!(cfg.max_buffered_frames >= 288_000); // headroom хотя бы 6 сек на 48 kHz
         assert!(cfg.drain_max_buffered_frames > cfg.max_buffered_frames);
     }
@@ -772,5 +769,45 @@ mod tests {
         let state = out.playback_state.lock().unwrap();
         assert!(state.draining);
         assert!(!state.prebuffering);
+    }
+
+    #[test]
+    fn fill_output_drain_mode_does_not_rebuffer_after_underrun() {
+        let queue = Arc::new(Mutex::new(VecDeque::new()));
+        let state = Arc::new(Mutex::new(OutputPlaybackState {
+            prebuffering: false,
+            draining: true,
+        }));
+        let mut underrun = [1.0f32; 4];
+
+        fill_output(&mut underrun, &queue, &state, 64);
+
+        assert_eq!(underrun, [0.0, 0.0, 0.0, 0.0]);
+        assert!(!state.lock().unwrap().prebuffering);
+
+        queue.lock().unwrap().push_back(0.7);
+        let mut tail = [0.0f32; 4];
+        fill_output(&mut tail, &queue, &state, 64);
+
+        assert_eq!(tail, [0.7, 0.0, 0.0, 0.0]);
+        assert!(!state.lock().unwrap().prebuffering);
+    }
+
+    #[test]
+    fn drain_source_and_push_caps_ready_queue_to_latest_audio() {
+        let source = Arc::new(Mutex::new(VecDeque::from(vec![
+            1000, 2000, 3000, 4000, 5000,
+        ])));
+        let ready = Arc::new(Mutex::new(VecDeque::new()));
+
+        CpalAudioOutput::drain_source_and_push(&source, &ready, &None, 2, 3, true);
+
+        assert!(source.lock().unwrap().is_empty());
+        let ready: Vec<f32> = ready.lock().unwrap().iter().copied().collect();
+        assert_eq!(ready.len(), 6);
+        assert_eq!(ready[0], 3000.0 / 32_768.0);
+        assert_eq!(ready[1], 3000.0 / 32_768.0);
+        assert_eq!(ready[4], 5000.0 / 32_768.0);
+        assert_eq!(ready[5], 5000.0 / 32_768.0);
     }
 }
