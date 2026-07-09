@@ -1420,6 +1420,7 @@ mod tests {
         close_calls: AtomicUsize,
         abort_calls: AtomicUsize,
         fail_close: AtomicBool,
+        fail_append_call: AtomicUsize,
         target_language: StdMutex<Option<String>>,
         received_samples: StdMutex<Vec<i16>>,
         event_tx: StdMutex<Option<mpsc::Sender<OpenAIRealtimeEvent>>>,
@@ -1461,14 +1462,19 @@ mod tests {
         }
 
         async fn append_input_audio(&self, pcm16: &[i16]) -> Result<(), OpenAITranslationError> {
-            let call = self.state.append_calls.fetch_add(1, Ordering::SeqCst);
+            let call = self.state.append_calls.fetch_add(1, Ordering::SeqCst) + 1;
             self.state
                 .received_samples
                 .lock()
                 .unwrap()
                 .extend_from_slice(pcm16);
+            if self.state.fail_append_call.load(Ordering::SeqCst) == call {
+                return Err(OpenAITranslationError::Connection(
+                    "simulated append failure".to_string(),
+                ));
+            }
 
-            if call == 0 {
+            if call == 1 {
                 let tx = self.state.event_tx.lock().unwrap().clone();
                 if let Some(tx) = tx {
                     let _ = tx
@@ -1904,6 +1910,86 @@ mod tests {
         svc.stop_translation().await.unwrap();
         assert_eq!(svc.get_status().await, RecordingStatus::Idle);
         assert_eq!(realtime_state.connect_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn openai_append_failure_cleans_session_and_allows_restart() {
+        let output_state = Arc::new(SyntheticOutputState::default());
+        let realtime_state = Arc::new(SyntheticRealtimeState::default());
+        realtime_state.fail_append_call.store(1, Ordering::SeqCst);
+        let capture_started = Arc::new(AtomicBool::new(false));
+        let capture_stopped = Arc::new(AtomicBool::new(false));
+        let mic_target = Arc::new(StdMutex::new(None));
+
+        let svc = LiveTranslationService::new_with_factories(
+            Arc::new(SyntheticPlatformAudioFactory {
+                output_state: output_state.clone(),
+                capture_started: capture_started.clone(),
+                capture_stopped: capture_stopped.clone(),
+                mic_target,
+            }),
+            Arc::new(SyntheticRealtimeClientFactory {
+                state: realtime_state.clone(),
+            }),
+        );
+
+        let errors = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let statuses = Arc::new(StdMutex::new(Vec::<RecordingStatus>::new()));
+        let callbacks = LiveTranslationCallbacks {
+            on_transcript_delta: Arc::new(|_| {}),
+            on_audio_spectrum: Arc::new(|_| {}),
+            on_error: {
+                let errors = errors.clone();
+                Arc::new(move |err| errors.lock().unwrap().push(err.to_string()))
+            },
+            on_status: {
+                let statuses = statuses.clone();
+                Arc::new(move |status| statuses.lock().unwrap().push(status))
+            },
+        };
+
+        svc.start_translation(valid_config(95), callbacks)
+            .await
+            .unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            if svc.get_status().await == RecordingStatus::Error {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        assert_eq!(svc.get_status().await, RecordingStatus::Error);
+        assert!(svc.active_session_id().await.is_none());
+        assert!(capture_started.load(Ordering::SeqCst));
+        assert!(capture_stopped.load(Ordering::SeqCst));
+        assert!(output_state.closed.load(Ordering::SeqCst));
+        assert_eq!(realtime_state.abort_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            errors
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|err| err.contains("simulated append failure")),
+            "expected append failure error, got {:?}",
+            errors.lock().unwrap()
+        );
+        assert!(
+            statuses.lock().unwrap().contains(&RecordingStatus::Error),
+            "expected Error status, got {:?}",
+            statuses.lock().unwrap()
+        );
+
+        realtime_state.fail_append_call.store(0, Ordering::SeqCst);
+        svc.start_translation(valid_config(96), test_callbacks())
+            .await
+            .unwrap();
+        assert_eq!(svc.get_status().await, RecordingStatus::Recording);
+        svc.stop_translation().await.unwrap();
+        assert_eq!(svc.get_status().await, RecordingStatus::Idle);
+        assert_eq!(realtime_state.connect_calls.load(Ordering::SeqCst), 2);
+        assert!(realtime_state.append_calls.load(Ordering::SeqCst) >= 2);
     }
 
     #[tokio::test]
