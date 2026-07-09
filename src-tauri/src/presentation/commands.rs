@@ -269,22 +269,67 @@ async fn clear_dictation_failure_state_if_current(state: &AppState, session_id: 
     }
 }
 
-fn incoming_stop_session_id(active_session_id: Option<u64>, sequence_id: u64) -> u64 {
-    active_session_id.unwrap_or_else(|| sequence_id.max(1))
+fn recording_state_after_failed_start_cleanup(
+    failed_session_id: u64,
+    current_session_id: u64,
+    active_mode: Option<RecordingMode>,
+    failed_mode: RecordingMode,
+    displaced_session_id: u64,
+    displaced_mode: Option<RecordingMode>,
+) -> Option<(u64, Option<RecordingMode>)> {
+    if failed_session_id != current_session_id || active_mode != Some(failed_mode) {
+        return None;
+    }
+
+    let restored_mode = if displaced_session_id == 0 {
+        None
+    } else {
+        displaced_mode
+    };
+    Some((displaced_session_id, restored_mode))
 }
 
-/// Возвращает вытесненный id активной сессии, если провалившийся старт всё ещё числится активным.
-///
-/// Нужен для конкурентных стартов (кнопка + hotkey): провалившийся старт не должен
-/// обнулять id живой сессии, иначе её Idle при остановке уйдёт с session_id=0
-/// и фронт его проигнорирует.
-fn restore_displaced_transcription_session_id(state: &AppState, session_id: u64, displaced: u64) {
-    let _ = state.active_transcription_session_id.compare_exchange(
-        session_id,
-        displaced,
-        Ordering::Relaxed,
-        Ordering::Relaxed,
-    );
+async fn restore_or_clear_failed_start_state_if_current(
+    state: &AppState,
+    failed_session_id: u64,
+    failed_mode: RecordingMode,
+    displaced_session_id: u64,
+    displaced_mode: Option<RecordingMode>,
+) {
+    let current_session_id = state
+        .active_transcription_session_id
+        .load(Ordering::Relaxed);
+    let active_mode_snapshot = *state.active_recording_mode.read().await;
+    let Some((restored_session_id, restored_mode)) = recording_state_after_failed_start_cleanup(
+        failed_session_id,
+        current_session_id,
+        active_mode_snapshot,
+        failed_mode,
+        displaced_session_id,
+        displaced_mode,
+    ) else {
+        return;
+    };
+
+    if state
+        .active_transcription_session_id
+        .compare_exchange(
+            failed_session_id,
+            restored_session_id,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        )
+        .is_ok()
+    {
+        let mut active_mode = state.active_recording_mode.write().await;
+        if *active_mode == Some(failed_mode) {
+            *active_mode = restored_mode;
+        }
+    }
+}
+
+fn incoming_stop_session_id(active_session_id: Option<u64>, sequence_id: u64) -> u64 {
+    active_session_id.unwrap_or_else(|| sequence_id.max(1))
 }
 
 fn emit_idle_recording_status(
@@ -334,6 +379,14 @@ fn should_report_live_translation_status(
             live_status,
             RecordingStatus::Starting | RecordingStatus::Recording | RecordingStatus::Processing
         )
+}
+
+fn should_route_stop_to_live_translation(
+    active_mode: Option<RecordingMode>,
+    live_status: RecordingStatus,
+    has_live_session: bool,
+) -> bool {
+    should_report_live_translation_status(active_mode, live_status, has_live_session)
 }
 
 #[tauri::command]
@@ -700,12 +753,22 @@ async fn stop_recording_and_emit_idle(
     app_handle: &AppHandle,
     stopped_via_hotkey: bool,
 ) -> Result<String, String> {
-    // Dispatcher: если активный режим — live_translation, останавливаем translation сервис.
+    // Dispatcher: если live translation активен или mode потерялся, но сервис ещё жив,
+    // останавливаем translation сервис, а не dictation pipeline.
     let active_mode = *state.active_recording_mode.read().await;
-    if matches!(
-        active_mode,
-        Some(crate::domain::RecordingMode::LiveTranslation)
-    ) {
+    let live_service = {
+        let guard = state.live_translation_service.read().await;
+        guard.as_ref().cloned()
+    };
+    let (live_status, has_live_session) = if let Some(service) = live_service.as_ref() {
+        (
+            service.get_status().await,
+            service.active_session_id().await.is_some(),
+        )
+    } else {
+        (RecordingStatus::Idle, false)
+    };
+    if should_route_stop_to_live_translation(active_mode, live_status, has_live_session) {
         return stop_live_translation_recording(state, app_handle, stopped_via_hotkey).await;
     }
 
@@ -818,6 +881,7 @@ async fn start_live_translation_recording(
     app_handle: AppHandle,
     session_id: u64,
     displaced_session_id: u64,
+    displaced_recording_mode: Option<RecordingMode>,
 ) -> Result<String, String> {
     use crate::application::services::{
         LiveTranslationCallbacks, LiveTranslationConfig, LiveTranslationError,
@@ -973,11 +1037,14 @@ async fn start_live_translation_recording(
                     mode: Some(RecordingMode::LiveTranslation),
                 },
             );
-            restore_displaced_transcription_session_id(state, session_id, displaced_session_id);
-            let mut active_mode = state.active_recording_mode.write().await;
-            if matches!(*active_mode, Some(RecordingMode::LiveTranslation)) {
-                *active_mode = None;
-            }
+            restore_or_clear_failed_start_state_if_current(
+                state,
+                session_id,
+                RecordingMode::LiveTranslation,
+                displaced_session_id,
+                displaced_recording_mode,
+            )
+            .await;
             Err(err.to_string())
         }
     }
@@ -1642,6 +1709,7 @@ pub async fn start_recording(
     let displaced_session_id = state
         .active_transcription_session_id
         .fetch_max(session_id, Ordering::AcqRel);
+    let displaced_recording_mode = *state.active_recording_mode.read().await;
     log::info!("Recording session started: session_id={}", session_id);
 
     // Dispatcher: если в Settings выбран live_translation, направляем в отдельный сервис
@@ -1653,6 +1721,7 @@ pub async fn start_recording(
             app_handle,
             session_id,
             displaced_session_id,
+            displaced_recording_mode,
         )
         .await;
     }
@@ -1694,12 +1763,14 @@ pub async fn start_recording(
                         mode: None,
                     },
                 );
-                clear_dictation_failure_state_if_current(state.inner(), session_id).await;
-                restore_displaced_transcription_session_id(
+                restore_or_clear_failed_start_state_if_current(
                     state.inner(),
                     session_id,
+                    RecordingMode::Dictation,
                     displaced_session_id,
-                );
+                    displaced_recording_mode,
+                )
+                .await;
                 return Err(error_msg);
             }
         }
@@ -1918,8 +1989,14 @@ pub async fn start_recording(
                 mode: None,
             },
         );
-        clear_dictation_failure_state_if_current(state.inner(), session_id).await;
-        restore_displaced_transcription_session_id(state.inner(), session_id, displaced_session_id);
+        restore_or_clear_failed_start_state_if_current(
+            state.inner(),
+            session_id,
+            RecordingMode::Dictation,
+            displaced_session_id,
+            displaced_recording_mode,
+        )
+        .await;
         return Err(error_msg);
     }
 
@@ -1998,10 +2075,17 @@ pub async fn start_recording(
             error_type
         );
 
+        restore_or_clear_failed_start_state_if_current(
+            state.inner(),
+            session_id,
+            RecordingMode::Dictation,
+            displaced_session_id,
+            displaced_recording_mode,
+        )
+        .await;
+
         // Сначала transcription:error, потом recording:status=Error (во фронте есть логика suppression/retry).
         on_error(stt);
-        clear_dictation_failure_state_if_current(state.inner(), session_id).await;
-        restore_displaced_transcription_session_id(state.inner(), session_id, displaced_session_id);
 
         return Err(error);
     }
@@ -2439,9 +2523,9 @@ mod snapshot_contract_tests {
         live_translation_health_check_blocks_recording_status,
         live_translation_health_check_blocks_service_status, point_inside_rect,
         recording_hotkey_press_intent, recording_hotkey_release_intent,
-        recording_window_size_from_config, resolve_incoming_translation_target_language,
-        resolve_outgoing_translation_target_language, resolve_streaming_keyterms_update,
-        should_cancel_hold_to_record_pending_start,
+        recording_state_after_failed_start_cleanup, recording_window_size_from_config,
+        resolve_incoming_translation_target_language, resolve_outgoing_translation_target_language,
+        resolve_streaming_keyterms_update, should_cancel_hold_to_record_pending_start,
         should_clear_active_mode_after_dictation_failure,
         should_clear_active_mode_after_session_cleanup,
         should_hide_recording_window_for_auto_paste,
@@ -2449,7 +2533,7 @@ mod snapshot_contract_tests {
         should_ignore_hotkey_stop_after_start, should_lower_recording_window_for_auto_paste,
         should_reassert_recording_window_after_auto_paste, should_report_live_translation_status,
         should_restore_recording_window_after_auto_paste,
-        should_restore_recording_window_after_suppression,
+        should_restore_recording_window_after_suppression, should_route_stop_to_live_translation,
         should_save_auto_paste_target_for_hotkey_start,
         should_show_recording_window_on_processing_hotkey,
         should_start_incoming_translation_on_toggle, validate_auto_paste_target_for_focus,
@@ -2671,6 +2755,39 @@ mod snapshot_contract_tests {
     }
 
     #[test]
+    fn stop_routes_to_live_translation_when_mode_was_lost_but_service_is_active() {
+        assert!(should_route_stop_to_live_translation(
+            None,
+            RecordingStatus::Recording,
+            true
+        ));
+        assert!(should_route_stop_to_live_translation(
+            None,
+            RecordingStatus::Processing,
+            false
+        ));
+        assert!(should_route_stop_to_live_translation(
+            None,
+            RecordingStatus::Idle,
+            true
+        ));
+    }
+
+    #[test]
+    fn stop_does_not_route_to_idle_live_service_without_session() {
+        assert!(!should_route_stop_to_live_translation(
+            None,
+            RecordingStatus::Idle,
+            false
+        ));
+        assert!(!should_route_stop_to_live_translation(
+            Some(RecordingMode::Dictation),
+            RecordingStatus::Idle,
+            false
+        ));
+    }
+
+    #[test]
     fn virtual_output_health_check_reports_close_failure() {
         let ok_item = virtual_output_open_health_item("BlackHole".to_string(), Ok(()));
         assert!(ok_item.ok);
@@ -2734,6 +2851,73 @@ mod snapshot_contract_tests {
         assert!(!should_clear_active_mode_after_dictation_failure(
             10, 10, None
         ));
+    }
+
+    #[test]
+    fn failed_start_cleanup_restores_displaced_recording_state() {
+        assert_eq!(
+            recording_state_after_failed_start_cleanup(
+                11,
+                11,
+                Some(RecordingMode::Dictation),
+                RecordingMode::Dictation,
+                10,
+                Some(RecordingMode::LiveTranslation),
+            ),
+            Some((10, Some(RecordingMode::LiveTranslation)))
+        );
+        assert_eq!(
+            recording_state_after_failed_start_cleanup(
+                12,
+                12,
+                Some(RecordingMode::LiveTranslation),
+                RecordingMode::LiveTranslation,
+                10,
+                Some(RecordingMode::Dictation),
+            ),
+            Some((10, Some(RecordingMode::Dictation)))
+        );
+    }
+
+    #[test]
+    fn failed_start_cleanup_clears_when_nothing_was_displaced() {
+        assert_eq!(
+            recording_state_after_failed_start_cleanup(
+                11,
+                11,
+                Some(RecordingMode::Dictation),
+                RecordingMode::Dictation,
+                0,
+                Some(RecordingMode::LiveTranslation),
+            ),
+            Some((0, None))
+        );
+    }
+
+    #[test]
+    fn failed_start_cleanup_ignores_stale_failure() {
+        assert_eq!(
+            recording_state_after_failed_start_cleanup(
+                11,
+                12,
+                Some(RecordingMode::Dictation),
+                RecordingMode::Dictation,
+                10,
+                Some(RecordingMode::LiveTranslation),
+            ),
+            None
+        );
+        assert_eq!(
+            recording_state_after_failed_start_cleanup(
+                11,
+                11,
+                Some(RecordingMode::LiveTranslation),
+                RecordingMode::Dictation,
+                10,
+                Some(RecordingMode::LiveTranslation),
+            ),
+            None
+        );
     }
 
     #[test]
