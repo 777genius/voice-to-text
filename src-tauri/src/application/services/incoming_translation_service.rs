@@ -155,15 +155,15 @@ fn notify_incoming_runtime_error(
     callbacks: &IncomingTranslationCallbacks,
     error: IncomingTranslationError,
 ) {
-    if std::panic::catch_unwind(AssertUnwindSafe(|| (callbacks.on_error)(error))).is_err() {
-        log::error!("IncomingTranslationService: on_error callback panicked");
-    }
-    if std::panic::catch_unwind(AssertUnwindSafe(|| {
+    call_incoming_callback("on_error", || (callbacks.on_error)(error));
+    call_incoming_callback("Error status", || {
         (callbacks.on_status)(RecordingStatus::Error)
-    }))
-    .is_err()
-    {
-        log::error!("IncomingTranslationService: Error status callback panicked");
+    });
+}
+
+fn call_incoming_callback(label: &str, callback: impl FnOnce()) {
+    if std::panic::catch_unwind(AssertUnwindSafe(callback)).is_err() {
+        log::error!("IncomingTranslationService: {} callback panicked", label);
     }
 }
 
@@ -447,7 +447,9 @@ impl IncomingTranslationService {
             normalize_incoming_translation_target_language(&config.target_language);
 
         *self.status.write().await = RecordingStatus::Starting;
-        (callbacks.on_status)(RecordingStatus::Starting);
+        call_incoming_callback("Starting status", || {
+            (callbacks.on_status)(RecordingStatus::Starting)
+        });
 
         let audio_target = AudioCaptureTarget::incoming_subtitles();
         let mut capture = match self
@@ -790,7 +792,9 @@ fn handle_finalized_transcription(
         transcription.start,
         transcription.duration
     );
-    (runtime_failure_reporter.callbacks.on_source_final)(text.clone());
+    call_incoming_callback("source final", || {
+        (runtime_failure_reporter.callbacks.on_source_final)(text.clone())
+    });
 
     pending_translations.fetch_add(1, Ordering::SeqCst);
     if let Err(err) = translation_tx.try_send(TranslationJob {
@@ -859,7 +863,9 @@ async fn mark_incoming_recording_started(
 
     *status_guard = RecordingStatus::Recording;
     drop(status_guard);
-    (callbacks.on_status)(RecordingStatus::Recording);
+    call_incoming_callback("Recording status", || {
+        (callbacks.on_status)(RecordingStatus::Recording)
+    });
     true
 }
 
@@ -901,7 +907,9 @@ async fn run_translation_worker(
                 if runtime_failure_reporter.running.load(Ordering::Relaxed)
                     && !translated.trim().is_empty()
                 {
-                    (runtime_failure_reporter.callbacks.on_translation_delta)(translated);
+                    call_incoming_callback("translation delta", || {
+                        (runtime_failure_reporter.callbacks.on_translation_delta)(translated)
+                    });
                 }
             }
             Err(err) => {
@@ -1047,8 +1055,7 @@ async fn run_audio_pump(
             if running.load(Ordering::Relaxed) {
                 running.store(false, Ordering::SeqCst);
                 *status.write().await = RecordingStatus::Error;
-                (callbacks.on_error)(err.into());
-                (callbacks.on_status)(RecordingStatus::Error);
+                notify_incoming_runtime_error(&callbacks, err.into());
                 let _ = runtime_cleanup_tx.send(());
             }
             break;
@@ -1064,8 +1071,7 @@ async fn run_audio_pump(
             "system audio capture stopped unexpectedly".to_string(),
         );
         *status.write().await = RecordingStatus::Error;
-        (callbacks.on_error)(err);
-        (callbacks.on_status)(RecordingStatus::Error);
+        notify_incoming_runtime_error(&callbacks, err);
         let _ = runtime_cleanup_tx.send(());
     }
 }
@@ -2120,6 +2126,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn audio_pump_callback_panics_do_not_block_cleanup_signal() {
+        let provider: Arc<Mutex<Box<dyn SttProvider>>> =
+            Arc::new(Mutex::new(Box::new(TrackingSttProvider {
+                state: Arc::new(TrackingProviderState::default()),
+                fail_initialize: false,
+                fail_stop: false,
+            })));
+        let (audio_tx, audio_rx) = mpsc::channel::<AudioChunk>(1);
+        drop(audio_tx);
+        let running = Arc::new(AtomicBool::new(true));
+        let status = Arc::new(RwLock::new(RecordingStatus::Recording));
+        let callbacks = IncomingTranslationCallbacks {
+            on_source_final: Arc::new(|_| {}),
+            on_translation_delta: Arc::new(|_| {}),
+            on_error: Arc::new(|_| panic!("simulated incoming on_error panic")),
+            on_status: Arc::new(|_| panic!("simulated incoming on_status panic")),
+        };
+        let (cleanup_tx, mut cleanup_rx) = mpsc::unbounded_channel();
+
+        run_audio_pump(
+            audio_rx,
+            provider,
+            callbacks,
+            running.clone(),
+            Arc::new(AtomicBool::new(false)),
+            status.clone(),
+            cleanup_tx,
+        )
+        .await;
+
+        assert!(!running.load(Ordering::SeqCst));
+        assert_eq!(*status.read().await, RecordingStatus::Error);
+        assert!(cleanup_rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
     async fn audio_pump_does_not_report_planned_capture_channel_close() {
         let provider: Arc<Mutex<Box<dyn SttProvider>>> =
             Arc::new(Mutex::new(Box::new(TrackingSttProvider {
@@ -2564,6 +2606,42 @@ mod tests {
         assert_eq!(service.get_status().await, RecordingStatus::Idle);
         assert!(capture_state.stopped.load(Ordering::SeqCst));
         assert!(provider_state.stopped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn status_callback_panic_does_not_break_incoming_session_lifecycle() {
+        let capture_state = std::sync::Arc::new(SyntheticIncomingCaptureState::default());
+        let service = IncomingTranslationService::new_with_all_factories(
+            std::sync::Arc::new(SyntheticIncomingSttFactory {
+                state: std::sync::Arc::new(SyntheticIncomingProviderState::default()),
+            }),
+            std::sync::Arc::new(SyntheticIncomingAudioFactory {
+                capture_state: capture_state.clone(),
+                requested_target: std::sync::Arc::new(StdMutex::new(None)),
+            }),
+            std::sync::Arc::new(SyntheticTextTranslatorFactory {
+                state: std::sync::Arc::new(SyntheticTextTranslatorState::default()),
+            }),
+        );
+        let callbacks = IncomingTranslationCallbacks {
+            on_source_final: Arc::new(|_| {}),
+            on_translation_delta: Arc::new(|_| {}),
+            on_error: Arc::new(|_| {}),
+            on_status: Arc::new(|_| panic!("simulated incoming status callback panic")),
+        };
+        let mut config = IncomingTranslationConfig::new_with_defaults(SttConfig::default(), 108);
+        config.openai_api_key = "sk-test".to_string();
+
+        service
+            .start(config, callbacks)
+            .await
+            .expect("status callback panic must not abort startup");
+        assert_eq!(service.get_status().await, RecordingStatus::Recording);
+        assert_eq!(service.active_session_id().await, Some(108));
+
+        service.stop().await.unwrap();
+        assert_eq!(service.get_status().await, RecordingStatus::Idle);
+        assert!(capture_state.stopped.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

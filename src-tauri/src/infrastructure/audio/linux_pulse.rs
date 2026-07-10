@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -722,12 +723,20 @@ impl AudioCapture for LinuxPulseMonitorCapture {
                 if samples.is_empty() {
                     continue;
                 }
-                on_chunk(AudioChunk::new(
-                    samples,
-                    target.sample_rate,
-                    target.channels,
-                ));
+                if catch_unwind(AssertUnwindSafe(|| {
+                    on_chunk(AudioChunk::new(
+                        samples,
+                        target.sample_rate,
+                        target.channels,
+                    ))
+                }))
+                .is_err()
+                {
+                    log::error!("Linux Pulse capture callback panicked; stopping reader task");
+                    break;
+                }
             }
+            running.store(false, Ordering::SeqCst);
         });
 
         self.child = Some(child);

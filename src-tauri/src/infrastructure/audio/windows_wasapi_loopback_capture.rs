@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig, SupportedStreamConfig};
 use rubato::{Resampler, SincFixedIn};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 
 use crate::domain::{
@@ -23,7 +24,10 @@ fn emit_loopback_chunk(callback_slot: &LoopbackCallbackSlot, chunk: AudioChunk) 
         }
     };
     if let Some(callback) = callback {
-        callback(chunk);
+        if catch_unwind(AssertUnwindSafe(|| callback(chunk))).is_err() {
+            log::error!("WASAPI loopback callback panicked; revoking it for this stream");
+            revoke_loopback_callback(callback_slot);
+        }
     }
 }
 

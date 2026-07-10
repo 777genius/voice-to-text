@@ -184,15 +184,15 @@ where
 }
 
 fn notify_live_runtime_error(callbacks: &LiveTranslationCallbacks, error: LiveTranslationError) {
-    if std::panic::catch_unwind(AssertUnwindSafe(|| (callbacks.on_error)(error))).is_err() {
-        log::error!("LiveTranslationService: on_error callback panicked");
-    }
-    if std::panic::catch_unwind(AssertUnwindSafe(|| {
+    call_live_callback("on_error", || (callbacks.on_error)(error));
+    call_live_callback("Error status", || {
         (callbacks.on_status)(RecordingStatus::Error)
-    }))
-    .is_err()
-    {
-        log::error!("LiveTranslationService: Error status callback panicked");
+    });
+}
+
+fn call_live_callback(label: &str, callback: impl FnOnce()) {
+    if std::panic::catch_unwind(AssertUnwindSafe(callback)).is_err() {
+        log::error!("LiveTranslationService: {} callback panicked", label);
     }
 }
 
@@ -315,7 +315,9 @@ impl LiveTranslationService {
         }
 
         *self.status.write().await = RecordingStatus::Starting;
-        (callbacks.on_status)(RecordingStatus::Starting);
+        call_live_callback("Starting status", || {
+            (callbacks.on_status)(RecordingStatus::Starting)
+        });
 
         // 1. API key
         if config.openai_api_key.trim().is_empty() {
@@ -574,7 +576,9 @@ async fn mark_live_recording_started(
 
     *status_guard = RecordingStatus::Recording;
     drop(status_guard);
-    (callbacks.on_status)(RecordingStatus::Recording);
+    call_live_callback("Recording status", || {
+        (callbacks.on_status)(RecordingStatus::Recording)
+    });
     true
 }
 
@@ -627,7 +631,7 @@ async fn run_audio_pump(
 
         // spectrum (cheap, FFT 256-1024 samples)
         if let Some(bars) = spectrum.push_samples(&amplified) {
-            on_spectrum(bars);
+            call_live_callback("audio spectrum", || on_spectrum(bars));
         }
 
         openai_input_buffer.extend_from_slice(&amplified);
@@ -739,7 +743,7 @@ async fn run_event_forwarder(
                 }
             }
             OpenAIRealtimeEvent::TranscriptDelta(text) => {
-                on_transcript(text);
+                call_live_callback("transcript delta", || on_transcript(text));
             }
             OpenAIRealtimeEvent::InputTranscriptDelta(text) => {
                 log::debug!("translation source delta: {}", text);
@@ -2219,6 +2223,40 @@ mod tests {
             statuses.lock().unwrap().as_slice(),
             &[RecordingStatus::Starting, RecordingStatus::Recording]
         );
+    }
+
+    #[tokio::test]
+    async fn status_callback_panic_does_not_break_live_session_lifecycle() {
+        let output_state = Arc::new(SyntheticOutputState::default());
+        let capture_stopped = Arc::new(AtomicBool::new(false));
+        let svc = LiveTranslationService::new_with_factories(
+            Arc::new(SyntheticPlatformAudioFactory {
+                output_state: output_state.clone(),
+                capture_started: Arc::new(AtomicBool::new(false)),
+                capture_stopped: capture_stopped.clone(),
+                mic_target: Arc::new(StdMutex::new(None)),
+            }),
+            Arc::new(SyntheticRealtimeClientFactory {
+                state: Arc::new(SyntheticRealtimeState::default()),
+            }),
+        );
+        let callbacks = LiveTranslationCallbacks {
+            on_transcript_delta: Arc::new(|_| {}),
+            on_audio_spectrum: Arc::new(|_| {}),
+            on_error: Arc::new(|_| {}),
+            on_status: Arc::new(|_| panic!("simulated live status callback panic")),
+        };
+
+        svc.start_translation(valid_config(99), callbacks)
+            .await
+            .expect("status callback panic must not abort startup");
+        assert_eq!(svc.get_status().await, RecordingStatus::Recording);
+        assert_eq!(svc.active_session_id().await, Some(99));
+
+        svc.stop_translation().await.unwrap();
+        assert_eq!(svc.get_status().await, RecordingStatus::Idle);
+        assert!(capture_stopped.load(Ordering::SeqCst));
+        assert!(output_state.closed.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

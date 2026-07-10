@@ -443,6 +443,10 @@ impl TranscriptionService {
         *status = RecordingStatus::Starting;
         drop(status);
 
+        // Freeze the session config before any async device/provider startup work. Settings
+        // saved while status=Starting must apply to the next recording, not race this one.
+        let config = self.config.read().await.clone();
+
         // Отменяем таймер неактивности если он запущен
         if let Some(timer) = self.inactivity_timer_task.write().await.take() {
             log::info!("Cancelling inactivity timer (user started recording before timeout)");
@@ -561,7 +565,6 @@ impl TranscriptionService {
             stt_startup_error_callback(on_error.clone());
 
         // Проверяем можно ли переиспользовать существующее соединение
-        let config = self.config.read().await.clone();
         let (mut can_reuse_connection, mut reuse_decision_reason) = {
             let provider_opt = self.stt_provider.read().await;
             if let Some(provider) = provider_opt.as_ref() {
@@ -1425,9 +1428,13 @@ impl TranscriptionService {
             || prev_config.language != config.language
             || prev_config.streaming_keyterms != config.streaming_keyterms;
 
+        // Serialize the config write and any keep-alive teardown against start_recording's
+        // Idle -> Starting transition. Otherwise a new recording can resume the provider
+        // between the Idle check and the teardown below.
+        let status = self.status.read().await;
+
         if config_requires_new_connection {
-            let status = *self.status.read().await;
-            if status == RecordingStatus::Idle {
+            if *status == RecordingStatus::Idle {
                 let has_keep_alive_connection = {
                     let provider_opt = self.stt_provider.read().await;
                     provider_opt
@@ -1460,12 +1467,13 @@ impl TranscriptionService {
                 // Если запись идёт — не вмешиваемся. Новая конфигурация применится на следующей сессии.
                 log::info!(
                     "STT config updated while status={:?}; keep-alive connection will not be reset until idle",
-                    status
+                    *status
                 );
             }
         }
 
         *self.config.write().await = config;
+        drop(status);
         Ok(())
     }
 
@@ -1497,10 +1505,9 @@ impl TranscriptionService {
             );
         }
 
-        drop(status); // освобождаем read lock
-
         log::info!("Replacing audio capture device");
         *self.audio_capture.write().await = new_capture;
+        drop(status);
         log::info!("Audio capture device replaced successfully");
 
         Ok(())
@@ -1845,6 +1852,44 @@ mod tests {
         is_capturing: Arc<AtomicBool>,
     }
 
+    struct BlockingStartAudioCapture {
+        config: AudioConfig,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        is_capturing: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl AudioCapture for BlockingStartAudioCapture {
+        async fn initialize(&mut self, config: AudioConfig) -> AudioResult<()> {
+            self.config = config;
+            Ok(())
+        }
+
+        async fn start_capture(
+            &mut self,
+            _on_chunk: crate::domain::AudioChunkCallback,
+        ) -> AudioResult<()> {
+            self.is_capturing.store(true, Ordering::SeqCst);
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(())
+        }
+
+        async fn stop_capture(&mut self) -> AudioResult<()> {
+            self.is_capturing.store(false, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_capturing(&self) -> bool {
+            self.is_capturing.load(Ordering::SeqCst)
+        }
+
+        fn config(&self) -> AudioConfig {
+            self.config
+        }
+    }
+
     impl ImmediateAudioCapture {
         fn new() -> Self {
             Self {
@@ -1943,6 +1988,25 @@ mod tests {
         stopped: Arc<AtomicBool>,
         delay_per_chunk: Duration,
         start_stream_delay: Duration,
+    }
+
+    struct ConfigRecordingFactory {
+        languages: Arc<StdMutex<Vec<String>>>,
+    }
+
+    impl SttProviderFactory for ConfigRecordingFactory {
+        fn create(&self, config: &SttConfig) -> SttResult<Box<dyn SttProvider>> {
+            self.languages
+                .lock()
+                .expect("languages mutex poisoned")
+                .push(config.language.clone());
+            Ok(Box::new(CountingProvider {
+                sent_chunks: Arc::new(AtomicUsize::new(0)),
+                stopped: Arc::new(AtomicBool::new(false)),
+                delay_per_chunk: Duration::ZERO,
+                start_stream_delay: Duration::ZERO,
+            }))
+        }
     }
 
     impl SttProviderFactory for CountingFactory {
@@ -2186,6 +2250,96 @@ mod tests {
         let mut cleanup = SttConfig::new(SttProviderType::Backend);
         cleanup.backend_streaming_provider = crate::domain::BackendStreamingProvider::Deepgram;
         service.update_config(cleanup).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn config_saved_during_starting_applies_only_to_next_recording() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let languages = Arc::new(StdMutex::new(Vec::new()));
+        let service = Arc::new(TranscriptionService::new(
+            Box::new(BlockingStartAudioCapture {
+                config: AudioConfig::default(),
+                entered: entered.clone(),
+                release: release.clone(),
+                is_capturing: Arc::new(AtomicBool::new(false)),
+            }),
+            Arc::new(ConfigRecordingFactory {
+                languages: languages.clone(),
+            }),
+        ));
+
+        let mut initial = SttConfig::new(SttProviderType::Deepgram);
+        initial.language = "en".to_string();
+        service.update_config(initial).await.unwrap();
+
+        let start_service = service.clone();
+        let start_task = tokio::spawn(async move {
+            start_service
+                .start_recording(
+                    Arc::new(|_| {}),
+                    Arc::new(|_| {}),
+                    Arc::new(|_| {}),
+                    Arc::new(|_| {}),
+                    Arc::new(|_| {}),
+                    Arc::new(|_, _| {}),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("audio capture startup must block at the test gate");
+
+        let mut next = SttConfig::new(SttProviderType::Deepgram);
+        next.language = "fr".to_string();
+        service.update_config(next).await.unwrap();
+        release.notify_waiters();
+
+        start_task
+            .await
+            .expect("start task must join")
+            .expect("recording must start");
+        assert_eq!(
+            languages
+                .lock()
+                .expect("languages mutex poisoned")
+                .as_slice(),
+            &["en".to_string()]
+        );
+        service.stop_recording().await.unwrap();
+        assert_eq!(service.get_config().await.language, "fr");
+    }
+
+    #[tokio::test]
+    async fn replacing_audio_capture_keeps_idle_guard_until_swap_completes() {
+        let service = Arc::new(TranscriptionService::new(
+            Box::new(FailingStartAudioCapture::default()),
+            Arc::new(TestFactory {
+                aborted: Arc::new(AtomicBool::new(false)),
+            }),
+        ));
+        let audio_guard = service.audio_capture.write().await;
+        let replace_service = service.clone();
+        let replace_task = tokio::spawn(async move {
+            replace_service
+                .replace_audio_capture(Box::new(FailingStartAudioCapture::default()))
+                .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), service.status.write())
+                .await
+                .is_err(),
+            "Idle must remain read-locked while replacement waits for the audio device"
+        );
+
+        drop(audio_guard);
+        replace_task
+            .await
+            .expect("replace task must join")
+            .expect("replacement must succeed");
+        assert_eq!(service.get_status().await, RecordingStatus::Idle);
     }
 
     #[tokio::test]

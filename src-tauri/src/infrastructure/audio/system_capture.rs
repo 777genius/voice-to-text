@@ -4,6 +4,7 @@ use cpal::{Device, Host, SampleFormat, Stream, StreamConfig, SupportedStreamConf
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -114,7 +115,16 @@ fn emit_capture_chunk(callback_slot: &CaptureCallbackSlot, chunk: AudioChunk) {
         }
     };
     if let Some(callback) = callback {
-        callback(chunk);
+        if catch_unwind(AssertUnwindSafe(|| callback(chunk))).is_err() {
+            log::error!("Audio capture callback panicked; revoking it for this stream");
+            match callback_slot.lock() {
+                Ok(mut callback) => *callback = None,
+                Err(err) => log::error!(
+                    "Audio capture callback slot poisoned while revoking panicked callback: {}",
+                    err
+                ),
+            }
+        }
     }
 }
 
@@ -742,6 +752,17 @@ mod tests {
         deactivate_capture_after_stream_error(&gate, &callback_slot);
 
         assert!(!gate.should_emit(generation));
+        assert!(callback_slot.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn callback_panic_is_contained_and_revokes_callback() {
+        let callback: AudioChunkCallback =
+            Arc::new(|_chunk| panic!("simulated capture callback panic"));
+        let callback_slot: CaptureCallbackSlot = Arc::new(Mutex::new(Some(callback)));
+
+        emit_capture_chunk(&callback_slot, AudioChunk::new(vec![1, 2, 3], 16_000, 1));
+
         assert!(callback_slot.lock().unwrap().is_none());
     }
 
