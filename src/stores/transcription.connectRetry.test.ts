@@ -675,7 +675,9 @@ describe('transcription connect-retry reliability', () => {
     const firstToggle = store.toggleIncomingTranslation();
     await store.toggleIncomingTranslation();
 
-    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(
+      invokeMock.mock.calls.filter((call) => call[0] === 'start_incoming_translation')
+    ).toHaveLength(1);
     expect(invokeMock).toHaveBeenCalledWith('start_incoming_translation');
 
     pendingStart.resolve('Incoming translation started');
@@ -790,6 +792,186 @@ describe('transcription connect-retry reliability', () => {
     });
 
     expect(store.incomingTranslationText).toBe('перевод до стопа');
+  });
+
+  it('incoming translation восстанавливает active backend session после renderer reload', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'get_incoming_translation_state') {
+        return Promise.resolve({ session_id: 614, status: 'Recording' });
+      }
+      return Promise.resolve(null);
+    });
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    expect(store.incomingTranslationSessionId).toBe(614);
+    expect(store.incomingTranslationStatus).toBe('Recording');
+
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 614, text: 'восстановленный перевод', timestamp: 1 },
+    });
+
+    expect(store.incomingTranslationText).toBe('восстановленный перевод');
+  });
+
+  it('incoming translation восстанавливает terminal Error после renderer reload', async () => {
+    listenMock.mockResolvedValue(() => {});
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'get_incoming_translation_state') {
+        return Promise.resolve({ session_id: 618, status: 'Error' });
+      }
+      return Promise.resolve(null);
+    });
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    expect(store.incomingTranslationSessionId).toBeNull();
+    expect(store.incomingTranslationStatus).toBe('Error');
+    expect(store.incomingTranslationError).toBeTruthy();
+  });
+
+  it('incoming translation start success восстанавливает уже active backend session без event', async () => {
+    let backendActive = false;
+
+    listenMock.mockResolvedValue(() => {});
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'start_incoming_translation') {
+        backendActive = true;
+        return Promise.resolve('Incoming translation already running');
+      }
+      if (cmd === 'get_incoming_translation_state') {
+        return Promise.resolve(
+          backendActive
+            ? { session_id: 617, status: 'Recording' }
+            : { session_id: 0, status: 'Idle' }
+        );
+      }
+      return Promise.resolve(null);
+    });
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+    expect(store.incomingTranslationStatus).toBe('Idle');
+
+    await store.toggleIncomingTranslation();
+
+    expect(store.incomingTranslationSessionId).toBe(617);
+    expect(store.incomingTranslationStatus).toBe('Recording');
+  });
+
+  it('incoming translation сбрасывает stale active state по authoritative Idle snapshot', async () => {
+    const handlers = new Map<string, any>();
+    let snapshotCall = 0;
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd !== 'get_incoming_translation_state') return Promise.resolve(null);
+      snapshotCall += 1;
+      return Promise.resolve(
+        snapshotCall === 1
+          ? { session_id: 616, status: 'Recording' }
+          : { session_id: 0, status: 'Idle' }
+      );
+    });
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 616, text: 'последний перевод', timestamp: 1 },
+    });
+
+    await store.initialize();
+
+    expect(store.incomingTranslationSessionId).toBeNull();
+    expect(store.incomingTranslationStatus).toBe('Idle');
+    expect(store.incomingTranslationError).toBeNull();
+    expect(store.incomingTranslationText).toBe('последний перевод');
+  });
+
+  it('incoming translation не применяет stale snapshot поверх нового status event', async () => {
+    const handlers = new Map<string, any>();
+    const snapshot = deferred<{ session_id: number; status: string }>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'get_incoming_translation_state') return snapshot.promise;
+      return Promise.resolve(null);
+    });
+
+    const store = useTranscriptionStore();
+    const initialize = store.initialize();
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith('get_incoming_translation_state');
+    });
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 615, status: 'Processing' },
+    });
+    snapshot.resolve({ session_id: 615, status: 'Recording' });
+    await initialize;
+
+    expect(store.incomingTranslationStatus).toBe('Processing');
+  });
+
+  it('incoming translation игнорирует invalid session_id=0 events', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 0, status: 'Recording' },
+    });
+    await handlers.get('incoming_translation:source-final')({
+      payload: { session_id: 0, text: 'invalid source', timestamp: 1 },
+    });
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 0, text: 'invalid translation', timestamp: 2 },
+    });
+    await handlers.get('incoming_translation:error')({
+      payload: { session_id: 0, error: 'invalid auth error', error_type: 'authentication' },
+    });
+
+    expect(store.incomingTranslationSessionId).toBeNull();
+    expect(store.incomingTranslationStatus).toBe('Idle');
+    expect(store.incomingSourceText).toBe('');
+    expect(store.incomingTranslationText).toBe('');
+    expect(store.incomingTranslationError).toBeNull();
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 614, status: 'Recording' },
+    });
+    await handlers.get('incoming_translation:source-final')({
+      payload: { session_id: 614, text: 'valid source', timestamp: 3 },
+    });
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 614, text: 'валидный перевод', timestamp: 4 },
+    });
+
+    expect(store.incomingTranslationSessionId).toBe(614);
+    expect(store.incomingTranslationStatus).toBe('Recording');
+    expect(store.incomingSourceText).toBe('valid source');
+    expect(store.incomingTranslationText).toBe('валидный перевод');
   });
 
   it('показывает incoming subtitles из source-final и translated delta events', async () => {
@@ -1071,7 +1253,7 @@ describe('transcription connect-retry reliability', () => {
     expect(store.incomingTranslationText).toBe('новая сессия');
   });
 
-  it('incoming translation transient errors не ломают subtitles, но terminal status показывает последнюю ошибку', async () => {
+  it('incoming translation error event сам завершает session даже без status event', async () => {
     const handlers = new Map<string, any>();
 
     listenMock.mockImplementation(async (eventName: string, handler: any) => {
@@ -1093,9 +1275,10 @@ describe('transcription connect-retry reliability', () => {
       payload: { session_id: 401, error: 'temporary network blip', error_type: 'connection' },
     });
 
-    expect(store.incomingTranslationStatus).toBe('Recording');
-    expect(store.incomingTranslationError).toBeNull();
+    expect(store.incomingTranslationStatus).toBe('Error');
+    expect(store.incomingTranslationError).toContain('temporary network blip');
     expect(store.incomingTranslationText).toBe('первый перевод');
+    expect(store.isIncomingTranslationActive).toBe(false);
 
     await handlers.get('incoming_translation:status')({
       payload: { session_id: 401, status: 'Error' },
@@ -1122,6 +1305,46 @@ describe('transcription connect-retry reliability', () => {
 
     expect(store.incomingTranslationStatus).toBe('Error');
     expect(store.incomingTranslationError).toContain('OpenAI API key missing');
+  });
+
+  it('incoming translation уточняет terminal error при status-before-error и игнорирует старую ошибку после нового start', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 603, status: 'Recording' },
+    });
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 603, status: 'Error' },
+    });
+
+    expect(store.incomingTranslationSessionId).toBeNull();
+    expect(store.incomingTranslationStatus).toBe('Error');
+    expect(store.incomingTranslationError).toBeTruthy();
+
+    await handlers.get('incoming_translation:error')({
+      payload: { session_id: 603, error: 'capture stream failed', error_type: 'connection' },
+    });
+    expect(store.incomingTranslationError).toBe('capture stream failed');
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 604, status: 'Recording' },
+    });
+    await handlers.get('incoming_translation:error')({
+      payload: { session_id: 603, error: 'late old error', error_type: 'connection' },
+    });
+
+    expect(store.incomingTranslationSessionId).toBe(604);
+    expect(store.incomingTranslationStatus).toBe('Recording');
+    expect(store.incomingTranslationError).toBeNull();
   });
 
   it('очищает скрытый старый текст, когда приходит новая recording session', async () => {

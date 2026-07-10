@@ -79,16 +79,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   // Incoming subtitles: system audio -> STT -> text translation. Separate lifecycle.
   const incomingTranslationStatus = ref<RecordingStatus>(RecordingStatus.Idle);
   const incomingTranslationSessionId = ref<number | null>(null);
+  let incomingTranslationStatusEventVersion = 0;
+  let incomingTerminalSessionId: number | null = null;
   const incomingClosedSessionIds = ref<Set<number>>(new Set());
   const incomingSourceText = ref<string>('');
   const incomingTranslationText = ref<string>('');
   const incomingTranslationError = ref<string | null>(null);
   const incomingTranslationCommandInFlight = ref(false);
-  const lastIncomingTranslationError = ref<{
-    sessionId: number;
-    error: string;
-    errorType: string;
-  } | null>(null);
   const liveTranslationHealthCheck = ref<LiveTranslationHealthCheck | null>(null);
   const liveTranslationHealthCheckLoading = ref<boolean>(false);
   const liveTranslationHealthCheckError = ref<string | null>(null);
@@ -400,12 +397,26 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
+  function isValidIncomingTranslationSessionId(payloadSessionId: number): boolean {
+    return Number.isSafeInteger(payloadSessionId) && payloadSessionId > 0;
+  }
+
+  function isStaleIncomingTranslationSession(payloadSessionId: number): boolean {
+    return (
+      incomingTranslationSessionId.value !== null &&
+      payloadSessionId < incomingTranslationSessionId.value
+    );
+  }
+
   function isIncomingTranslationSessionClosed(payloadSessionId: number): boolean {
-    return payloadSessionId > 0 && incomingClosedSessionIds.value.has(payloadSessionId);
+    return (
+      isValidIncomingTranslationSessionId(payloadSessionId) &&
+      incomingClosedSessionIds.value.has(payloadSessionId)
+    );
   }
 
   function markIncomingTranslationSessionClosed(sessionIdToClose: number, reason: string): void {
-    if (!sessionIdToClose || sessionIdToClose <= 0) return;
+    if (!isValidIncomingTranslationSessionId(sessionIdToClose)) return;
 
     if (!incomingClosedSessionIds.value.has(sessionIdToClose)) {
       const next = new Set(incomingClosedSessionIds.value);
@@ -424,6 +435,97 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       incomingTranslationSessionId.value === sessionIdToClose
     ) {
       incomingTranslationSessionId.value = null;
+    }
+  }
+
+  function applyIncomingTranslationStatus(payload: IncomingTranslationStatusPayload): void {
+    const payloadSessionId = payload.session_id;
+    const nextStatus = payload.status;
+    if (!isValidIncomingTranslationSessionId(payloadSessionId)) return;
+    if (isStaleIncomingTranslationSession(payloadSessionId)) return;
+    if (isIncomingTranslationSessionClosed(payloadSessionId)) return;
+
+    if (
+      incomingTranslationStatus.value === RecordingStatus.Error &&
+      incomingTranslationSessionId.value === payloadSessionId &&
+      nextStatus !== RecordingStatus.Idle &&
+      nextStatus !== RecordingStatus.Error
+    ) {
+      return;
+    }
+
+    const isNewStart =
+      nextStatus === RecordingStatus.Starting || nextStatus === RecordingStatus.Recording;
+
+    if (isNewStart && payloadSessionId !== incomingTranslationSessionId.value) {
+      incomingTerminalSessionId = null;
+      incomingTranslationSessionId.value = payloadSessionId;
+      incomingSourceText.value = '';
+      incomingTranslationText.value = '';
+      incomingTranslationError.value = null;
+    }
+
+    if (
+      incomingTranslationSessionId.value !== null &&
+      payloadSessionId !== incomingTranslationSessionId.value
+    ) {
+      return;
+    }
+
+    incomingTranslationStatus.value = nextStatus;
+    if (nextStatus === RecordingStatus.Error) {
+      incomingTerminalSessionId = payloadSessionId;
+      if (!incomingTranslationError.value) {
+        incomingTranslationError.value = String(i18n.global.t('main.errorGeneric'));
+      }
+      markIncomingTranslationSessionClosed(payloadSessionId, 'status:error');
+    }
+    if (nextStatus === RecordingStatus.Idle) {
+      if (incomingTerminalSessionId === payloadSessionId) {
+        incomingTerminalSessionId = null;
+      }
+      markIncomingTranslationSessionClosed(payloadSessionId, 'status:idle');
+    }
+  }
+
+  function applyIncomingTranslationSnapshot(payload: IncomingTranslationStatusPayload): void {
+    if (isValidIncomingTranslationSessionId(payload.session_id)) {
+      applyIncomingTranslationStatus(payload);
+      return;
+    }
+    if (payload.session_id !== 0 || payload.status !== RecordingStatus.Idle) return;
+
+    if (incomingTranslationSessionId.value !== null) {
+      markIncomingTranslationSessionClosed(
+        incomingTranslationSessionId.value,
+        'backend_snapshot:idle'
+      );
+    }
+    incomingTranslationSessionId.value = null;
+    incomingTerminalSessionId = null;
+    incomingTranslationStatus.value = RecordingStatus.Idle;
+    incomingTranslationError.value = null;
+  }
+
+  async function reconcileIncomingTranslationState(
+    reason: string,
+    expectedGeneration?: number
+  ): Promise<void> {
+    const statusEventVersionBeforeSnapshot = incomingTranslationStatusEventVersion;
+    try {
+      const snapshot = await invoke<IncomingTranslationStatusPayload>(
+        'get_incoming_translation_state'
+      );
+      if (
+        (expectedGeneration === undefined || expectedGeneration === listenerGeneration) &&
+        statusEventVersionBeforeSnapshot === incomingTranslationStatusEventVersion &&
+        snapshot &&
+        typeof snapshot === 'object'
+      ) {
+        applyIncomingTranslationSnapshot(snapshot);
+      }
+    } catch (err) {
+      console.warn('[IncomingTranslation] Failed to reconcile backend state:', reason, err);
     }
   }
 
@@ -1949,50 +2051,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         generation,
         EVENT_INCOMING_TRANSLATION_STATUS,
         (event) => {
-          const payloadSessionId = event.payload.session_id;
-          const nextStatus = event.payload.status;
-          if (isIncomingTranslationSessionClosed(payloadSessionId)) {
-            return;
-          }
-
-          if (
-            incomingTranslationStatus.value === RecordingStatus.Error &&
-            incomingTranslationSessionId.value === payloadSessionId &&
-            nextStatus !== RecordingStatus.Idle &&
-            nextStatus !== RecordingStatus.Error
-          ) {
-            return;
-          }
-
-          const isNewStart =
-            nextStatus === RecordingStatus.Starting || nextStatus === RecordingStatus.Recording;
-
-          if (isNewStart && payloadSessionId !== incomingTranslationSessionId.value) {
-            incomingTranslationSessionId.value = payloadSessionId;
-            incomingSourceText.value = '';
-            incomingTranslationText.value = '';
-            incomingTranslationError.value = null;
-            lastIncomingTranslationError.value = null;
-          }
-
-          if (
-            incomingTranslationSessionId.value !== null &&
-            payloadSessionId !== incomingTranslationSessionId.value
-          ) {
-            return;
-          }
-
-          incomingTranslationStatus.value = nextStatus;
-          if (nextStatus === RecordingStatus.Error) {
-            const lastError = lastIncomingTranslationError.value;
-            if (lastError?.sessionId === payloadSessionId && !incomingTranslationError.value) {
-              incomingTranslationError.value = lastError.error;
-            }
-            markIncomingTranslationSessionClosed(payloadSessionId, 'status:error');
-          }
-          if (nextStatus === RecordingStatus.Idle) {
-            markIncomingTranslationSessionClosed(payloadSessionId, 'status:idle');
-          }
+          incomingTranslationStatusEventVersion += 1;
+          applyIncomingTranslationStatus(event.payload);
         }
       );
       if (!unlistenIncomingStatus) return;
@@ -2001,8 +2061,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         generation,
         EVENT_INCOMING_TRANSLATION_SOURCE_FINAL,
         (event) => {
-          if (isIncomingTranslationSessionClosed(event.payload.session_id)) return;
-          if (event.payload.session_id !== incomingTranslationSessionId.value) return;
+          const payloadSessionId = event.payload.session_id;
+          if (!isValidIncomingTranslationSessionId(payloadSessionId)) return;
+          if (isStaleIncomingTranslationSession(payloadSessionId)) return;
+          if (isIncomingTranslationSessionClosed(payloadSessionId)) return;
+          if (payloadSessionId !== incomingTranslationSessionId.value) return;
           if (incomingTranslationStatus.value === RecordingStatus.Error) return;
           if (event.payload.text) {
             incomingSourceText.value = appendTranscriptText(
@@ -2018,12 +2081,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         generation,
         EVENT_INCOMING_TRANSLATION_DELTA,
         (event) => {
-          if (isIncomingTranslationSessionClosed(event.payload.session_id)) return;
-          if (event.payload.session_id !== incomingTranslationSessionId.value) return;
+          const payloadSessionId = event.payload.session_id;
+          if (!isValidIncomingTranslationSessionId(payloadSessionId)) return;
+          if (isIncomingTranslationSessionClosed(payloadSessionId)) return;
+          if (payloadSessionId !== incomingTranslationSessionId.value) return;
           if (incomingTranslationStatus.value === RecordingStatus.Error) return;
           if (event.payload.text) {
             incomingTranslationError.value = null;
-            lastIncomingTranslationError.value = null;
             incomingTranslationText.value = appendTranscriptText(
               incomingTranslationText.value,
               event.payload.text
@@ -2037,30 +2101,37 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         generation,
         EVENT_INCOMING_TRANSLATION_ERROR,
         (event) => {
-          if (isIncomingTranslationSessionClosed(event.payload.session_id)) return;
+          const payloadSessionId = event.payload.session_id;
+          if (!isValidIncomingTranslationSessionId(payloadSessionId)) return;
+          const canRefineTerminalError =
+            isIncomingTranslationSessionClosed(payloadSessionId) &&
+            incomingTerminalSessionId === payloadSessionId &&
+            incomingTranslationStatus.value === RecordingStatus.Error;
+          if (isIncomingTranslationSessionClosed(payloadSessionId) && !canRefineTerminalError) {
+            return;
+          }
           if (
+            !canRefineTerminalError &&
             incomingTranslationSessionId.value !== null &&
-            event.payload.session_id !== incomingTranslationSessionId.value
+            payloadSessionId !== incomingTranslationSessionId.value
           ) {
             return;
           }
-          incomingTranslationSessionId.value = event.payload.session_id;
-          if (['configuration', 'authentication', 'rate_limited'].includes(event.payload.error_type)) {
-            incomingTranslationError.value = event.payload.error;
-            lastIncomingTranslationError.value = null;
-            incomingTranslationStatus.value = RecordingStatus.Error;
-            markIncomingTranslationSessionClosed(event.payload.session_id, 'terminal_error');
-          } else {
-            lastIncomingTranslationError.value = {
-              sessionId: event.payload.session_id,
-              error: event.payload.error,
-              errorType: event.payload.error_type,
-            };
-            console.warn('[incoming_translation:transient_error]', event.payload);
+          if (!canRefineTerminalError) {
+            incomingTranslationSessionId.value = payloadSessionId;
           }
+          // IncomingTranslationService emits on_error only after it has stopped the
+          // session. The error event must therefore be sufficient even if the
+          // separate status event is delayed or lost.
+          incomingTerminalSessionId = payloadSessionId;
+          incomingTranslationError.value = event.payload.error;
+          incomingTranslationStatus.value = RecordingStatus.Error;
+          markIncomingTranslationSessionClosed(payloadSessionId, 'terminal_error');
         }
       );
       if (!unlistenIncomingError) return;
+
+      await reconcileIncomingTranslationState('initialize', generation);
 
       console.log('Event listeners initialized successfully');
     } catch (err) {
@@ -2823,14 +2894,22 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     const sessionBeforeCommand = incomingTranslationSessionId.value;
 
     incomingTranslationError.value = null;
+    if (!shouldStop) {
+      incomingTerminalSessionId = null;
+    }
     incomingTranslationCommandInFlight.value = true;
     try {
       await invoke<string>(command);
       if (shouldStop) {
         incomingTranslationStatus.value = RecordingStatus.Idle;
+        if (incomingTerminalSessionId === sessionBeforeCommand) {
+          incomingTerminalSessionId = null;
+        }
         if (sessionBeforeCommand !== null) {
           markIncomingTranslationSessionClosed(sessionBeforeCommand, 'stop_command_success');
         }
+      } else {
+        await reconcileIncomingTranslationState('start_command_success');
       }
     } catch (err) {
       incomingTranslationError.value = String(err);
