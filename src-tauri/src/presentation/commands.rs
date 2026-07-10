@@ -8,8 +8,8 @@ use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
 use crate::domain::{
     AppConfig, AudioCapture, AudioCaptureTarget, AudioConfig, AudioError, BackendStreamingProvider,
     PlatformAudioFactory, PlatformAudioSetupState, PlatformAudioSetupStatus, RecordingMode,
-    RecordingStatus, RecordingWindowPosition, SttConnectionCategory, SttError, SttProviderType,
-    Transcription, TranslationAudioOutputConfig,
+    RecordingStatus, RecordingWindowPosition, SttConfig, SttConnectionCategory, SttError,
+    SttProviderType, Transcription, TranslationAudioOutputConfig,
 };
 use crate::infrastructure::{
     audio::DefaultPlatformAudioFactory, auto_paste::AutoPasteTarget,
@@ -948,6 +948,20 @@ fn resolve_incoming_translation_source_language(config: &AppConfig) -> String {
     resolve_outgoing_translation_target_language(config)
 }
 
+fn configure_incoming_translation_source(stt_config: &mut SttConfig, app_config: &AppConfig) {
+    if stt_config.provider == SttProviderType::WhisperLocal {
+        // The local buffered Whisper adapter currently passes a fixed language into
+        // whisper.cpp. Keep it valid until that adapter supports auto-detection.
+        stt_config.language = resolve_incoming_translation_source_language(app_config);
+        stt_config.auto_detect_language = false;
+    } else {
+        // Streaming providers use "multi" for multilingual recognition. In particular,
+        // Deepgram streaming does not support the batch-only detect_language parameter.
+        stt_config.language = "multi".to_string();
+        stt_config.auto_detect_language = true;
+    }
+}
+
 async fn start_live_translation_recording(
     state: &AppState,
     app_handle: AppHandle,
@@ -1198,8 +1212,7 @@ pub async fn start_incoming_translation(
     let mut stt_config = state.transcription_service.get_config().await;
     stt_config.keep_connection_alive = false;
     let app_config = state.config.read().await.clone();
-    stt_config.language = resolve_incoming_translation_source_language(&app_config);
-    stt_config.auto_detect_language = false;
+    configure_incoming_translation_source(&mut stt_config, &app_config);
     let mut cfg = IncomingTranslationConfig::new_with_defaults(stt_config, session_id);
     cfg.openai_api_key = resolve_openai_api_key(&app_config);
     cfg.target_language = resolve_incoming_translation_target_language(&app_config);
@@ -2607,9 +2620,9 @@ where
 mod snapshot_contract_tests {
     use super::{
         active_recording_status_payload, auto_paste_text_can_trigger_recording_hotkey,
-        calculate_recording_window_position, hotkey_action_is_stale, incoming_stop_session_id,
-        incoming_translation_state_payload, is_audio_capture_start_failure,
-        live_translation_health_check_blocks_recording_status,
+        calculate_recording_window_position, configure_incoming_translation_source,
+        hotkey_action_is_stale, incoming_stop_session_id, incoming_translation_state_payload,
+        is_audio_capture_start_failure, live_translation_health_check_blocks_recording_status,
         live_translation_health_check_blocks_service_status, point_inside_rect,
         recording_hotkey_press_intent, recording_hotkey_release_intent, recording_start_is_busy,
         recording_state_after_failed_start_cleanup, recording_window_size_from_config,
@@ -2634,7 +2647,7 @@ mod snapshot_contract_tests {
     };
     use crate::domain::{
         AppConfig, AudioError, BackendStreamingProvider, RecordingMode, RecordingStatus,
-        RecordingWindowPosition, SttError, SttProviderType,
+        RecordingWindowPosition, SttConfig, SttError, SttProviderType,
     };
     use crate::infrastructure::auto_paste::{AutoPasteTarget, VOICETEXT_BUNDLE_ID};
     use tauri::{PhysicalPosition, PhysicalSize};
@@ -2754,6 +2767,35 @@ mod snapshot_contract_tests {
         config.stt.language = "en".to_string();
         assert_eq!(resolve_incoming_translation_target_language(&config), "en");
         assert_eq!(resolve_incoming_translation_source_language(&config), "ru");
+    }
+
+    #[test]
+    fn incoming_streaming_stt_uses_multilingual_recognition() {
+        let mut app_config = AppConfig::default();
+        app_config.stt.language = "de".to_string();
+        let mut stt_config = SttConfig::new(SttProviderType::Backend);
+
+        configure_incoming_translation_source(&mut stt_config, &app_config);
+
+        assert_eq!(stt_config.language, "multi");
+        assert!(stt_config.auto_detect_language);
+        assert_eq!(
+            resolve_incoming_translation_target_language(&app_config),
+            "de"
+        );
+    }
+
+    #[test]
+    fn incoming_local_whisper_keeps_a_valid_fixed_source_language() {
+        let mut app_config = AppConfig::default();
+        app_config.stt.language = "en".to_string();
+        let mut stt_config = SttConfig::new(SttProviderType::WhisperLocal);
+        stt_config.auto_detect_language = true;
+
+        configure_incoming_translation_source(&mut stt_config, &app_config);
+
+        assert_eq!(stt_config.language, "ru");
+        assert!(!stt_config.auto_detect_language);
     }
 
     #[test]

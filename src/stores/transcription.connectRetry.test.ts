@@ -166,6 +166,43 @@ describe('transcription connect-retry reliability', () => {
     expect(listenMock).toHaveBeenCalledTimes(1);
   });
 
+  it('поздняя старая initialize не затирает unlisten нового listener', async () => {
+    const staleListen = deferred<() => void>();
+    const staleUnlisten = vi.fn();
+    const currentPartialUnlisten = vi.fn();
+    let listenCall = 0;
+    listenMock.mockImplementation(() => {
+      listenCall += 1;
+      if (listenCall === 1) return staleListen.promise;
+      if (listenCall === 2) return Promise.resolve(currentPartialUnlisten);
+      return Promise.resolve(vi.fn());
+    });
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'get_incoming_translation_state') {
+        return Promise.resolve({ session_id: 0, status: 'Idle' });
+      }
+      return Promise.resolve(null);
+    });
+    const store = useTranscriptionStore();
+
+    const staleInitialize = store.initialize();
+    for (let i = 0; i < 20 && listenMock.mock.calls.length === 0; i++) {
+      await flushMicrotasks();
+    }
+    expect(listenMock).toHaveBeenCalledTimes(1);
+
+    const currentInitialize = store.initialize();
+    await currentInitialize;
+    expect(listenMock.mock.calls.length).toBeGreaterThan(2);
+
+    staleListen.resolve(staleUnlisten);
+    await staleInitialize;
+    expect(staleUnlisten).toHaveBeenCalledTimes(1);
+
+    store.cleanup();
+    expect(currentPartialUnlisten).toHaveBeenCalledTimes(1);
+  });
+
   it('cleanup отписывает уже зарегистрированные listeners, если initialize упал на следующем listen', async () => {
     const unlistenFirst = vi.fn();
     listenMock
@@ -2661,5 +2698,50 @@ describe('transcription connect-retry reliability', () => {
     expect(store.sessionId).toBe(51);
     expect(store.closedSessionIdFloor).toBeLessThan(51);
     expect(store.status).toBe('Recording');
+  });
+
+  it('ограничивает потоковые тексты перевода в длинной сессии', async () => {
+    const handlers = new Map<string, any>();
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+    const longText = `old-prefix ${'x'.repeat(40_000)} latest-tail`;
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 701, status: 'Recording' },
+    });
+    await handlers.get('incoming_translation:source-final')({
+      payload: { session_id: 701, text: longText },
+    });
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 701, text: longText },
+    });
+
+    expect(store.incomingSourceText.length).toBeLessThanOrEqual(32_000);
+    expect(store.incomingSourceText).not.toContain('old-prefix');
+    expect(store.incomingSourceText).toContain('latest-tail');
+    expect(store.incomingTranslationText.length).toBeLessThanOrEqual(32_000);
+    expect(store.incomingTranslationText).toContain('latest-tail');
+
+    await handlers.get('recording:status')({
+      payload: {
+        session_id: 702,
+        status: 'Recording',
+        stopped_via_hotkey: false,
+        mode: 'live_translation',
+      },
+    });
+    await handlers.get('translation:delta')({
+      payload: { session_id: 702, text: longText },
+    });
+
+    expect(store.translationText.length).toBeLessThanOrEqual(32_000);
+    expect(store.translationText).not.toContain('old-prefix');
+    expect(store.translationText).toContain('latest-tail');
   });
 });

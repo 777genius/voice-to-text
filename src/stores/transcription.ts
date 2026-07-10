@@ -5,6 +5,22 @@ import { listen } from '@tauri-apps/api/event';
 import { isTauriAvailable } from '../utils/tauri';
 import { i18n } from '../i18n';
 import { appendTranscriptText, mergeTranscriptText } from '../utils/transcriptionText';
+
+const MAX_STREAMING_TRANSLATION_TEXT_CHARS = 32_000;
+
+function keepRecentStreamingText(value: string): string {
+  if (value.length <= MAX_STREAMING_TRANSLATION_TEXT_CHARS) return value;
+
+  const tail = value.slice(-MAX_STREAMING_TRANSLATION_TEXT_CHARS);
+  const firstWhitespace = tail.search(/\s/);
+  return firstWhitespace >= 0 && firstWhitespace < 256
+    ? tail.slice(firstWhitespace + 1)
+    : tail;
+}
+
+function appendStreamingTranscriptText(current: string, next: string): string {
+  return keepRecentStreamingText(appendTranscriptText(current, next));
+}
 import { api } from '../features/auth/infrastructure/api/apiClient';
 import { useAuthStore } from '../features/auth/store/authStore';
 import { useAppConfigStore } from './appConfig';
@@ -1241,7 +1257,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
     try {
       // Listen to partial transcription events
-      unlistenPartial = await registerStoreListener<PartialTranscriptionPayload>(
+      const partialUnlisten = await registerStoreListener<PartialTranscriptionPayload>(
         generation,
         EVENT_TRANSCRIPTION_PARTIAL,
         async (event) => {
@@ -1366,10 +1382,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
         }
       );
-      if (!unlistenPartial) return;
+      if (!partialUnlisten) return;
+      unlistenPartial = partialUnlisten;
 
       // Listen to final transcription events
-      unlistenFinal = await registerStoreListener<FinalTranscriptionPayload>(
+      const finalUnlisten = await registerStoreListener<FinalTranscriptionPayload>(
         generation,
         EVENT_TRANSCRIPTION_FINAL,
         async (event) => {
@@ -1497,10 +1514,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
         }
       );
-      if (!unlistenFinal) return;
+      if (!finalUnlisten) return;
+      unlistenFinal = finalUnlisten;
 
       // Listen to recording status events
-      unlistenStatus = await registerStoreListener<RecordingStatusPayload>(
+      const statusUnlisten = await registerStoreListener<RecordingStatusPayload>(
         generation,
         EVENT_RECORDING_STATUS,
         async (event) => {
@@ -1722,10 +1740,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
         }
       );
-      if (!unlistenStatus) return;
+      if (!statusUnlisten) return;
+      unlistenStatus = statusUnlisten;
 
       // Listen to transcription error events
-      unlistenError = await registerStoreListener<TranscriptionErrorPayload>(
+      const errorUnlisten = await registerStoreListener<TranscriptionErrorPayload>(
         generation,
         EVENT_TRANSCRIPTION_ERROR,
         async (event) => {
@@ -1981,10 +2000,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           setTerminalRecordingErrorStatus(event.payload.session_id, 'transcription:error');
         }
       );
-      if (!unlistenError) return;
+      if (!errorUnlisten) return;
+      unlistenError = errorUnlisten;
 
       // Listen to connection quality events
-      unlistenConnectionQuality = await registerStoreListener<ConnectionQualityPayload>(
+      const connectionQualityUnlisten = await registerStoreListener<ConnectionQualityPayload>(
         generation,
         EVENT_CONNECTION_QUALITY,
         (event) => {
@@ -2002,10 +2022,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
         }
       );
-      if (!unlistenConnectionQuality) return;
+      if (!connectionQualityUnlisten) return;
+      unlistenConnectionQuality = connectionQualityUnlisten;
 
       // Live translation events. Идут параллельно STT — не пересекаются с auto-paste/copy/history.
-      unlistenTranslationDelta = await registerStoreListener<TranslationDeltaPayload>(
+      const translationDeltaUnlisten = await registerStoreListener<TranslationDeltaPayload>(
         generation,
         EVENT_TRANSLATION_DELTA,
         (event) => {
@@ -2013,13 +2034,16 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             return;
           }
           if (event.payload.text) {
-            translationText.value += event.payload.text;
+            translationText.value = keepRecentStreamingText(
+              translationText.value + event.payload.text
+            );
           }
         }
       );
-      if (!unlistenTranslationDelta) return;
+      if (!translationDeltaUnlisten) return;
+      unlistenTranslationDelta = translationDeltaUnlisten;
 
-      unlistenTranslationError = await registerStoreListener<TranslationErrorPayload>(
+      const translationErrorUnlisten = await registerStoreListener<TranslationErrorPayload>(
         generation,
         EVENT_TRANSLATION_ERROR,
         (event) => {
@@ -2045,9 +2069,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           console.error('[translation:error]', event.payload);
         }
       );
-      if (!unlistenTranslationError) return;
+      if (!translationErrorUnlisten) return;
+      unlistenTranslationError = translationErrorUnlisten;
 
-      unlistenIncomingStatus = await registerStoreListener<IncomingTranslationStatusPayload>(
+      const incomingStatusUnlisten = await registerStoreListener<IncomingTranslationStatusPayload>(
         generation,
         EVENT_INCOMING_TRANSLATION_STATUS,
         (event) => {
@@ -2055,9 +2080,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           applyIncomingTranslationStatus(event.payload);
         }
       );
-      if (!unlistenIncomingStatus) return;
+      if (!incomingStatusUnlisten) return;
+      unlistenIncomingStatus = incomingStatusUnlisten;
 
-      unlistenIncomingSourceFinal = await registerStoreListener<IncomingTranslationTextPayload>(
+      const incomingSourceFinalUnlisten = await registerStoreListener<IncomingTranslationTextPayload>(
         generation,
         EVENT_INCOMING_TRANSLATION_SOURCE_FINAL,
         (event) => {
@@ -2068,16 +2094,17 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           if (payloadSessionId !== incomingTranslationSessionId.value) return;
           if (incomingTranslationStatus.value === RecordingStatus.Error) return;
           if (event.payload.text) {
-            incomingSourceText.value = appendTranscriptText(
+            incomingSourceText.value = appendStreamingTranscriptText(
               incomingSourceText.value,
               event.payload.text
             );
           }
         }
       );
-      if (!unlistenIncomingSourceFinal) return;
+      if (!incomingSourceFinalUnlisten) return;
+      unlistenIncomingSourceFinal = incomingSourceFinalUnlisten;
 
-      unlistenIncomingDelta = await registerStoreListener<IncomingTranslationTextPayload>(
+      const incomingDeltaUnlisten = await registerStoreListener<IncomingTranslationTextPayload>(
         generation,
         EVENT_INCOMING_TRANSLATION_DELTA,
         (event) => {
@@ -2088,16 +2115,17 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           if (incomingTranslationStatus.value === RecordingStatus.Error) return;
           if (event.payload.text) {
             incomingTranslationError.value = null;
-            incomingTranslationText.value = appendTranscriptText(
+            incomingTranslationText.value = appendStreamingTranscriptText(
               incomingTranslationText.value,
               event.payload.text
             );
           }
         }
       );
-      if (!unlistenIncomingDelta) return;
+      if (!incomingDeltaUnlisten) return;
+      unlistenIncomingDelta = incomingDeltaUnlisten;
 
-      unlistenIncomingError = await registerStoreListener<IncomingTranslationErrorPayload>(
+      const incomingErrorUnlisten = await registerStoreListener<IncomingTranslationErrorPayload>(
         generation,
         EVENT_INCOMING_TRANSLATION_ERROR,
         (event) => {
@@ -2129,7 +2157,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           markIncomingTranslationSessionClosed(payloadSessionId, 'terminal_error');
         }
       );
-      if (!unlistenIncomingError) return;
+      if (!incomingErrorUnlisten) return;
+      unlistenIncomingError = incomingErrorUnlisten;
 
       await reconcileIncomingTranslationState('initialize', generation);
 
