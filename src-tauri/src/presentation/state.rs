@@ -209,6 +209,15 @@ pub struct AppState {
     /// Сериализует hotkey toggle, чтобы stop и следующий start не выполнялись параллельно.
     pub recording_hotkey_toggle_guard: Arc<tokio::sync::Mutex<()>>,
 
+    /// Сериализует lifecycle записи для UI-команд, hotkey и live translation.
+    pub recording_lifecycle_guard: Arc<tokio::sync::Mutex<()>>,
+
+    /// Не даёт start/preflight операциям одновременно открывать одни audio resources.
+    pub audio_start_guard: Arc<tokio::sync::Mutex<()>>,
+
+    /// Сериализует start/stop входящих субтитров между окнами.
+    pub incoming_translation_lifecycle_guard: Arc<tokio::sync::Mutex<()>>,
+
     /// Сериализует register/unregister глобального hotkey.
     /// На Windows startup/settings пути могут иначе оставить зарегистрированным устаревшее значение.
     pub recording_hotkey_registration_guard: Arc<tokio::sync::Mutex<()>>,
@@ -311,6 +320,9 @@ impl AppState {
                     recording_hotkey_stop_suppression_press_seq: AtomicU64::new(0),
                     recording_start_pending_after_stop: AtomicBool::new(false),
                     recording_hotkey_toggle_guard: Arc::new(tokio::sync::Mutex::new(())),
+                    recording_lifecycle_guard: Arc::new(tokio::sync::Mutex::new(())),
+                    audio_start_guard: Arc::new(tokio::sync::Mutex::new(())),
+                    incoming_translation_lifecycle_guard: Arc::new(tokio::sync::Mutex::new(())),
                     recording_hotkey_registration_guard: Arc::new(tokio::sync::Mutex::new(())),
                     double_space_hotkey_enabled_runtime: AtomicBool::new(false),
                     double_space_hotkey_listener_started: AtomicBool::new(false),
@@ -383,6 +395,9 @@ impl AppState {
                     recording_hotkey_stop_suppression_press_seq: AtomicU64::new(0),
                     recording_start_pending_after_stop: AtomicBool::new(false),
                     recording_hotkey_toggle_guard: Arc::new(tokio::sync::Mutex::new(())),
+                    recording_lifecycle_guard: Arc::new(tokio::sync::Mutex::new(())),
+                    audio_start_guard: Arc::new(tokio::sync::Mutex::new(())),
+                    incoming_translation_lifecycle_guard: Arc::new(tokio::sync::Mutex::new(())),
                     recording_hotkey_registration_guard: Arc::new(tokio::sync::Mutex::new(())),
                     double_space_hotkey_enabled_runtime: AtomicBool::new(false),
                     double_space_hotkey_listener_started: AtomicBool::new(false),
@@ -475,6 +490,9 @@ impl AppState {
             recording_hotkey_stop_suppression_press_seq: AtomicU64::new(0),
             recording_start_pending_after_stop: AtomicBool::new(false),
             recording_hotkey_toggle_guard: Arc::new(tokio::sync::Mutex::new(())),
+            recording_lifecycle_guard: Arc::new(tokio::sync::Mutex::new(())),
+            audio_start_guard: Arc::new(tokio::sync::Mutex::new(())),
+            incoming_translation_lifecycle_guard: Arc::new(tokio::sync::Mutex::new(())),
             recording_hotkey_registration_guard: Arc::new(tokio::sync::Mutex::new(())),
             double_space_hotkey_enabled_runtime: AtomicBool::new(false),
             double_space_hotkey_listener_started: AtomicBool::new(false),
@@ -961,6 +979,7 @@ impl AppState {
                     log::warn!("VAD timeout ignored - app state is unavailable");
                     continue;
                 };
+                let _lifecycle_guard = state.recording_lifecycle_guard.lock().await;
                 let active_session_id = state.active_transcription_session_id.clone();
                 let config = state.config.clone();
                 let active_recording_mode = state.active_recording_mode.clone();

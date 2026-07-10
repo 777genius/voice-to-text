@@ -266,6 +266,7 @@ struct SyntheticPcmMicrophone {
     config: AudioConfig,
     started: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
+    callback: Option<AudioChunkCallback>,
 }
 
 #[async_trait]
@@ -284,11 +285,13 @@ impl AudioCapture for SyntheticPcmMicrophone {
                 self.config.channels,
             ));
         }
+        self.callback = Some(on_chunk);
         Ok(())
     }
 
     async fn stop_capture(&mut self) -> AudioResult<()> {
         self.stopped.store(true, Ordering::SeqCst);
+        self.callback = None;
         Ok(())
     }
 
@@ -438,6 +441,7 @@ impl PlatformAudioFactory for SyntheticMicToBlackholeFactory {
             config: AudioConfig::default(),
             started: self.mic_started.clone(),
             stopped: self.mic_stopped.clone(),
+            callback: None,
         }))
     }
 

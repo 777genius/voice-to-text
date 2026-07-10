@@ -249,6 +249,7 @@ fn should_clear_active_mode_after_dictation_failure(
 }
 
 async fn clear_dictation_failure_state_if_current(state: &AppState, session_id: u64) {
+    let _lifecycle_guard = state.recording_lifecycle_guard.lock().await;
     let current_session_id = state
         .active_transcription_session_id
         .load(Ordering::Relaxed);
@@ -261,9 +262,36 @@ async fn clear_dictation_failure_state_if_current(state: &AppState, session_id: 
         return;
     }
 
+    state
+        .transcription_service
+        .cleanup_runtime_failure("provider runtime error callback")
+        .await;
+
     if clear_active_transcription_session_id_if_current(state, session_id) {
         let mut active_mode = state.active_recording_mode.write().await;
         if matches!(*active_mode, Some(RecordingMode::Dictation)) {
+            *active_mode = None;
+        }
+    }
+}
+
+async fn clear_live_translation_failure_state_if_current(state: &AppState, session_id: u64) {
+    let _lifecycle_guard = state.recording_lifecycle_guard.lock().await;
+    let current_session_id = state
+        .active_transcription_session_id
+        .load(Ordering::Relaxed);
+    let active_mode_snapshot = *state.active_recording_mode.read().await;
+    if !should_clear_active_mode_after_session_cleanup(
+        session_id,
+        current_session_id,
+        active_mode_snapshot,
+    ) {
+        return;
+    }
+
+    if clear_active_transcription_session_id_if_current(state, session_id) {
+        let mut active_mode = state.active_recording_mode.write().await;
+        if matches!(*active_mode, Some(RecordingMode::LiveTranslation)) {
             *active_mode = None;
         }
     }
@@ -332,6 +360,24 @@ fn incoming_stop_session_id(active_session_id: Option<u64>, sequence_id: u64) ->
     active_session_id.unwrap_or_else(|| sequence_id.max(1))
 }
 
+fn incoming_translation_state_payload(
+    active_session_id: Option<u64>,
+    status: RecordingStatus,
+    sequence_id: u64,
+) -> IncomingTranslationStatusPayload {
+    match active_session_id {
+        Some(session_id) => IncomingTranslationStatusPayload { session_id, status },
+        None if status == RecordingStatus::Idle => IncomingTranslationStatusPayload {
+            session_id: 0,
+            status: RecordingStatus::Idle,
+        },
+        None => IncomingTranslationStatusPayload {
+            session_id: sequence_id.max(1),
+            status,
+        },
+    }
+}
+
 fn emit_idle_recording_status(
     app_handle: &AppHandle,
     session_id: u64,
@@ -352,6 +398,19 @@ fn emit_idle_recording_status(
             mode,
         },
     );
+}
+
+fn active_recording_status_payload(
+    session_id: u64,
+    status: RecordingStatus,
+    mode: Option<RecordingMode>,
+) -> Option<RecordingStatusPayload> {
+    (session_id > 0).then_some(RecordingStatusPayload {
+        session_id,
+        status,
+        stopped_via_hotkey: false,
+        mode,
+    })
 }
 
 async fn active_recording_status(state: &AppState) -> RecordingStatus {
@@ -387,6 +446,13 @@ fn should_route_stop_to_live_translation(
     has_live_session: bool,
 ) -> bool {
     should_report_live_translation_status(active_mode, live_status, has_live_session)
+}
+
+fn recording_start_is_busy(status: RecordingStatus) -> bool {
+    matches!(
+        status,
+        RecordingStatus::Starting | RecordingStatus::Recording | RecordingStatus::Processing
+    )
 }
 
 #[tauri::command]
@@ -753,6 +819,8 @@ async fn stop_recording_and_emit_idle(
     app_handle: &AppHandle,
     stopped_via_hotkey: bool,
 ) -> Result<String, String> {
+    let _lifecycle_guard = state.recording_lifecycle_guard.lock().await;
+
     // Dispatcher: если live translation активен или mode потерялся, но сервис ещё жив,
     // останавливаем translation сервис, а не dictation pipeline.
     let active_mode = *state.active_recording_mode.read().await;
@@ -876,6 +944,10 @@ fn resolve_incoming_translation_target_language(config: &AppConfig) -> String {
     normalize_translation_target_language(&config.stt.language, "ru")
 }
 
+fn resolve_incoming_translation_source_language(config: &AppConfig) -> String {
+    resolve_outgoing_translation_target_language(config)
+}
+
 async fn start_live_translation_recording(
     state: &AppState,
     app_handle: AppHandle,
@@ -964,35 +1036,31 @@ async fn start_live_translation_recording(
                 let Some(state) = cleanup_handle.try_state::<AppState>() else {
                     return;
                 };
-                let current_session_id = state
-                    .active_transcription_session_id
-                    .load(Ordering::Relaxed);
-                let active_mode_snapshot = *state.active_recording_mode.read().await;
-                if should_clear_active_mode_after_session_cleanup(
-                    session_id,
-                    current_session_id,
-                    active_mode_snapshot,
-                ) && clear_active_transcription_session_id_if_current(state.inner(), session_id)
-                {
-                    let mut active_mode = state.active_recording_mode.write().await;
-                    if matches!(*active_mode, Some(RecordingMode::LiveTranslation)) {
-                        *active_mode = None;
-                    }
-                }
+                clear_live_translation_failure_state_if_current(state.inner(), session_id).await;
             });
         });
 
     let app_handle_status = app_handle.clone();
     let on_status: std::sync::Arc<dyn Fn(RecordingStatus) + Send + Sync> =
         std::sync::Arc::new(move |status: RecordingStatus| {
-            // Состояния Starting / Recording / Error эмитятся выше явно; здесь логируем для диагностики.
             log::debug!(
                 "LiveTranslation status callback: session={}, status={:?}",
                 session_id,
                 status
             );
-            // Можем дополнительно эмитить, но во избежание двойных эмитов оставим только лог.
-            let _ = app_handle_status;
+            // Recording is emitted while the service still owns its startup lock, so
+            // a queued runtime failure cannot overtake it with a stale Recording event.
+            if status == RecordingStatus::Recording {
+                let _ = app_handle_status.emit(
+                    EVENT_RECORDING_STATUS,
+                    RecordingStatusPayload {
+                        session_id,
+                        status,
+                        stopped_via_hotkey: false,
+                        mode: Some(RecordingMode::LiveTranslation),
+                    },
+                );
+            }
         });
 
     let callbacks = LiveTranslationCallbacks {
@@ -1004,20 +1072,8 @@ async fn start_live_translation_recording(
 
     match service.start_translation(translation_cfg, callbacks).await {
         Ok(()) => {
-            // Сессия принята сервисом — фиксируем её id безусловно (см. dictation-путь).
-            state
-                .active_transcription_session_id
-                .store(session_id, Ordering::Relaxed);
-            *state.active_recording_mode.write().await = Some(RecordingMode::LiveTranslation);
-            let _ = app_handle.emit(
-                EVENT_RECORDING_STATUS,
-                RecordingStatusPayload {
-                    session_id,
-                    status: RecordingStatus::Recording,
-                    stopped_via_hotkey: false,
-                    mode: Some(RecordingMode::LiveTranslation),
-                },
-            );
+            // active session/mode were claimed before service startup. Do not write
+            // them again here: a runtime error may already have cleared that state.
             Ok("LiveTranslation started".to_string())
         }
         Err(err) => {
@@ -1123,6 +1179,9 @@ pub async fn start_incoming_translation(
         EVENT_INCOMING_TRANSLATION_SOURCE_FINAL, EVENT_INCOMING_TRANSLATION_STATUS,
     };
 
+    let _lifecycle_guard = state.incoming_translation_lifecycle_guard.lock().await;
+    let _audio_start_guard = state.audio_start_guard.lock().await;
+
     let service = get_or_create_incoming_translation_service(state.inner()).await;
     match service.get_status().await {
         RecordingStatus::Idle => {}
@@ -1139,17 +1198,11 @@ pub async fn start_incoming_translation(
     let mut stt_config = state.transcription_service.get_config().await;
     stt_config.keep_connection_alive = false;
     let app_config = state.config.read().await.clone();
+    stt_config.language = resolve_incoming_translation_source_language(&app_config);
+    stt_config.auto_detect_language = false;
     let mut cfg = IncomingTranslationConfig::new_with_defaults(stt_config, session_id);
     cfg.openai_api_key = resolve_openai_api_key(&app_config);
     cfg.target_language = resolve_incoming_translation_target_language(&app_config);
-
-    let _ = app_handle.emit(
-        EVENT_INCOMING_TRANSLATION_STATUS,
-        IncomingTranslationStatusPayload {
-            session_id,
-            status: RecordingStatus::Starting,
-        },
-    );
 
     let source_handle = app_handle.clone();
     let on_source_final: std::sync::Arc<dyn Fn(String) + Send + Sync> =
@@ -1180,12 +1233,6 @@ pub async fn start_incoming_translation(
     let error_handle = app_handle.clone();
     let on_error: std::sync::Arc<dyn Fn(IncomingTranslationError) + Send + Sync> =
         std::sync::Arc::new(move |err: IncomingTranslationError| {
-            let should_emit_error_status = matches!(
-                &err,
-                IncomingTranslationError::Configuration(_)
-                    | IncomingTranslationError::Authentication(_)
-                    | IncomingTranslationError::RateLimited(_)
-            );
             let _ = error_handle.emit(
                 EVENT_INCOMING_TRANSLATION_ERROR,
                 IncomingTranslationErrorPayload {
@@ -1194,15 +1241,6 @@ pub async fn start_incoming_translation(
                     error_type: err.error_type().to_string(),
                 },
             );
-            if should_emit_error_status {
-                let _ = error_handle.emit(
-                    EVENT_INCOMING_TRANSLATION_STATUS,
-                    IncomingTranslationStatusPayload {
-                        session_id,
-                        status: RecordingStatus::Error,
-                    },
-                );
-            }
         });
 
     let status_handle = app_handle.clone();
@@ -1221,24 +1259,30 @@ pub async fn start_incoming_translation(
         on_status,
     };
 
-    service.start(cfg, callbacks).await.map_err(|err| {
-        let _ = app_handle.emit(
-            EVENT_INCOMING_TRANSLATION_ERROR,
-            IncomingTranslationErrorPayload {
-                session_id,
-                error: err.to_string(),
-                error_type: err.error_type().to_string(),
-            },
-        );
-        let _ = app_handle.emit(
-            EVENT_INCOMING_TRANSLATION_STATUS,
-            IncomingTranslationStatusPayload {
-                session_id,
-                status: RecordingStatus::Error,
-            },
-        );
-        err.to_string()
-    })?;
+    if let Err(err) = service.start(cfg, callbacks).await {
+        if matches!(err, IncomingTranslationError::AlreadyActive) {
+            return Ok("Incoming translation already running".to_string());
+        }
+
+        if !err.was_reported() {
+            let _ = app_handle.emit(
+                EVENT_INCOMING_TRANSLATION_ERROR,
+                IncomingTranslationErrorPayload {
+                    session_id,
+                    error: err.to_string(),
+                    error_type: err.error_type().to_string(),
+                },
+            );
+            let _ = app_handle.emit(
+                EVENT_INCOMING_TRANSLATION_STATUS,
+                IncomingTranslationStatusPayload {
+                    session_id,
+                    status: RecordingStatus::Error,
+                },
+            );
+        }
+        return Err(err.to_string());
+    }
 
     Ok("Incoming translation started".to_string())
 }
@@ -1249,6 +1293,8 @@ pub async fn stop_incoming_translation(
     app_handle: AppHandle,
 ) -> Result<String, String> {
     use crate::presentation::events::EVENT_INCOMING_TRANSLATION_STATUS;
+
+    let _lifecycle_guard = state.incoming_translation_lifecycle_guard.lock().await;
 
     let service = {
         let guard = state.incoming_translation_service.read().await;
@@ -1317,6 +1363,29 @@ pub async fn get_incoming_translation_status(
     } else {
         Ok(RecordingStatus::Idle)
     }
+}
+
+#[tauri::command]
+pub async fn get_incoming_translation_state(
+    state: State<'_, AppState>,
+) -> Result<IncomingTranslationStatusPayload, String> {
+    let service = {
+        let guard = state.incoming_translation_service.read().await;
+        guard.as_ref().cloned()
+    };
+    let sequence_id = state
+        .incoming_translation_session_seq
+        .load(Ordering::Relaxed);
+    let (active_session_id, status) = if let Some(service) = service {
+        service.state_snapshot().await
+    } else {
+        (None, RecordingStatus::Idle)
+    };
+    Ok(incoming_translation_state_payload(
+        active_session_id,
+        status,
+        sequence_id,
+    ))
 }
 
 #[tauri::command]
@@ -1686,6 +1755,7 @@ fn live_translation_health_check_busy(message: String) -> LiveTranslationHealthC
 pub async fn run_live_translation_health_check(
     state: State<'_, AppState>,
 ) -> Result<LiveTranslationHealthCheck, String> {
+    let _audio_start_guard = state.audio_start_guard.lock().await;
     collect_live_translation_health_check(state.inner()).await
 }
 
@@ -1696,6 +1766,24 @@ pub async fn start_recording(
     app_handle: AppHandle,
 ) -> Result<String, String> {
     log::info!("Command: start_recording");
+
+    let _lifecycle_guard = state.recording_lifecycle_guard.lock().await;
+    let _audio_start_guard = state.audio_start_guard.lock().await;
+    let current_status = active_recording_status(state.inner()).await;
+    if recording_start_is_busy(current_status) {
+        log::info!(
+            "Ignoring duplicate start_recording while backend status is {:?}",
+            current_status
+        );
+        let session_id = state
+            .active_transcription_session_id
+            .load(Ordering::Relaxed);
+        let mode = *state.active_recording_mode.read().await;
+        if let Some(payload) = active_recording_status_payload(session_id, current_status, mode) {
+            let _ = app_handle.emit(EVENT_RECORDING_STATUS, payload);
+        }
+        return Ok("Recording already active".to_string());
+    }
 
     // Новый идентификатор сессии записи. Маркируем им все события transcription:* и recording:status,
     // чтобы frontend мог игнорировать "поздние" сообщения от предыдущей сессии.
@@ -2518,14 +2606,16 @@ where
 #[cfg(test)]
 mod snapshot_contract_tests {
     use super::{
-        auto_paste_text_can_trigger_recording_hotkey, calculate_recording_window_position,
-        hotkey_action_is_stale, incoming_stop_session_id, is_audio_capture_start_failure,
+        active_recording_status_payload, auto_paste_text_can_trigger_recording_hotkey,
+        calculate_recording_window_position, hotkey_action_is_stale, incoming_stop_session_id,
+        incoming_translation_state_payload, is_audio_capture_start_failure,
         live_translation_health_check_blocks_recording_status,
         live_translation_health_check_blocks_service_status, point_inside_rect,
-        recording_hotkey_press_intent, recording_hotkey_release_intent,
+        recording_hotkey_press_intent, recording_hotkey_release_intent, recording_start_is_busy,
         recording_state_after_failed_start_cleanup, recording_window_size_from_config,
-        resolve_incoming_translation_target_language, resolve_outgoing_translation_target_language,
-        resolve_streaming_keyterms_update, should_cancel_hold_to_record_pending_start,
+        resolve_incoming_translation_source_language, resolve_incoming_translation_target_language,
+        resolve_outgoing_translation_target_language, resolve_streaming_keyterms_update,
+        should_cancel_hold_to_record_pending_start,
         should_clear_active_mode_after_dictation_failure,
         should_clear_active_mode_after_session_cleanup,
         should_hide_recording_window_for_auto_paste,
@@ -2651,12 +2741,19 @@ mod snapshot_contract_tests {
 
         config.stt.language = "de".to_string();
         assert_eq!(resolve_incoming_translation_target_language(&config), "de");
+        assert_eq!(resolve_incoming_translation_source_language(&config), "en");
 
         config.stt.language = "multi".to_string();
         assert_eq!(resolve_incoming_translation_target_language(&config), "ru");
+        assert_eq!(resolve_incoming_translation_source_language(&config), "en");
 
         config.stt.language = "  ".to_string();
         assert_eq!(resolve_incoming_translation_target_language(&config), "ru");
+        assert_eq!(resolve_incoming_translation_source_language(&config), "en");
+
+        config.stt.language = "en".to_string();
+        assert_eq!(resolve_incoming_translation_target_language(&config), "en");
+        assert_eq!(resolve_incoming_translation_source_language(&config), "ru");
     }
 
     #[test]
@@ -2676,6 +2773,30 @@ mod snapshot_contract_tests {
         assert!(!should_start_incoming_translation_on_toggle(
             RecordingStatus::Processing
         ));
+    }
+
+    #[test]
+    fn duplicate_recording_start_is_rejected_while_lifecycle_is_busy() {
+        assert!(recording_start_is_busy(RecordingStatus::Starting));
+        assert!(recording_start_is_busy(RecordingStatus::Recording));
+        assert!(recording_start_is_busy(RecordingStatus::Processing));
+        assert!(!recording_start_is_busy(RecordingStatus::Idle));
+        assert!(!recording_start_is_busy(RecordingStatus::Error));
+    }
+
+    #[test]
+    fn duplicate_recording_start_replays_only_valid_active_session() {
+        let payload = active_recording_status_payload(
+            42,
+            RecordingStatus::Recording,
+            Some(RecordingMode::LiveTranslation),
+        )
+        .expect("active payload");
+
+        assert_eq!(payload.session_id, 42);
+        assert_eq!(payload.status, RecordingStatus::Recording);
+        assert_eq!(payload.mode, Some(RecordingMode::LiveTranslation));
+        assert!(active_recording_status_payload(0, RecordingStatus::Recording, None).is_none());
     }
 
     #[test]
@@ -2807,6 +2928,21 @@ mod snapshot_contract_tests {
         assert_eq!(incoming_stop_session_id(Some(42), 7), 42);
         assert_eq!(incoming_stop_session_id(None, 7), 7);
         assert_eq!(incoming_stop_session_id(None, 0), 1);
+    }
+
+    #[test]
+    fn incoming_translation_snapshot_preserves_non_idle_service_status() {
+        let active = incoming_translation_state_payload(Some(42), RecordingStatus::Recording, 99);
+        assert_eq!(active.session_id, 42);
+        assert_eq!(active.status, RecordingStatus::Recording);
+
+        let terminal = incoming_translation_state_payload(None, RecordingStatus::Error, 42);
+        assert_eq!(terminal.session_id, 42);
+        assert_eq!(terminal.status, RecordingStatus::Error);
+
+        let idle = incoming_translation_state_payload(None, RecordingStatus::Idle, 42);
+        assert_eq!(idle.session_id, 0);
+        assert_eq!(idle.status, RecordingStatus::Idle);
     }
 
     #[test]

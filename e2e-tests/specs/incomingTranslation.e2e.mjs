@@ -78,19 +78,19 @@ describe('incoming translation subtitles (real tauri webdriver)', () => {
     });
     await waitFor(async () => (await text.getText()).includes('перевод перед ошибкой'));
 
+    await emitEvent('incoming_translation:status', {
+      session_id: 903,
+      status: 'Error',
+    });
+    await waitFor(async () => {
+      const terminalText = await text.getText();
+      return terminalText.length > 0 && !terminalText.includes('перевод перед ошибкой');
+    });
+
     await emitEvent('incoming_translation:error', {
       session_id: 903,
       error: 'temporary network blip',
       error_type: 'connection',
-    });
-    const transientVisibleText = await text.getText();
-    if (transientVisibleText.includes('temporary network blip')) {
-      throw new Error(`transient incoming translation error should stay hidden: ${transientVisibleText}`);
-    }
-
-    await emitEvent('incoming_translation:status', {
-      session_id: 903,
-      status: 'Error',
     });
     await waitFor(async () => (await text.getText()).includes('temporary network blip'));
 

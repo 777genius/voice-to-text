@@ -162,6 +162,7 @@ pub fn run() {
             commands::stop_incoming_translation,
             commands::toggle_incoming_translation,
             commands::get_incoming_translation_status,
+            commands::get_incoming_translation_state,
             commands::get_live_translation_platform_status,
             commands::run_live_translation_health_check,
             commands::log_client_event,
