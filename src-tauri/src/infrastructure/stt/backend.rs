@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use http::Request;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpStream;
@@ -57,9 +58,10 @@ fn is_local_backend_url(url: &str) -> bool {
 fn get_default_backend_url() -> String {
     // 1. Проверяем env переменную (для staging, тестов и т.д.)
     if let Ok(url) = std::env::var("VOICE_TO_TEXT_BACKEND_URL") {
+        let url = url.trim();
         if !url.is_empty() {
             log::info!("Using backend URL from env: {}", url);
-            return url;
+            return url.to_string();
         }
     }
 
@@ -122,7 +124,6 @@ pub struct BackendProvider {
     sent_bytes_total: usize,
 
     audio_batch: Vec<u8>,
-    audio_batch_frames: usize,
 
     next_send_at: Option<std::time::Instant>,
     batch_started_at: Option<std::time::Instant>,
@@ -194,6 +195,12 @@ fn server_error_closes_stream(code: &str) -> bool {
     )
 }
 
+fn call_backend_callback(label: &str, callback: impl FnOnce()) {
+    if catch_unwind(AssertUnwindSafe(callback)).is_err() {
+        log::error!("Backend {} callback panicked", label);
+    }
+}
+
 async fn report_backend_unexpected_eof(
     callbacks_state: &Arc<Mutex<CallbackState>>,
     is_closed: &Arc<AtomicBool>,
@@ -213,13 +220,15 @@ async fn report_backend_unexpected_eof(
         state.error_callback()
     };
     if let Some(callback) = callback {
-        callback(SttError::Connection(SttConnectionError {
-            message: "WebSocket stream ended without a close frame".to_string(),
-            details: SttConnectionDetails {
-                category: Some(SttConnectionCategory::Closed),
-                ..Default::default()
-            },
-        }));
+        call_backend_callback("error", || {
+            callback(SttError::Connection(SttConnectionError {
+                message: "WebSocket stream ended without a close frame".to_string(),
+                details: SttConnectionDetails {
+                    category: Some(SttConnectionCategory::Closed),
+                    ..Default::default()
+                },
+            }))
+        });
     }
 }
 
@@ -243,7 +252,6 @@ impl BackendProvider {
             sent_chunks_count: 0,
             sent_bytes_total: 0,
             audio_batch: Vec::new(),
-            audio_batch_frames: 0,
             next_send_at: None,
             batch_started_at: None,
         }
@@ -265,7 +273,10 @@ impl BackendProvider {
                 self.is_paused,
                 self.ws_write.is_some()
             );
-            return Ok(()); // Игнорируем — соединение уже закрыто
+            return Err(SttError::Connection(SttConnectionError::with_category(
+                "Backend WebSocket is already closed".to_string(),
+                SttConnectionCategory::Closed,
+            )));
         }
 
         if let Some(ref ws_write) = self.ws_write {
@@ -305,18 +316,24 @@ impl BackendProvider {
         }
     }
 
-    async fn flush_pending_audio_batch(&mut self, context: &'static str) {
-        if self.audio_batch.is_empty() || self.is_closed.load(Ordering::SeqCst) {
-            return;
+    async fn flush_pending_audio_batch(&mut self, context: &'static str) -> SttResult<()> {
+        if self.audio_batch.is_empty() {
+            return Ok(());
+        }
+        if self.is_closed.load(Ordering::SeqCst) {
+            return Err(SttError::Connection(SttConnectionError::with_category(
+                format!(
+                    "Backend connection closed with {} pending audio bytes during {}",
+                    self.audio_batch.len(),
+                    context
+                ),
+                SttConnectionCategory::Closed,
+            )));
         }
 
         if let Some(ref ws_write) = self.ws_write {
-            let bytes = std::mem::take(&mut self.audio_batch);
-            self.audio_batch_frames = 0;
-            self.next_send_at = None;
-            self.batch_started_at = None;
-            self.sent_chunks_count += 1;
-            self.sent_bytes_total += bytes.len();
+            let bytes = self.audio_batch.clone();
+            let bytes_len = bytes.len();
             let flush_fut = async {
                 let mut guard = ws_write.lock().await;
                 guard.send(Message::Binary(bytes)).await
@@ -324,31 +341,56 @@ impl BackendProvider {
 
             match tokio::time::timeout(Duration::from_secs(WS_SEND_TIMEOUT_SECS), flush_fut).await {
                 Ok(Ok(())) => {
+                    self.audio_batch.clear();
+                    self.next_send_at = None;
+                    self.batch_started_at = None;
+                    self.sent_chunks_count += 1;
+                    self.sent_bytes_total += bytes_len;
                     log::debug!(
                         "[ReconnectDiag] BackendProvider {} flushed pending audio batch",
                         context
                     );
+                    Ok(())
                 }
                 Ok(Err(e)) => {
-                    log::warn!(
-                        "[ReconnectDiag] BackendProvider {} failed to flush pending audio batch: {}",
-                        context,
-                        e
-                    );
+                    self.is_closed.store(true, Ordering::SeqCst);
+                    Err(SttError::Connection(SttConnectionError::with_category(
+                        format!(
+                            "Backend {} failed to flush pending audio batch: {}",
+                            context, e
+                        ),
+                        SttConnectionCategory::Closed,
+                    )))
                 }
                 Err(_) => {
-                    log::warn!(
-                        "[ReconnectDiag] BackendProvider {} timed out flushing pending audio batch",
-                        context
-                    );
+                    self.is_closed.store(true, Ordering::SeqCst);
+                    Err(SttError::Connection(SttConnectionError::with_category(
+                        format!("Backend {} timed out flushing pending audio batch", context),
+                        SttConnectionCategory::Timeout,
+                    )))
                 }
             }
+        } else {
+            Err(SttError::Connection(SttConnectionError::with_category(
+                format!(
+                    "Backend WebSocket writer missing with {} pending audio bytes during {}",
+                    self.audio_batch.len(),
+                    context
+                ),
+                SttConnectionCategory::Closed,
+            )))
         }
     }
 
-    async fn finalize_and_wait_for_drain(&self, context: &'static str) {
+    async fn finalize_and_wait_for_drain(&self, context: &'static str) -> SttResult<()> {
         if self.is_closed.load(Ordering::SeqCst) || self.ws_write.is_none() {
-            return;
+            return Err(SttError::Connection(SttConnectionError::with_category(
+                format!(
+                    "Backend cannot finalize during {}: connection is closed",
+                    context
+                ),
+                SttConnectionCategory::Closed,
+            )));
         }
 
         let finalize_rx = {
@@ -365,12 +407,7 @@ impl BackendProvider {
         );
         if let Err(e) = self.send_json(&ClientMessage::Finalize).await {
             let _ = self.finalize_waiter.lock().await.take();
-            log::warn!(
-                "[ReconnectDiag] BackendProvider finalize failed on {}: {}",
-                context,
-                e
-            );
-            return;
+            return Err(e);
         }
 
         match tokio::time::timeout(
@@ -411,6 +448,7 @@ impl BackendProvider {
                 );
             }
         }
+        Ok(())
     }
 }
 
@@ -428,8 +466,17 @@ impl SttProvider for BackendProvider {
         // Получаем URL бэкенда (из конфига или авто-детект по окружению)
         let backend_url = config
             .backend_url
-            .clone()
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(str::to_string)
             .unwrap_or_else(get_default_backend_url);
+        let configured_auth_token = config
+            .backend_auth_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string);
 
         log::info!("BackendProvider: Using backend URL: {}", backend_url);
 
@@ -439,17 +486,13 @@ impl SttProvider for BackendProvider {
         // Это защищает от ситуации "я уже логинился в прод, а сейчас запускаю local" → 401.
         log::info!(
             "BackendProvider: config.backend_auth_token present: {}, len: {}",
-            config.backend_auth_token.is_some(),
-            config
-                .backend_auth_token
-                .as_ref()
-                .map(|t| t.len())
-                .unwrap_or(0)
+            configured_auth_token.is_some(),
+            configured_auth_token.as_ref().map(|t| t.len()).unwrap_or(0)
         );
 
         let auth_token = if cfg!(debug_assertions) {
             if is_local_backend_url(&backend_url) {
-                if config.backend_auth_token.as_deref() != Some("dev-local-token") {
+                if configured_auth_token.as_deref() != Some("dev-local-token") {
                     log::info!(
                         "DEV MODE: Local backend detected ({}). Using dev-local-token instead of saved token",
                         backend_url
@@ -462,13 +505,13 @@ impl SttProvider for BackendProvider {
                 }
                 "dev-local-token".to_string()
             } else {
-                config.backend_auth_token.clone().unwrap_or_else(|| {
+                configured_auth_token.clone().unwrap_or_else(|| {
                     log::info!("DEV MODE: Using dev-local-token (no real token configured)");
                     "dev-local-token".to_string()
                 })
             }
         } else {
-            config.backend_auth_token.clone().ok_or_else(|| {
+            configured_auth_token.ok_or_else(|| {
                 SttError::Configuration(
                     "Backend auth token is required. Please activate your license.".to_string(),
                 )
@@ -828,7 +871,9 @@ impl SttProvider for BackendProvider {
                                                 .map(|c| c.on_connection_quality.clone())
                                         };
                                         if let Some(cb) = cb {
-                                            cb("Good".to_string(), None);
+                                            call_backend_callback("connection quality", || {
+                                                cb("Good".to_string(), None)
+                                            });
                                         }
                                     }
 
@@ -884,7 +929,9 @@ impl SttProvider for BackendProvider {
                                             state.active.as_ref().map(|c| c.on_partial.clone())
                                         };
                                         if let Some(cb) = cb {
-                                            cb(transcription);
+                                            call_backend_callback("partial transcription", || {
+                                                cb(transcription)
+                                            });
                                         }
                                     }
 
@@ -918,7 +965,9 @@ impl SttProvider for BackendProvider {
                                             state.active.as_ref().map(|c| c.on_final.clone())
                                         };
                                         if let Some(cb) = cb {
-                                            cb(transcription);
+                                            call_backend_callback("final transcription", || {
+                                                cb(transcription)
+                                            });
                                         }
                                     }
 
@@ -938,7 +987,9 @@ impl SttProvider for BackendProvider {
                                             remaining
                                         );
                                         if let Some(ref cb) = on_usage_cb {
-                                            cb(seconds_used, remaining);
+                                            call_backend_callback("usage", || {
+                                                cb(seconds_used, remaining)
+                                            });
                                         }
                                     }
 
@@ -959,7 +1010,9 @@ impl SttProvider for BackendProvider {
                                                 .map(|c| c.on_connection_quality.clone())
                                         };
                                         if let Some(cb) = cb {
-                                            cb("Good".to_string(), None);
+                                            call_backend_callback("connection quality", || {
+                                                cb("Good".to_string(), None)
+                                            });
                                         }
                                     }
 
@@ -971,16 +1024,18 @@ impl SttProvider for BackendProvider {
                                             state.error_callback()
                                         };
                                         if let Some(cb) = cb {
-                                            cb(SttError::Connection(SttConnectionError {
-                                                message,
-                                                details: SttConnectionDetails {
-                                                    category: Some(category_for_server_error(
-                                                        &code,
-                                                    )),
-                                                    server_code: Some(code),
-                                                    ..Default::default()
-                                                },
-                                            }));
+                                            call_backend_callback("error", || {
+                                                cb(SttError::Connection(SttConnectionError {
+                                                    message,
+                                                    details: SttConnectionDetails {
+                                                        category: Some(category_for_server_error(
+                                                            &code,
+                                                        )),
+                                                        server_code: Some(code),
+                                                        ..Default::default()
+                                                    },
+                                                }))
+                                            });
                                         }
                                     }
 
@@ -1054,14 +1109,16 @@ impl SttProvider for BackendProvider {
                                 category = SttConnectionCategory::LimitExceeded;
                             }
 
-                            cb(SttError::Connection(SttConnectionError {
-                                message: "WebSocket closed by server".to_string(),
-                                details: SttConnectionDetails {
-                                    category: Some(category),
-                                    ws_close_code: code_u16,
-                                    ..Default::default()
-                                },
-                            }));
+                            call_backend_callback("error", || {
+                                cb(SttError::Connection(SttConnectionError {
+                                    message: "WebSocket closed by server".to_string(),
+                                    details: SttConnectionDetails {
+                                        category: Some(category),
+                                        ws_close_code: code_u16,
+                                        ..Default::default()
+                                    },
+                                }))
+                            });
                         }
                         break;
                     }
@@ -1161,10 +1218,12 @@ impl SttProvider for BackendProvider {
                                 details.category = Some(SttConnectionCategory::LimitExceeded);
                             }
 
-                            cb(SttError::Connection(SttConnectionError {
-                                message: e.to_string(),
-                                details,
-                            }));
+                            call_backend_callback("error", || {
+                                cb(SttError::Connection(SttConnectionError {
+                                    message: e.to_string(),
+                                    details,
+                                }))
+                            });
                         }
                         break;
                     }
@@ -1264,33 +1323,33 @@ impl SttProvider for BackendProvider {
 
             self.audio_batch.reserve(chunk.data.len() * 2);
             let now = std::time::Instant::now();
-            if self.audio_batch_frames == 0 {
+            if self.audio_batch.is_empty() {
                 self.batch_started_at = Some(now);
             }
             for &sample in &chunk.data {
                 self.audio_batch.extend_from_slice(&sample.to_le_bytes());
             }
-            self.audio_batch_frames += 1;
 
             let batch_age_ms = self
                 .batch_started_at
                 .map(|t| now.saturating_duration_since(t).as_millis() as u64)
                 .unwrap_or(0);
-            let ready_to_send = self.audio_batch_frames >= MIN_FRAMES_PER_MESSAGE
-                || batch_age_ms >= MAX_BATCH_WAIT_MS;
+            let available_frames = self.audio_batch.len() / FRAME_BYTES;
+            let ready_to_send =
+                available_frames >= MIN_FRAMES_PER_MESSAGE || batch_age_ms >= MAX_BATCH_WAIT_MS;
             if !ready_to_send {
                 return Ok(());
             }
 
-            let frames_to_send = self.audio_batch_frames.min(MAX_FRAMES_PER_MESSAGE);
+            let frames_to_send = available_frames.min(MAX_FRAMES_PER_MESSAGE);
             let bytes_to_send = frames_to_send * FRAME_BYTES;
-            if self.audio_batch.len() < bytes_to_send {
+            if bytes_to_send == 0 {
                 return Ok(());
             }
 
-            let remainder = self.audio_batch.split_off(bytes_to_send);
-            let bytes = std::mem::replace(&mut self.audio_batch, remainder);
-            self.audio_batch_frames -= frames_to_send;
+            // Keep the authoritative batch intact until the sink accepts the frame.
+            // A cancelled or failed send must not silently discard speech.
+            let bytes = self.audio_batch[..bytes_to_send].to_vec();
 
             let now2 = std::time::Instant::now();
             let next_at = self.next_send_at.unwrap_or(now2);
@@ -1301,24 +1360,24 @@ impl SttProvider for BackendProvider {
                 std::time::Instant::now() + std::time::Duration::from_millis(MIN_SEND_INTERVAL_MS),
             );
 
-            self.sent_chunks_count += 1;
-            self.sent_bytes_total += bytes.len();
-
-            if self.sent_chunks_count % 50 == 0 {
-                log::debug!(
-                    "Backend: sent {} chunks, {} bytes total",
-                    self.sent_chunks_count,
-                    self.sent_bytes_total
-                );
-            }
-
             let send_fut = async {
                 let mut guard = ws_write.lock().await;
                 guard.send(Message::Binary(bytes)).await
             };
 
             match tokio::time::timeout(Duration::from_secs(WS_SEND_TIMEOUT_SECS), send_fut).await {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => {
+                    self.audio_batch.drain(..bytes_to_send);
+                    self.sent_chunks_count += 1;
+                    self.sent_bytes_total += bytes_to_send;
+                    if self.sent_chunks_count % 50 == 0 {
+                        log::debug!(
+                            "Backend: sent {} chunks, {} bytes total",
+                            self.sent_chunks_count,
+                            self.sent_bytes_total
+                        );
+                    }
+                }
                 Ok(Err(e)) => {
                     self.is_closed.store(true, Ordering::SeqCst);
                     return Err(SttError::Connection(SttConnectionError::simple(format!(
@@ -1335,7 +1394,7 @@ impl SttProvider for BackendProvider {
                 }
             }
 
-            if self.audio_batch_frames == 0 {
+            if self.audio_batch.is_empty() {
                 self.batch_started_at = None;
             }
 
@@ -1348,22 +1407,26 @@ impl SttProvider for BackendProvider {
     async fn stop_stream(&mut self) -> SttResult<()> {
         log::info!("BackendProvider: Stopping stream");
 
-        self.flush_pending_audio_batch("stop").await;
-        if self.sent_chunks_count > 0 {
-            self.finalize_and_wait_for_drain("stop").await;
-        }
-
-        let _ = self.finalize_waiter.lock().await.take();
-
         if !self.is_streaming {
             self.is_closed.store(true, Ordering::SeqCst);
             return Ok(());
         }
 
+        let mut stop_result = self.flush_pending_audio_batch("stop").await;
+        if stop_result.is_ok() && self.sent_chunks_count > 0 {
+            stop_result = self.finalize_and_wait_for_drain("stop").await;
+        }
+
+        let _ = self.finalize_waiter.lock().await.take();
+
         // Отправляем Close message
-        if self.ws_write.is_some() {
+        if !self.is_closed.load(Ordering::SeqCst) && self.ws_write.is_some() {
             let close_msg = ClientMessage::Close;
-            let _ = self.send_json(&close_msg).await;
+            if let Err(error) = self.send_json(&close_msg).await {
+                if stop_result.is_ok() {
+                    stop_result = Err(error);
+                }
+            }
         }
 
         self.is_closed.store(true, Ordering::SeqCst);
@@ -1374,8 +1437,22 @@ impl SttProvider for BackendProvider {
                 let mut guard = ws_write.lock().await;
                 guard.close().await
             };
-            let _ =
-                tokio::time::timeout(Duration::from_secs(WS_SEND_TIMEOUT_SECS), close_fut).await;
+            match tokio::time::timeout(Duration::from_secs(WS_SEND_TIMEOUT_SECS), close_fut).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) if stop_result.is_ok() => {
+                    stop_result = Err(SttError::Connection(SttConnectionError::with_category(
+                        format!("Backend WebSocket close failed: {}", error),
+                        SttConnectionCategory::Closed,
+                    )));
+                }
+                Err(_) if stop_result.is_ok() => {
+                    stop_result = Err(SttError::Connection(SttConnectionError::with_category(
+                        "Backend WebSocket close timed out".to_string(),
+                        SttConnectionCategory::Timeout,
+                    )));
+                }
+                _ => {}
+            }
         }
 
         // Останавливаем receiver task
@@ -1394,6 +1471,7 @@ impl SttProvider for BackendProvider {
         self.is_streaming = false;
         self.is_paused = false;
         self.session_id = None;
+        self.audio_batch.clear();
         self.next_send_at = None;
         self.batch_started_at = None;
         {
@@ -1410,7 +1488,7 @@ impl SttProvider for BackendProvider {
             self.sent_bytes_total
         );
 
-        Ok(())
+        stop_result
     }
 
     async fn abort(&mut self) -> SttResult<()> {
@@ -1422,6 +1500,7 @@ impl SttProvider for BackendProvider {
 
         if let Some(task) = self.keepalive_task.take() {
             task.abort();
+            let _ = task.await;
         }
 
         // Принудительно закрываем без отправки Close
@@ -1436,12 +1515,16 @@ impl SttProvider for BackendProvider {
 
         if let Some(task) = self.receiver_task.take() {
             task.abort();
+            let _ = task.await;
         }
 
         self.ws_write = None;
         self.is_streaming = false;
         self.is_paused = false;
         self.session_id = None;
+        self.audio_batch.clear();
+        self.next_send_at = None;
+        self.batch_started_at = None;
         {
             let mut state = self.callbacks.lock().await;
             state.active = None;
@@ -1472,8 +1555,8 @@ impl SttProvider for BackendProvider {
             return Ok(());
         }
 
-        self.flush_pending_audio_batch("pause").await;
-        self.finalize_and_wait_for_drain("pause").await;
+        self.flush_pending_audio_batch("pause").await?;
+        self.finalize_and_wait_for_drain("pause").await?;
 
         self.is_paused = true;
         log::info!(
@@ -1610,6 +1693,22 @@ mod tests {
         assert_eq!(provider.backend_url, DEV_BACKEND_URL);
         #[cfg(not(debug_assertions))]
         assert_eq!(provider.backend_url, PROD_BACKEND_URL);
+    }
+
+    #[tokio::test]
+    async fn initialize_trims_backend_url_and_auth_token() {
+        let mut provider = BackendProvider::new();
+        let mut config = SttConfig::new(SttProviderType::Backend);
+        config.backend_url = Some("  wss://example.test  \n".to_string());
+        config.backend_auth_token = Some("  test-token  \n".to_string());
+
+        provider
+            .initialize(&config)
+            .await
+            .expect("initialize provider");
+
+        assert_eq!(provider.backend_url, "wss://example.test");
+        assert_eq!(provider.auth_token.as_deref(), Some("test-token"));
     }
 
     #[test]
@@ -1997,7 +2096,7 @@ mod tests {
         assert_eq!(quality, "Good");
 
         provider
-            .send_audio(&AudioChunk::new(vec![1000; 480], 16_000, 1))
+            .send_audio(&AudioChunk::new(vec![1000; 1024], 16_000, 1))
             .await
             .unwrap();
 
@@ -2043,8 +2142,49 @@ mod tests {
         assert_eq!(capture.config["keyterms"][0], "VoicetextAI");
         assert_eq!(capture.config["keyterms"][1], "ElevenLabs");
         assert_eq!(capture.config["capabilities"][0], CAPABILITY_FINALIZE_ACK);
-        assert_eq!(capture.binary_lengths, vec![960]);
+        assert_eq!(capture.binary_lengths, vec![1920, 128]);
+        assert_eq!(capture.binary_lengths.iter().sum::<usize>(), 1024 * 2);
         assert!(capture.saw_finalize);
+    }
+
+    #[tokio::test]
+    async fn panicking_partial_callback_does_not_kill_backend_receiver() {
+        let (backend_url, server_task) = spawn_lifecycle_mock_backend().await;
+        let mut config = SttConfig::new(SttProviderType::Backend);
+        config.backend_url = Some(backend_url);
+        config.backend_auth_token = Some("test-token".to_string());
+        config.language = "en".to_string();
+
+        let (final_tx, mut final_rx) = tokio::sync::mpsc::unbounded_channel::<Transcription>();
+        let mut provider = BackendProvider::new();
+        provider.initialize(&config).await.unwrap();
+        provider
+            .start_stream(
+                Arc::new(|_| panic!("simulated partial callback panic")),
+                Arc::new(move |transcription| {
+                    let _ = final_tx.send(transcription);
+                }),
+                Arc::new(|error| panic!("unexpected backend provider error: {error}")),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .unwrap();
+
+        provider
+            .send_audio(&AudioChunk::new(vec![1000; 480], 16_000, 1))
+            .await
+            .unwrap();
+        let final_result = tokio::time::timeout(Duration::from_secs(3), final_rx.recv())
+            .await
+            .expect("final callback timeout")
+            .expect("final callback");
+        assert_eq!(final_result.text, "hello world");
+
+        provider.abort().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), server_task)
+            .await
+            .expect("mock backend timeout")
+            .expect("mock backend task");
     }
 
     #[tokio::test]
@@ -2072,7 +2212,7 @@ mod tests {
             .unwrap();
 
         provider
-            .send_audio(&AudioChunk::new(vec![1000; 480], 16_000, 1))
+            .send_audio(&AudioChunk::new(vec![1000; 1024], 16_000, 1))
             .await
             .unwrap();
         provider.stop_stream().await.unwrap();
@@ -2088,7 +2228,8 @@ mod tests {
             .await
             .expect("mock backend timeout")
             .expect("mock backend task");
-        assert_eq!(capture.binary_lengths, vec![960]);
+        assert_eq!(capture.binary_lengths, vec![1920, 128]);
+        assert_eq!(capture.binary_lengths.iter().sum::<usize>(), 1024 * 2);
         assert!(capture.saw_finalize);
     }
 

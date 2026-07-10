@@ -2,8 +2,11 @@ use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use http::Request;
 use serde_json::{json, Value};
+use std::future::Future;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
@@ -23,10 +26,15 @@ use crate::infrastructure::embedded_keys;
 ///
 /// Protocol:
 /// 1. Connect with Authorization header (NOT Bearer, just raw API key)
-/// 2. Send session config: sample_rate, encoding, language_code
-/// 3. Stream audio_data as base64-encoded PCM
-/// 4. Receive: SessionBegins, PartialTranscript, FinalTranscript, SessionTerminated
+/// 2. Select the streaming model in the connection query.
+/// 3. Stream raw PCM16 in binary WebSocket frames.
+/// 4. Receive Begin/Turn events, then send Terminate and drain through Termination.
 const ASSEMBLYAI_WS_URL: &str = "wss://streaming.assemblyai.com/v3/ws";
+const ASSEMBLYAI_SESSION_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const ASSEMBLYAI_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+const ASSEMBLYAI_TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
+const ASSEMBLYAI_MIN_AUDIO_SAMPLES: usize = 800; // 50 ms @ 16 kHz
+const ASSEMBLYAI_MAX_AUDIO_SAMPLES: usize = 16_000; // 1 s @ 16 kHz
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -76,6 +84,72 @@ fn assemblyai_closed_error(message: impl Into<String>) -> SttError {
     ))
 }
 
+fn assemblyai_timeout_error(message: impl Into<String>) -> SttError {
+    SttError::Connection(SttConnectionError::with_category(
+        message,
+        SttConnectionCategory::Timeout,
+    ))
+}
+
+fn assemblyai_speech_model(language: &str) -> &'static str {
+    let base_language = language
+        .trim()
+        .split(['-', '_'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    match base_language.as_str() {
+        "en" | "es" | "de" | "fr" | "pt" | "it" => "u3-rt-pro",
+        _ => "whisper-rt",
+    }
+}
+
+fn assemblyai_stream_url(base_url: &str, language: &str) -> String {
+    format!(
+        "{}?sample_rate=16000&encoding=pcm_s16le&speech_model={}&language_detection=true",
+        base_url,
+        assemblyai_speech_model(language)
+    )
+}
+
+fn assemblyai_next_audio_frame_samples(buffered_samples: usize) -> Option<usize> {
+    if buffered_samples < ASSEMBLYAI_MIN_AUDIO_SAMPLES {
+        return None;
+    }
+
+    let mut samples_to_send = buffered_samples.min(ASSEMBLYAI_MAX_AUDIO_SAMPLES);
+    let remaining = buffered_samples - samples_to_send;
+    if remaining > 0 && remaining < ASSEMBLYAI_MIN_AUDIO_SAMPLES {
+        samples_to_send -= ASSEMBLYAI_MIN_AUDIO_SAMPLES - remaining;
+    }
+    Some(samples_to_send)
+}
+
+async fn await_assemblyai_send<F>(future: F, timeout: Duration, operation: &str) -> SttResult<()>
+where
+    F: Future<Output = Result<(), tokio_tungstenite::tungstenite::Error>>,
+{
+    match tokio::time::timeout(timeout, future).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(assemblyai_closed_error(format!(
+            "AssemblyAI {} failed: {}",
+            operation, error
+        ))),
+        Err(_) => Err(assemblyai_timeout_error(format!(
+            "AssemblyAI {} timed out after {} ms",
+            operation,
+            timeout.as_millis()
+        ))),
+    }
+}
+
+fn call_assemblyai_callback(label: &str, callback: impl FnOnce()) {
+    if catch_unwind(AssertUnwindSafe(callback)).is_err() {
+        log::error!("AssemblyAI {} callback panicked", label);
+    }
+}
+
 async fn report_assemblyai_receiver_error(
     startup_error: &Arc<Mutex<Option<SttError>>>,
     session_ready: &Arc<Notify>,
@@ -83,8 +157,8 @@ async fn report_assemblyai_receiver_error(
     error: SttError,
 ) {
     *startup_error.lock().await = Some(error.clone());
-    on_error(error);
     session_ready.notify_one();
+    call_assemblyai_callback("error", || on_error(error));
 }
 
 pub struct AssemblyAIProvider {
@@ -97,6 +171,7 @@ pub struct AssemblyAIProvider {
     startup_error: Arc<Mutex<Option<SttError>>>,
     stop_requested: Arc<AtomicBool>,
     audio_buffer: Vec<i16>, // Буфер для накопления аудио до минимального размера
+    ws_base_url: String,
 }
 
 impl AssemblyAIProvider {
@@ -111,6 +186,15 @@ impl AssemblyAIProvider {
             startup_error: Arc::new(Mutex::new(None)),
             stop_requested: Arc::new(AtomicBool::new(false)),
             audio_buffer: Vec::new(),
+            ws_base_url: ASSEMBLYAI_WS_URL.to_string(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_ws_base_url(ws_base_url: String) -> Self {
+        Self {
+            ws_base_url,
+            ..Self::new()
         }
     }
 }
@@ -127,9 +211,14 @@ impl SttProvider for AssemblyAIProvider {
         log::info!("AssemblyAI Provider: Initializing (v3)");
 
         // Приоритет: пользовательский ключ → встроенный ключ
-        let api_key = config
+        let user_api_key = config
             .assemblyai_api_key
-            .clone()
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .map(str::to_string);
+        let using_user_key = user_api_key.is_some();
+        let api_key = user_api_key
             .or_else(|| {
                 // Fallback на встроенный ключ
                 if embedded_keys::has_embedded_assemblyai_key() {
@@ -146,11 +235,7 @@ impl SttProvider for AssemblyAIProvider {
 
         log::info!(
             "AssemblyAI Provider: Using {} API key",
-            if config.assemblyai_api_key.is_some() {
-                "user"
-            } else {
-                "embedded"
-            }
+            if using_user_key { "user" } else { "embedded" }
         );
 
         self.api_key = Some(api_key);
@@ -181,32 +266,10 @@ impl SttProvider for AssemblyAIProvider {
         let configured_language = self
             .config
             .as_ref()
-            .and_then(|c| Some(c.language.clone()))
+            .map(|config| config.language.clone())
             .unwrap_or_else(|| "en".to_string());
 
-        // 1. Build URL with query parameters
-        let language = configured_language.clone();
-
-        // Конвертируем короткие коды языков в полные BCP-47 для AssemblyAI
-        let language_code = match language.as_str() {
-            "ru" => "ru",   // Russian
-            "en" => "en",   // English (global)
-            "es" => "es",   // Spanish
-            "fr" => "fr",   // French
-            "de" => "de",   // German
-            "it" => "it",   // Italian
-            "pt" => "pt",   // Portuguese
-            "nl" => "nl",   // Dutch
-            "ja" => "ja",   // Japanese
-            "ko" => "ko",   // Korean
-            "zh" => "zh",   // Chinese
-            other => other, // Pass as-is
-        };
-
-        let url = format!(
-            "{}?sample_rate=16000&encoding=pcm_s16le&language_code={}",
-            ASSEMBLYAI_WS_URL, language_code
-        );
+        let url = assemblyai_stream_url(&self.ws_base_url, &configured_language);
 
         log::debug!("Connecting to {}", url);
 
@@ -292,12 +355,19 @@ impl SttProvider for AssemblyAIProvider {
                                     break;
                                 }
 
+                                let is_termination = matches!(
+                                    msg_type,
+                                    Some("Termination") | Some("End") | Some("SessionTerminated")
+                                );
                                 Self::handle_message(
                                     json,
                                     &on_partial,
                                     &on_final,
                                     &lang_for_transcription,
                                 );
+                                if is_termination {
+                                    break;
+                                }
                             }
                             Err(e) => {
                                 log::error!("Failed to parse AssemblyAI message: {}", e);
@@ -382,19 +452,33 @@ impl SttProvider for AssemblyAIProvider {
 
         // Ждем пока сессия будет готова (получим SessionBegins)
         log::info!("Waiting for session to be ready...");
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+        let ready_result = tokio::time::timeout(
+            ASSEMBLYAI_SESSION_READY_TIMEOUT,
             self.session_ready.notified(),
         )
         .await
         .map_err(|_| {
-            SttError::Connection(SttConnectionError::with_category(
-                "Timeout waiting for SessionBegins".to_string(),
-                SttConnectionCategory::Timeout,
+            assemblyai_timeout_error(format!(
+                "Timeout waiting for AssemblyAI Begin after {} ms",
+                ASSEMBLYAI_SESSION_READY_TIMEOUT.as_millis()
             ))
-        })?;
+        });
 
-        if let Some(error) = self.startup_error.lock().await.take() {
+        let startup_result = match ready_result {
+            Ok(()) => match self.startup_error.lock().await.take() {
+                Some(error) => Err(error),
+                None => Ok(()),
+            },
+            Err(error) => Err(error),
+        };
+        if let Err(error) = startup_result {
+            if let Err(cleanup_error) = self.abort().await {
+                log::warn!(
+                    "AssemblyAI startup cleanup failed after {}: {}",
+                    error,
+                    cleanup_error
+                );
+            }
             return Err(error);
         }
 
@@ -425,13 +509,11 @@ impl SttProvider for AssemblyAIProvider {
         // Добавляем чанк в буфер
         self.audio_buffer.extend_from_slice(&chunk.data);
 
-        // AssemblyAI требует минимум 50ms аудио
-        // 50ms @ 16kHz = 800 samples
-        const MIN_SAMPLES: usize = 800;
         const MAX_RETAINED_SAMPLES: usize = 16_000 * 10;
 
-        // Отправляем когда накопилось достаточно
-        if self.audio_buffer.len() >= MIN_SAMPLES {
+        while let Some(samples_to_send) =
+            assemblyai_next_audio_frame_samples(self.audio_buffer.len())
+        {
             if self.audio_buffer.len() > MAX_RETAINED_SAMPLES {
                 let excess = self.audio_buffer.len() - MAX_RETAINED_SAMPLES;
                 log::warn!(
@@ -441,17 +523,17 @@ impl SttProvider for AssemblyAIProvider {
                 self.audio_buffer.drain(..excess);
             }
 
-            // Convert i16 samples to bytes (little-endian PCM)
             let bytes: Vec<u8> = self
                 .audio_buffer
                 .iter()
+                .take(samples_to_send)
                 .flat_map(|&sample| sample.to_le_bytes())
                 .collect();
 
-            let duration_ms = (self.audio_buffer.len() * 1000) / 16000;
+            let duration_ms = (samples_to_send * 1000) / 16000;
             log::debug!(
                 "Sending {} samples (~{}ms, {} bytes) to AssemblyAI",
-                self.audio_buffer.len(),
+                samples_to_send,
                 duration_ms,
                 bytes.len()
             );
@@ -461,9 +543,7 @@ impl SttProvider for AssemblyAIProvider {
                 .send(Message::Binary(bytes))
                 .await
                 .map_err(|e| SttError::Processing(format!("Failed to send audio: {}", e)))?;
-            // Keep buffered audio intact if send is cancelled or fails so a retry does
-            // not silently lose the user's speech.
-            self.audio_buffer.clear();
+            self.audio_buffer.drain(..samples_to_send);
         }
 
         Ok(())
@@ -478,11 +558,17 @@ impl SttProvider for AssemblyAIProvider {
             return Ok(());
         }
 
-        // Отправляем остатки из буфера если есть
+        let mut stop_result = Ok(());
+
+        // Flush the sub-50 ms tail before termination. Only clear it after the
+        // WebSocket confirms the frame was accepted by the sink.
         if !self.audio_buffer.is_empty() {
             if let Some(write) = self.ws_write.as_mut() {
-                let bytes: Vec<u8> = self
-                    .audio_buffer
+                let mut padded_tail = self.audio_buffer.clone();
+                if padded_tail.len() < ASSEMBLYAI_MIN_AUDIO_SAMPLES {
+                    padded_tail.resize(ASSEMBLYAI_MIN_AUDIO_SAMPLES, 0);
+                }
+                let bytes: Vec<u8> = padded_tail
                     .iter()
                     .flat_map(|&sample| sample.to_le_bytes())
                     .collect();
@@ -491,32 +577,85 @@ impl SttProvider for AssemblyAIProvider {
                     "Flushing remaining {} samples from buffer",
                     self.audio_buffer.len()
                 );
-                let _ = write.send(Message::Binary(bytes)).await;
-                self.audio_buffer.clear();
+                match await_assemblyai_send(
+                    write.send(Message::Binary(bytes)),
+                    ASSEMBLYAI_SEND_TIMEOUT,
+                    "final audio send",
+                )
+                .await
+                {
+                    Ok(()) => self.audio_buffer.clear(),
+                    Err(error) => stop_result = Err(error),
+                }
+            } else {
+                stop_result = Err(assemblyai_closed_error(
+                    "AssemblyAI final audio could not be sent: WebSocket writer is missing",
+                ));
             }
         }
 
-        // Send terminate message (optional for v3, but good practice)
-        if let Some(write) = self.ws_write.as_mut() {
-            let terminate_msg = json!({
-                "terminate_session": true
-            });
-
-            let _ = write.send(Message::Text(terminate_msg.to_string())).await;
-            let _ = write.send(Message::Close(None)).await;
+        if stop_result.is_ok() {
+            if let Some(write) = self.ws_write.as_mut() {
+                let terminate_msg = json!({ "type": "Terminate" });
+                if let Err(error) = await_assemblyai_send(
+                    write.send(Message::Text(terminate_msg.to_string())),
+                    ASSEMBLYAI_SEND_TIMEOUT,
+                    "Terminate send",
+                )
+                .await
+                {
+                    stop_result = Err(error);
+                }
+            } else {
+                stop_result = Err(assemblyai_closed_error(
+                    "AssemblyAI Terminate could not be sent: WebSocket writer is missing",
+                ));
+            }
         }
 
-        // Abort receiver task
+        // Keep the receiver alive so final Turn events are delivered before the
+        // server's Termination event ends the task.
+        if stop_result.is_ok() {
+            if let Some(mut task) = self.receiver_task.take() {
+                match tokio::time::timeout(ASSEMBLYAI_TERMINATION_TIMEOUT, &mut task).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(join_error)) => {
+                        stop_result = Err(SttError::Internal(format!(
+                            "AssemblyAI receiver task failed during termination: {}",
+                            join_error
+                        )));
+                    }
+                    Err(_) => {
+                        task.abort();
+                        let _ = task.await;
+                        stop_result = Err(assemblyai_timeout_error(format!(
+                            "AssemblyAI Termination timed out after {} ms",
+                            ASSEMBLYAI_TERMINATION_TIMEOUT.as_millis()
+                        )));
+                    }
+                }
+            } else {
+                stop_result = Err(SttError::Internal(
+                    "AssemblyAI receiver task is missing during termination".to_string(),
+                ));
+            }
+        }
+
         if let Some(task) = self.receiver_task.take() {
             task.abort();
-            let _ = task.await; // Ignore cancellation error
+            let _ = task.await;
         }
 
         self.ws_write = None;
         self.is_streaming = false;
+        self.audio_buffer.clear();
+        *self.startup_error.lock().await = None;
 
-        log::info!("AssemblyAI stream stopped");
-        Ok(())
+        match &stop_result {
+            Ok(()) => log::info!("AssemblyAI stream stopped after graceful termination"),
+            Err(error) => log::warn!("AssemblyAI stream stop failed: {}", error),
+        }
+        stop_result
     }
 
     async fn abort(&mut self) -> SttResult<()> {
@@ -571,9 +710,14 @@ impl AssemblyAIProvider {
 
                 // Извлекаем язык из ответа (если есть) или используем сконфигурированный
                 let detected_language = json
-                    .get("language")
+                    .get("language_code")
                     .and_then(|l| l.as_str())
                     .map(|s| s.to_string())
+                    .or_else(|| {
+                        json.get("language")
+                            .and_then(|l| l.as_str())
+                            .map(|s| s.to_string())
+                    })
                     .or_else(|| Some(configured_language.to_string()));
 
                 // Берем текст из transcript (utterance часто пуст)
@@ -599,7 +743,9 @@ impl AssemblyAIProvider {
                                 duration: 0.0, // AssemblyAI не предоставляет duration
                             };
 
-                            on_final(transcription);
+                            call_assemblyai_callback("final transcription", || {
+                                on_final(transcription)
+                            });
                         } else {
                             log::debug!("Partial transcript: {}", text);
 
@@ -618,13 +764,15 @@ impl AssemblyAIProvider {
                                 duration: 0.0, // AssemblyAI не предоставляет duration
                             };
 
-                            on_partial(transcription);
+                            call_assemblyai_callback("partial transcription", || {
+                                on_partial(transcription)
+                            });
                         }
                     }
                 }
             }
 
-            Some("End") | Some("SessionTerminated") => {
+            Some("Termination") | Some("End") | Some("SessionTerminated") => {
                 log::info!("AssemblyAI session terminated");
             }
 
@@ -649,6 +797,82 @@ impl AssemblyAIProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::SttProviderType;
+    use std::sync::Mutex as StdMutex;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::accept_async;
+
+    async fn spawn_assemblyai_termination_server() -> (String, JoinHandle<(Vec<u8>, Value)>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock AssemblyAI server");
+        let address = listener.local_addr().expect("mock server address");
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept websocket client");
+            let mut websocket = accept_async(stream).await.expect("accept websocket");
+            websocket
+                .send(Message::Text(
+                    json!({ "type": "Begin", "id": "test-session" }).to_string(),
+                ))
+                .await
+                .expect("send Begin");
+
+            let mut audio = Vec::new();
+            let terminate = loop {
+                match websocket.next().await.expect("client websocket message") {
+                    Ok(Message::Binary(bytes)) => audio.extend_from_slice(&bytes),
+                    Ok(Message::Text(text)) => {
+                        let value: Value = serde_json::from_str(&text).expect("valid client JSON");
+                        if value.get("type").and_then(Value::as_str) == Some("Terminate") {
+                            websocket
+                                .send(Message::Text(
+                                    json!({
+                                        "type": "Turn",
+                                        "end_of_turn": false,
+                                        "transcript": "partial tail",
+                                        "language_code": "ru"
+                                    })
+                                    .to_string(),
+                                ))
+                                .await
+                                .expect("send partial Turn");
+                            websocket
+                                .send(Message::Text(
+                                    json!({
+                                        "type": "Turn",
+                                        "end_of_turn": true,
+                                        "transcript": "final tail",
+                                        "language_code": "ru",
+                                        "end_of_turn_confidence": 0.99
+                                    })
+                                    .to_string(),
+                                ))
+                                .await
+                                .expect("send final Turn");
+                            websocket
+                                .send(Message::Text(
+                                    json!({
+                                        "type": "Termination",
+                                        "audio_duration_seconds": 0.025,
+                                        "session_duration_seconds": 0.1
+                                    })
+                                    .to_string(),
+                                ))
+                                .await
+                                .expect("send Termination");
+                            break value;
+                        }
+                    }
+                    Ok(Message::Close(_)) => panic!("client closed before Terminate"),
+                    Ok(_) => {}
+                    Err(error) => panic!("mock websocket failed: {error}"),
+                }
+            };
+            (audio, terminate)
+        });
+
+        (format!("ws://{address}/v3/ws"), task)
+    }
 
     #[test]
     fn amplitude_stats_handle_full_pcm16_range_without_overflow() {
@@ -686,5 +910,97 @@ mod tests {
             SttError::Connection(connection)
                 if connection.details.category == Some(SttConnectionCategory::Closed)
         ));
+    }
+
+    #[test]
+    fn streaming_model_matches_current_language_support() {
+        assert_eq!(assemblyai_speech_model("en-US"), "u3-rt-pro");
+        assert_eq!(assemblyai_speech_model("de"), "u3-rt-pro");
+        assert_eq!(assemblyai_speech_model("ru"), "whisper-rt");
+        assert_eq!(assemblyai_speech_model("ja-JP"), "whisper-rt");
+
+        let russian_url = assemblyai_stream_url(ASSEMBLYAI_WS_URL, "ru");
+        assert!(russian_url.contains("speech_model=whisper-rt"));
+        assert!(russian_url.contains("language_detection=true"));
+        assert!(!russian_url.contains("language_code="));
+    }
+
+    #[test]
+    fn audio_frames_stay_within_assemblyai_protocol_bounds() {
+        assert_eq!(assemblyai_next_audio_frame_samples(799), None);
+        assert_eq!(assemblyai_next_audio_frame_samples(800), Some(800));
+        assert_eq!(assemblyai_next_audio_frame_samples(16_000), Some(16_000));
+        assert_eq!(assemblyai_next_audio_frame_samples(16_500), Some(15_700));
+        assert_eq!(assemblyai_next_audio_frame_samples(32_000), Some(16_000));
+    }
+
+    #[tokio::test]
+    async fn initialize_trims_user_api_key() {
+        let mut provider = AssemblyAIProvider::new();
+        let mut config = SttConfig::new(SttProviderType::AssemblyAI);
+        config.assemblyai_api_key = Some("  test-key  \n".to_string());
+
+        provider
+            .initialize(&config)
+            .await
+            .expect("initialize provider");
+
+        assert_eq!(provider.api_key.as_deref(), Some("test-key"));
+    }
+
+    #[tokio::test]
+    async fn graceful_stop_flushes_tail_and_waits_for_final_turn() {
+        let (ws_base_url, server) = spawn_assemblyai_termination_server().await;
+        let mut provider = AssemblyAIProvider::with_ws_base_url(ws_base_url);
+        let mut config = SttConfig::new(SttProviderType::AssemblyAI).with_language("ru");
+        config.assemblyai_api_key = Some("test-key".to_string());
+        provider
+            .initialize(&config)
+            .await
+            .expect("initialize provider");
+
+        let finals = Arc::new(StdMutex::new(Vec::<Transcription>::new()));
+        let finals_for_callback = finals.clone();
+        provider
+            .start_stream(
+                Arc::new(|_| panic!("simulated partial callback panic")),
+                Arc::new(move |transcription| {
+                    finals_for_callback
+                        .lock()
+                        .expect("final callback lock")
+                        .push(transcription);
+                }),
+                Arc::new(|error| panic!("unexpected AssemblyAI error: {error}")),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .expect("start mock stream");
+
+        let tail_samples = vec![321i16; 400];
+        provider
+            .send_audio(&AudioChunk::new(tail_samples.clone(), 16_000, 1))
+            .await
+            .expect("buffer short audio tail");
+        provider.stop_stream().await.expect("graceful stop");
+
+        let (received_audio, terminate) = server.await.expect("mock server task");
+        assert_eq!(received_audio.len(), ASSEMBLYAI_MIN_AUDIO_SAMPLES * 2);
+        let received_samples: Vec<i16> = received_audio
+            .chunks_exact(2)
+            .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+            .collect();
+        assert_eq!(
+            &received_samples[..tail_samples.len()],
+            tail_samples.as_slice()
+        );
+        assert!(received_samples[tail_samples.len()..]
+            .iter()
+            .all(|sample| *sample == 0));
+        assert_eq!(terminate, json!({ "type": "Terminate" }));
+
+        let finals = finals.lock().expect("finals lock");
+        assert_eq!(finals.len(), 1);
+        assert_eq!(finals[0].text, "final tail");
+        assert_eq!(finals[0].language.as_deref(), Some("ru"));
     }
 }
