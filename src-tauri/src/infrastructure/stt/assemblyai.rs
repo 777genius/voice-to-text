@@ -2,15 +2,16 @@ use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use http::Request;
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpStream;
-use tokio::sync::Notify;
+use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 use crate::domain::{
-    AudioChunk, SttConfig, SttConnectionCategory, SttConnectionError, SttError, SttProvider,
-    SttResult, Transcription, TranscriptionCallback,
+    AudioChunk, ErrorCallback, SttConfig, SttConnectionCategory, SttConnectionError, SttError,
+    SttProvider, SttResult, Transcription, TranscriptionCallback,
 };
 use crate::infrastructure::embedded_keys;
 
@@ -29,6 +30,63 @@ const ASSEMBLYAI_WS_URL: &str = "wss://streaming.assemblyai.com/v3/ws";
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+fn pcm_amplitude_stats(samples: &[i16]) -> (i32, i32) {
+    let mut peak = 0i32;
+    let mut sum = 0i64;
+    for &sample in samples {
+        let amplitude = (sample as i32).abs();
+        peak = peak.max(amplitude);
+        sum = sum.saturating_add(amplitude as i64);
+    }
+
+    let average = if samples.is_empty() {
+        0
+    } else {
+        (sum / samples.len() as i64).min(i32::MAX as i64) as i32
+    };
+    (peak, average)
+}
+
+fn assemblyai_server_error(message: impl Into<String>) -> SttError {
+    let message = message.into();
+    let lower = message.to_lowercase();
+    if lower.contains("auth")
+        || lower.contains("api key")
+        || lower.contains("unauthorized")
+        || lower.contains("401")
+        || lower.contains("403")
+    {
+        return SttError::Authentication(message);
+    }
+
+    let category = if lower.contains("rate limit") || lower.contains("429") {
+        SttConnectionCategory::RateLimited
+    } else if lower.contains("quota") || lower.contains("billing") {
+        SttConnectionCategory::ProviderQuotaExceeded
+    } else {
+        SttConnectionCategory::Unknown
+    };
+    SttError::Connection(SttConnectionError::with_category(message, category))
+}
+
+fn assemblyai_closed_error(message: impl Into<String>) -> SttError {
+    SttError::Connection(SttConnectionError::with_category(
+        message,
+        SttConnectionCategory::Closed,
+    ))
+}
+
+async fn report_assemblyai_receiver_error(
+    startup_error: &Arc<Mutex<Option<SttError>>>,
+    session_ready: &Arc<Notify>,
+    on_error: &ErrorCallback,
+    error: SttError,
+) {
+    *startup_error.lock().await = Some(error.clone());
+    on_error(error);
+    session_ready.notify_one();
+}
+
 pub struct AssemblyAIProvider {
     config: Option<SttConfig>,
     is_streaming: bool,
@@ -36,6 +94,8 @@ pub struct AssemblyAIProvider {
     ws_write: Option<futures_util::stream::SplitSink<WsStream, Message>>,
     receiver_task: Option<JoinHandle<()>>,
     session_ready: Arc<Notify>,
+    startup_error: Arc<Mutex<Option<SttError>>>,
+    stop_requested: Arc<AtomicBool>,
     audio_buffer: Vec<i16>, // Буфер для накопления аудио до минимального размера
 }
 
@@ -48,6 +108,8 @@ impl AssemblyAIProvider {
             ws_write: None,
             receiver_task: None,
             session_ready: Arc::new(Notify::new()),
+            startup_error: Arc::new(Mutex::new(None)),
+            stop_requested: Arc::new(AtomicBool::new(false)),
             audio_buffer: Vec::new(),
         }
     }
@@ -100,7 +162,7 @@ impl SttProvider for AssemblyAIProvider {
         &mut self,
         on_partial: TranscriptionCallback,
         on_final: TranscriptionCallback,
-        _on_error: crate::domain::ErrorCallback,
+        on_error: ErrorCallback,
         _on_connection_quality: crate::domain::ConnectionQualityCallback,
     ) -> SttResult<()> {
         log::info!("AssemblyAI Provider: Starting stream (v3 endpoint)");
@@ -182,12 +244,17 @@ impl SttProvider for AssemblyAIProvider {
 
         // Пересоздаем Notify для новой сессии (фикс повторного использования)
         self.session_ready = Arc::new(Notify::new());
+        *self.startup_error.lock().await = None;
+        self.stop_requested.store(false, Ordering::SeqCst);
 
         // 2. Spawn background task for receiving messages
         let session_notify = self.session_ready.clone();
+        let startup_error = self.startup_error.clone();
+        let stop_requested = self.stop_requested.clone();
         let lang_for_transcription = configured_language.clone();
         let receiver_task = tokio::spawn(async move {
             log::debug!("AssemblyAI receiver task started");
+            let mut terminal_error_reported = false;
 
             while let Some(msg_result) = read.next().await {
                 match msg_result {
@@ -205,6 +272,26 @@ impl SttProvider for AssemblyAIProvider {
                                     session_notify.notify_one();
                                 }
 
+                                if msg_type == Some("Error") {
+                                    let message = json
+                                        .get("error")
+                                        .and_then(Value::as_str)
+                                        .or_else(|| json.get("message").and_then(Value::as_str))
+                                        .unwrap_or("AssemblyAI server error")
+                                        .to_string();
+                                    let error = assemblyai_server_error(message);
+                                    log::error!("AssemblyAI server error: {}", error);
+                                    report_assemblyai_receiver_error(
+                                        &startup_error,
+                                        &session_notify,
+                                        &on_error,
+                                        error,
+                                    )
+                                    .await;
+                                    terminal_error_reported = true;
+                                    break;
+                                }
+
                                 Self::handle_message(
                                     json,
                                     &on_partial,
@@ -220,6 +307,28 @@ impl SttProvider for AssemblyAIProvider {
                     }
                     Ok(Message::Close(frame)) => {
                         log::info!("AssemblyAI WebSocket closed: {:?}", frame);
+                        if !stop_requested.load(Ordering::SeqCst) {
+                            let detail = frame
+                                .as_ref()
+                                .map(|frame| {
+                                    format!(
+                                        "AssemblyAI WebSocket closed (code={}, reason={})",
+                                        u16::from(frame.code),
+                                        frame.reason
+                                    )
+                                })
+                                .unwrap_or_else(|| {
+                                    "AssemblyAI WebSocket closed unexpectedly".to_string()
+                                });
+                            report_assemblyai_receiver_error(
+                                &startup_error,
+                                &session_notify,
+                                &on_error,
+                                assemblyai_closed_error(detail),
+                            )
+                            .await;
+                            terminal_error_reported = true;
+                        }
                         break;
                     }
                     Ok(Message::Binary(data)) => {
@@ -233,12 +342,35 @@ impl SttProvider for AssemblyAIProvider {
                     }
                     Err(e) => {
                         log::error!("AssemblyAI WebSocket error: {}", e);
+                        if !stop_requested.load(Ordering::SeqCst) {
+                            report_assemblyai_receiver_error(
+                                &startup_error,
+                                &session_notify,
+                                &on_error,
+                                SttError::Connection(SttConnectionError::simple(format!(
+                                    "AssemblyAI WebSocket error: {}",
+                                    e
+                                ))),
+                            )
+                            .await;
+                            terminal_error_reported = true;
+                        }
                         break;
                     }
                     Ok(msg) => {
                         log::warn!("AssemblyAI received unexpected message type: {:?}", msg);
                     }
                 }
+            }
+
+            if !terminal_error_reported && !stop_requested.load(Ordering::SeqCst) {
+                report_assemblyai_receiver_error(
+                    &startup_error,
+                    &session_notify,
+                    &on_error,
+                    assemblyai_closed_error("AssemblyAI WebSocket ended unexpectedly"),
+                )
+                .await;
             }
 
             log::debug!("AssemblyAI receiver task ended");
@@ -262,6 +394,10 @@ impl SttProvider for AssemblyAIProvider {
             ))
         })?;
 
+        if let Some(error) = self.startup_error.lock().await.take() {
+            return Err(error);
+        }
+
         log::info!("AssemblyAI stream started successfully");
         Ok(())
     }
@@ -276,9 +412,7 @@ impl SttProvider for AssemblyAIProvider {
         })?;
 
         // Проверяем уровень сигнала для детекции тишины
-        let max_amplitude = chunk.data.iter().map(|&s| s.abs()).max().unwrap_or(0);
-        let avg_amplitude: i32 = chunk.data.iter().map(|&s| s.abs() as i32).sum::<i32>()
-            / chunk.data.len().max(1) as i32;
+        let (max_amplitude, avg_amplitude) = pcm_amplitude_stats(&chunk.data);
 
         if max_amplitude > 1000 {
             log::debug!(
@@ -294,9 +428,19 @@ impl SttProvider for AssemblyAIProvider {
         // AssemblyAI требует минимум 50ms аудио
         // 50ms @ 16kHz = 800 samples
         const MIN_SAMPLES: usize = 800;
+        const MAX_RETAINED_SAMPLES: usize = 16_000 * 10;
 
         // Отправляем когда накопилось достаточно
         if self.audio_buffer.len() >= MIN_SAMPLES {
+            if self.audio_buffer.len() > MAX_RETAINED_SAMPLES {
+                let excess = self.audio_buffer.len() - MAX_RETAINED_SAMPLES;
+                log::warn!(
+                    "AssemblyAI retry buffer overflow, dropping {} oldest samples",
+                    excess
+                );
+                self.audio_buffer.drain(..excess);
+            }
+
             // Convert i16 samples to bytes (little-endian PCM)
             let bytes: Vec<u8> = self
                 .audio_buffer
@@ -312,14 +456,14 @@ impl SttProvider for AssemblyAIProvider {
                 bytes.len()
             );
 
-            // Очищаем буфер ПЕРЕД отправкой (фикс утечки памяти)
-            self.audio_buffer.clear();
-
             // Send as binary message (AssemblyAI v3 expects raw PCM binary data)
             write
                 .send(Message::Binary(bytes))
                 .await
                 .map_err(|e| SttError::Processing(format!("Failed to send audio: {}", e)))?;
+            // Keep buffered audio intact if send is cancelled or fails so a retry does
+            // not silently lose the user's speech.
+            self.audio_buffer.clear();
         }
 
         Ok(())
@@ -327,6 +471,7 @@ impl SttProvider for AssemblyAIProvider {
 
     async fn stop_stream(&mut self) -> SttResult<()> {
         log::info!("AssemblyAI Provider: Stopping stream");
+        self.stop_requested.store(true, Ordering::SeqCst);
 
         if !self.is_streaming {
             log::warn!("Stream not active");
@@ -376,6 +521,7 @@ impl SttProvider for AssemblyAIProvider {
 
     async fn abort(&mut self) -> SttResult<()> {
         log::info!("AssemblyAI Provider: Aborting stream");
+        self.stop_requested.store(true, Ordering::SeqCst);
 
         // Immediate shutdown - abort task without graceful close
         if let Some(task) = self.receiver_task.take() {
@@ -386,6 +532,7 @@ impl SttProvider for AssemblyAIProvider {
         self.ws_write = None;
         self.is_streaming = false;
         self.audio_buffer.clear();
+        *self.startup_error.lock().await = None;
 
         log::info!("AssemblyAI stream aborted");
         Ok(())
@@ -496,5 +643,48 @@ impl AssemblyAIProvider {
                 log::warn!("AssemblyAI message without type field");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn amplitude_stats_handle_full_pcm16_range_without_overflow() {
+        let samples = [i16::MIN, i16::MAX, -1, 0, 1];
+
+        let (peak, average) = pcm_amplitude_stats(&samples);
+
+        assert_eq!(peak, 32_768);
+        assert_eq!(average, 13_107);
+    }
+
+    #[test]
+    fn amplitude_stats_handle_empty_audio() {
+        assert_eq!(pcm_amplitude_stats(&[]), (0, 0));
+    }
+
+    #[test]
+    fn server_error_classifies_auth_and_quota() {
+        assert!(matches!(
+            assemblyai_server_error("Invalid API key"),
+            SttError::Authentication(_)
+        ));
+        assert!(matches!(
+            assemblyai_server_error("Provider quota exceeded"),
+            SttError::Connection(connection)
+                if connection.details.category
+                    == Some(SttConnectionCategory::ProviderQuotaExceeded)
+        ));
+    }
+
+    #[test]
+    fn unexpected_close_has_closed_category() {
+        assert!(matches!(
+            assemblyai_closed_error("socket ended"),
+            SttError::Connection(connection)
+                if connection.details.category == Some(SttConnectionCategory::Closed)
+        ));
     }
 }

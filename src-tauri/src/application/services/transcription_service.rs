@@ -1,13 +1,16 @@
+use futures_util::FutureExt;
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::RwLock;
 use tokio::time::{Duration, Instant};
 
 use crate::domain::{
     amplify_i16_samples, limited_microphone_gain, microphone_sensitivity_gain, AudioCapture,
     AudioChunk, AudioConfig, AudioLevelCallback, AudioSpectrumCallback, ConnectionQualityCallback,
-    ErrorCallback, RecordingStatus, SttConfig, SttError, SttProvider, SttProviderFactory,
-    SttProviderType, TranscriptionCallback,
+    ErrorCallback, RecordingStatus, SttConfig, SttConnectionCategory, SttConnectionError, SttError,
+    SttProvider, SttProviderFactory, SttProviderType, SttResult, TranscriptionCallback,
 };
 
 use crate::application::AudioSpectrumAnalyzer;
@@ -21,6 +24,91 @@ const AUDIO_SPECTRUM_EMIT_EVERY_CHUNKS: usize = 3;
 const AUDIO_LOW_SIGNAL_MIN_CHUNKS: usize = 50;
 const AUDIO_RAW_NOISE_FLOOR_MAX_AMPLITUDE: i32 = 300;
 const AUDIO_SENT_SPEECH_LIKELY_AMPLITUDE: i32 = 1500;
+const MAX_AUDIO_STALL_RESTARTS: u32 = 3;
+const STT_START_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
+const STT_SEND_OPERATION_TIMEOUT: Duration = Duration::from_secs(6);
+const STT_STOP_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
+const STT_ABORT_OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[derive(Default)]
+struct SttStartupErrorGate {
+    committed: bool,
+    error: Option<SttError>,
+}
+
+fn lock_stt_startup_error_gate(
+    gate: &StdMutex<SttStartupErrorGate>,
+) -> std::sync::MutexGuard<'_, SttStartupErrorGate> {
+    match gate.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn stt_startup_error_callback(
+    on_runtime_error: ErrorCallback,
+) -> (Arc<StdMutex<SttStartupErrorGate>>, ErrorCallback) {
+    let gate = Arc::new(StdMutex::new(SttStartupErrorGate::default()));
+    let callback_gate = gate.clone();
+    let callback: ErrorCallback = Arc::new(move |error| {
+        let should_report_runtime_error = {
+            let mut gate = lock_stt_startup_error_gate(&callback_gate);
+            if gate.committed {
+                true
+            } else {
+                if gate.error.is_none() {
+                    gate.error = Some(error.clone());
+                }
+                false
+            }
+        };
+
+        if should_report_runtime_error {
+            on_runtime_error(error);
+        }
+    });
+    (gate, callback)
+}
+
+async fn await_stt_operation<F>(operation: F, timeout: Duration, label: &str) -> SttResult<()>
+where
+    F: Future<Output = SttResult<()>>,
+{
+    match tokio::time::timeout(timeout, operation).await {
+        Ok(result) => result,
+        Err(_) => Err(SttError::Connection(SttConnectionError::with_category(
+            format!("{} timed out after {} ms", label, timeout.as_millis()),
+            SttConnectionCategory::Timeout,
+        ))),
+    }
+}
+
+async fn abort_stt_provider(provider: &mut Box<dyn SttProvider>, reason: &str) -> SttResult<()> {
+    await_stt_operation(
+        provider.abort(),
+        STT_ABORT_OPERATION_TIMEOUT,
+        &format!("STT abort ({})", reason),
+    )
+    .await
+}
+
+async fn stop_stt_provider(provider: &mut Box<dyn SttProvider>, reason: &str) -> SttResult<()> {
+    await_stt_operation(
+        provider.stop_stream(),
+        STT_STOP_OPERATION_TIMEOUT,
+        &format!("STT stop_stream ({})", reason),
+    )
+    .await
+}
+
+fn next_audio_stall_restart_attempt(completed_attempts: &mut u32) -> Option<u32> {
+    if *completed_attempts >= MAX_AUDIO_STALL_RESTARTS {
+        return None;
+    }
+
+    *completed_attempts = completed_attempts.saturating_add(1);
+    Some(*completed_attempts)
+}
 
 struct PreparedAudioChunk {
     max_amplitude: i32,
@@ -171,6 +259,38 @@ pub struct TranscriptionService {
     audio_processor_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>, // обработчик аудио-чанков → STT
 }
 
+fn spawn_transcription_runtime_task<F>(
+    future: F,
+    status: Arc<RwLock<RecordingStatus>>,
+    audio_capture: Arc<RwLock<Box<dyn AudioCapture>>>,
+    stt_provider: Arc<RwLock<Option<Box<dyn SttProvider>>>>,
+    on_error: ErrorCallback,
+) -> tokio::task::JoinHandle<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        if AssertUnwindSafe(future).catch_unwind().await.is_err() {
+            if std::panic::catch_unwind(AssertUnwindSafe(|| {
+                on_error(SttError::Internal(
+                    "Audio processor task panicked".to_string(),
+                ))
+            }))
+            .is_err()
+            {
+                log::error!("TranscriptionService: on_error callback panicked");
+            }
+            TranscriptionService::cleanup_failed_processor_session(
+                &status,
+                &audio_capture,
+                &stt_provider,
+                "audio processor panic",
+            )
+            .await;
+        }
+    })
+}
+
 impl TranscriptionService {
     pub fn new(
         audio_capture: Box<dyn AudioCapture>,
@@ -256,10 +376,51 @@ impl TranscriptionService {
             log::warn!("Failed to stop audio capture after {}: {}", reason, e);
         }
         if let Some(mut provider) = stt_provider.write().await.take() {
-            if let Err(e) = provider.abort().await {
+            if let Err(e) = abort_stt_provider(&mut provider, reason).await {
                 log::warn!("Failed to abort STT provider after {}: {}", reason, e);
             }
         }
+    }
+
+    pub async fn cleanup_runtime_failure(&self, reason: &str) -> bool {
+        let should_cleanup = {
+            let mut status = self.status.write().await;
+            if !matches!(
+                *status,
+                RecordingStatus::Starting | RecordingStatus::Recording
+            ) {
+                false
+            } else {
+                *status = RecordingStatus::Idle;
+                true
+            }
+        };
+        if !should_cleanup {
+            return false;
+        }
+
+        if let Some(timer) = self.inactivity_timer_task.write().await.take() {
+            timer.abort();
+            let _ = timer.await;
+        }
+        if let Err(error) = self.audio_capture.write().await.stop_capture().await {
+            log::warn!(
+                "Failed to stop audio capture after runtime failure ({}): {}",
+                reason,
+                error
+            );
+        }
+        self.abort_audio_processor_task(reason).await;
+        if let Some(mut provider) = self.stt_provider.write().await.take() {
+            if let Err(error) = abort_stt_provider(&mut provider, reason).await {
+                log::warn!(
+                    "Failed to abort STT provider after runtime failure ({}): {}",
+                    reason,
+                    error
+                );
+            }
+        }
+        true
     }
 
     /// Start recording and transcription
@@ -396,6 +557,9 @@ impl TranscriptionService {
             );
         }));
 
+        let (mut startup_error_gate, mut provider_on_error) =
+            stt_startup_error_callback(on_error.clone());
+
         // Проверяем можно ли переиспользовать существующее соединение
         let config = self.config.read().await.clone();
         let (mut can_reuse_connection, mut reuse_decision_reason) = {
@@ -441,14 +605,17 @@ impl TranscriptionService {
             let resume_result = {
                 let mut provider_opt = self.stt_provider.write().await;
                 if let Some(provider) = provider_opt.as_mut() {
-                    provider
-                        .resume_stream(
+                    await_stt_operation(
+                        provider.resume_stream(
                             on_partial.clone(),
                             on_final.clone(),
-                            on_error.clone(),
+                            provider_on_error.clone(),
                             on_connection_quality.clone(),
-                        )
-                        .await
+                        ),
+                        STT_START_OPERATION_TIMEOUT,
+                        "STT resume_stream",
+                    )
+                    .await
                 } else {
                     Err(SttError::Processing("Provider not available".to_string()))
                 }
@@ -468,8 +635,10 @@ impl TranscriptionService {
                     // Важно: перед тем как выкинуть провайдер, аккуратно закрываем его.
                     // Иначе есть риск оставить "висящий" WebSocket/таски в фоне.
                     if let Some(mut provider) = self.stt_provider.write().await.take() {
-                        let _ = provider.abort().await;
+                        let _ = abort_stt_provider(&mut provider, "resume failure").await;
                     }
+                    (startup_error_gate, provider_on_error) =
+                        stt_startup_error_callback(on_error.clone());
                     can_reuse_connection = false;
                 }
             }
@@ -505,7 +674,7 @@ impl TranscriptionService {
                 log::error!("Failed to initialize STT provider: {}", e);
                 let _ = self.audio_capture.write().await.stop_capture().await;
                 *self.status.write().await = RecordingStatus::Idle;
-                let _ = provider.abort().await;
+                let _ = abort_stt_provider(&mut provider, "initialize failure").await;
                 abort_prestart_visualizer_task(
                     &mut prestart_visual_task,
                     &prestart_visual_active,
@@ -514,18 +683,21 @@ impl TranscriptionService {
                 return Err(anyhow::Error::new(e).context("Failed to initialize STT provider"));
             }
 
-            if let Err(e) = provider
-                .start_stream(
+            let start_stream_result = await_stt_operation(
+                provider.start_stream(
                     on_partial.clone(),
                     on_final.clone(),
-                    on_error.clone(),
+                    provider_on_error,
                     on_connection_quality.clone(),
-                )
-                .await
-            {
+                ),
+                STT_START_OPERATION_TIMEOUT,
+                "STT start_stream",
+            )
+            .await;
+            if let Err(e) = start_stream_result {
                 let _ = self.audio_capture.write().await.stop_capture().await;
                 *self.status.write().await = RecordingStatus::Idle;
-                let _ = provider.abort().await;
+                let _ = abort_stt_provider(&mut provider, "start_stream failure").await;
                 abort_prestart_visualizer_task(
                     &mut prestart_visual_task,
                     &prestart_visual_active,
@@ -537,9 +709,39 @@ impl TranscriptionService {
             *self.stt_provider.write().await = Some(provider);
         }
 
-        // Теперь STT готов принимать аудио. Переводим статус в Recording до запуска processor task,
+        // Commit startup and Recording status under one gate. A provider error either wins
+        // before this point and turns start into Err, or is reported as a runtime failure.
+        let startup_error = {
+            let mut status = self.status.write().await;
+            let mut gate = lock_stt_startup_error_gate(&startup_error_gate);
+            if let Some(error) = gate.error.take() {
+                *status = RecordingStatus::Idle;
+                gate.committed = true;
+                Some(error)
+            } else {
+                *status = RecordingStatus::Recording;
+                gate.committed = true;
+                None
+            }
+        };
+        if let Some(error) = startup_error {
+            abort_prestart_visualizer_task(
+                &mut prestart_visual_task,
+                &prestart_visual_active,
+                "STT reported an error during startup",
+            );
+            Self::cleanup_failed_processor_session(
+                &self.status,
+                &self.audio_capture,
+                &self.stt_provider,
+                "STT runtime error during startup",
+            )
+            .await;
+            return Err(anyhow::Error::new(error));
+        }
+
+        // Теперь STT готов принимать аудио. Recording выставлен до запуска processor task,
         // чтобы предзахваченные чанки из очереди не были отброшены как "ещё Starting".
-        *self.status.write().await = RecordingStatus::Recording;
         abort_prestart_visualizer_task(
             &mut prestart_visual_task,
             &prestart_visual_active,
@@ -554,8 +756,12 @@ impl TranscriptionService {
         let audio_capture = self.audio_capture.clone();
         let on_connection_quality_for_processor = on_connection_quality.clone();
         let on_chunk_for_restart = on_chunk.clone();
+        let processor_panic_status = self.status.clone();
+        let processor_panic_audio_capture = self.audio_capture.clone();
+        let processor_panic_stt_provider = self.stt_provider.clone();
+        let processor_panic_on_error = on_error.clone();
 
-        let processor_task = tokio::spawn(async move {
+        let processor_future = async move {
             let mut chunk_count = 0;
             let mut consecutive_errors: u32 = 0;
             const MAX_CONSECUTIVE_ERRORS: u32 = 10;
@@ -575,8 +781,6 @@ impl TranscriptionService {
 
             const AUDIO_STALL_TIMEOUT: Duration = Duration::from_millis(2200);
             const AUDIO_STALL_CHECK_INTERVAL: Duration = Duration::from_millis(650);
-            const MAX_AUDIO_STALL_RESTARTS: u32 = 3;
-
             loop {
                 let maybe_chunk = tokio::select! {
                     v = rx.recv() => v,
@@ -597,11 +801,28 @@ impl TranscriptionService {
                             continue;
                         }
 
-                        stall_restarts = stall_restarts.saturating_add(1);
+                        let Some(restart_attempt) =
+                            next_audio_stall_restart_attempt(&mut stall_restarts)
+                        else {
+                            let raw = format!(
+                                "Audio capture remains stalled after {} restart attempts",
+                                MAX_AUDIO_STALL_RESTARTS
+                            );
+                            log::error!("{}", raw);
+                            on_error_for_processor(SttError::Processing(raw));
+                            Self::cleanup_failed_processor_session(
+                                &status_arc,
+                                &audio_capture,
+                                &stt_provider,
+                                "audio capture remained stalled after restart",
+                            )
+                            .await;
+                            break;
+                        };
                         log::warn!(
                             "Audio capture stalled (no chunks for {:?}). Restart attempt {}/{}",
                             AUDIO_STALL_TIMEOUT,
-                            stall_restarts,
+                            restart_attempt,
                             MAX_AUDIO_STALL_RESTARTS
                         );
 
@@ -623,7 +844,6 @@ impl TranscriptionService {
                             Ok(_) => {
                                 log::info!("Audio capture restarted successfully after stall");
                                 last_audio_at = Instant::now();
-                                stall_restarts = 0;
                                 on_connection_quality_for_processor(
                                     "Recovering".to_string(),
                                     Some("Аудио восстановлено".to_string()),
@@ -633,7 +853,7 @@ impl TranscriptionService {
                             }
                             Err(e) => {
                                 log::error!("Failed to restart audio capture after stall: {}", e);
-                                if stall_restarts < MAX_AUDIO_STALL_RESTARTS {
+                                if restart_attempt < MAX_AUDIO_STALL_RESTARTS {
                                     // Дадим шанс восстановиться (например, устройство вот-вот появится).
                                     continue;
                                 }
@@ -794,7 +1014,12 @@ impl TranscriptionService {
                     );
                 }
 
-                let send_result = provider.send_audio(&amplified_chunk).await;
+                let send_result = await_stt_operation(
+                    provider.send_audio(&amplified_chunk),
+                    STT_SEND_OPERATION_TIMEOUT,
+                    "STT send_audio",
+                )
+                .await;
 
                 match send_result {
                     Ok(_) => {
@@ -941,7 +1166,14 @@ impl TranscriptionService {
                 "Audio chunk processor finished, total chunks: {}",
                 chunk_count
             );
-        });
+        };
+        let processor_task = spawn_transcription_runtime_task(
+            processor_future,
+            processor_panic_status,
+            processor_panic_audio_capture,
+            processor_panic_stt_provider,
+            processor_panic_on_error,
+        );
 
         *self.audio_processor_task.write().await = Some(processor_task);
 
@@ -978,7 +1210,7 @@ impl TranscriptionService {
 
             // Закрываем провайдера, чтобы не оставлять "полуживой" WS/таски.
             if let Some(mut provider) = self.stt_provider.write().await.take() {
-                let _ = provider.abort().await;
+                let _ = abort_stt_provider(&mut provider, "audio capture stop failure").await;
             }
 
             *self.status.write().await = RecordingStatus::Idle;
@@ -1046,14 +1278,20 @@ impl TranscriptionService {
                 }
             };
 
-            if let Err(e) = provider.pause_stream().await {
+            let pause_result = await_stt_operation(
+                provider.pause_stream(),
+                STT_STOP_OPERATION_TIMEOUT,
+                "STT pause_stream",
+            )
+            .await;
+            if let Err(e) = pause_result {
                 log::warn!(
                     "[ReconnectDiag] failed to pause STT stream (keep-alive). Falling back to hard close: {}",
                     e
                 );
 
                 // Фоллбек: закрываем соединение полностью, чтобы не держать "полуживой" провайдер.
-                let _ = provider.abort().await;
+                let _ = abort_stt_provider(&mut provider, "pause_stream failure").await;
 
                 *self.status.write().await = RecordingStatus::Idle;
                 return Ok("Recording stopped".to_string());
@@ -1088,7 +1326,12 @@ impl TranscriptionService {
                     );
 
                     if let Some(mut provider) = stt_provider.write().await.take() {
-                        let _ = provider.stop_stream().await;
+                        if stop_stt_provider(&mut provider, "inactivity timeout")
+                            .await
+                            .is_err()
+                        {
+                            let _ = abort_stt_provider(&mut provider, "inactivity timeout").await;
+                        }
                     }
 
                     log::info!("Persistent connection closed");
@@ -1118,9 +1361,9 @@ impl TranscriptionService {
             log::info!("Stopping STT stream completely");
 
             if let Some(mut provider) = self.stt_provider.write().await.take() {
-                if let Err(e) = provider.stop_stream().await {
+                if let Err(e) = stop_stt_provider(&mut provider, "recording stop").await {
                     log::warn!("Failed to stop STT stream cleanly, aborting: {}", e);
-                    let _ = provider.abort().await;
+                    let _ = abort_stt_provider(&mut provider, "recording stop failure").await;
                 }
             }
 
@@ -1203,12 +1446,13 @@ impl TranscriptionService {
                     // Закрываем провайдера целиком: следующий start_recording создаст новое соединение
                     // и отправит новый Config message (с новым языком и т.д.).
                     if let Some(mut provider) = self.stt_provider.write().await.take() {
-                        if let Err(e) = provider.stop_stream().await {
+                        if let Err(e) = stop_stt_provider(&mut provider, "config change").await {
                             log::warn!(
                                 "Failed to stop keep-alive stream on config change, aborting: {}",
                                 e
                             );
-                            let _ = provider.abort().await;
+                            let _ =
+                                abort_stt_provider(&mut provider, "config change failure").await;
                         }
                     }
                 }
@@ -1263,10 +1507,6 @@ impl TranscriptionService {
     }
 }
 
-// Ensure TranscriptionService is thread-safe
-unsafe impl Send for TranscriptionService {}
-unsafe impl Sync for TranscriptionService {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1274,6 +1514,59 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::time::Duration;
+
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn transcription_service_thread_safety_is_compiler_checked() {
+        assert_send_sync::<TranscriptionService>();
+    }
+
+    #[tokio::test]
+    async fn stt_operation_timeout_has_typed_timeout_category() {
+        let err = await_stt_operation(
+            std::future::pending::<SttResult<()>>(),
+            Duration::from_millis(20),
+            "test STT operation",
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            SttError::Connection(connection)
+                if connection.details.category == Some(SttConnectionCategory::Timeout)
+                    && connection.message.contains("test STT operation timed out")
+        ));
+    }
+
+    #[test]
+    fn audio_stall_restart_budget_resets_only_after_real_audio() {
+        let mut completed_attempts = 0;
+
+        assert_eq!(
+            next_audio_stall_restart_attempt(&mut completed_attempts),
+            Some(1)
+        );
+        assert_eq!(
+            next_audio_stall_restart_attempt(&mut completed_attempts),
+            Some(2)
+        );
+        assert_eq!(
+            next_audio_stall_restart_attempt(&mut completed_attempts),
+            Some(3)
+        );
+        assert_eq!(
+            next_audio_stall_restart_attempt(&mut completed_attempts),
+            None
+        );
+
+        completed_attempts = 0;
+        assert_eq!(
+            next_audio_stall_restart_attempt(&mut completed_attempts),
+            Some(1)
+        );
+    }
 
     struct BurstAudioCapture {
         config: AudioConfig,
@@ -1436,6 +1729,65 @@ mod tests {
     impl SttProviderFactory for TestFactory {
         fn create(&self, _config: &SttConfig) -> SttResult<Box<dyn SttProvider>> {
             Ok(Box::new(AlwaysFailSendProvider {
+                aborted: self.aborted.clone(),
+            }))
+        }
+    }
+
+    struct StartupErrorProvider {
+        aborted: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl SttProvider for StartupErrorProvider {
+        async fn initialize(&mut self, _config: &SttConfig) -> SttResult<()> {
+            Ok(())
+        }
+
+        async fn start_stream(
+            &mut self,
+            _on_partial: TranscriptionCallback,
+            _on_final: TranscriptionCallback,
+            on_error: ErrorCallback,
+            _on_connection_quality: ConnectionQualityCallback,
+        ) -> SttResult<()> {
+            on_error(SttError::Connection(
+                crate::domain::SttConnectionError::simple(
+                    "simulated receiver failure during dictation startup",
+                ),
+            ));
+            Ok(())
+        }
+
+        async fn send_audio(&mut self, _chunk: &crate::domain::AudioChunk) -> SttResult<()> {
+            Ok(())
+        }
+
+        async fn stop_stream(&mut self) -> SttResult<()> {
+            Ok(())
+        }
+
+        async fn abort(&mut self) -> SttResult<()> {
+            self.aborted.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn name(&self) -> &str {
+            "startup_error"
+        }
+
+        fn is_online(&self) -> bool {
+            true
+        }
+    }
+
+    struct StartupErrorFactory {
+        aborted: Arc<AtomicBool>,
+    }
+
+    impl SttProviderFactory for StartupErrorFactory {
+        fn create(&self, _config: &SttConfig) -> SttResult<Box<dyn SttProvider>> {
+            Ok(Box::new(StartupErrorProvider {
                 aborted: self.aborted.clone(),
             }))
         }
@@ -2147,6 +2499,147 @@ mod tests {
         assert!(capture_stopped.load(Ordering::SeqCst));
         assert_eq!(aborted_count.load(Ordering::SeqCst), 1);
         assert_eq!(stopped_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn provider_error_during_start_is_returned_without_false_recording_state() {
+        let capture_stopped = Arc::new(AtomicBool::new(false));
+        let provider_aborted = Arc::new(AtomicBool::new(false));
+        let callback_errors = Arc::new(AtomicUsize::new(0));
+        let service = TranscriptionService::new(
+            Box::new(BurstAudioCapture::new(capture_stopped.clone(), 0)),
+            Arc::new(StartupErrorFactory {
+                aborted: provider_aborted.clone(),
+            }),
+        );
+
+        let result = service
+            .start_recording(
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                {
+                    let callback_errors = callback_errors.clone();
+                    Arc::new(move |_| {
+                        callback_errors.fetch_add(1, Ordering::SeqCst);
+                    })
+                },
+                Arc::new(|_, _| {}),
+            )
+            .await;
+
+        let error = result.expect_err("startup receiver error must fail start_recording");
+        assert!(error
+            .downcast_ref::<SttError>()
+            .expect("typed STT startup error")
+            .to_string()
+            .contains("simulated receiver failure during dictation startup"));
+        assert_eq!(service.get_status().await, RecordingStatus::Idle);
+        assert!(capture_stopped.load(Ordering::SeqCst));
+        assert!(provider_aborted.load(Ordering::SeqCst));
+        assert_eq!(callback_errors.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn runtime_failure_cleanup_stops_capture_and_aborts_provider_once() {
+        let capture_stopped = Arc::new(AtomicBool::new(false));
+        let provider_aborted = Arc::new(AtomicBool::new(false));
+        let service = TranscriptionService::new(
+            Box::new(BurstAudioCapture::new(capture_stopped.clone(), 0)),
+            Arc::new(TestFactory {
+                aborted: provider_aborted.clone(),
+            }),
+        );
+
+        service
+            .start_recording(
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .expect("recording must start");
+
+        assert!(service.cleanup_runtime_failure("test failure").await);
+        assert_eq!(service.get_status().await, RecordingStatus::Idle);
+        assert!(capture_stopped.load(Ordering::SeqCst));
+        assert!(provider_aborted.load(Ordering::SeqCst));
+        assert!(!service.cleanup_runtime_failure("duplicate failure").await);
+    }
+
+    #[tokio::test]
+    async fn audio_processor_panic_is_contained_and_cleans_runtime_resources() {
+        let capture_stopped = Arc::new(AtomicBool::new(false));
+        let provider_aborted = Arc::new(AtomicBool::new(false));
+        let service = TranscriptionService::new(
+            Box::new(BurstAudioCapture::new(capture_stopped.clone(), 4)),
+            Arc::new(TestFactory {
+                aborted: provider_aborted.clone(),
+            }),
+        );
+        let (error_tx, mut error_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+        service
+            .start_recording(
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| panic!("simulated visualization panic")),
+                Arc::new(|_| {}),
+                Arc::new(move |error| {
+                    let _ = error_tx.send(error.to_string());
+                }),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .expect("recording must start before processor panic");
+
+        let error = tokio::time::timeout(Duration::from_secs(2), error_rx.recv())
+            .await
+            .expect("processor panic error timeout")
+            .expect("processor panic error");
+        assert!(error.contains("Audio processor task panicked"));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while service.get_status().await != RecordingStatus::Idle {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("processor panic cleanup timeout");
+        assert!(capture_stopped.load(Ordering::SeqCst));
+        assert!(provider_aborted.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn processor_error_callback_panic_does_not_block_cleanup() {
+        let capture_stopped = Arc::new(AtomicBool::new(false));
+        let provider_aborted = Arc::new(AtomicBool::new(false));
+        let status = Arc::new(RwLock::new(RecordingStatus::Recording));
+        let audio_capture: Arc<RwLock<Box<dyn AudioCapture>>> = Arc::new(RwLock::new(Box::new(
+            BurstAudioCapture::new(capture_stopped.clone(), 0),
+        )));
+        let stt_provider: Arc<RwLock<Option<Box<dyn SttProvider>>>> =
+            Arc::new(RwLock::new(Some(Box::new(AlwaysFailSendProvider {
+                aborted: provider_aborted.clone(),
+            }))));
+
+        let task = spawn_transcription_runtime_task(
+            async move { panic!("simulated processor panic") },
+            status.clone(),
+            audio_capture,
+            stt_provider,
+            Arc::new(|_| panic!("simulated processor error callback panic")),
+        );
+
+        task.await
+            .expect("processor and callback panics must be contained");
+        assert_eq!(*status.read().await, RecordingStatus::Idle);
+        assert!(capture_stopped.load(Ordering::SeqCst));
+        assert!(provider_aborted.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

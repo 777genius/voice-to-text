@@ -2,12 +2,14 @@ use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use http::Request;
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
 use crate::domain::{
@@ -33,6 +35,30 @@ const DEEPGRAM_WS_URL: &str = "wss://api.deepgram.com/v1/listen";
 // Keep this aligned with the backend stream config.
 const DEEPGRAM_ENDPOINTING_MS: u32 = 300;
 const DEEPGRAM_FINALIZE_SETTLE_TIMEOUT_MS: u64 = 900;
+const DEEPGRAM_KEEPALIVE_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn await_deepgram_send<F, E>(
+    future: F,
+    operation_timeout: Duration,
+    label: &str,
+) -> SttResult<()>
+where
+    F: std::future::Future<Output = Result<(), E>>,
+    E: std::fmt::Display,
+{
+    match tokio::time::timeout(operation_timeout, future).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(deepgram_transport_error(error, label)),
+        Err(_) => Err(SttError::Connection(SttConnectionError::with_category(
+            format!(
+                "{} timed out after {} ms",
+                label,
+                operation_timeout.as_millis()
+            ),
+            SttConnectionCategory::Timeout,
+        ))),
+    }
+}
 
 fn build_keyterms_query(keyterms: &Option<String>) -> String {
     let Some(raw) = keyterms.as_deref() else {
@@ -83,6 +109,80 @@ async fn quality_callback(
         .map(|c| c.on_connection_quality.clone())
 }
 
+struct AtomicFlagReset {
+    flag: Arc<AtomicBool>,
+}
+
+impl AtomicFlagReset {
+    fn set(flag: Arc<AtomicBool>) -> Self {
+        flag.store(true, Ordering::SeqCst);
+        Self { flag }
+    }
+}
+
+impl Drop for AtomicFlagReset {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::SeqCst);
+    }
+}
+
+fn deepgram_close_error(frame: Option<&CloseFrame<'_>>, context: &str) -> SttError {
+    let (message, code, reason) = match frame {
+        Some(frame) => {
+            let code = u16::from(frame.code);
+            let reason = frame.reason.to_string();
+            let message = if reason.trim().is_empty() {
+                format!("{} (close code {})", context, code)
+            } else {
+                format!("{} (close code {}): {}", context, code, reason)
+            };
+            (message, Some(code), reason)
+        }
+        None => (context.to_string(), None, String::new()),
+    };
+    let lower = reason.to_lowercase();
+    if lower.contains("auth") || lower.contains("401") || lower.contains("403") {
+        return SttError::Authentication(message);
+    }
+
+    let category = if lower.contains("timeout") || lower.contains("net0001") {
+        SttConnectionCategory::Timeout
+    } else if matches!(code, Some(1012 | 1013 | 1014)) {
+        SttConnectionCategory::ServerUnavailable
+    } else {
+        SttConnectionCategory::Closed
+    };
+    SttError::Connection(SttConnectionError {
+        message,
+        details: SttConnectionDetails {
+            category: Some(category),
+            ws_close_code: code,
+            ..Default::default()
+        },
+    })
+}
+
+fn deepgram_transport_error(error: impl std::fmt::Display, context: &str) -> SttError {
+    SttError::Connection(SttConnectionError::with_category(
+        format!("{}: {}", context, error),
+        SttConnectionCategory::Closed,
+    ))
+}
+
+async fn emit_deepgram_receiver_error(
+    callbacks: &Arc<Mutex<Option<ActiveCallbacks>>>,
+    error: SttError,
+) {
+    let callback = callbacks
+        .lock()
+        .await
+        .as_ref()
+        .map(|callbacks| callbacks.on_error.clone());
+    if let Some(callback) = callback {
+        callback(error);
+    }
+}
+
 pub struct DeepgramProvider {
     config: Option<SttConfig>,
     is_streaming: bool,
@@ -110,9 +210,10 @@ pub struct DeepgramProvider {
     current_quality: Arc<Mutex<String>>, // текущее состояние качества связи (Good/Poor/Recovering)
 
     // Поля для автоматического переподключения
-    is_reconnecting: bool,     // флаг что идёт процесс переподключения
-    reconnect_attempts: usize, // количество попыток переподключения
+    is_reconnecting: Arc<AtomicBool>, // cancellation-safe флаг переподключения
+    reconnect_attempts: usize,        // количество попыток переподключения
     audio_buffer_during_reconnect: Arc<Mutex<Vec<AudioChunk>>>, // буфер аудио во время reconnect
+    receiver_stop_requested: Arc<AtomicBool>, // suppress expected close during stop/abort
 }
 
 impl DeepgramProvider {
@@ -140,9 +241,10 @@ impl DeepgramProvider {
             last_successful_send: None,
             last_server_response: Arc::new(Mutex::new(None)),
             current_quality: Arc::new(Mutex::new("Good".to_string())),
-            is_reconnecting: false,
+            is_reconnecting: Arc::new(AtomicBool::new(false)),
             reconnect_attempts: 0,
             audio_buffer_during_reconnect: Arc::new(Mutex::new(Vec::new())),
+            receiver_stop_requested: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -287,6 +389,8 @@ impl SttProvider for DeepgramProvider {
             on_connection_quality: on_connection_quality.clone(),
         });
         let callbacks_for_receiver = self.callbacks.clone();
+        self.receiver_stop_requested.store(false, Ordering::SeqCst);
+        let receiver_stop_requested = self.receiver_stop_requested.clone();
 
         // Канал, через который receiver сообщает pause_stream, что сервер прислал from_finalize
         // (т.е. flush после Finalize завершён и финальные результаты уже доставлены).
@@ -305,6 +409,7 @@ impl SttProvider for DeepgramProvider {
         let is_paused_flag_for_receiver = self.is_paused_flag.clone(); // клон для receiver task
         let receiver_task = tokio::spawn(async move {
             log::debug!("Deepgram receiver task started");
+            let mut terminal_error_reported = false;
 
             // Запускаем отдельную задачу для мониторинга качества связи
             let last_server_response_monitor = last_server_response_for_receiver.clone();
@@ -416,55 +521,14 @@ impl SttProvider for DeepgramProvider {
                     }
                     Ok(Message::Close(frame)) => {
                         log::info!("Deepgram WebSocket closed: {:?}", frame);
-
-                        // Проверяем тип закрытия - если это ошибка, уведомляем UI
-                        if let Some(close_frame) = &frame {
-                            let reason = close_frame.reason.to_string();
-                            let code_u16 = u16::from(close_frame.code);
-
-                            // Вызываем error callback если это не нормальное закрытие
-                            if close_frame.code
-                                != tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal
-                            {
-                                let stt_err = if reason.to_lowercase().contains("auth")
-                                    || reason.contains("401")
-                                {
-                                    SttError::Authentication(reason.clone())
-                                } else {
-                                    let category = if reason.to_lowercase().contains("timeout")
-                                        || reason.to_lowercase().contains("net0001")
-                                    {
-                                        SttConnectionCategory::Timeout
-                                    } else if matches!(code_u16, 1012 | 1013 | 1014) {
-                                        SttConnectionCategory::ServerUnavailable
-                                    } else {
-                                        SttConnectionCategory::Unknown
-                                    };
-
-                                    SttError::Connection(SttConnectionError {
-                                        message: reason.clone(),
-                                        details: SttConnectionDetails {
-                                            category: Some(category),
-                                            ws_close_code: Some(code_u16),
-                                            ..Default::default()
-                                        },
-                                    })
-                                };
-
-                                log::error!(
-                                    "Deepgram connection closed with error: {} (code: {})",
-                                    reason,
-                                    code_u16
-                                );
-                                let error_cb = callbacks_for_receiver
-                                    .lock()
-                                    .await
-                                    .as_ref()
-                                    .map(|c| c.on_error.clone());
-                                if let Some(cb) = error_cb {
-                                    cb(stt_err);
-                                }
-                            }
+                        if !receiver_stop_requested.load(Ordering::SeqCst) {
+                            let error = deepgram_close_error(
+                                frame.as_ref(),
+                                "Deepgram WebSocket closed unexpectedly",
+                            );
+                            log::error!("{}", error);
+                            emit_deepgram_receiver_error(&callbacks_for_receiver, error).await;
+                            terminal_error_reported = true;
                         }
 
                         break;
@@ -480,12 +544,28 @@ impl SttProvider for DeepgramProvider {
                     }
                     Err(e) => {
                         log::error!("Deepgram WebSocket error: {}", e);
+                        if !receiver_stop_requested.load(Ordering::SeqCst) {
+                            emit_deepgram_receiver_error(
+                                &callbacks_for_receiver,
+                                deepgram_transport_error(e, "Deepgram WebSocket read failed"),
+                            )
+                            .await;
+                            terminal_error_reported = true;
+                        }
                         break;
                     }
                     Ok(msg) => {
                         log::warn!("Deepgram unexpected message: {:?}", msg);
                     }
                 }
+            }
+
+            if !terminal_error_reported && !receiver_stop_requested.load(Ordering::SeqCst) {
+                emit_deepgram_receiver_error(
+                    &callbacks_for_receiver,
+                    deepgram_close_error(None, "Deepgram WebSocket ended unexpectedly"),
+                )
+                .await;
             }
 
             // Останавливаем задачу мониторинга качества связи
@@ -506,12 +586,18 @@ impl SttProvider for DeepgramProvider {
 
                 let keepalive_msg = json!({"type": "KeepAlive"});
                 let mut write = ws_write_for_keepalive.lock().await;
-                match write.send(Message::Text(keepalive_msg.to_string())).await {
-                    Ok(_) => {
+                match await_deepgram_send(
+                    write.send(Message::Text(keepalive_msg.to_string())),
+                    DEEPGRAM_KEEPALIVE_SEND_TIMEOUT,
+                    "Deepgram KeepAlive send failed",
+                )
+                .await
+                {
+                    Ok(()) => {
                         log::trace!("Sent KeepAlive to Deepgram");
                     }
-                    Err(e) => {
-                        log::debug!("KeepAlive failed, connection closed: {}", e);
+                    Err(error) => {
+                        log::warn!("KeepAlive failed, connection closed: {}", error);
                         break;
                     }
                 }
@@ -550,7 +636,7 @@ impl SttProvider for DeepgramProvider {
         }
 
         // Если идёт переподключение - буферизуем аудио и не пытаемся отправлять
-        if self.is_reconnecting {
+        if self.is_reconnecting.load(Ordering::SeqCst) {
             let mut buffer = self.audio_buffer_during_reconnect.lock().await;
 
             // Ограничиваем размер буфера (макс 80 чанков = ~4 секунды @ 50ms)
@@ -739,6 +825,7 @@ impl SttProvider for DeepgramProvider {
 
     async fn stop_stream(&mut self) -> SttResult<()> {
         log::info!("DeepgramProvider: Stopping stream");
+        self.receiver_stop_requested.store(true, Ordering::SeqCst);
 
         if !self.is_streaming {
             log::warn!("Stream not active");
@@ -830,7 +917,7 @@ impl SttProvider for DeepgramProvider {
         self.last_successful_send = None;
 
         // Очищаем reconnect state
-        self.is_reconnecting = false;
+        self.is_reconnecting.store(false, Ordering::SeqCst);
         self.reconnect_attempts = 0;
         self.audio_buffer_during_reconnect.lock().await.clear();
 
@@ -848,6 +935,7 @@ impl SttProvider for DeepgramProvider {
             self.sent_chunks_count,
             self.sent_bytes_total as f64 / 1024.0
         );
+        self.receiver_stop_requested.store(true, Ordering::SeqCst);
 
         // Останавливаем keepalive задачу
         if let Some(task) = self.keepalive_task.take() {
@@ -877,7 +965,7 @@ impl SttProvider for DeepgramProvider {
         self.last_successful_send = None;
 
         // Очищаем reconnect state
-        self.is_reconnecting = false;
+        self.is_reconnecting.store(false, Ordering::SeqCst);
         self.reconnect_attempts = 0;
         self.audio_buffer_during_reconnect.lock().await.clear();
 
@@ -990,7 +1078,7 @@ impl SttProvider for DeepgramProvider {
         *self.is_paused_flag.lock().await = true; // устанавливаем флаг для receiver_task
 
         // Очищаем reconnect state
-        self.is_reconnecting = false;
+        self.is_reconnecting.store(false, Ordering::SeqCst);
         self.reconnect_attempts = 0;
         self.audio_buffer_during_reconnect.lock().await.clear();
 
@@ -1172,8 +1260,8 @@ impl DeepgramProvider {
     async fn reconnect(&mut self) -> SttResult<()> {
         log::warn!("Connection lost, attempting to reconnect...");
 
-        // Устанавливаем флаг переподключения
-        self.is_reconnecting = true;
+        // Drop guard resets the flag even when a service-level timeout cancels reconnect.
+        let _reconnect_flag = AtomicFlagReset::set(self.is_reconnecting.clone());
         self.reconnect_attempts = 0;
 
         // Отправляем событие Poor с reason
@@ -1307,9 +1395,12 @@ impl DeepgramProvider {
             let last_server_response_for_receiver = self.last_server_response.clone();
             let current_quality_for_receiver = self.current_quality.clone();
             let is_paused_flag_for_receiver = self.is_paused_flag.clone(); // клон для receiver task
+            self.receiver_stop_requested.store(false, Ordering::SeqCst);
+            let receiver_stop_requested = self.receiver_stop_requested.clone();
 
             let receiver_task = tokio::spawn(async move {
                 log::debug!("Deepgram receiver task started after reconnect");
+                let mut terminal_error_reported = false;
 
                 // Мониторинг качества связи
                 let last_server_response_monitor = last_server_response_for_receiver.clone();
@@ -1417,14 +1508,44 @@ impl DeepgramProvider {
                         }
                         Ok(Message::Close(frame)) => {
                             log::info!("Deepgram WebSocket closed after reconnect: {:?}", frame);
+                            if !receiver_stop_requested.load(Ordering::SeqCst) {
+                                emit_deepgram_receiver_error(
+                                    &callbacks_for_receiver,
+                                    deepgram_close_error(
+                                        frame.as_ref(),
+                                        "Deepgram WebSocket closed after reconnect",
+                                    ),
+                                )
+                                .await;
+                                terminal_error_reported = true;
+                            }
                             break;
                         }
                         Err(e) => {
                             log::warn!("WebSocket error after reconnect: {}", e);
+                            if !receiver_stop_requested.load(Ordering::SeqCst) {
+                                emit_deepgram_receiver_error(
+                                    &callbacks_for_receiver,
+                                    deepgram_transport_error(
+                                        e,
+                                        "Deepgram WebSocket read failed after reconnect",
+                                    ),
+                                )
+                                .await;
+                                terminal_error_reported = true;
+                            }
                             break;
                         }
                         _ => {}
                     }
+                }
+
+                if !terminal_error_reported && !receiver_stop_requested.load(Ordering::SeqCst) {
+                    emit_deepgram_receiver_error(
+                        &callbacks_for_receiver,
+                        deepgram_close_error(None, "Deepgram WebSocket ended after reconnect"),
+                    )
+                    .await;
                 }
 
                 monitor_task.abort();
@@ -1442,13 +1563,16 @@ impl DeepgramProvider {
                     let keepalive_msg = json!({"type": "KeepAlive"});
                     let mut write_guard = ws_write_for_keepalive.lock().await;
 
-                    if let Err(e) = write_guard
-                        .send(Message::Text(keepalive_msg.to_string()))
-                        .await
+                    if let Err(error) = await_deepgram_send(
+                        write_guard.send(Message::Text(keepalive_msg.to_string())),
+                        DEEPGRAM_KEEPALIVE_SEND_TIMEOUT,
+                        "Deepgram KeepAlive send after reconnect failed",
+                    )
+                    .await
                     {
-                        log::debug!(
+                        log::warn!(
                             "Could not send KeepAlive after reconnect (connection closed): {}",
-                            e
+                            error
                         );
                         break;
                     }
@@ -1505,7 +1629,7 @@ impl DeepgramProvider {
             }
 
             // Сбрасываем флаг переподключения
-            self.is_reconnecting = false;
+            self.is_reconnecting.store(false, Ordering::SeqCst);
             self.reconnect_attempts = 0;
 
             return Ok(());
@@ -1513,7 +1637,7 @@ impl DeepgramProvider {
 
         // Все попытки провалились
         log::error!("Failed to reconnect after {} attempts", MAX_ATTEMPTS);
-        self.is_reconnecting = false;
+        self.is_reconnecting.store(false, Ordering::SeqCst);
         self.is_streaming = false;
 
         Err(SttError::Connection(SttConnectionError::simple(format!(
@@ -1679,8 +1803,74 @@ mod tests {
         let provider = DeepgramProvider::new();
         assert!(!provider.is_streaming);
         assert!(!provider.is_paused);
+        assert!(!provider.is_reconnecting.load(Ordering::SeqCst));
         assert_eq!(provider.audio_buffer.len(), 0);
         assert_eq!(provider.sent_chunks_count, 0);
+    }
+
+    #[test]
+    fn reconnect_flag_resets_when_future_scope_is_cancelled() {
+        let flag = Arc::new(AtomicBool::new(false));
+        {
+            let _guard = AtomicFlagReset::set(flag.clone());
+            assert!(flag.load(Ordering::SeqCst));
+        }
+        assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn unexpected_normal_close_is_still_a_closed_connection_error() {
+        let frame = CloseFrame {
+            code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
+            reason: "server ended session".into(),
+        };
+
+        assert!(matches!(
+            deepgram_close_error(Some(&frame), "unexpected close"),
+            SttError::Connection(connection)
+                if connection.details.category == Some(SttConnectionCategory::Closed)
+                    && connection.details.ws_close_code == Some(1000)
+        ));
+    }
+
+    #[test]
+    fn close_error_preserves_authentication_and_timeout_types() {
+        let auth = CloseFrame {
+            code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy,
+            reason: "401 authentication failed".into(),
+        };
+        let timeout = CloseFrame {
+            code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Error,
+            reason: "NET0001 timeout".into(),
+        };
+
+        assert!(matches!(
+            deepgram_close_error(Some(&auth), "closed"),
+            SttError::Authentication(_)
+        ));
+        assert!(matches!(
+            deepgram_close_error(Some(&timeout), "closed"),
+            SttError::Connection(connection)
+                if connection.details.category == Some(SttConnectionCategory::Timeout)
+        ));
+    }
+
+    #[tokio::test]
+    async fn websocket_send_timeout_is_typed_and_bounded() {
+        let error = await_deepgram_send(
+            std::future::pending::<Result<(), std::io::Error>>(),
+            Duration::from_millis(20),
+            "test keepalive",
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            SttError::Connection(connection)
+                if connection.details.category == Some(SttConnectionCategory::Timeout)
+                    && connection.message.contains("test keepalive timed out")
+        ));
     }
 
     #[test]

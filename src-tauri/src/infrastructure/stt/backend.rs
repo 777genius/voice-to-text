@@ -194,6 +194,35 @@ fn server_error_closes_stream(code: &str) -> bool {
     )
 }
 
+async fn report_backend_unexpected_eof(
+    callbacks_state: &Arc<Mutex<CallbackState>>,
+    is_closed: &Arc<AtomicBool>,
+    server_error_reported: bool,
+) {
+    if server_error_reported
+        || is_closed
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+    {
+        return;
+    }
+
+    log::warn!("Backend WebSocket stream ended without a close frame");
+    let callback = {
+        let state = callbacks_state.lock().await;
+        state.error_callback()
+    };
+    if let Some(callback) = callback {
+        callback(SttError::Connection(SttConnectionError {
+            message: "WebSocket stream ended without a close frame".to_string(),
+            details: SttConnectionDetails {
+                category: Some(SttConnectionCategory::Closed),
+                ..Default::default()
+            },
+        }));
+    }
+}
+
 impl BackendProvider {
     pub fn new() -> Self {
         Self {
@@ -1141,6 +1170,9 @@ impl SttProvider for BackendProvider {
                     }
                 }
             }
+
+            report_backend_unexpected_eof(&callbacks_state, &is_closed_flag, server_error_reported)
+                .await;
 
             // На выходе из loop всегда помечаем соединение закрытым
             is_closed_flag.store(true, Ordering::SeqCst);
@@ -2131,6 +2163,34 @@ mod tests {
         assert!(server_error_closes_stream("PROVIDER_QUOTA_EXCEEDED"));
         assert!(server_error_closes_stream("PROVIDER_UNAVAILABLE"));
         assert!(!server_error_closes_stream("BAD_REQUEST"));
+    }
+
+    #[tokio::test]
+    async fn unexpected_eof_reports_closed_connection_once() {
+        let reported = Arc::new(AtomicUsize::new(0));
+        let reported_for_callback = reported.clone();
+        let callbacks = Arc::new(Mutex::new(CallbackState {
+            active: Some(CallbackSet {
+                on_partial: Arc::new(|_| {}),
+                on_final: Arc::new(|_| {}),
+                on_error: Arc::new(move |error| {
+                    let SttError::Connection(error) = error else {
+                        panic!("expected connection error");
+                    };
+                    assert_eq!(error.details.category, Some(SttConnectionCategory::Closed));
+                    reported_for_callback.fetch_add(1, Ordering::SeqCst);
+                }),
+                on_connection_quality: Arc::new(|_, _| {}),
+            }),
+            ..Default::default()
+        }));
+        let is_closed = Arc::new(AtomicBool::new(false));
+
+        report_backend_unexpected_eof(&callbacks, &is_closed, false).await;
+        report_backend_unexpected_eof(&callbacks, &is_closed, false).await;
+
+        assert!(is_closed.load(Ordering::SeqCst));
+        assert_eq!(reported.load(Ordering::SeqCst), 1);
     }
 
     #[test]
