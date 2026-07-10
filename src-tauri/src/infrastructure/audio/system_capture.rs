@@ -85,6 +85,8 @@ struct CaptureCallbackGate {
     generation: Arc<AtomicU64>,
 }
 
+type CaptureCallbackSlot = Arc<Mutex<Option<AudioChunkCallback>>>;
+
 impl CaptureCallbackGate {
     fn begin_capture(&self) -> u64 {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -100,6 +102,37 @@ impl CaptureCallbackGate {
     fn should_emit(&self, generation: u64) -> bool {
         self.running.load(Ordering::Relaxed)
             && self.generation.load(Ordering::Relaxed) == generation
+    }
+}
+
+fn emit_capture_chunk(callback_slot: &CaptureCallbackSlot, chunk: AudioChunk) {
+    let callback = match callback_slot.lock() {
+        Ok(callback) => callback.clone(),
+        Err(err) => {
+            log::error!("Audio capture callback slot poisoned: {}", err);
+            return;
+        }
+    };
+    if let Some(callback) = callback {
+        callback(chunk);
+    }
+}
+
+fn deactivate_capture_after_stream_error(
+    callback_gate: &CaptureCallbackGate,
+    callback_slot: &CaptureCallbackSlot,
+) {
+    callback_gate.stop_capture();
+    match callback_slot.lock() {
+        Ok(mut callback) => {
+            *callback = None;
+        }
+        Err(err) => {
+            log::error!(
+                "Audio capture callback slot poisoned during stream failure: {}",
+                err
+            );
+        }
     }
 }
 
@@ -441,7 +474,8 @@ impl AudioCapture for SystemAudioCapture {
             let stream_config: StreamConfig = self.native_config.clone().into();
             let sample_format = self.native_config.sample_format();
 
-            let on_chunk_cb = on_chunk.clone();
+            let callback_slot: CaptureCallbackSlot = Arc::new(Mutex::new(Some(on_chunk.clone())));
+            let callback_slot_for_audio = callback_slot.clone();
             let capture_generation = self.callback_gate.begin_capture();
             let callback_gate = self.callback_gate.clone();
             let process_pcm = move |mut pcm_samples: Vec<i16>| {
@@ -476,11 +510,10 @@ impl AudioCapture for SystemAudioCapture {
                             if !callback_gate.should_emit(capture_generation) {
                                 return;
                             }
-                            on_chunk_cb(AudioChunk::new(
-                                final_samples,
-                                target_sample_rate,
-                                target_channels,
-                            ));
+                            emit_capture_chunk(
+                                &callback_slot_for_audio,
+                                AudioChunk::new(final_samples, target_sample_rate, target_channels),
+                            );
                         }
                     }
                     return;
@@ -519,12 +552,18 @@ impl AudioCapture for SystemAudioCapture {
                     if !callback_gate.should_emit(capture_generation) {
                         return;
                     }
-                    on_chunk_cb(audio_chunk);
+                    emit_capture_chunk(&callback_slot_for_audio, audio_chunk);
                 }
             };
 
-            let err_fn = |err| {
+            let callback_gate_for_error = self.callback_gate.clone();
+            let callback_slot_for_error = callback_slot.clone();
+            let err_fn = move |err: cpal::StreamError| {
                 log::error!("Audio stream error: {}", err);
+                deactivate_capture_after_stream_error(
+                    &callback_gate_for_error,
+                    &callback_slot_for_error,
+                );
             };
 
             let stream_result: AudioResult<Stream> = match sample_format {
@@ -692,6 +731,18 @@ mod tests {
 
         gate.stop_capture();
         assert!(!gate.should_emit(second_generation));
+    }
+
+    #[test]
+    fn stream_error_revokes_callback_and_stops_capture_generation() {
+        let gate = CaptureCallbackGate::default();
+        let generation = gate.begin_capture();
+        let callback_slot: CaptureCallbackSlot = Arc::new(Mutex::new(Some(Arc::new(|_chunk| {}))));
+
+        deactivate_capture_after_stream_error(&gate, &callback_slot);
+
+        assert!(!gate.should_emit(generation));
+        assert!(callback_slot.lock().unwrap().is_none());
     }
 
     #[tokio::test]

@@ -3,7 +3,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -23,6 +23,8 @@ const REQUIRED_COMMANDS: &[&str] = &["pactl", "pacat", "parec"];
 const PULSE_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const PULSE_CHILD_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const PULSE_PLAYBACK_LATENCY_PADDING: Duration = Duration::from_millis(160);
+const PULSE_OUTPUT_HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const PULSE_OUTPUT_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 struct LinuxPulseConfig {
@@ -138,6 +140,11 @@ async fn run_pulse_command_with_timeout(
 }
 
 async fn stop_pulse_child(mut child: Child, label: &str) {
+    match child.try_wait() {
+        Ok(Some(_status)) => return,
+        Ok(None) => {}
+        Err(err) => log::warn!("{} status check failed before kill: {}", label, err),
+    }
     if let Err(err) = child.start_kill() {
         log::warn!("{} kill failed: {}", label, err);
         return;
@@ -330,6 +337,7 @@ pub struct LinuxPulseAudioOutput {
     state: Arc<Mutex<LinuxPulseOutputState>>,
     is_open: Arc<AtomicBool>,
     pending_until: Arc<StdMutex<Option<Instant>>>,
+    monitor_task: Option<JoinHandle<()>>,
 }
 
 impl LinuxPulseAudioOutput {
@@ -349,6 +357,7 @@ impl LinuxPulseAudioOutput {
             })),
             is_open: Arc::new(AtomicBool::new(false)),
             pending_until: Arc::new(StdMutex::new(None)),
+            monitor_task: None,
         }
     }
 
@@ -371,6 +380,57 @@ impl LinuxPulseAudioOutput {
                 PULSE_PLAYBACK_LATENCY_PADDING,
             );
         }
+    }
+}
+
+fn spawn_pulse_output_monitor(
+    state: Arc<Mutex<LinuxPulseOutputState>>,
+    is_open: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(PULSE_OUTPUT_HEALTH_POLL_INTERVAL).await;
+            if !is_open.load(Ordering::SeqCst) {
+                return;
+            }
+
+            let process_status = {
+                let mut state = state.lock().await;
+                match state.child.as_mut() {
+                    Some(child) => child.try_wait(),
+                    None => return,
+                }
+            };
+
+            match process_status {
+                Ok(Some(status)) => {
+                    log::error!("pacat exited unexpectedly with status {}", status);
+                    is_open.store(false, Ordering::SeqCst);
+                    return;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    log::error!("pacat status check failed: {}", err);
+                    is_open.store(false, Ordering::SeqCst);
+                    return;
+                }
+            }
+        }
+    })
+}
+
+async fn write_pulse_output_with_timeout<W>(
+    writer: &mut W,
+    bytes: &[u8],
+    timeout: Duration,
+) -> Result<(), String>
+where
+    W: AsyncWrite + Unpin,
+{
+    match tokio::time::timeout(timeout, writer.write_all(bytes)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(err.to_string()),
+        Err(_) => Err(format!("write timed out after {} ms", timeout.as_millis())),
     }
 }
 
@@ -418,7 +478,7 @@ impl TranslationAudioOutput for LinuxPulseAudioOutput {
             .arg("--latency-msec=80")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn();
         let mut child = match spawn_result {
             Ok(child) => child,
@@ -447,6 +507,10 @@ impl TranslationAudioOutput for LinuxPulseAudioOutput {
         state.config = Some(config);
         state.virtual_device_session = Some(virtual_device_session);
         self.is_open.store(true, Ordering::SeqCst);
+        self.monitor_task = Some(spawn_pulse_output_monitor(
+            self.state.clone(),
+            self.is_open.clone(),
+        ));
         Ok(())
     }
 
@@ -469,10 +533,12 @@ impl TranslationAudioOutput for LinuxPulseAudioOutput {
             .stdin
             .as_mut()
             .ok_or(TranslationAudioOutputError::Closed)?;
-        stdin
-            .write_all(&bytes)
-            .await
-            .map_err(|e| TranslationAudioOutputError::Stream(e.to_string()))?;
+        if let Err(err) =
+            write_pulse_output_with_timeout(stdin, &bytes, PULSE_OUTPUT_WRITE_TIMEOUT).await
+        {
+            self.is_open.store(false, Ordering::SeqCst);
+            return Err(TranslationAudioOutputError::Stream(err.to_string()));
+        }
         drop(state);
 
         self.extend_pending_estimate(samples.len(), config);
@@ -481,6 +547,10 @@ impl TranslationAudioOutput for LinuxPulseAudioOutput {
 
     async fn close(&mut self) -> TranslationAudioOutputResult<()> {
         self.is_open.store(false, Ordering::SeqCst);
+        if let Some(task) = self.monitor_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
         if let Ok(mut pending) = self.pending_until.lock() {
             *pending = None;
         }
@@ -540,6 +610,31 @@ pub struct LinuxPulseMonitorCapture {
     is_capturing: bool,
 }
 
+fn decode_s16le_chunk(bytes: &[u8], pending_low_byte: &mut Option<u8>) -> Vec<i16> {
+    let mut samples =
+        Vec::with_capacity((bytes.len() + usize::from(pending_low_byte.is_some())) / 2);
+    let mut offset = 0usize;
+
+    if let Some(low) = pending_low_byte.take() {
+        let Some(&high) = bytes.first() else {
+            *pending_low_byte = Some(low);
+            return samples;
+        };
+        samples.push(i16::from_le_bytes([low, high]));
+        offset = 1;
+    }
+
+    let paired_len = ((bytes.len() - offset) / 2) * 2;
+    for chunk in bytes[offset..offset + paired_len].chunks_exact(2) {
+        samples.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+    }
+    if offset + paired_len < bytes.len() {
+        *pending_low_byte = bytes.last().copied();
+    }
+
+    samples
+}
+
 impl LinuxPulseMonitorCapture {
     pub fn new_default(target: AudioCaptureTarget) -> Self {
         Self::new_with_runner(target, default_runner())
@@ -591,14 +686,19 @@ impl AudioCapture for LinuxPulseMonitorCapture {
             .arg(format!("--rate={}", self.target.sample_rate))
             .arg(format!("--channels={}", self.target.channels))
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|e| AudioError::Capture(format!("Failed to start parec: {}", e)))?;
 
-        let mut stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| AudioError::Capture("parec stdout is not available".to_string()))?;
+        let mut stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                stop_pulse_child(child, "parec").await;
+                return Err(AudioError::Capture(
+                    "parec stdout is not available".to_string(),
+                ));
+            }
+        };
 
         self.running.store(true, Ordering::SeqCst);
         let running = self.running.clone();
@@ -607,6 +707,7 @@ impl AudioCapture for LinuxPulseMonitorCapture {
             let bytes_per_sample = 2usize;
             let chunk_samples = (target.sample_rate as usize / 10).max(320);
             let mut buffer = vec![0u8; chunk_samples * bytes_per_sample];
+            let mut pending_low_byte = None;
 
             while running.load(Ordering::SeqCst) {
                 let read = match stdout.read(&mut buffer).await {
@@ -617,13 +718,9 @@ impl AudioCapture for LinuxPulseMonitorCapture {
                         break;
                     }
                 };
-                let sample_count = read / bytes_per_sample;
-                if sample_count == 0 {
+                let samples = decode_s16le_chunk(&buffer[..read], &mut pending_low_byte);
+                if samples.is_empty() {
                     continue;
-                }
-                let mut samples = Vec::with_capacity(sample_count);
-                for chunk in buffer[..sample_count * bytes_per_sample].chunks_exact(2) {
-                    samples.push(i16::from_le_bytes([chunk[0], chunk[1]]));
                 }
                 on_chunk(AudioChunk::new(
                     samples,
@@ -914,5 +1011,64 @@ mod tests {
                 if message.contains("already open")
         ));
         assert!(runner.loaded_args.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pulse_output_monitor_marks_closed_after_unexpected_child_exit() {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let state = Arc::new(Mutex::new(LinuxPulseOutputState {
+            child: Some(child),
+            stdin: None,
+            config: None,
+            virtual_device_session: None,
+        }));
+        let is_open = Arc::new(AtomicBool::new(true));
+
+        let monitor = spawn_pulse_output_monitor(state.clone(), is_open.clone());
+        tokio::time::timeout(Duration::from_secs(2), monitor)
+            .await
+            .expect("pulse output monitor must observe child exit")
+            .expect("pulse output monitor must not panic");
+
+        assert!(!is_open.load(Ordering::SeqCst));
+        let child = state.lock().await.child.take().unwrap();
+        stop_pulse_child(child, "test-pacat").await;
+    }
+
+    #[test]
+    fn pulse_capture_preserves_pcm16_samples_across_odd_read_boundaries() {
+        let expected = [0x1234i16, -2i16, i16::MIN];
+        let bytes: Vec<u8> = expected
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
+        let mut pending = None;
+        let mut decoded = Vec::new();
+
+        decoded.extend(decode_s16le_chunk(&bytes[..1], &mut pending));
+        decoded.extend(decode_s16le_chunk(&bytes[1..4], &mut pending));
+        decoded.extend(decode_s16le_chunk(&bytes[4..5], &mut pending));
+        decoded.extend(decode_s16le_chunk(&bytes[5..], &mut pending));
+
+        assert_eq!(decoded, expected);
+        assert!(pending.is_none());
+    }
+
+    #[tokio::test]
+    async fn pulse_output_write_times_out_when_consumer_stalls() {
+        let (mut writer, _reader) = tokio::io::duplex(1);
+        let err =
+            write_pulse_output_with_timeout(&mut writer, &[1, 2, 3, 4], Duration::from_millis(20))
+                .await
+                .unwrap_err();
+
+        assert!(err.contains("timed out"));
     }
 }

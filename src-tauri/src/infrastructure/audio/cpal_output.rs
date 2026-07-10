@@ -92,6 +92,8 @@ pub struct CpalAudioOutput {
     /// Готовый к воспроизведению буфер f32, уже в native sample rate и channel layout.
     output_ready: Arc<Mutex<VecDeque<f32>>>,
     playback_state: Arc<Mutex<OutputPlaybackState>>,
+    /// CPAL reports device loss asynchronously through the stream error callback.
+    stream_error: Arc<Mutex<Option<String>>>,
     /// Resampler 24 kHz mono → native sample rate mono (если нужно).
     resampler: Option<Arc<Mutex<SincFixedIn<f32>>>>,
     /// Признак что output открыт (атомарно бы лучше, но используем под общим контролем).
@@ -144,6 +146,7 @@ impl CpalAudioOutput {
             source_queue: Arc::new(Mutex::new(VecDeque::with_capacity(48_000))),
             output_ready: Arc::new(Mutex::new(VecDeque::with_capacity(192_000))),
             playback_state: Arc::new(Mutex::new(OutputPlaybackState::default())),
+            stream_error: Arc::new(Mutex::new(None)),
             resampler: None,
             is_open: false,
         }
@@ -230,13 +233,13 @@ impl CpalAudioOutput {
         native_channels: usize,
         max_buffered_frames: usize,
         flush_partial: bool,
-    ) {
+    ) -> AudioOutputResult<()> {
         // Берём всё что есть, но обрабатываем фиксированными чанками RESAMPLER_CHUNK_SIZE.
         let mut local_chunks: Vec<Vec<i16>> = Vec::new();
         {
-            let Ok(mut q) = source_queue.lock() else {
-                return;
-            };
+            let mut q = source_queue
+                .lock()
+                .map_err(|_| AudioOutputError::Stream("source_queue poisoned".into()))?;
             while q.len() >= RESAMPLER_CHUNK_SIZE {
                 let chunk: Vec<i16> = q.drain(..RESAMPLER_CHUNK_SIZE).collect();
                 local_chunks.push(chunk);
@@ -252,23 +255,20 @@ impl CpalAudioOutput {
         }
 
         if local_chunks.is_empty() {
-            return;
+            return Ok(());
         }
 
         let mut expanded_samples = Vec::new();
         for chunk in local_chunks {
             let mono_f32: Vec<f32> = chunk.iter().map(|&s| s as f32 / 32_768.0).collect();
             let native_mono: Vec<f32> = if let Some(rs) = resampler {
-                let Ok(mut r) = rs.lock() else {
-                    continue;
-                };
-                match r.process(&[mono_f32], None) {
-                    Ok(mut output_per_channel) => output_per_channel.pop().unwrap_or_default(),
-                    Err(e) => {
-                        log::error!("Output resample error: {}", e);
-                        continue;
-                    }
-                }
+                let mut r = rs
+                    .lock()
+                    .map_err(|_| AudioOutputError::Resample("resampler state poisoned".into()))?;
+                let mut output_per_channel = r
+                    .process(&[mono_f32], None)
+                    .map_err(|e| AudioOutputError::Resample(e.to_string()))?;
+                output_per_channel.pop().unwrap_or_default()
             } else {
                 mono_f32
             };
@@ -282,12 +282,12 @@ impl CpalAudioOutput {
         }
 
         if expanded_samples.is_empty() {
-            return;
+            return Ok(());
         }
 
-        let Ok(mut out) = output_ready.lock() else {
-            return;
-        };
+        let mut out = output_ready
+            .lock()
+            .map_err(|_| AudioOutputError::Stream("output_ready poisoned".into()))?;
         out.extend(expanded_samples);
 
         // Bounded queue: если выросло выше потолка (frames * channels) — дропаем старые сэмплы.
@@ -304,6 +304,7 @@ impl CpalAudioOutput {
                 native_channels
             );
         }
+        Ok(())
     }
 
     fn build_stream(
@@ -311,11 +312,20 @@ impl CpalAudioOutput {
         native: &SupportedStreamConfig,
         output_ready: Arc<Mutex<VecDeque<f32>>>,
         playback_state: Arc<Mutex<OutputPlaybackState>>,
+        stream_error: Arc<Mutex<Option<String>>>,
         prebuffer_samples: usize,
     ) -> AudioOutputResult<Stream> {
         let stream_config: StreamConfig = native.clone().into();
         let sample_format = native.sample_format();
-        let err_fn = |err| log::error!("CpalAudioOutput stream error: {}", err);
+        let err_fn = move |err: cpal::StreamError| {
+            let message = err.to_string();
+            log::error!("CpalAudioOutput stream error: {}", message);
+            if let Ok(mut stored_error) = stream_error.lock() {
+                if stored_error.is_none() {
+                    *stored_error = Some(message);
+                }
+            }
+        };
 
         let make_callback = || {
             let q = output_ready.clone();
@@ -378,6 +388,7 @@ impl CpalAudioOutput {
         if !self.is_open {
             return Ok(Duration::ZERO);
         }
+        self.ensure_stream_healthy()?;
         let Some(native) = self.native_config.as_ref() else {
             return Err(AudioOutputError::Closed);
         };
@@ -392,7 +403,7 @@ impl CpalAudioOutput {
             native.channels() as usize,
             cfg.drain_max_buffered_frames,
             true,
-        );
+        )?;
 
         let pending = self.pending_playback_duration();
         if pending > Duration::ZERO {
@@ -401,6 +412,20 @@ impl CpalAudioOutput {
             }
         }
         Ok(pending)
+    }
+
+    fn ensure_stream_healthy(&self) -> AudioOutputResult<()> {
+        let stored_error = self
+            .stream_error
+            .lock()
+            .map_err(|_| AudioOutputError::Stream("stream_error state poisoned".into()))?;
+        match stored_error.as_ref() {
+            Some(message) => Err(AudioOutputError::Stream(format!(
+                "virtual microphone output stream failed: {}",
+                message
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// Estimated amount of audio still queued for playback.
@@ -491,6 +516,9 @@ impl TranslationAudioOutput for CpalAudioOutput {
             state.prebuffering = true;
             state.draining = false;
         }
+        if let Ok(mut stream_error) = self.stream_error.lock() {
+            *stream_error = None;
+        }
 
         let prebuffer_frames =
             ((native_sr as u64).saturating_mul(config.prebuffer_ms) / 1000).max(1) as usize;
@@ -501,6 +529,7 @@ impl TranslationAudioOutput for CpalAudioOutput {
             &native,
             self.output_ready.clone(),
             self.playback_state.clone(),
+            self.stream_error.clone(),
             prebuffer_samples,
         )?;
         stream
@@ -523,6 +552,7 @@ impl TranslationAudioOutput for CpalAudioOutput {
         if !self.is_open {
             return Err(AudioOutputError::Closed);
         }
+        self.ensure_stream_healthy()?;
         if samples.is_empty() {
             return Ok(());
         }
@@ -559,7 +589,7 @@ impl TranslationAudioOutput for CpalAudioOutput {
             native_channels,
             max_buffered_frames,
             false,
-        );
+        )?;
 
         Ok(())
     }
@@ -584,12 +614,15 @@ impl TranslationAudioOutput for CpalAudioOutput {
             state.prebuffering = true;
             state.draining = false;
         }
+        if let Ok(mut stream_error) = self.stream_error.lock() {
+            *stream_error = None;
+        }
         log::info!("CpalAudioOutput closed");
         Ok(())
     }
 
     fn is_open(&self) -> bool {
-        self.is_open
+        self.is_open && self.ensure_stream_healthy().is_ok()
     }
 
     fn device_name(&self) -> Option<String> {
@@ -727,6 +760,22 @@ mod tests {
     }
 
     #[test]
+    fn asynchronous_stream_failure_becomes_output_error() {
+        let out = CpalAudioOutput::new();
+        *out.stream_error.lock().unwrap() = Some("device disappeared".to_string());
+
+        let err = out
+            .ensure_stream_healthy()
+            .expect_err("stored CPAL failure must be observable by the service");
+
+        assert!(matches!(
+            err,
+            AudioOutputError::Stream(message)
+                if message.contains("device disappeared")
+        ));
+    }
+
+    #[test]
     fn fill_output_waits_for_prebuffer_and_rebuffers_after_underrun() {
         let queue = Arc::new(Mutex::new(VecDeque::from(vec![0.1, 0.2, 0.3, 0.4])));
         let state = Arc::new(Mutex::new(OutputPlaybackState::default()));
@@ -800,7 +849,7 @@ mod tests {
         ])));
         let ready = Arc::new(Mutex::new(VecDeque::new()));
 
-        CpalAudioOutput::drain_source_and_push(&source, &ready, &None, 2, 3, true);
+        CpalAudioOutput::drain_source_and_push(&source, &ready, &None, 2, 3, true).unwrap();
 
         assert!(source.lock().unwrap().is_empty());
         let ready: Vec<f32> = ready.lock().unwrap().iter().copied().collect();
@@ -809,5 +858,35 @@ mod tests {
         assert_eq!(ready[1], 3000.0 / 32_768.0);
         assert_eq!(ready[4], 5000.0 / 32_768.0);
         assert_eq!(ready[5], 5000.0 / 32_768.0);
+    }
+
+    #[test]
+    fn output_pipeline_propagates_poisoned_resampler_state() {
+        let source = Arc::new(Mutex::new(VecDeque::from(vec![1i16; RESAMPLER_CHUNK_SIZE])));
+        let ready = Arc::new(Mutex::new(VecDeque::new()));
+        let resampler = Arc::new(Mutex::new(
+            CpalAudioOutput::build_resampler(24_000, 48_000).unwrap(),
+        ));
+        let poisoned = resampler.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.lock().unwrap();
+            panic!("poison test resampler");
+        })
+        .join();
+
+        let err = CpalAudioOutput::drain_source_and_push(
+            &source,
+            &ready,
+            &Some(resampler),
+            2,
+            48_000,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            AudioOutputError::Resample(message) if message.contains("poisoned")
+        ));
     }
 }

@@ -12,6 +12,34 @@ use crate::domain::{
 use super::SystemAudioCapture;
 
 const RESAMPLER_CHUNK_SIZE: usize = 1024;
+type LoopbackCallbackSlot = Arc<Mutex<Option<AudioChunkCallback>>>;
+
+fn emit_loopback_chunk(callback_slot: &LoopbackCallbackSlot, chunk: AudioChunk) {
+    let callback = match callback_slot.lock() {
+        Ok(callback) => callback.clone(),
+        Err(err) => {
+            log::error!("WASAPI loopback callback slot poisoned: {}", err);
+            return;
+        }
+    };
+    if let Some(callback) = callback {
+        callback(chunk);
+    }
+}
+
+fn revoke_loopback_callback(callback_slot: &LoopbackCallbackSlot) {
+    match callback_slot.lock() {
+        Ok(mut callback) => {
+            *callback = None;
+        }
+        Err(err) => {
+            log::error!(
+                "WASAPI loopback callback slot poisoned during stream failure: {}",
+                err
+            );
+        }
+    }
+}
 
 pub struct WindowsWasapiLoopbackCapture {
     device: Device,
@@ -87,7 +115,8 @@ impl AudioCapture for WindowsWasapiLoopbackCapture {
 
         let resampler_clone = resampler.clone();
         let input_buffer_clone = input_buffer.clone();
-        let on_chunk_cb = on_chunk.clone();
+        let callback_slot: LoopbackCallbackSlot = Arc::new(Mutex::new(Some(on_chunk)));
+        let callback_slot_for_audio = callback_slot.clone();
         let process_pcm = move |mut pcm_samples: Vec<i16>| {
             if native_channels > 1 {
                 pcm_samples = SystemAudioCapture::downmix_to_mono(&pcm_samples, native_channels);
@@ -124,16 +153,19 @@ impl AudioCapture for WindowsWasapiLoopbackCapture {
                     chunk
                 };
 
-                on_chunk_cb(AudioChunk::new(
-                    final_samples,
-                    target_sample_rate,
-                    target_channels,
-                ));
+                emit_loopback_chunk(
+                    &callback_slot_for_audio,
+                    AudioChunk::new(final_samples, target_sample_rate, target_channels),
+                );
             }
         };
 
         let stream_config: StreamConfig = self.native_config.clone().into();
-        let err_fn = |err| log::error!("WASAPI loopback stream error: {}", err);
+        let callback_slot_for_error = callback_slot.clone();
+        let err_fn = move |err: cpal::StreamError| {
+            log::error!("WASAPI loopback stream error: {}", err);
+            revoke_loopback_callback(&callback_slot_for_error);
+        };
         let stream_result = match self.native_config.sample_format() {
             SampleFormat::F32 => self.device.build_input_stream(
                 &stream_config,

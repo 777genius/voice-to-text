@@ -42,6 +42,8 @@ struct CaptureCallbackGate {
     generation: Arc<AtomicU64>,
 }
 
+type CaptureCallbackSlot = Arc<Mutex<Option<AudioChunkCallback>>>;
+
 impl CaptureCallbackGate {
     fn begin_capture(&self) -> u64 {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -57,6 +59,37 @@ impl CaptureCallbackGate {
     fn should_emit(&self, generation: u64) -> bool {
         self.running.load(Ordering::Relaxed)
             && self.generation.load(Ordering::Relaxed) == generation
+    }
+}
+
+fn emit_capture_chunk(callback_slot: &CaptureCallbackSlot, chunk: AudioChunk) {
+    let callback = match callback_slot.lock() {
+        Ok(callback) => callback.clone(),
+        Err(err) => {
+            log::error!("ScreenCaptureKit callback slot poisoned: {}", err);
+            return;
+        }
+    };
+    if let Some(callback) = callback {
+        callback(chunk);
+    }
+}
+
+fn deactivate_capture_after_stream_error(
+    callback_gate: &CaptureCallbackGate,
+    callback_slot: &CaptureCallbackSlot,
+) {
+    callback_gate.stop_capture();
+    match callback_slot.lock() {
+        Ok(mut callback) => {
+            *callback = None;
+        }
+        Err(err) => {
+            log::error!(
+                "ScreenCaptureKit callback slot poisoned during stream failure: {}",
+                err
+            );
+        }
     }
 }
 
@@ -268,10 +301,20 @@ impl AudioCapture for MacosSystemAudioCapture {
 
         let pipeline: Arc<Mutex<PipelineState>> = Arc::new(Mutex::new(PipelineState::Pending));
         let pipeline_for_cb = pipeline.clone();
-        let on_chunk_cb = on_chunk.clone();
+        let callback_slot: CaptureCallbackSlot = Arc::new(Mutex::new(Some(on_chunk)));
+        let callback_slot_for_audio = callback_slot.clone();
         let callback_gate = self.callback_gate.clone();
+        let callback_gate_for_error = self.callback_gate.clone();
+        let callback_slot_for_error = callback_slot.clone();
+        let error_handler = ErrorHandler::new(move |error| {
+            log::error!("ScreenCaptureKit stream error: {}", error);
+            deactivate_capture_after_stream_error(
+                &callback_gate_for_error,
+                &callback_slot_for_error,
+            );
+        });
 
-        let mut stream = SCStream::new(&filter, &config);
+        let mut stream = SCStream::new_with_delegate(&filter, &config, error_handler);
         let added = stream.add_output_handler(
             move |sample: CMSampleBuffer, _output: SCStreamOutputType| {
                 if !callback_gate.should_emit(capture_generation) {
@@ -327,7 +370,10 @@ impl AudioCapture for MacosSystemAudioCapture {
                         return;
                     }
                     if !frame.is_empty() {
-                        on_chunk_cb(AudioChunk::new(frame, TARGET_SAMPLE_RATE, TARGET_CHANNELS));
+                        emit_capture_chunk(
+                            &callback_slot_for_audio,
+                            AudioChunk::new(frame, TARGET_SAMPLE_RATE, TARGET_CHANNELS),
+                        );
                     }
                 }
             },
@@ -482,6 +528,18 @@ mod tests {
 
         gate.stop_capture();
         assert!(!gate.should_emit(second_generation));
+    }
+
+    #[test]
+    fn stream_error_revokes_callback_and_stops_capture_generation() {
+        let gate = CaptureCallbackGate::default();
+        let generation = gate.begin_capture();
+        let callback_slot: CaptureCallbackSlot = Arc::new(Mutex::new(Some(Arc::new(|_chunk| {}))));
+
+        deactivate_capture_after_stream_error(&gate, &callback_slot);
+
+        assert!(!gate.should_emit(generation));
+        assert!(callback_slot.lock().unwrap().is_none());
     }
 
     #[test]
