@@ -2941,8 +2941,14 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         await reconcileIncomingTranslationState('start_command_success');
       }
     } catch (err) {
-      incomingTranslationError.value = String(err);
+      const commandError = String(err);
+      incomingTranslationError.value = commandError;
       incomingTranslationStatus.value = shouldStop ? statusBeforeCommand : RecordingStatus.Error;
+      await reconcileIncomingTranslationState(`${command}_failure`);
+      if (!shouldStop && incomingTranslationStatus.value === RecordingStatus.Idle) {
+        incomingTranslationStatus.value = RecordingStatus.Error;
+        incomingTranslationError.value = commandError;
+      }
     } finally {
       incomingTranslationCommandInFlight.value = false;
     }

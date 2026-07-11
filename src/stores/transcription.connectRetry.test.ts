@@ -797,6 +797,60 @@ describe('transcription connect-retry reliability', () => {
     expect(invokeMock).not.toHaveBeenCalledWith('start_incoming_translation');
   });
 
+  it('incoming translation stop response loss принимает backend Idle snapshot', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'stop_incoming_translation') return Promise.reject('response channel closed');
+      if (cmd === 'get_incoming_translation_state') {
+        return Promise.resolve({ session_id: 0, status: 'Idle' });
+      }
+      return Promise.resolve('ok');
+    });
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 614, status: 'Recording' },
+    });
+
+    await store.toggleIncomingTranslation();
+
+    expect(store.incomingTranslationStatus).toBe('Idle');
+    expect(store.incomingTranslationSessionId).toBeNull();
+    expect(store.incomingTranslationError).toBeNull();
+  });
+
+  it('incoming translation start response loss принимает active backend snapshot', async () => {
+    let snapshotCalls = 0;
+    listenMock.mockResolvedValue(() => {});
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'start_incoming_translation') return Promise.reject('response channel closed');
+      if (cmd === 'get_incoming_translation_state') {
+        snapshotCalls += 1;
+        return Promise.resolve(
+          snapshotCalls === 1
+            ? { session_id: 0, status: 'Idle' }
+            : { session_id: 615, status: 'Recording' }
+        );
+      }
+      return Promise.resolve('ok');
+    });
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await store.toggleIncomingTranslation();
+
+    expect(store.incomingTranslationStatus).toBe('Recording');
+    expect(store.incomingTranslationSessionId).toBe(615);
+    expect(store.incomingTranslationError).toBeNull();
+  });
+
   it('incoming translation stop success закрывает session даже если Idle event потерян', async () => {
     const handlers = new Map<string, any>();
 
