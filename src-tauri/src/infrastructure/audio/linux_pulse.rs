@@ -384,6 +384,55 @@ impl LinuxPulseAudioOutput {
     }
 }
 
+impl Drop for LinuxPulseAudioOutput {
+    fn drop(&mut self) {
+        self.is_open.store(false, Ordering::SeqCst);
+        if let Some(task) = self.monitor_task.take() {
+            task.abort();
+        }
+
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let state = self.state.clone();
+            let runner = self.runner.clone();
+            runtime.spawn(async move {
+                let (stdin, child, virtual_device_session) = {
+                    let mut state = state.lock().await;
+                    let stdin = state.stdin.take();
+                    let child = state.child.take();
+                    state.config = None;
+                    let session = state.virtual_device_session.take();
+                    (stdin, child, session)
+                };
+
+                if let Some(mut stdin) = stdin {
+                    let _ = stdin.shutdown().await;
+                }
+                if let Some(child) = child {
+                    stop_pulse_child(child, "pacat").await;
+                }
+                if let Some(session) = virtual_device_session {
+                    if let Err(error) = cleanup_virtual_microphone(runner.as_ref(), &session).await
+                    {
+                        log::warn!("Linux Pulse drop cleanup failed: {}", error);
+                    }
+                }
+            });
+            return;
+        }
+
+        let Ok(mut state) = self.state.try_lock() else {
+            log::warn!("Linux Pulse output dropped outside Tokio while state was locked");
+            return;
+        };
+        state.stdin.take();
+        drop(state.child.take());
+        state.config = None;
+        if state.virtual_device_session.take().is_some() {
+            log::warn!("Linux Pulse output dropped outside a Tokio runtime; virtual device cleanup was skipped");
+        }
+    }
+}
+
 fn spawn_pulse_output_monitor(
     state: Arc<Mutex<LinuxPulseOutputState>>,
     is_open: Arc<AtomicBool>,
@@ -470,7 +519,8 @@ impl TranslationAudioOutput for LinuxPulseAudioOutput {
             .await
             .map_err(TranslationAudioOutputError::Configuration)?;
 
-        let spawn_result = Command::new("pacat")
+        let mut pacat = Command::new("pacat");
+        pacat
             .arg("--playback")
             .arg(format!("--device={}", self.pulse.sink_name))
             .arg("--format=s16le")
@@ -479,8 +529,9 @@ impl TranslationAudioOutput for LinuxPulseAudioOutput {
             .arg("--latency-msec=80")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+            .stderr(Stdio::null());
+        pacat.kill_on_drop(true);
+        let spawn_result = pacat.spawn();
         let mut child = match spawn_result {
             Ok(child) => child,
             Err(e) => {
@@ -657,6 +708,17 @@ impl LinuxPulseMonitorCapture {
     }
 }
 
+impl Drop for LinuxPulseMonitorCapture {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+        drop(self.child.take());
+        self.is_capturing = false;
+    }
+}
+
 #[async_trait]
 impl AudioCapture for LinuxPulseMonitorCapture {
     async fn initialize(&mut self, config: AudioConfig) -> AudioResult<()> {
@@ -680,14 +742,17 @@ impl AudioCapture for LinuxPulseMonitorCapture {
         }
 
         let monitor = default_monitor_device(self.runner.as_ref()).await;
-        let mut child = Command::new("parec")
+        let mut parec = Command::new("parec");
+        parec
             .arg("--record")
             .arg(format!("--device={}", monitor))
             .arg("--format=s16le")
             .arg(format!("--rate={}", self.target.sample_rate))
             .arg(format!("--channels={}", self.target.channels))
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        parec.kill_on_drop(true);
+        let mut child = parec
             .spawn()
             .map_err(|e| AudioError::Capture(format!("Failed to start parec: {}", e)))?;
 
@@ -772,6 +837,31 @@ mod tests {
     use super::*;
     use std::collections::{HashMap, VecDeque};
 
+    struct TaskDropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for TaskDropSignal {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    fn pending_task_with_drop_signal() -> (
+        JoinHandle<()>,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _drop_signal = TaskDropSignal(Some(dropped_tx));
+            let _ = started_tx.send(());
+            futures_util::future::pending::<()>().await;
+        });
+        (task, started_rx, dropped_rx)
+    }
+
     #[derive(Default)]
     struct FakeLinuxPulseCommandRunner {
         spawns: StdMutex<HashMap<String, bool>>,
@@ -779,6 +869,58 @@ mod tests {
         load_results: StdMutex<VecDeque<Result<u32, String>>>,
         loaded_args: StdMutex<Vec<Vec<String>>>,
         unloaded_modules: StdMutex<Vec<u32>>,
+    }
+
+    #[tokio::test]
+    async fn pulse_audio_drop_aborts_output_and_capture_tasks() {
+        let runner = Arc::new(FakeLinuxPulseCommandRunner::default());
+        let mut output = LinuxPulseAudioOutput::new_with_runner(runner.clone());
+        let (task, started, dropped) = pending_task_with_drop_signal();
+        output.monitor_task = Some(task);
+        started.await.expect("output monitor started");
+        drop(output);
+        tokio::time::timeout(Duration::from_secs(1), dropped)
+            .await
+            .expect("output monitor future must be dropped")
+            .expect("output monitor drop signal");
+
+        let mut capture = LinuxPulseMonitorCapture::new_with_runner(
+            AudioCaptureTarget::incoming_subtitles(),
+            runner,
+        );
+        let (task, started, dropped) = pending_task_with_drop_signal();
+        capture.task = Some(task);
+        started.await.expect("capture reader started");
+        drop(capture);
+        tokio::time::timeout(Duration::from_secs(1), dropped)
+            .await
+            .expect("capture reader future must be dropped")
+            .expect("capture reader drop signal");
+    }
+
+    #[tokio::test]
+    async fn pulse_output_drop_unloads_created_virtual_modules() {
+        let runner = Arc::new(FakeLinuxPulseCommandRunner::default());
+        let output = LinuxPulseAudioOutput::new_with_runner(runner.clone());
+        {
+            let mut state = output.state.lock().await;
+            state.virtual_device_session = Some(LinuxPulseVirtualDeviceSession {
+                created_module_ids: vec![41, 42],
+            });
+        }
+
+        drop(output);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while runner.unloaded_modules.lock().unwrap().len() < 2
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            runner.unloaded_modules.lock().unwrap().as_slice(),
+            &[42, 41]
+        );
     }
 
     impl FakeLinuxPulseCommandRunner {
