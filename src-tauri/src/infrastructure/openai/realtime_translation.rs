@@ -36,8 +36,8 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, Message};
+use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
 
 const OPENAI_REALTIME_TRANSLATION_URL: &str =
     "wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate";
@@ -45,6 +45,17 @@ const OPENAI_EVENT_QUEUE_CAPACITY: usize = 128;
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const WS_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const WS_FORCE_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+const WS_MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
+const WS_MAX_WRITE_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+
+fn realtime_websocket_config() -> WebSocketConfig {
+    WebSocketConfig {
+        max_write_buffer_size: WS_MAX_WRITE_BUFFER_BYTES,
+        max_message_size: Some(WS_MAX_MESSAGE_BYTES),
+        max_frame_size: Some(WS_MAX_MESSAGE_BYTES),
+        ..WebSocketConfig::default()
+    }
+}
 
 /// Категории ошибок OpenAI, на которые UI/Service реагируют по-разному.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,7 +219,8 @@ impl OpenAIRealtimeTranslationClient {
             self.target_language
         );
 
-        let (ws, _resp) = match timeout(WS_CONNECT_TIMEOUT, connect_async(req)).await {
+        let connect = connect_async_with_config(req, Some(realtime_websocket_config()), false);
+        let (ws, _resp) = match timeout(WS_CONNECT_TIMEOUT, connect).await {
             Ok(Ok(pair)) => pair,
             Ok(Err(err)) => {
                 let mapped = map_connect_error(&err);
@@ -371,6 +383,15 @@ impl OpenAIRealtimeTranslationClient {
         if let Some(tx) = self.event_tx.take() {
             let _ = tx.try_send(OpenAIRealtimeEvent::Closed);
         }
+    }
+}
+
+impl Drop for OpenAIRealtimeTranslationClient {
+    fn drop(&mut self) {
+        if let Some(task) = self.reader_task.take() {
+            task.abort();
+        }
+        self.event_tx = None;
     }
 }
 
@@ -644,6 +665,16 @@ fn _force_anyhow_used() -> anyhow::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ReaderDropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for ReaderDropSignal {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
     use std::future::pending;
 
     #[test]
@@ -706,6 +737,16 @@ mod tests {
     }
 
     #[test]
+    fn realtime_websocket_config_bounds_reads_and_failed_writes() {
+        let config = realtime_websocket_config();
+
+        assert_eq!(config.max_message_size, Some(WS_MAX_MESSAGE_BYTES));
+        assert_eq!(config.max_frame_size, Some(WS_MAX_MESSAGE_BYTES));
+        assert_eq!(config.max_write_buffer_size, WS_MAX_WRITE_BUFFER_BYTES);
+        assert!(config.max_write_buffer_size > config.write_buffer_size);
+    }
+
+    #[test]
     fn authorization_header_trims_api_key_whitespace() {
         let value = build_authorization_header_value("  test-key\n").expect("valid header");
 
@@ -727,6 +768,26 @@ mod tests {
             OpenAITranslationError::Connection(message)
                 if message.contains("test send timed out after 10 ms")
         ));
+    }
+
+    #[tokio::test]
+    async fn client_drop_aborts_pending_reader_task() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let mut client = OpenAIRealtimeTranslationClient::new("test-key".into(), "en".into());
+        client.reader_task = Some(tokio::spawn(async move {
+            let _drop_signal = ReaderDropSignal(Some(dropped_tx));
+            let _ = started_tx.send(());
+            futures_util::future::pending::<()>().await;
+        }));
+        started_rx.await.expect("reader task started");
+
+        drop(client);
+
+        tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("reader future must be dropped")
+            .expect("reader drop signal");
     }
 
     #[tokio::test]

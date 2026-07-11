@@ -37,6 +37,7 @@ const TARGET_LANGUAGE_DEFAULT: &str = "ru";
 const AUDIO_QUEUE_CAPACITY: usize = 256;
 const AUDIO_QUEUE_OVERLOAD_DROP_THRESHOLD: u64 = 32;
 const TRANSLATION_QUEUE_CAPACITY: usize = 64;
+const MAX_TRANSLATION_SEGMENT_BYTES: usize = 64 * 1024;
 const STOP_DRAIN_TIMEOUT_MS: u64 = 1_800;
 const STOP_TRANSLATION_DRAIN_TIMEOUT_MS: u64 = 3_000;
 const STOP_TRANSLATION_DRAIN_POLL_MS: u64 = 20;
@@ -767,6 +768,14 @@ fn handle_finalized_transcription(
 ) {
     let text = transcription.text.trim().to_string();
     if text.is_empty() || !runtime_failure_reporter.running.load(Ordering::Relaxed) {
+        return;
+    }
+    if text.len() > MAX_TRANSLATION_SEGMENT_BYTES {
+        let _ = runtime_failure_reporter.report(IncomingTranslationError::Processing(format!(
+            "Speech segment is too large to translate safely ({} bytes, limit {} bytes)",
+            text.len(),
+            MAX_TRANSLATION_SEGMENT_BYTES
+        )));
         return;
     }
 
@@ -2272,6 +2281,56 @@ mod tests {
             statuses.lock().unwrap().as_slice(),
             &[RecordingStatus::Error]
         );
+    }
+
+    #[tokio::test]
+    async fn oversized_translation_segment_stops_before_event_or_queue_allocation() {
+        let source_finals = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let errors = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let callbacks = IncomingTranslationCallbacks {
+            on_source_final: {
+                let source_finals = source_finals.clone();
+                Arc::new(move |text| source_finals.lock().unwrap().push(text))
+            },
+            on_translation_delta: Arc::new(|_| {}),
+            on_error: {
+                let errors = errors.clone();
+                Arc::new(move |error| errors.lock().unwrap().push(error.to_string()))
+            },
+            on_status: Arc::new(|_| {}),
+        };
+        let running = Arc::new(AtomicBool::new(true));
+        let (tx, mut rx) = mpsc::channel::<TranslationJob>(1);
+        let (runtime_cleanup_tx, mut runtime_cleanup_rx) = mpsc::unbounded_channel();
+        let reporter = IncomingRuntimeFailureReporter {
+            callbacks,
+            running: running.clone(),
+            status: Arc::new(RwLock::new(RecordingStatus::Recording)),
+            runtime_cleanup_tx,
+            startup_error: Arc::new(StdMutex::new(None)),
+        };
+
+        handle_finalized_transcription(
+            Transcription::final_result("x".repeat(MAX_TRANSLATION_SEGMENT_BYTES + 1)),
+            &reporter,
+            Arc::new(StdMutex::new(BoundedSegmentDedupe::new(2))),
+            tx,
+            Arc::new(AtomicUsize::new(0)),
+            "final",
+        );
+
+        assert!(!running.load(Ordering::SeqCst));
+        assert!(source_finals.lock().unwrap().is_empty());
+        assert!(rx.try_recv().is_err());
+        tokio::time::timeout(Duration::from_secs(1), runtime_cleanup_rx.recv())
+            .await
+            .expect("runtime cleanup timeout")
+            .expect("runtime cleanup signal");
+        assert!(errors
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|error| error.contains("too large to translate safely")));
     }
 
     #[test]

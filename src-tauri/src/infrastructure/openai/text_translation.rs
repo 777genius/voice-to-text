@@ -3,10 +3,12 @@ use serde_json::json;
 use std::error::Error as StdError;
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use reqwest::StatusCode;
 
 const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
 const DEFAULT_TEXT_TRANSLATION_MODEL: &str = "gpt-5-mini";
+const MAX_TEXT_TRANSLATION_RESPONSE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum OpenAITextTranslationError {
@@ -88,10 +90,9 @@ impl OpenAITextTranslationClient {
             .map_err(|e| OpenAITextTranslationError::Connection(format_reqwest_error(&e)))?;
 
         let status = response.status();
-        let text_body = response
-            .text()
+        let text_body = read_bounded_response_body(response)
             .await
-            .map_err(|e| OpenAITextTranslationError::Connection(format_reqwest_error(&e)))?;
+            .map_err(|error| classify_response_body_error(status, error))?;
 
         if !status.is_success() {
             let message = extract_openai_error_message(&text_body)
@@ -107,6 +108,62 @@ impl OpenAITextTranslationClient {
             OpenAITextTranslationError::Protocol("OpenAI response has no output text".to_string())
         })
     }
+}
+
+fn classify_response_body_error(
+    status: StatusCode,
+    error: OpenAITextTranslationError,
+) -> OpenAITextTranslationError {
+    match error {
+        OpenAITextTranslationError::Protocol(message) if !status.is_success() => {
+            map_openai_http_error(status, message)
+        }
+        error => error,
+    }
+}
+
+async fn read_bounded_response_body(
+    response: reqwest::Response,
+) -> Result<String, OpenAITextTranslationError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_TEXT_TRANSLATION_RESPONSE_BYTES as u64)
+    {
+        return Err(OpenAITextTranslationError::Protocol(format!(
+            "OpenAI response exceeds {} bytes",
+            MAX_TEXT_TRANSLATION_RESPONSE_BYTES
+        )));
+    }
+
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| {
+            OpenAITextTranslationError::Connection(format_reqwest_error(&error))
+        })?;
+        append_bounded_response_chunk(&mut body, &chunk)?;
+    }
+
+    String::from_utf8(body).map_err(|error| {
+        OpenAITextTranslationError::Protocol(format!(
+            "OpenAI response is not valid UTF-8: {}",
+            error
+        ))
+    })
+}
+
+fn append_bounded_response_chunk(
+    body: &mut Vec<u8>,
+    chunk: &[u8],
+) -> Result<(), OpenAITextTranslationError> {
+    if body.len().saturating_add(chunk.len()) > MAX_TEXT_TRANSLATION_RESPONSE_BYTES {
+        return Err(OpenAITextTranslationError::Protocol(format!(
+            "OpenAI response exceeds {} bytes",
+            MAX_TEXT_TRANSLATION_RESPONSE_BYTES
+        )));
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
 }
 
 fn resolve_text_translation_model(value: Option<String>) -> String {
@@ -313,5 +370,34 @@ mod tests {
         );
 
         assert!(matches!(err, OpenAITextTranslationError::Authentication(_)));
+    }
+
+    #[test]
+    fn bounded_response_chunks_reject_streamed_overflow() {
+        let mut body = vec![0; MAX_TEXT_TRANSLATION_RESPONSE_BYTES - 1];
+
+        append_bounded_response_chunk(&mut body, &[1]).expect("exact limit is accepted");
+        let error = append_bounded_response_chunk(&mut body, &[2]).unwrap_err();
+
+        assert!(matches!(error, OpenAITextTranslationError::Protocol(_)));
+        assert_eq!(body.len(), MAX_TEXT_TRANSLATION_RESPONSE_BYTES);
+    }
+
+    #[test]
+    fn oversized_error_body_keeps_http_auth_and_rate_limit_types() {
+        assert!(matches!(
+            classify_response_body_error(
+                StatusCode::UNAUTHORIZED,
+                OpenAITextTranslationError::Protocol("oversized".to_string())
+            ),
+            OpenAITextTranslationError::Authentication(_)
+        ));
+        assert!(matches!(
+            classify_response_body_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                OpenAITextTranslationError::Protocol("oversized".to_string())
+            ),
+            OpenAITextTranslationError::RateLimited(_)
+        ));
     }
 }
