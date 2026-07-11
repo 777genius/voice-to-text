@@ -181,6 +181,7 @@ function mountRecordingPopover() {
           incomingTranslation: 'Incoming translation',
           incomingTranslationMute: 'Mute translated audio',
             incomingTranslationUnmute: 'Unmute translated audio',
+            incomingDuplexHeadsetWarning: 'Use headphones while translating both sides of a call.',
             incomingTranslationStart: 'Start incoming translation',
             incomingTranslationStop: 'Stop incoming translation',
             healthCheckStart: 'Run health check',
@@ -486,6 +487,26 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     expect(invokeMock).toHaveBeenCalledWith('set_incoming_translation_muted', { muted: true });
     expect(store.incomingTranslationMuted).toBe(true);
     expect(mute!.querySelector('.mdi')?.classList.contains('mdi-volume-off')).toBe(true);
+    wrapper.unmount();
+  });
+
+  it('shows the headset warning only while spoken incoming and outgoing translation overlap', async () => {
+    appConfigMock.showMiniRecordingWindow = false;
+    const wrapper = mountRecordingPopover();
+    await flushMicrotasks();
+    await nextTick();
+    const store = useTranscriptionStore();
+
+    store.incomingTranslationStatus = RecordingStatus.Recording;
+    store.incomingTranslationDelivery = 'text_and_audio';
+    store.activeRecordingMode = 'live_translation';
+    store.status = RecordingStatus.Recording;
+    await nextTick();
+    expect(document.querySelector('[data-testid="incoming-duplex-headset-warning"]')).not.toBeNull();
+
+    store.status = RecordingStatus.Idle;
+    await nextTick();
+    expect(document.querySelector('[data-testid="incoming-duplex-headset-warning"]')).toBeNull();
     wrapper.unmount();
   });
 

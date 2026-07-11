@@ -77,6 +77,12 @@ const hasMiniIncomingTranslationText = computed(() =>
 const hasVisibleIncomingTranslation = computed(() =>
   store.isIncomingTranslationActive || store.hasIncomingTranslationText || Boolean(store.incomingTranslationError)
 );
+const showDuplexHeadsetWarning = computed(() =>
+  store.incomingTranslationDelivery === 'text_and_audio' &&
+  store.isIncomingTranslationActive &&
+  store.activeRecordingMode === 'live_translation' &&
+  (store.isStarting || store.isRecording)
+);
 const hasMiniIncomingTranslation = computed(() =>
   hasVisibleIncomingTranslation.value
 );
@@ -1111,6 +1117,14 @@ const minimizeWindow = async (event?: Event) => {
             </div>
           </div>
           <div
+            v-if="showDuplexHeadsetWarning"
+            class="incoming-duplex-warning"
+            data-testid="incoming-duplex-headset-warning"
+          >
+            <span class="mdi mdi-headphones"></span>
+            <span>{{ t('main.incomingDuplexHeadsetWarning') }}</span>
+          </div>
+          <div
             class="incoming-translation-text"
             data-testid="incoming-translation-text"
             :class="{ placeholder: !store.incomingTranslationText && !store.incomingTranslationError }"
@@ -1782,6 +1796,19 @@ const minimizeWindow = async (event?: Event) => {
 .incoming-translation-dot.error {
   background: var(--color-error);
   opacity: 1;
+}
+
+.incoming-duplex-warning {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 3px 0 6px;
+  padding: 5px 6px;
+  border-radius: 4px;
+  background: rgba(255, 193, 7, 0.12);
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  line-height: 1.3;
 }
 
 .incoming-translation-text {
