@@ -12,11 +12,11 @@ use app_lib::application::{
 };
 use app_lib::domain::{
     AudioCaptureTarget, AudioChunk, AudioConfig, AudioEnqueueOutcome, ConnectionQualityCallback,
-    ErrorCallback, LocalPlaybackOutputFactory, LocalPlaybackRoute, RealtimeTranslationFactory,
-    RecordingStatus, SpokenIncomingCapability, SpokenTranslationCapability, SttConfig, SttError,
-    SttProvider, SttProviderFactory, SttResult, SystemAudioCaptureFactory,
-    SystemAudioCaptureRequest, Transcription, TranscriptionCallback, TranslationAudioOutput,
-    TranslationAudioOutputConfig, TranslationAudioOutputResult,
+    ErrorCallback, LocalPlaybackOutputFactory, LocalPlaybackRoute, RecordingStatus,
+    SpokenIncomingCapability, SpokenTranslationCapability, SttConfig, SttError, SttProvider,
+    SttProviderFactory, SttResult, SystemAudioCaptureFactory, SystemAudioCaptureRequest,
+    Transcription, TranscriptionCallback, TranslationAudioOutput, TranslationAudioOutputConfig,
+    TranslationAudioOutputResult,
 };
 use app_lib::infrastructure::audio::{
     DefaultLocalPlaybackOutputFactory, DefaultPlatformAudioFactory,
@@ -37,6 +37,18 @@ fn load_openai_api_key() -> String {
         .ok()
         .filter(|key| !key.trim().is_empty())
         .expect("OPENAI_API_KEY must be set in src-tauri/.env or environment")
+}
+
+fn load_paid_spoken_e2e_api_key() -> String {
+    assert_eq!(
+        std::env::var("VOICETEXT_RUN_PAID_E2E").as_deref(),
+        Ok("1"),
+        "set VOICETEXT_RUN_PAID_E2E=1 to acknowledge paid realtime API usage"
+    );
+    std::env::var("OPENAI_E2E_API_KEY")
+        .ok()
+        .filter(|key| !key.trim().is_empty())
+        .expect("OPENAI_E2E_API_KEY must contain a new dedicated test key")
 }
 
 fn live_audio_soak_duration() -> Duration {
@@ -101,15 +113,23 @@ fn wait_for_child_with_timeout(mut child: Child, timeout: Duration, process_name
 }
 
 fn generate_system_audio_fixture() -> TempAudioFixture {
-    let aiff_path = unique_temp_audio_path("voicetext_incoming_system_audio_source", "aiff");
+    generate_spoken_audio_fixture(
+        "voicetext_incoming_system_audio_source",
+        "Alex",
+        "Hello from the call. This checks incoming subtitles.",
+    )
+}
+
+fn generate_spoken_audio_fixture(prefix: &str, voice: &str, text: &str) -> TempAudioFixture {
+    let aiff_path = unique_temp_audio_path(prefix, "aiff");
 
     let status = Command::new("say")
         .args([
             "-v",
-            "Alex",
+            voice,
             "-o",
             aiff_path.to_str().expect("valid aiff path"),
-            "Hello from the call. This checks incoming subtitles.",
+            text,
         ])
         .status()
         .expect("must run macOS say");
@@ -176,6 +196,8 @@ struct PaidSpokenOutputState {
     closed: AtomicBool,
     samples: Mutex<Vec<i16>>,
     gain: Mutex<Option<f32>>,
+    started_at: Mutex<Option<Instant>>,
+    first_audio_ms: Mutex<Option<u128>>,
 }
 
 struct PaidSpokenOutputFactory {
@@ -213,6 +235,16 @@ impl TranslationAudioOutput for PaidSpokenOutput {
         &self,
         samples: &[i16],
     ) -> TranslationAudioOutputResult<AudioEnqueueOutcome> {
+        let mut first_audio_ms = self.state.first_audio_ms.lock().unwrap();
+        if first_audio_ms.is_none() {
+            *first_audio_ms = self
+                .state
+                .started_at
+                .lock()
+                .unwrap()
+                .map(|started_at| started_at.elapsed().as_millis());
+        }
+        drop(first_audio_ms);
         self.state
             .samples
             .lock()
@@ -257,6 +289,98 @@ struct PaidSpokenReadyCapability;
 impl SpokenTranslationCapability for PaidSpokenReadyCapability {
     fn check(&self, _target_language: &str) -> SpokenIncomingCapability {
         SpokenIncomingCapability::Ready
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PaidSpokenScenario {
+    id: &'static str,
+    source: &'static str,
+    secondary_source: Option<&'static str>,
+    human_reference: &'static str,
+}
+
+fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
+    vec![
+        PaidSpokenScenario {
+            id: "english_to_russian",
+            source: "Hello from the call. Please translate this sentence into Russian.",
+            secondary_source: None,
+            human_reference: "Natural Russian translation preserving the request.",
+        },
+        PaidSpokenScenario {
+            id: "names_and_numbers",
+            source: "Anna Petrova will meet Michael Chen on October twenty first at three forty five, room two hundred seven.",
+            secondary_source: None,
+            human_reference: "Preserve both names, date, time, and room 207.",
+        },
+        PaidSpokenScenario {
+            id: "technical_terms",
+            source: "The WebSocket reconnect uses exponential backoff, bounded queues, and twenty four kilohertz PCM audio.",
+            secondary_source: None,
+            human_reference: "Preserve WebSocket, exponential backoff, bounded queues, and 24 kHz PCM.",
+        },
+        PaidSpokenScenario {
+            id: "mixed_english_russian",
+            source: "Please open настройки and choose режим text and audio for this call.",
+            secondary_source: None,
+            human_reference: "Produce coherent Russian while preserving the UI mode name.",
+        },
+        PaidSpokenScenario {
+            id: "already_russian",
+            source: "Добрый день. Проверяем, что русская речь остается понятной и не искажается.",
+            secondary_source: None,
+            human_reference: "Keep the Russian meaning without inventing content.",
+        },
+        PaidSpokenScenario {
+            id: "long_context",
+            source: "During yesterday's incident the first deployment failed because the certificate expired. After the certificate was renewed, the second deployment succeeded, so do not roll back the database migration.",
+            secondary_source: None,
+            human_reference: "Preserve chronology, causality, and the instruction not to roll back.",
+        },
+        PaidSpokenScenario {
+            id: "pause_and_silence",
+            source: "The first value is twelve. [[slnc 1200]] The second value is forty seven. [[slnc 1800]] Keep both values.",
+            secondary_source: None,
+            human_reference: "Preserve values 12 and 47 across pauses.",
+        },
+        PaidSpokenScenario {
+            id: "overlapping_speakers",
+            source: "Alice says the release is scheduled for Friday morning.",
+            secondary_source: Some("Bob says the security review must finish before Thursday evening."),
+            human_reference: "Best effort mixed-track translation; note any lost speaker or timing detail.",
+        },
+    ]
+}
+
+fn paid_artifact_root() -> PathBuf {
+    if let Some(path) = std::env::var_os("INCOMING_SPOKEN_E2E_ARTIFACTS") {
+        return PathBuf::from(path);
+    }
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/e2e-artifacts")
+        .join(format!("incoming-spoken-{timestamp}"))
+}
+
+fn play_paid_scenario(primary: &Path, secondary: Option<&Path>) {
+    let primary_child = Command::new("afplay")
+        .arg(primary)
+        .spawn()
+        .expect("must play primary paid fixture");
+    let secondary_child = secondary.map(|path| {
+        std::thread::sleep(Duration::from_millis(180));
+        Command::new("afplay")
+            .arg(path)
+            .spawn()
+            .expect("must play overlapping paid fixture")
+    });
+    wait_for_child_with_timeout(primary_child, Duration::from_secs(25), "primary afplay");
+    if let Some(child) = secondary_child {
+        wait_for_child_with_timeout(child, Duration::from_secs(25), "secondary afplay");
     }
 }
 
@@ -418,88 +542,265 @@ async fn system_default_playback_is_drained_and_excluded_from_system_capture() {
 }
 
 #[tokio::test]
-#[ignore = "paid/manual: requires macOS Screen & System Audio permission, audible system output, and OPENAI_API_KEY"]
+#[ignore = "paid/manual: requires macOS permission, audible output, VOICETEXT_RUN_PAID_E2E=1, and a dedicated OPENAI_E2E_API_KEY"]
 async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system_capture() {
-    let api_key = load_openai_api_key();
-    let fixture = generate_system_audio_fixture();
+    let api_key = load_paid_spoken_e2e_api_key();
+    let artifact_root = paid_artifact_root();
+    fs::create_dir_all(&artifact_root).expect("must create paid E2E artifact root");
+    let scenario_filter =
+        std::env::var("INCOMING_SPOKEN_E2E_SCENARIO").unwrap_or_else(|_| "all".into());
+    let scenarios: Vec<_> = paid_spoken_scenarios()
+        .into_iter()
+        .filter(|scenario| scenario_filter == "all" || scenario_filter == scenario.id)
+        .collect();
+    assert!(
+        !scenarios.is_empty(),
+        "unknown INCOMING_SPOKEN_E2E_SCENARIO={scenario_filter}"
+    );
+
+    for (index, scenario) in scenarios.into_iter().enumerate() {
+        let fixture = generate_spoken_audio_fixture(
+            &format!("voicetext_paid_{}", scenario.id),
+            "Alex",
+            scenario.source,
+        );
+        let secondary_fixture = scenario.secondary_source.map(|source| {
+            generate_spoken_audio_fixture(
+                &format!("voicetext_paid_{}_secondary", scenario.id),
+                "Samantha",
+                source,
+            )
+        });
+        let scenario_dir = artifact_root.join(scenario.id);
+        fs::create_dir_all(&scenario_dir).expect("must create scenario artifact directory");
+        fs::copy(fixture.path(), scenario_dir.join("source-primary.aiff"))
+            .expect("must persist primary source audio");
+        if let Some(secondary) = secondary_fixture.as_ref() {
+            fs::copy(secondary.path(), scenario_dir.join("source-secondary.aiff"))
+                .expect("must persist secondary source audio");
+        }
+
+        let output_state = Arc::new(PaidSpokenOutputState::default());
+        let service = IncomingTranslationFacade::new_spoken_with_factories(
+            Arc::new(DefaultPlatformAudioFactory::new()),
+            Arc::new(PaidSpokenOutputFactory {
+                state: output_state.clone(),
+            }),
+            Arc::new(OpenAIRealtimeTranslationFactory),
+            Arc::new(PaidSpokenReadyCapability),
+        );
+        let source_text = Arc::new(Mutex::new(String::new()));
+        let translated_text = Arc::new(Mutex::new(String::new()));
+        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let first_source_text_ms = Arc::new(Mutex::new(None::<u128>));
+        let first_translated_text_ms = Arc::new(Mutex::new(None::<u128>));
+        let started_at = Instant::now();
+        *output_state.started_at.lock().unwrap() = Some(started_at);
+        let callbacks = IncomingTranslationCallbacks {
+            on_source_final: {
+                let source_text = source_text.clone();
+                let first_source_text_ms = first_source_text_ms.clone();
+                Arc::new(move |delta| {
+                    first_source_text_ms
+                        .lock()
+                        .unwrap()
+                        .get_or_insert_with(|| started_at.elapsed().as_millis());
+                    source_text.lock().unwrap().push_str(&delta);
+                })
+            },
+            on_translation_delta: {
+                let translated_text = translated_text.clone();
+                let first_translated_text_ms = first_translated_text_ms.clone();
+                Arc::new(move |delta| {
+                    first_translated_text_ms
+                        .lock()
+                        .unwrap()
+                        .get_or_insert_with(|| started_at.elapsed().as_millis());
+                    translated_text.lock().unwrap().push_str(&delta);
+                })
+            },
+            on_error: {
+                let errors = errors.clone();
+                Arc::new(move |error| errors.lock().unwrap().push(error.to_string()))
+            },
+            on_status: Arc::new(|_| {}),
+        };
+        let mut config = IncomingTranslationConfig::new_with_defaults(
+            SttConfig::default(),
+            30_001 + index as u64,
+        );
+        config.openai_api_key = api_key.clone();
+        config.target_language = "ru".into();
+        config.playback_gain = 0.8;
+
+        service
+            .start(config, callbacks)
+            .await
+            .unwrap_or_else(|error| panic!("paid scenario {} must start: {error}", scenario.id));
+        let first_input_ms = started_at.elapsed().as_millis();
+        play_paid_scenario(
+            fixture.path(),
+            secondary_fixture.as_ref().map(TempAudioFixture::path),
+        );
+        let result = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if !translated_text.lock().unwrap().trim().is_empty()
+                    && !output_state.samples.lock().unwrap().is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        service
+            .stop()
+            .await
+            .unwrap_or_else(|error| panic!("paid scenario {} must stop: {error}", scenario.id));
+        result.unwrap_or_else(|_| {
+            panic!(
+                "scenario {} returned no text/audio within 30 seconds",
+                scenario.id
+            )
+        });
+
+        let source = source_text.lock().unwrap().clone();
+        let translated = translated_text.lock().unwrap().clone();
+        let translated_samples = output_state.samples.lock().unwrap().clone();
+        fs::write(scenario_dir.join("source-transcript.txt"), &source)
+            .expect("must write source transcript");
+        fs::write(scenario_dir.join("translated-transcript.txt"), &translated)
+            .expect("must write translated transcript");
+        fs::write(
+            scenario_dir.join("translated-audio.wav"),
+            wav_pcm16(24_000, 1, &translated_samples),
+        )
+        .expect("must write translated audio");
+        let metrics = serde_json::json!({
+            "scenario": scenario.id,
+            "human_reference": scenario.human_reference,
+            "first_input_ms": first_input_ms,
+            "first_source_text_ms": *first_source_text_ms.lock().unwrap(),
+            "first_translated_text_ms": *first_translated_text_ms.lock().unwrap(),
+            "first_translated_audio_ms": *output_state.first_audio_ms.lock().unwrap(),
+            "translated_audio_samples": translated_samples.len(),
+            "errors": errors.lock().unwrap().clone(),
+        });
+        fs::write(
+            scenario_dir.join("metrics.json"),
+            serde_json::to_vec_pretty(&metrics).expect("metrics must serialize"),
+        )
+        .expect("must write metrics");
+
+        assert!(
+            !source.trim().is_empty(),
+            "scenario {} source transcript is empty",
+            scenario.id
+        );
+        assert!(
+            translated
+                .chars()
+                .any(|character| ('\u{0400}'..='\u{04ff}').contains(&character)),
+            "scenario {} expected Russian text, got: {translated}",
+            scenario.id
+        );
+        assert!(
+            !translated_samples.is_empty(),
+            "scenario {} translated PCM is empty",
+            scenario.id
+        );
+        assert!(
+            errors.lock().unwrap().is_empty(),
+            "scenario {} errors: {:?}",
+            scenario.id,
+            errors.lock().unwrap()
+        );
+        assert!(output_state.opened.load(Ordering::SeqCst));
+        assert!(output_state.closed.load(Ordering::SeqCst));
+        assert_eq!(*output_state.gain.lock().unwrap(), Some(0.8));
+        assert_eq!(service.get_status().await, RecordingStatus::Idle);
+    }
+
+    println!("paid_incoming_artifacts={}", artifact_root.display());
+}
+
+#[tokio::test]
+#[ignore = "paid/manual: requires macOS permission, audible output, VOICETEXT_RUN_PAID_E2E=1, and a dedicated OPENAI_E2E_API_KEY"]
+async fn incoming_spoken_translation_paid_stop_mid_phrase_is_bounded() {
+    let api_key = load_paid_spoken_e2e_api_key();
+    let fixture = generate_spoken_audio_fixture(
+        "voicetext_paid_stop_mid_phrase",
+        "Alex",
+        "This is a deliberately long sentence about a production incident, a certificate renewal, a database migration, and a scheduled release, and the translation session will be stopped before the speaker can finish the complete thought.",
+    );
     let output_state = Arc::new(PaidSpokenOutputState::default());
-    let realtime_factory: Arc<dyn RealtimeTranslationFactory> =
-        Arc::new(OpenAIRealtimeTranslationFactory);
+    let started_at = Instant::now();
+    *output_state.started_at.lock().unwrap() = Some(started_at);
     let service = IncomingTranslationFacade::new_spoken_with_factories(
         Arc::new(DefaultPlatformAudioFactory::new()),
         Arc::new(PaidSpokenOutputFactory {
             state: output_state.clone(),
         }),
-        realtime_factory,
+        Arc::new(OpenAIRealtimeTranslationFactory),
         Arc::new(PaidSpokenReadyCapability),
     );
-    let source_text = Arc::new(Mutex::new(String::new()));
-    let translated_text = Arc::new(Mutex::new(String::new()));
-    let errors = Arc::new(Mutex::new(Vec::<String>::new()));
     let callbacks = IncomingTranslationCallbacks {
-        on_source_final: {
-            let source_text = source_text.clone();
-            Arc::new(move |delta| source_text.lock().unwrap().push_str(&delta))
-        },
-        on_translation_delta: {
-            let translated_text = translated_text.clone();
-            Arc::new(move |delta| translated_text.lock().unwrap().push_str(&delta))
-        },
-        on_error: {
-            let errors = errors.clone();
-            Arc::new(move |error| errors.lock().unwrap().push(error.to_string()))
-        },
+        on_source_final: Arc::new(|_| {}),
+        on_translation_delta: Arc::new(|_| {}),
+        on_error: Arc::new(|_| {}),
         on_status: Arc::new(|_| {}),
     };
-    let mut config = IncomingTranslationConfig::new_with_defaults(SttConfig::default(), 30_001);
+    let mut config = IncomingTranslationConfig::new_with_defaults(SttConfig::default(), 40_001);
     config.openai_api_key = api_key;
     config.target_language = "ru".into();
     config.playback_gain = 0.8;
-
     service
         .start(config, callbacks)
         .await
-        .expect("paid incoming spoken translation must start");
-    play_system_audio(fixture.path());
-    let result = tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            if !translated_text.lock().unwrap().trim().is_empty()
-                && !output_state.samples.lock().unwrap().is_empty()
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await;
-    service
-        .stop()
-        .await
-        .expect("paid incoming spoken translation must stop");
-    result.expect("OpenAI must return translated text and PCM audio within 20 seconds");
+        .expect("paid stop-mid-phrase session must start");
 
-    let source = source_text.lock().unwrap().clone();
-    let translated = translated_text.lock().unwrap().clone();
-    let translated_audio_samples = output_state.samples.lock().unwrap().len();
-    println!("paid_incoming_source_text={source}");
-    println!("paid_incoming_translated_text={translated}");
-    println!("paid_incoming_audio_samples={translated_audio_samples}");
-    assert!(source.to_lowercase().contains("call") || source.to_lowercase().contains("subtitle"));
-    assert!(
-        translated
-            .chars()
-            .any(|character| ('\u{0400}'..='\u{04ff}').contains(&character)),
-        "expected Russian translated text, got: {translated}"
+    let mut player = Command::new("afplay")
+        .arg(fixture.path())
+        .spawn()
+        .expect("must play stop-mid-phrase fixture");
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let stop_started = Instant::now();
+    tokio::time::timeout(Duration::from_secs(8), service.stop())
+        .await
+        .expect("stop mid phrase must remain bounded")
+        .expect("stop mid phrase must cleanly close the realtime session");
+    let _ = player.kill();
+    let _ = player.wait();
+
+    let samples_after_stop = output_state.samples.lock().unwrap().len();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        output_state.samples.lock().unwrap().len(),
+        samples_after_stop,
+        "translated audio arrived after stop completed"
     );
-    assert!(
-        translated_audio_samples > 0,
-        "translated PCM audio is empty"
-    );
-    assert!(errors.lock().unwrap().is_empty());
-    assert!(output_state.opened.load(Ordering::SeqCst));
     assert!(output_state.closed.load(Ordering::SeqCst));
-    assert_eq!(*output_state.gain.lock().unwrap(), Some(0.8));
     assert_eq!(service.get_status().await, RecordingStatus::Idle);
+
+    let artifact_dir = paid_artifact_root().join("stop_mid_phrase");
+    fs::create_dir_all(&artifact_dir).expect("must create stop-mid-phrase artifact directory");
+    fs::copy(fixture.path(), artifact_dir.join("source-primary.aiff"))
+        .expect("must persist stop-mid-phrase source audio");
+    fs::write(
+        artifact_dir.join("translated-audio.wav"),
+        wav_pcm16(24_000, 1, &output_state.samples.lock().unwrap()),
+    )
+    .expect("must persist stop-mid-phrase translated audio");
+    fs::write(
+        artifact_dir.join("metrics.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "stop_requested_ms": stop_started.duration_since(started_at).as_millis(),
+            "stop_duration_ms": stop_started.elapsed().as_millis(),
+            "translated_audio_samples": samples_after_stop,
+        }))
+        .expect("stop-mid-phrase metrics must serialize"),
+    )
+    .expect("must persist stop-mid-phrase metrics");
 }
 
 fn wav_pcm16(sample_rate: u32, channels: u16, samples: &[i16]) -> Vec<u8> {

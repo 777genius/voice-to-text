@@ -97,12 +97,13 @@ the external tone power.
 
 ## Paid OpenAI Gate
 
-Use a dedicated, revocable test key. Set `OPENAI_API_KEY` in the shell or `src-tauri/.env`; never add
-the key to source, logs, screenshots, or test artifacts.
+Use a new, dedicated, revocable test key. The spoken paid test intentionally ignores `.env` and
+`OPENAI_API_KEY`; never add the key to source, logs, screenshots, or test artifacts.
 
 ```bash
 cd src-tauri
-cargo test --test incoming_system_audio_translation_e2e_test \
+VOICETEXT_RUN_PAID_E2E=1 OPENAI_E2E_API_KEY="sk-..." \
+  cargo test --test incoming_system_audio_translation_e2e_test \
   incoming_spoken_translation_returns_realtime_text_and_audio_from_system_capture \
   -- --ignored --nocapture
 ```
@@ -116,6 +117,18 @@ generated macOS speech
   -> translated text callback + translated PCM collector
   -> graceful final tail and shutdown
 ```
+
+By default it runs the linguistic matrix: English to Russian, names/numbers, technical terms,
+mixed English/Russian, already-Russian input, long context, pauses/silence, and overlapping system
+speakers. Set `INCOMING_SPOKEN_E2E_SCENARIO=technical_terms` to run one case. Reviewable source
+audio, translated PCM, both transcripts, first-input/text/audio timings, errors, and the human
+reference are written under `src-tauri/target/e2e-artifacts`; override the directory with
+`INCOMING_SPOKEN_E2E_ARTIFACTS`.
+
+Run `incoming_spoken_translation_paid_stop_mid_phrase_is_bounded` with the same paid-key guard to
+verify bounded shutdown against a real OpenAI session. Deterministic network interruption,
+malformed frames, abrupt close, stalled close, 401/429, and oversized messages are covered by
+`realtime_translation_websocket_e2e_test` without a paid key.
 
 It must report nonempty source text, Russian translated text, nonempty translated PCM, no terminal
 errors, and Idle after stop. The separate native output test proves that the same PCM output adapter
