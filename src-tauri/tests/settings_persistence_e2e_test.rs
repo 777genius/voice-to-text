@@ -1,4 +1,4 @@
-use app_lib::domain::{AppConfig, SttConfig, SttProviderType};
+use app_lib::domain::{AppConfig, IncomingTranslationDelivery, SttConfig, SttProviderType};
 use app_lib::infrastructure::ConfigStore;
 use serial_test::serial;
 use std::fs;
@@ -46,6 +46,8 @@ async fn settings_persist_across_restart_like_flow() {
     // 2) "Пользователь выставил чувствительность" → сохраняем app_config.json
     let mut app = AppConfig::default();
     app.microphone_sensitivity = 135;
+    app.incoming_translation_delivery = IncomingTranslationDelivery::TextAndAudio;
+    app.incoming_translation_volume = 63;
     ConfigStore::save_app_config(&app).await.unwrap();
 
     // 3) Частичное обновление STT (например смена языка) не должно затирать keyterms
@@ -60,4 +62,9 @@ async fn settings_persist_across_restart_like_flow() {
     assert_eq!(stt_after.language, "en");
     assert_eq!(stt_after.streaming_keyterms.as_deref(), Some(keyterms));
     assert_eq!(app_after.microphone_sensitivity, 135);
+    assert_eq!(
+        app_after.incoming_translation_delivery,
+        IncomingTranslationDelivery::TextAndAudio
+    );
+    assert_eq!(app_after.incoming_translation_volume, 63);
 }

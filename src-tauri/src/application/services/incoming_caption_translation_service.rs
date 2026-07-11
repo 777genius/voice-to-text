@@ -57,6 +57,7 @@ pub struct IncomingTranslationConfig {
     pub stt_config: SttConfig,
     pub openai_api_key: String,
     pub target_language: String,
+    pub playback_gain: f32,
     pub session_id: u64,
 }
 
@@ -66,6 +67,7 @@ impl IncomingTranslationConfig {
             stt_config,
             openai_api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
             target_language: TARGET_LANGUAGE_DEFAULT.to_string(),
+            playback_gain: 1.0,
             session_id,
         }
     }

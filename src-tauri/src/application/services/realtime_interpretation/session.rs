@@ -247,6 +247,10 @@ pub(crate) enum AudioQueueEnqueueError {
 
 enum OutputCommand {
     Audio(Vec<i16>),
+    SetGain {
+        gain: f32,
+        done: oneshot::Sender<Result<(), TranslationAudioOutputError>>,
+    },
     BeginDrain,
     Drain {
         done: oneshot::Sender<()>,
@@ -391,6 +395,42 @@ impl RealtimeInterpretationSession {
 
     pub fn session_id(&self) -> u64 {
         self.session_id
+    }
+
+    pub async fn set_output_gain(&self, gain: f32) -> Result<(), RealtimeInterpretationError> {
+        let (done_tx, done_rx) = oneshot::channel();
+        tokio::time::timeout(
+            self.policy.worker_stop_timeout,
+            self.output_tx.send(OutputCommand::SetGain {
+                gain,
+                done: done_tx,
+            }),
+        )
+        .await
+        .map_err(|_| {
+            RealtimeInterpretationError::Timeout(
+                "timed out while updating translated playback volume".into(),
+            )
+        })?
+        .map_err(|_| {
+            RealtimeInterpretationError::OutputDeviceLost(
+                "local playback worker is no longer available".into(),
+            )
+        })?;
+
+        tokio::time::timeout(self.policy.worker_stop_timeout, done_rx)
+            .await
+            .map_err(|_| {
+                RealtimeInterpretationError::Timeout(
+                    "timed out while applying translated playback volume".into(),
+                )
+            })?
+            .map_err(|_| {
+                RealtimeInterpretationError::OutputDeviceLost(
+                    "local playback worker stopped while applying volume".into(),
+                )
+            })?
+            .map_err(|error| map_output_error(error, self.policy.output_route_name))
     }
 
     pub async fn shutdown(mut self, mode: RealtimeInterpretationShutdown) {
@@ -875,6 +915,9 @@ async fn run_output_worker(
                                 return output;
                             }
                         }
+                    }
+                    OutputCommand::SetGain { gain, done } => {
+                        let _ = done.send(output.set_gain(gain));
                     }
                     OutputCommand::BeginDrain => output.begin_drain_mode(),
                     OutputCommand::Drain { done } => {

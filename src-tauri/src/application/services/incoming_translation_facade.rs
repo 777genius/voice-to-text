@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use crate::domain::{
-    PlatformAudioFactory, RecordingStatus, SttProviderFactory, TranslationLanguage,
+    IncomingTranslationDelivery, PlatformAudioFactory, RecordingStatus, SttProviderFactory,
+    TranslationLanguage,
 };
 
 use super::{
     incoming_caption_translation_service::IncomingCaptionTranslationService,
-    incoming_spoken_translation_service::IncomingSpokenTranslationService,
+    incoming_spoken_translation_service::IncomingSpokenTranslationService, IncomingPlaybackState,
     IncomingSpokenTranslationCallbacks, IncomingSpokenTranslationConfig,
     IncomingSpokenTranslationError, IncomingTranslationCallbacks, IncomingTranslationConfig,
     IncomingTranslationError,
@@ -49,6 +50,31 @@ impl IncomingTranslationFacade {
     pub fn new_spoken() -> Self {
         Self {
             runtime: IncomingRuntime::Spoken(IncomingSpokenTranslationService::new()),
+        }
+    }
+
+    pub fn delivery(&self) -> IncomingTranslationDelivery {
+        match &self.runtime {
+            IncomingRuntime::Captions(_) => IncomingTranslationDelivery::CaptionsOnly,
+            IncomingRuntime::Spoken(_) => IncomingTranslationDelivery::TextAndAudio,
+        }
+    }
+
+    pub async fn playback_snapshot(&self) -> Option<(IncomingPlaybackState, bool)> {
+        match &self.runtime {
+            IncomingRuntime::Captions(_) => None,
+            IncomingRuntime::Spoken(service) => Some(service.playback_snapshot().await),
+        }
+    }
+
+    pub async fn set_muted(&self, muted: bool) -> Result<(), IncomingTranslationError> {
+        match &self.runtime {
+            IncomingRuntime::Captions(_) => Err(IncomingTranslationError::Configuration(
+                "incoming translated playback is disabled in captions-only mode".into(),
+            )),
+            IncomingRuntime::Spoken(service) => {
+                service.set_muted(muted).await.map_err(map_spoken_error)
+            }
         }
     }
 
@@ -99,7 +125,7 @@ impl IncomingTranslationFacade {
                         IncomingSpokenTranslationConfig {
                             openai_api_key: config.openai_api_key,
                             target_language,
-                            playback_gain: 1.0,
+                            playback_gain: config.playback_gain,
                             session_id: config.session_id,
                         },
                         spoken_callbacks,
@@ -196,5 +222,17 @@ mod tests {
 
         assert_eq!(error.error_type(), "unsupported_target_language");
         assert_eq!(facade.get_status().await, RecordingStatus::Idle);
+    }
+
+    #[test]
+    fn facade_reports_its_delivery_mode_without_exposing_runtime_details() {
+        assert_eq!(
+            IncomingTranslationFacade::new().delivery(),
+            IncomingTranslationDelivery::CaptionsOnly
+        );
+        assert_eq!(
+            IncomingTranslationFacade::new_spoken().delivery(),
+            IncomingTranslationDelivery::TextAndAudio
+        );
     }
 }

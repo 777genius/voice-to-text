@@ -33,6 +33,7 @@ export type AppTheme = 'dark' | 'light';
 
 // Режим записи: STT в текст vs realtime translation в virtual mic
 export type RecordingMode = 'dictation' | 'live_translation';
+export type IncomingTranslationDelivery = 'captions_only' | 'text_and_audio';
 
 // Конфигурация STT (соответствует бэкенду)
 export interface SttConfigData {
@@ -60,6 +61,8 @@ export interface AppConfigData {
   selected_audio_device: string | null;
   recording_mode: RecordingMode;
   openai_api_key: string | null;
+  incoming_translation_delivery?: IncomingTranslationDelivery;
+  incoming_translation_volume?: number;
 }
 
 // Полная конфигурация настроек для UI
@@ -103,6 +106,8 @@ export interface SettingsState {
 
   // Режим записи (dictation vs live_translation)
   recordingMode: RecordingMode;
+  incomingTranslationDelivery: IncomingTranslationDelivery;
+  incomingTranslationVolume: number;
 }
 
 // Статус сохранения

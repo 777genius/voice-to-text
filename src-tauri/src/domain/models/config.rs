@@ -16,6 +16,24 @@ impl Default for RecordingMode {
     }
 }
 
+/// Delivery mode for translating audio produced by other applications.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncomingTranslationDelivery {
+    CaptionsOnly,
+    TextAndAudio,
+}
+
+impl Default for IncomingTranslationDelivery {
+    fn default() -> Self {
+        Self::CaptionsOnly
+    }
+}
+
+pub const fn default_incoming_translation_volume() -> u8 {
+    100
+}
+
 /// Supported STT provider types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -260,6 +278,14 @@ pub struct AppConfig {
     /// User-provided OpenAI API key for live translation and incoming subtitles.
     #[serde(default)]
     pub openai_api_key: Option<String>,
+
+    /// Incoming translation remains text-only after upgrades unless explicitly enabled.
+    #[serde(default)]
+    pub incoming_translation_delivery: IncomingTranslationDelivery,
+
+    /// Local translated speech volume in the inclusive 0-100 range.
+    #[serde(default = "default_incoming_translation_volume")]
+    pub incoming_translation_volume: u8,
 }
 
 impl Default for AppConfig {
@@ -284,6 +310,8 @@ impl Default for AppConfig {
             max_history_items: 20,
             recording_mode: RecordingMode::default(),
             openai_api_key: None,
+            incoming_translation_delivery: IncomingTranslationDelivery::default(),
+            incoming_translation_volume: default_incoming_translation_volume(),
         }
     }
 }
@@ -471,6 +499,11 @@ mod tests {
         assert_eq!(config.max_history_items, 20);
         assert_eq!(config.recording_mode, RecordingMode::Dictation);
         assert_eq!(config.openai_api_key, None);
+        assert_eq!(
+            config.incoming_translation_delivery,
+            IncomingTranslationDelivery::CaptionsOnly
+        );
+        assert_eq!(config.incoming_translation_volume, 100);
     }
 
     #[test]
@@ -512,6 +545,11 @@ mod tests {
         assert_eq!(config.recording_mode, RecordingMode::Dictation);
         assert!(!config.double_space_hotkey_enabled);
         assert_eq!(config.openai_api_key, None);
+        assert_eq!(
+            config.incoming_translation_delivery,
+            IncomingTranslationDelivery::CaptionsOnly
+        );
+        assert_eq!(config.incoming_translation_volume, 100);
     }
 
     #[test]

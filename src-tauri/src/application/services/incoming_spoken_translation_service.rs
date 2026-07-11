@@ -43,7 +43,8 @@ impl std::fmt::Debug for IncomingSpokenTranslationConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum IncomingPlaybackState {
     Opening,
     Playing,
@@ -159,6 +160,8 @@ pub(super) struct IncomingSpokenTranslationService {
 struct RunningIncomingSpokenSession {
     session: RealtimeInterpretationSession,
     callbacks: IncomingSpokenTranslationCallbacks,
+    playback_gain: f32,
+    muted: bool,
 }
 
 impl IncomingSpokenTranslationService {
@@ -203,6 +206,45 @@ impl IncomingSpokenTranslationService {
     pub(super) async fn state_snapshot(&self) -> (Option<u64>, RecordingStatus) {
         let session_id = self.active_session_id().await;
         (session_id, self.get_status().await)
+    }
+
+    pub(super) async fn playback_snapshot(&self) -> (IncomingPlaybackState, bool) {
+        let muted = self
+            .inner
+            .lock()
+            .await
+            .as_ref()
+            .map(|running| running.muted)
+            .unwrap_or(false);
+        let state = match self.get_status().await {
+            RecordingStatus::Starting => IncomingPlaybackState::Opening,
+            RecordingStatus::Recording => IncomingPlaybackState::Playing,
+            RecordingStatus::Processing => IncomingPlaybackState::Draining,
+            RecordingStatus::Idle | RecordingStatus::Error => IncomingPlaybackState::Stopped,
+        };
+        (state, muted)
+    }
+
+    pub(super) async fn set_muted(
+        &self,
+        muted: bool,
+    ) -> Result<(), IncomingSpokenTranslationError> {
+        let _lifecycle_guard = self.lifecycle.lock().await;
+        let mut inner = self.inner.lock().await;
+        let Some(running) = inner.as_mut() else {
+            return Err(IncomingSpokenTranslationError::Configuration(
+                "incoming spoken translation is not active".into(),
+            ));
+        };
+        if !muted && running.playback_gain == 0.0 {
+            return Err(IncomingSpokenTranslationError::Configuration(
+                "translated playback volume is set to zero".into(),
+            ));
+        }
+        let gain = if muted { 0.0 } else { running.playback_gain };
+        running.session.set_output_gain(gain).await?;
+        running.muted = muted;
+        Ok(())
     }
 
     pub(super) async fn start(
@@ -341,9 +383,12 @@ impl IncomingSpokenTranslationService {
             return Err(map_runtime_stop(stop));
         }
 
+        let playback_gain = crate::domain::normalize_output_gain(config.playback_gain);
         *self.inner.lock().await = Some(RunningIncomingSpokenSession {
             session,
             callbacks: callbacks.clone(),
+            playback_gain,
+            muted: playback_gain == 0.0,
         });
         spawn_spoken_runtime_cleanup_monitor(
             self.inner.clone(),
@@ -586,6 +631,7 @@ mod tests {
         requested_route: StdMutex<Option<LocalPlaybackRoute>>,
         requested_language: StdMutex<Option<String>>,
         output_samples: StdMutex<Vec<i16>>,
+        output_gains: StdMutex<Vec<f32>>,
     }
 
     struct FakeCapability(SpokenIncomingCapability);
@@ -745,6 +791,11 @@ mod tests {
         async fn close(&mut self) -> TranslationAudioOutputResult<()> {
             self.state.output_close_calls.fetch_add(1, Ordering::SeqCst);
             self.open = false;
+            Ok(())
+        }
+
+        fn set_gain(&mut self, gain: f32) -> TranslationAudioOutputResult<()> {
+            self.state.output_gains.lock().unwrap().push(gain);
             Ok(())
         }
 
@@ -1111,5 +1162,30 @@ mod tests {
         assert_eq!(second.active_session_id().await, Some(202));
 
         second.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mute_updates_local_output_without_restarting_translation() {
+        let state = Arc::new(FakeState::default());
+        let service = service_with_fakes(
+            state.clone(),
+            SpokenIncomingCapability::Ready,
+            false,
+            false,
+            false,
+        );
+
+        service.start(config(303), no_op_callbacks()).await.unwrap();
+        service.set_muted(true).await.unwrap();
+        assert_eq!(
+            service.playback_snapshot().await,
+            (IncomingPlaybackState::Playing, true)
+        );
+        service.set_muted(false).await.unwrap();
+
+        assert_eq!(state.output_gains.lock().unwrap().as_slice(), &[0.0, 0.75]);
+        assert_eq!(state.translation_connect_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.capture_start_calls.load(Ordering::SeqCst), 1);
+        service.stop().await.unwrap();
     }
 }

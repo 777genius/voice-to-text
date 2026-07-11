@@ -885,6 +885,43 @@ describe('transcription connect-retry reliability', () => {
     expect(store.incomingTranslationText).toBe('перевод до стопа');
   });
 
+  it('spoken playback snapshot восстанавливает mute и отбрасывает stale playback events', async () => {
+    const handlers = new Map<string, any>();
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockImplementation((cmd: string, args?: { muted?: boolean }) => {
+      if (cmd === 'get_incoming_translation_state') {
+        return Promise.resolve({
+          session_id: 701,
+          status: 'Recording',
+          delivery: 'text_and_audio',
+          playback_state: 'playing',
+          muted: false,
+        });
+      }
+      if (cmd === 'set_incoming_translation_muted') {
+        return Promise.resolve({ session_id: 701, state: 'playing', muted: args?.muted });
+      }
+      return Promise.resolve(null);
+    });
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+    expect(store.incomingTranslationDelivery).toBe('text_and_audio');
+    expect(store.incomingTranslationMuted).toBe(false);
+
+    await handlers.get('incoming_translation:playback')({
+      payload: { session_id: 700, state: 'playing', muted: true },
+    });
+    expect(store.incomingTranslationMuted).toBe(false);
+
+    await store.toggleIncomingTranslationMute();
+    expect(invokeMock).toHaveBeenCalledWith('set_incoming_translation_muted', { muted: true });
+    expect(store.incomingTranslationMuted).toBe(true);
+  });
+
   it('incoming translation восстанавливает active backend session после renderer reload', async () => {
     const handlers = new Map<string, any>();
 

@@ -87,6 +87,11 @@ pub trait TranslationAudioOutput: Send + Sync {
         samples: &[i16],
     ) -> TranslationAudioOutputResult<AudioEnqueueOutcome>;
     async fn close(&mut self) -> TranslationAudioOutputResult<()>;
+    fn set_gain(&mut self, _gain: f32) -> TranslationAudioOutputResult<()> {
+        Err(TranslationAudioOutputError::Configuration(
+            "runtime output gain is unsupported by this adapter".into(),
+        ))
+    }
     fn is_open(&self) -> bool;
     fn health_check(&self) -> TranslationAudioOutputResult<()> {
         if self.is_open() {

@@ -49,6 +49,7 @@ export type {
   UiPreferencesSnapshotData,
   TauriSnapshotEnvelope,
   RecordingMode,
+  IncomingTranslationDelivery,
 } from './contracts';
 
 export { createAuthStateSync } from './authStateSync';

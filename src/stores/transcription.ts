@@ -40,6 +40,7 @@ import {
   IncomingTranslationStatusPayload,
   IncomingTranslationTextPayload,
   IncomingTranslationErrorPayload,
+  IncomingTranslationPlaybackPayload,
   LiveTranslationHealthCheck,
   EVENT_TRANSCRIPTION_PARTIAL,
   EVENT_TRANSCRIPTION_FINAL,
@@ -52,6 +53,7 @@ import {
   EVENT_INCOMING_TRANSLATION_SOURCE_FINAL,
   EVENT_INCOMING_TRANSLATION_DELTA,
   EVENT_INCOMING_TRANSLATION_ERROR,
+  EVENT_INCOMING_TRANSLATION_PLAYBACK,
 } from '../types';
 import type { RecordingMode } from '../types';
 
@@ -101,6 +103,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const incomingSourceText = ref<string>('');
   const incomingTranslationText = ref<string>('');
   const incomingTranslationError = ref<string | null>(null);
+  const incomingTranslationDelivery = ref<'captions_only' | 'text_and_audio'>('captions_only');
+  const incomingTranslationPlaybackState = ref<'opening' | 'playing' | 'draining' | 'stopped'>(
+    'stopped'
+  );
+  const incomingTranslationMuted = ref(false);
   const incomingTranslationCommandInFlight = ref(false);
   const liveTranslationHealthCheck = ref<LiveTranslationHealthCheck | null>(null);
   const liveTranslationHealthCheckLoading = ref<boolean>(false);
@@ -330,6 +337,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   let unlistenIncomingSourceFinal: UnlistenFn | null = null;
   let unlistenIncomingDelta: UnlistenFn | null = null;
   let unlistenIncomingError: UnlistenFn | null = null;
+  let unlistenIncomingPlayback: UnlistenFn | null = null;
   let listenerGeneration = 0;
 
   async function registerStoreListener<T>(
@@ -489,22 +497,37 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
 
     incomingTranslationStatus.value = nextStatus;
+    if (incomingTranslationDelivery.value === 'text_and_audio') {
+      incomingTranslationPlaybackState.value =
+        nextStatus === RecordingStatus.Starting
+          ? 'opening'
+          : nextStatus === RecordingStatus.Recording
+            ? 'playing'
+            : nextStatus === RecordingStatus.Processing
+              ? 'draining'
+              : 'stopped';
+    }
     if (nextStatus === RecordingStatus.Error) {
       incomingTerminalSessionId = payloadSessionId;
       if (!incomingTranslationError.value) {
         incomingTranslationError.value = String(i18n.global.t('main.errorGeneric'));
       }
       markIncomingTranslationSessionClosed(payloadSessionId, 'status:error');
+      incomingTranslationMuted.value = false;
     }
     if (nextStatus === RecordingStatus.Idle) {
       if (incomingTerminalSessionId === payloadSessionId) {
         incomingTerminalSessionId = null;
       }
       markIncomingTranslationSessionClosed(payloadSessionId, 'status:idle');
+      incomingTranslationMuted.value = false;
     }
   }
 
   function applyIncomingTranslationSnapshot(payload: IncomingTranslationStatusPayload): void {
+    incomingTranslationDelivery.value = payload.delivery ?? 'captions_only';
+    incomingTranslationPlaybackState.value = payload.playback_state ?? 'stopped';
+    incomingTranslationMuted.value = payload.muted ?? false;
     if (isValidIncomingTranslationSessionId(payload.session_id)) {
       applyIncomingTranslationStatus(payload);
       return;
@@ -2160,6 +2183,21 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       if (!incomingErrorUnlisten) return;
       unlistenIncomingError = incomingErrorUnlisten;
 
+      const incomingPlaybackUnlisten =
+        await registerStoreListener<IncomingTranslationPlaybackPayload>(
+          generation,
+          EVENT_INCOMING_TRANSLATION_PLAYBACK,
+          (event) => {
+            const payload = event.payload;
+            if (payload.session_id !== incomingTranslationSessionId.value) return;
+            if (isIncomingTranslationSessionClosed(payload.session_id)) return;
+            incomingTranslationPlaybackState.value = payload.state;
+            incomingTranslationMuted.value = payload.muted;
+          }
+        );
+      if (!incomingPlaybackUnlisten) return;
+      unlistenIncomingPlayback = incomingPlaybackUnlisten;
+
       await reconcileIncomingTranslationState('initialize', generation);
 
       console.log('Event listeners initialized successfully');
@@ -2954,6 +2992,29 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
+  async function toggleIncomingTranslationMute(): Promise<void> {
+    if (
+      !isTauriAvailable() ||
+      incomingTranslationDelivery.value !== 'text_and_audio' ||
+      incomingTranslationStatus.value !== RecordingStatus.Recording ||
+      incomingTranslationSessionId.value === null
+    ) {
+      return;
+    }
+    try {
+      const payload = await invoke<IncomingTranslationPlaybackPayload>(
+        'set_incoming_translation_muted',
+        { muted: !incomingTranslationMuted.value }
+      );
+      if (payload.session_id !== incomingTranslationSessionId.value) return;
+      incomingTranslationPlaybackState.value = payload.state;
+      incomingTranslationMuted.value = payload.muted;
+    } catch (err) {
+      console.warn('[IncomingTranslation] Failed to update playback mute:', err);
+      await reconcileIncomingTranslationState('playback_mute_failure');
+    }
+  }
+
   async function runLiveTranslationHealthCheck(): Promise<void> {
     if (!isTauriAvailable() || liveTranslationHealthCheckLoading.value) return;
     const recordingBusy =
@@ -3034,6 +3095,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       unlistenIncomingError();
       unlistenIncomingError = null;
     }
+    if (unlistenIncomingPlayback) {
+      unlistenIncomingPlayback();
+      unlistenIncomingPlayback = null;
+    }
 
     clearHotkeyStopFinalizeTimer();
 
@@ -3068,6 +3133,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     incomingSourceText,
     incomingTranslationText,
     incomingTranslationError,
+    incomingTranslationDelivery,
+    incomingTranslationPlaybackState,
+    incomingTranslationMuted,
     liveTranslationHealthCheck,
     liveTranslationHealthCheckLoading,
     liveTranslationHealthCheckError,
@@ -3120,6 +3188,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     clearText,
     toggleRecording,
     toggleIncomingTranslation,
+    toggleIncomingTranslationMute,
     runLiveTranslationHealthCheck,
     reconcileBackendStatus,
     cleanup,

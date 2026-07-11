@@ -18,7 +18,12 @@ import { useSettingsStore } from '../../store/settingsStore';
 import { tauriSettingsService } from '../../infrastructure/adapters/TauriSettingsService';
 import { useAppConfigStore } from '@/stores/appConfig';
 import { useSttConfigStore } from '@/stores/sttConfig';
-import type { AppConfigData, RecordingMode, SttConfigData } from '../../domain/types';
+import type {
+  AppConfigData,
+  IncomingTranslationDelivery,
+  RecordingMode,
+  SttConfigData,
+} from '../../domain/types';
 import { withTimeout } from '@/utils/async';
 
 // Кэшируем определение macOS - это не меняется во время работы
@@ -145,6 +150,16 @@ export function useSettings() {
     set: (value: RecordingMode) => store.setRecordingMode(value),
   });
 
+  const incomingTranslationDelivery = computed({
+    get: () => store.incomingTranslationDelivery,
+    set: (value: IncomingTranslationDelivery) => store.setIncomingTranslationDelivery(value),
+  });
+
+  const incomingTranslationVolume = computed({
+    get: () => store.incomingTranslationVolume,
+    set: (value: number) => store.setIncomingTranslationVolume(value),
+  });
+
   const streamingKeyterms = computed({
     get: () => store.streamingKeyterms,
     set: (value: string) => store.setStreamingKeyterms(value),
@@ -192,6 +207,8 @@ export function useSettings() {
           store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
           store.setRecordingMode(appConfigStoreInstance.recordingMode);
           store.setOpenaiApiKey(appConfigStoreInstance.openaiApiKey);
+          store.setIncomingTranslationDelivery(appConfigStoreInstance.incomingTranslationDelivery);
+          store.setIncomingTranslationVolume(appConfigStoreInstance.incomingTranslationVolume);
         } else {
           store.setMicrophoneSensitivity(100, { persist: false });
           store.setRecordingHotkey('CmdOrCtrl+Shift+X');
@@ -206,6 +223,8 @@ export function useSettings() {
           store.setSelectedAudioDevice('');
           store.setRecordingMode('dictation');
           store.setOpenaiApiKey('');
+          store.setIncomingTranslationDelivery('captions_only');
+          store.setIncomingTranslationVolume(100);
         }
 
         // В web режиме аудио-устройства/permission недоступны
@@ -286,6 +305,8 @@ export function useSettings() {
         store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
         store.setRecordingMode(appConfigStoreInstance.recordingMode);
         store.setOpenaiApiKey(appConfigStoreInstance.openaiApiKey);
+        store.setIncomingTranslationDelivery(appConfigStoreInstance.incomingTranslationDelivery);
+        store.setIncomingTranslationVolume(appConfigStoreInstance.incomingTranslationVolume);
       } else {
         try {
           const appConfig = await tauriSettingsService.getAppConfig();
@@ -302,6 +323,10 @@ export function useSettings() {
           store.setSelectedAudioDevice(appConfig.selected_audio_device ?? '');
           store.setRecordingMode(appConfig.recording_mode ?? 'dictation');
           store.setOpenaiApiKey(appConfig.openai_api_key ?? '');
+          store.setIncomingTranslationDelivery(
+            appConfig.incoming_translation_delivery ?? 'captions_only',
+          );
+          store.setIncomingTranslationVolume(appConfig.incoming_translation_volume ?? 100);
         } catch (err) {
           console.log('App config не загружен, используем значения по умолчанию');
         }
@@ -560,6 +585,22 @@ export function useSettings() {
         appUpdatePayload.openai_api_key = openaiKey ?? '';
       }
 
+      const latestDelivery = latestApp.incoming_translation_delivery ?? 'captions_only';
+      const hasDeliveryChange = persistedState
+        ? persistedState.incomingTranslationDelivery !== store.incomingTranslationDelivery
+        : latestDelivery !== store.incomingTranslationDelivery;
+      if (hasDeliveryChange && latestDelivery !== store.incomingTranslationDelivery) {
+        appUpdatePayload.incoming_translation_delivery = store.incomingTranslationDelivery;
+      }
+
+      const latestVolume = latestApp.incoming_translation_volume ?? 100;
+      const hasVolumeChange = persistedState
+        ? persistedState.incomingTranslationVolume !== store.incomingTranslationVolume
+        : latestVolume !== store.incomingTranslationVolume;
+      if (hasVolumeChange && latestVolume !== store.incomingTranslationVolume) {
+        appUpdatePayload.incoming_translation_volume = store.incomingTranslationVolume;
+      }
+
       if (Object.keys(appUpdatePayload).length > 0) {
         await withTimeout(
           tauriSettingsService.updateAppConfig(appUpdatePayload),
@@ -718,6 +759,8 @@ export function useSettings() {
     holdToRecord,
     doubleSpaceHotkeyEnabled,
     recordingMode,
+    incomingTranslationDelivery,
+    incomingTranslationVolume,
     streamingKeyterms,
 
     // Store state (через computed для корректной реактивности)

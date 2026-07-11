@@ -470,7 +470,6 @@ impl CpalAudioOutput {
         let Some(cfg) = self.config.as_ref() else {
             return Err(AudioOutputError::Closed);
         };
-
         Self::drain_source_and_push(
             &self.source_queue,
             &self.output_ready,
@@ -681,6 +680,11 @@ impl TranslationAudioOutput for CpalAudioOutput {
         let Some(cfg) = self.config.as_ref() else {
             return Err(AudioOutputError::Closed);
         };
+        if cfg.gain == 0.0 {
+            return Ok(AudioEnqueueOutcome::Queued {
+                pending: Duration::ZERO,
+            });
+        }
         let native_channels = native.channels() as usize;
         let max_buffered_frames = if self
             .playback_state
@@ -751,6 +755,25 @@ impl TranslationAudioOutput for CpalAudioOutput {
             *stream_error = None;
         }
         log::info!("CpalAudioOutput closed");
+        Ok(())
+    }
+
+    fn set_gain(&mut self, gain: f32) -> AudioOutputResult<()> {
+        let Some(config) = self.config.as_mut() else {
+            return Err(AudioOutputError::Closed);
+        };
+        let gain = crate::domain::normalize_output_gain(gain);
+        config.gain = gain;
+        if gain == 0.0 {
+            self.source_queue
+                .lock()
+                .map_err(|_| AudioOutputError::Stream("source_queue poisoned".into()))?
+                .clear();
+            self.output_ready
+                .lock()
+                .map_err(|_| AudioOutputError::Stream("output_ready poisoned".into()))?
+                .clear();
+        }
         Ok(())
     }
 
@@ -1091,6 +1114,20 @@ mod tests {
             ready.lock().unwrap().iter().copied().collect::<Vec<_>>(),
             vec![0.0, 0.0]
         );
+    }
+
+    #[test]
+    fn runtime_mute_clears_already_buffered_playback() {
+        let mut output = CpalAudioOutput::system_default();
+        output.config = Some(AudioOutputConfig::openai_translation());
+        output.source_queue.lock().unwrap().extend([1, 2, 3]);
+        output.output_ready.lock().unwrap().extend([0.1, 0.2]);
+
+        output.set_gain(0.0).unwrap();
+
+        assert_eq!(output.config.unwrap().gain, 0.0);
+        assert!(output.source_queue.lock().unwrap().is_empty());
+        assert!(output.output_ready.lock().unwrap().is_empty());
     }
 
     #[test]

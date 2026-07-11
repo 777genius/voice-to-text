@@ -12,7 +12,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { CMD_UPDATE_APP_CONFIG } from './tauri';
-import type { RecordingMode } from './contracts';
+import type { IncomingTranslationDelivery, RecordingMode } from './contracts';
 
 export type UpdateAppConfigInvokeArgs = Partial<{
   microphoneSensitivity: number;
@@ -28,6 +28,8 @@ export type UpdateAppConfigInvokeArgs = Partial<{
   selectedAudioDevice: string | null;
   recordingMode: RecordingMode;
   openaiApiKey: string | null;
+  incomingTranslationDelivery: IncomingTranslationDelivery;
+  incomingTranslationVolume: number;
 }>;
 
 const ALLOWED_KEYS = new Set([
@@ -44,6 +46,8 @@ const ALLOWED_KEYS = new Set([
   'selectedAudioDevice',
   'recordingMode',
   'openaiApiKey',
+  'incomingTranslationDelivery',
+  'incomingTranslationVolume',
 ]);
 
 function assertValidUpdateAppConfigArgs(args: Record<string, unknown>): void {
@@ -62,6 +66,7 @@ function assertValidUpdateAppConfigArgs(args: Record<string, unknown>): void {
     const v = args[k];
     switch (k) {
       case 'microphoneSensitivity':
+      case 'incomingTranslationVolume':
         if (typeof v !== 'number' || !Number.isFinite(v)) {
           throw new Error(`[update_app_config] "${k}" должен быть числом, получили: ${String(v)}`);
         }
@@ -93,6 +98,13 @@ function assertValidUpdateAppConfigArgs(args: Record<string, unknown>): void {
         if (v !== 'dictation' && v !== 'live_translation') {
           throw new Error(
             `[update_app_config] "recordingMode" должен быть 'dictation' | 'live_translation', получили: ${String(v)}`,
+          );
+        }
+        break;
+      case 'incomingTranslationDelivery':
+        if (v !== 'captions_only' && v !== 'text_and_audio') {
+          throw new Error(
+            `[update_app_config] "${k}" должен быть 'captions_only' | 'text_and_audio', получили: ${String(v)}`,
           );
         }
         break;

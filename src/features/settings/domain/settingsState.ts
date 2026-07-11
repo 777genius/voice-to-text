@@ -25,6 +25,8 @@ export function areSettingsStatesEqual(a: SettingsState | null, b: SettingsState
     a.holdToRecord === b.holdToRecord &&
     a.doubleSpaceHotkeyEnabled === b.doubleSpaceHotkeyEnabled &&
     a.streamingKeyterms === b.streamingKeyterms &&
-    a.recordingMode === b.recordingMode
+    a.recordingMode === b.recordingMode &&
+    a.incomingTranslationDelivery === b.incomingTranslationDelivery &&
+    a.incomingTranslationVolume === b.incomingTranslationVolume
   );
 }

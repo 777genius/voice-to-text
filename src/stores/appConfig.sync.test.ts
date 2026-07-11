@@ -59,6 +59,8 @@ describe('useAppConfigStore sync', () => {
 
     expect(store.autoPasteText).toBe(true);
     expect(store.showMiniRecordingWindow).toBe(true);
+    expect(store.incomingTranslationDelivery).toBe('captions_only');
+    expect(store.incomingTranslationVolume).toBe(100);
   });
 
   it('startSync: подписывается и загружает snapshot', async () => {
@@ -120,6 +122,8 @@ describe('useAppConfigStore sync', () => {
         selected_audio_device: 'Mic B',
         recording_mode: 'dictation',
         openai_api_key: 'sk-test',
+        incoming_translation_delivery: 'text_and_audio',
+        incoming_translation_volume: 64,
       },
       '42',
     );
@@ -137,6 +141,8 @@ describe('useAppConfigStore sync', () => {
     expect(store.microphoneSensitivity).toBe(50);
     expect(store.selectedAudioDevice).toBe('Mic B');
     expect(store.openaiApiKey).toBe('sk-test');
+    expect(store.incomingTranslationDelivery).toBe('text_and_audio');
+    expect(store.incomingTranslationVolume).toBe(64);
     expect(store.isLoaded).toBe(true);
   });
 

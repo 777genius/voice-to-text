@@ -39,4 +39,25 @@ describe('invokeUpdateAppConfig', () => {
 
     expect(invokeMock).not.toHaveBeenCalled();
   });
+
+  it('validates and forwards incoming translation settings', async () => {
+    invokeMock.mockResolvedValue(undefined);
+
+    await invokeUpdateAppConfig({
+      incomingTranslationDelivery: 'text_and_audio',
+      incomingTranslationVolume: 72,
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith(CMD_UPDATE_APP_CONFIG, {
+      incomingTranslationDelivery: 'text_and_audio',
+      incomingTranslationVolume: 72,
+    });
+  });
+
+  it('rejects an unknown incoming delivery mode', async () => {
+    await expect(
+      invokeUpdateAppConfig({ incomingTranslationDelivery: 'audio_only' } as any),
+    ).rejects.toThrow('captions_only');
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
 });

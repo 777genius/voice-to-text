@@ -25,6 +25,7 @@ import KeytermsSection from './sections/KeytermsSection.vue';
 import ThemeSection from './sections/ThemeSection.vue';
 import HotkeySection from './sections/HotkeySection.vue';
 import RecordingModeSection from './sections/RecordingModeSection.vue';
+import IncomingTranslationSection from './sections/IncomingTranslationSection.vue';
 import AutoActionsSection from './sections/AutoActionsSection.vue';
 import AudioDeviceSection from './sections/AudioDeviceSection.vue';
 import MicTestSection from './sections/MicTestSection.vue';
@@ -79,6 +80,8 @@ function snapshotSettingsState(): SettingsState {
     doubleSpaceHotkeyEnabled: settingsStore.doubleSpaceHotkeyEnabled,
     streamingKeyterms: settingsStore.streamingKeyterms,
     recordingMode: settingsStore.recordingMode,
+    incomingTranslationDelivery: settingsStore.incomingTranslationDelivery,
+    incomingTranslationVolume: settingsStore.incomingTranslationVolume,
   };
 }
 
@@ -322,6 +325,7 @@ watch(
         <KeytermsSection />
         <HotkeySection />
         <RecordingModeSection />
+        <IncomingTranslationSection />
         <AutoActionsSection />
         <AudioDeviceSection />
         <MicTestSection />

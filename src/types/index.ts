@@ -61,6 +61,17 @@ export interface TranslationErrorPayload {
 export interface IncomingTranslationStatusPayload {
   session_id: number;
   status: RecordingStatus;
+  delivery?: 'captions_only' | 'text_and_audio';
+  playback_state?: IncomingPlaybackState | null;
+  muted?: boolean;
+}
+
+export type IncomingPlaybackState = 'opening' | 'playing' | 'draining' | 'stopped';
+
+export interface IncomingTranslationPlaybackPayload {
+  session_id: number;
+  state: IncomingPlaybackState;
+  muted: boolean;
 }
 
 export interface IncomingTranslationTextPayload {
@@ -155,6 +166,7 @@ export const EVENT_INCOMING_TRANSLATION_STATUS = 'incoming_translation:status';
 export const EVENT_INCOMING_TRANSLATION_SOURCE_FINAL = 'incoming_translation:source-final';
 export const EVENT_INCOMING_TRANSLATION_DELTA = 'incoming_translation:delta';
 export const EVENT_INCOMING_TRANSLATION_ERROR = 'incoming_translation:error';
+export const EVENT_INCOMING_TRANSLATION_PLAYBACK = 'incoming_translation:playback';
 export const EVENT_ERROR = 'app:error';
 export const EVENT_RECORDING_WINDOW_SHOWN = 'recording:window-shown';
 export const EVENT_RECORDING_WINDOW_WILL_HIDE_FOR_HOTKEY_STOP = 'recording:window-will-hide-for-hotkey-stop';

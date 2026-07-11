@@ -9,6 +9,7 @@ import {
 import type { RevisionSyncHandle } from '@/windowing/stateSync';
 import type {
   AppConfigSnapshotData,
+  IncomingTranslationDelivery,
   RecordingMode,
   TauriSnapshotEnvelope,
 } from '@/windowing/stateSync';
@@ -31,6 +32,8 @@ export const useAppConfigStore = defineStore('appConfig', () => {
   const selectedAudioDevice = ref('');
   const recordingMode = ref<RecordingMode>('dictation');
   const openaiApiKey = ref('');
+  const incomingTranslationDelivery = ref<IncomingTranslationDelivery>('captions_only');
+  const incomingTranslationVolume = ref(100);
 
   let syncHandle: RevisionSyncHandle | null = null;
   let syncStartPromise: Promise<boolean> | null = null;
@@ -55,6 +58,12 @@ export const useAppConfigStore = defineStore('appConfig', () => {
     selectedAudioDevice.value = data.selected_audio_device ?? '';
     recordingMode.value = data.recording_mode ?? recordingMode.value;
     openaiApiKey.value = data.openai_api_key ?? '';
+    incomingTranslationDelivery.value =
+      data.incoming_translation_delivery ?? 'captions_only';
+    incomingTranslationVolume.value = Math.max(
+      0,
+      Math.min(100, Math.round(data.incoming_translation_volume ?? 100)),
+    );
     isLoaded.value = true;
   }
 
@@ -132,6 +141,8 @@ export const useAppConfigStore = defineStore('appConfig', () => {
     selectedAudioDevice,
     recordingMode,
     openaiApiKey,
+    incomingTranslationDelivery,
+    incomingTranslationVolume,
 
     hasSelectedAudioDevice: computed(() => Boolean(selectedAudioDevice.value)),
 

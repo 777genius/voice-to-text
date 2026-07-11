@@ -104,6 +104,18 @@ class TauriSettingsService {
     if (typeof config.openai_api_key === 'string' || config.openai_api_key === null) {
       args.openaiApiKey = config.openai_api_key ?? '';
     }
+    if (
+      config.incoming_translation_delivery === 'captions_only' ||
+      config.incoming_translation_delivery === 'text_and_audio'
+    ) {
+      args.incomingTranslationDelivery = config.incoming_translation_delivery;
+    }
+    if (typeof config.incoming_translation_volume === 'number') {
+      args.incomingTranslationVolume = Math.max(
+        0,
+        Math.min(100, Math.round(config.incoming_translation_volume)),
+      );
+    }
 
     await invokeUpdateAppConfig(args);
   }

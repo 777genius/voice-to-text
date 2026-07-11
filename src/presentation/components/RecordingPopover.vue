@@ -1087,13 +1087,28 @@ const minimizeWindow = async (event?: Event) => {
         >
           <div class="incoming-translation-header">
             <span>{{ t('main.incomingTranslation') }}</span>
-            <span
-              class="incoming-translation-dot"
-              :class="{
-                active: store.isIncomingTranslationActive,
-                error: Boolean(store.incomingTranslationError),
-              }"
-            ></span>
+            <div class="incoming-translation-actions">
+              <button
+                v-if="store.incomingTranslationDelivery === 'text_and_audio' && store.isIncomingTranslationActive"
+                class="incoming-playback-button no-drag"
+                data-testid="incoming-translation-mute"
+                :disabled="store.incomingTranslationStatus !== 'Recording'"
+                :title="store.incomingTranslationMuted ? t('main.incomingTranslationUnmute') : t('main.incomingTranslationMute')"
+                @click="store.toggleIncomingTranslationMute()"
+              >
+                <span
+                  class="mdi"
+                  :class="store.incomingTranslationMuted ? 'mdi-volume-off' : 'mdi-volume-high'"
+                ></span>
+              </button>
+              <span
+                class="incoming-translation-dot"
+                :class="{
+                  active: store.isIncomingTranslationActive,
+                  error: Boolean(store.incomingTranslationError),
+                }"
+              ></span>
+            </div>
           </div>
           <div
             class="incoming-translation-text"
@@ -1719,6 +1734,36 @@ const minimizeWindow = async (event?: Event) => {
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
+}
+
+.incoming-translation-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.incoming-playback-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.incoming-playback-button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--color-text);
+}
+
+.incoming-playback-button:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 
 .incoming-translation-dot {

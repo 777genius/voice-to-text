@@ -23,6 +23,7 @@ pub const EVENT_INCOMING_TRANSLATION_STATUS: &str = "incoming_translation:status
 pub const EVENT_INCOMING_TRANSLATION_SOURCE_FINAL: &str = "incoming_translation:source-final";
 pub const EVENT_INCOMING_TRANSLATION_DELTA: &str = "incoming_translation:delta";
 pub const EVENT_INCOMING_TRANSLATION_ERROR: &str = "incoming_translation:error";
+pub const EVENT_INCOMING_TRANSLATION_PLAYBACK: &str = "incoming_translation:playback";
 
 // UI lifecycle events
 // Важно: это не "focus", потому что main окно на macOS может быть nonactivating NSPanel и не получать фокус.
@@ -217,6 +218,28 @@ pub struct TranslationErrorPayload {
 pub struct IncomingTranslationStatusPayload {
     pub session_id: u64,
     pub status: RecordingStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IncomingTranslationStatePayload {
+    pub session_id: u64,
+    pub status: RecordingStatus,
+    pub delivery: crate::domain::IncomingTranslationDelivery,
+    pub playback_state: Option<crate::application::services::IncomingPlaybackState>,
+    pub muted: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IncomingTranslationPlaybackPayload {
+    pub session_id: u64,
+    pub state: crate::application::services::IncomingPlaybackState,
+    pub muted: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct IncomingSpokenCapabilityPayload {
+    pub capability: crate::domain::SpokenIncomingCapability,
+    pub supported: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

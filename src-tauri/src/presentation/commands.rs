@@ -7,9 +7,9 @@ use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
 
 use crate::domain::{
     AppConfig, AudioCapture, AudioCaptureTarget, AudioConfig, AudioError, BackendStreamingProvider,
-    PlatformAudioFactory, PlatformAudioSetupState, PlatformAudioSetupStatus, RecordingMode,
-    RecordingStatus, RecordingWindowPosition, SttConfig, SttConnectionCategory, SttError,
-    SttProviderType, Transcription, TranslationAudioOutputConfig,
+    IncomingTranslationDelivery, PlatformAudioFactory, PlatformAudioSetupState,
+    PlatformAudioSetupStatus, RecordingMode, RecordingStatus, RecordingWindowPosition, SttConfig,
+    SttConnectionCategory, SttError, SttProviderType, Transcription, TranslationAudioOutputConfig,
 };
 use crate::infrastructure::{
     audio::DefaultPlatformAudioFactory, auto_paste::AutoPasteTarget,
@@ -1220,21 +1220,47 @@ async fn stop_live_translation_recording(
 
 async fn get_or_create_incoming_translation_facade(
     state: &AppState,
+    delivery: IncomingTranslationDelivery,
 ) -> std::sync::Arc<crate::application::services::IncomingTranslationFacade> {
-    {
-        let guard = state.incoming_translation_facade.read().await;
-        if let Some(existing) = guard.as_ref() {
-            return existing.clone();
+    loop {
+        let observed = {
+            let guard = state.incoming_translation_facade.read().await;
+            guard.as_ref().cloned()
+        };
+        if let Some(existing) = observed.as_ref() {
+            if existing.delivery() == delivery {
+                return existing.clone();
+            }
+            let status = existing.get_status().await;
+            if !matches!(status, RecordingStatus::Idle | RecordingStatus::Error) {
+                return existing.clone();
+            }
+            if status == RecordingStatus::Error {
+                let _ = existing.stop().await;
+            }
         }
+
+        let mut guard = state.incoming_translation_facade.write().await;
+        let unchanged = match (guard.as_ref(), observed.as_ref()) {
+            (Some(current), Some(previous)) => std::sync::Arc::ptr_eq(current, previous),
+            (None, None) => true,
+            _ => false,
+        };
+        if !unchanged {
+            continue;
+        }
+
+        let service = std::sync::Arc::new(match delivery {
+            IncomingTranslationDelivery::CaptionsOnly => {
+                crate::application::services::IncomingTranslationFacade::new()
+            }
+            IncomingTranslationDelivery::TextAndAudio => {
+                crate::application::services::IncomingTranslationFacade::new_spoken()
+            }
+        });
+        *guard = Some(service.clone());
+        return service;
     }
-    let mut guard = state.incoming_translation_facade.write().await;
-    if let Some(existing) = guard.as_ref() {
-        return existing.clone();
-    }
-    let service =
-        std::sync::Arc::new(crate::application::services::IncomingTranslationFacade::new());
-    *guard = Some(service.clone());
-    service
 }
 
 #[tauri::command]
@@ -1253,7 +1279,12 @@ pub async fn start_incoming_translation(
     let _lifecycle_guard = state.incoming_translation_lifecycle_guard.lock().await;
     let _audio_start_guard = state.audio_start_guard.lock().await;
 
-    let service = get_or_create_incoming_translation_facade(state.inner()).await;
+    let app_config = state.config.read().await.clone();
+    let service = get_or_create_incoming_translation_facade(
+        state.inner(),
+        app_config.incoming_translation_delivery,
+    )
+    .await;
     match service.get_status().await {
         RecordingStatus::Idle => {}
         RecordingStatus::Error => {
@@ -1268,11 +1299,11 @@ pub async fn start_incoming_translation(
         + 1;
     let mut stt_config = state.transcription_service.get_config().await;
     stt_config.keep_connection_alive = false;
-    let app_config = state.config.read().await.clone();
     configure_incoming_translation_source(&mut stt_config, &app_config);
     let mut cfg = IncomingTranslationConfig::new_with_defaults(stt_config, session_id);
     cfg.openai_api_key = resolve_openai_api_key(&app_config);
     cfg.target_language = resolve_incoming_translation_target_language(&app_config);
+    cfg.playback_gain = f32::from(app_config.incoming_translation_volume.min(100)) / 100.0;
 
     let source_handle = app_handle.clone();
     let on_source_final: std::sync::Arc<dyn Fn(String) + Send + Sync> =
@@ -1408,8 +1439,16 @@ pub async fn toggle_incoming_translation(
     state: State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<String, String> {
-    let service = get_or_create_incoming_translation_facade(state.inner()).await;
-    if should_start_incoming_translation_on_toggle(service.get_status().await) {
+    let service = {
+        let guard = state.incoming_translation_facade.read().await;
+        guard.as_ref().cloned()
+    };
+    let status = if let Some(service) = service {
+        service.get_status().await
+    } else {
+        RecordingStatus::Idle
+    };
+    if should_start_incoming_translation_on_toggle(status) {
         start_incoming_translation(state, app_handle).await
     } else {
         stop_incoming_translation(state, app_handle).await
@@ -1438,7 +1477,7 @@ pub async fn get_incoming_translation_status(
 #[tauri::command]
 pub async fn get_incoming_translation_state(
     state: State<'_, AppState>,
-) -> Result<IncomingTranslationStatusPayload, String> {
+) -> Result<IncomingTranslationStatePayload, String> {
     let service = {
         let guard = state.incoming_translation_facade.read().await;
         guard.as_ref().cloned()
@@ -1446,16 +1485,105 @@ pub async fn get_incoming_translation_state(
     let sequence_id = state
         .incoming_translation_session_seq
         .load(Ordering::Relaxed);
-    let (active_session_id, status) = if let Some(service) = service {
-        service.state_snapshot().await
+    let runtime_delivery = service.as_ref().map(|service| service.delivery());
+    let (active_session_id, status, playback) = if let Some(service) = service {
+        let (session_id, status) = service.state_snapshot().await;
+        let playback = service.playback_snapshot().await;
+        (session_id, status, playback)
     } else {
-        (None, RecordingStatus::Idle)
+        (None, RecordingStatus::Idle, None)
     };
-    Ok(incoming_translation_state_payload(
-        active_session_id,
-        status,
-        sequence_id,
-    ))
+    let status_payload = incoming_translation_state_payload(active_session_id, status, sequence_id);
+    let configured_delivery = state.config.read().await.incoming_translation_delivery;
+    let delivery = if active_session_id.is_some() {
+        runtime_delivery.unwrap_or(configured_delivery)
+    } else {
+        configured_delivery
+    };
+    let (playback_state, muted) = playback
+        .map(|(playback_state, muted)| (Some(playback_state), muted))
+        .unwrap_or((None, false));
+    Ok(IncomingTranslationStatePayload {
+        session_id: status_payload.session_id,
+        status: status_payload.status,
+        delivery,
+        playback_state,
+        muted,
+    })
+}
+
+#[tauri::command]
+pub async fn set_incoming_translation_muted(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+    muted: bool,
+) -> Result<IncomingTranslationPlaybackPayload, String> {
+    use crate::application::services::IncomingPlaybackState;
+
+    let _lifecycle_guard = state.incoming_translation_lifecycle_guard.lock().await;
+    let service = {
+        let guard = state.incoming_translation_facade.read().await;
+        guard.as_ref().cloned()
+    }
+    .ok_or_else(|| "incoming spoken translation is not active".to_string())?;
+    let session_id = service
+        .active_session_id()
+        .await
+        .ok_or_else(|| "incoming spoken translation is not active".to_string())?;
+    if service.get_status().await != RecordingStatus::Recording {
+        return Err("incoming translated playback is not ready".to_string());
+    }
+    service
+        .set_muted(muted)
+        .await
+        .map_err(|error| error.to_string())?;
+    let payload = IncomingTranslationPlaybackPayload {
+        session_id,
+        state: IncomingPlaybackState::Playing,
+        muted,
+    };
+    let _ = app_handle.emit(EVENT_INCOMING_TRANSLATION_PLAYBACK, payload.clone());
+    Ok(payload)
+}
+
+#[tauri::command]
+pub async fn get_incoming_spoken_translation_capability(
+    state: State<'_, AppState>,
+    target_language: Option<String>,
+) -> Result<IncomingSpokenCapabilityPayload, String> {
+    use crate::domain::{
+        SpokenIncomingCapability, SpokenTranslationCapability, SystemAudioCaptureFactory,
+        SystemAudioCaptureRequest,
+    };
+    use crate::infrastructure::audio::{
+        DefaultPlatformAudioFactory, DefaultSpokenTranslationCapability,
+    };
+
+    let config = state.config.read().await;
+    let target_language = target_language
+        .map(|language| normalize_translation_target_language(&language, "ru"))
+        .unwrap_or_else(|| resolve_incoming_translation_target_language(&config));
+    let mut capability = DefaultSpokenTranslationCapability::new().check(&target_language);
+    if capability == SpokenIncomingCapability::Ready {
+        let request = SystemAudioCaptureRequest::isolated(
+            AudioCaptureTarget::incoming_realtime_translation(),
+        );
+        if let Err(error) =
+            DefaultPlatformAudioFactory::new().preflight_system_audio_capture(request)
+        {
+            capability = match error {
+                AudioError::AccessDenied(_) => SpokenIncomingCapability::PermissionRequired,
+                AudioError::Configuration(_) => SpokenIncomingCapability::UnsafeSelfCapture,
+                AudioError::DeviceNotFound(_)
+                | AudioError::Capture(_)
+                | AudioError::Internal(_) => SpokenIncomingCapability::UnsupportedPlatform,
+            };
+        }
+    }
+    Ok(IncomingSpokenCapabilityPayload {
+        supported: capability == SpokenIncomingCapability::Ready,
+        capability,
+    })
 }
 
 #[tauri::command]
@@ -3419,6 +3547,9 @@ mod snapshot_contract_tests {
                 selected_audio_device: None,
                 recording_mode: crate::domain::RecordingMode::Dictation,
                 openai_api_key: None,
+                incoming_translation_delivery:
+                    crate::domain::IncomingTranslationDelivery::CaptionsOnly,
+                incoming_translation_volume: 100,
             },
         };
 
@@ -3454,6 +3585,8 @@ mod snapshot_contract_tests {
         assert!(data.contains_key("double_space_hotkey_enabled"));
         assert!(data.contains_key("selected_audio_device"));
         assert!(data.contains_key("openai_api_key"));
+        assert!(data.contains_key("incoming_translation_delivery"));
+        assert!(data.contains_key("incoming_translation_volume"));
     }
 
     #[test]
@@ -4209,6 +4342,8 @@ pub struct AppConfigSnapshotData {
     pub selected_audio_device: Option<String>,
     pub recording_mode: crate::domain::RecordingMode,
     pub openai_api_key: Option<String>,
+    pub incoming_translation_delivery: IncomingTranslationDelivery,
+    pub incoming_translation_volume: u8,
 }
 /// Get current application configuration + revision (for cross-window sync)
 #[tauri::command]
@@ -4231,6 +4366,8 @@ pub async fn get_app_config_snapshot(
         selected_audio_device: config.selected_audio_device,
         recording_mode: config.recording_mode,
         openai_api_key: config.openai_api_key,
+        incoming_translation_delivery: config.incoming_translation_delivery,
+        incoming_translation_volume: config.incoming_translation_volume,
     };
     let revision = state.app_config_revision.read().await.to_string();
     Ok(SnapshotEnvelope { revision, data })
@@ -4451,6 +4588,8 @@ pub async fn update_app_config(
     selected_audio_device: Option<String>,
     recording_mode: Option<crate::domain::RecordingMode>,
     openai_api_key: Option<String>,
+    incoming_translation_delivery: Option<IncomingTranslationDelivery>,
+    incoming_translation_volume: Option<u8>,
 ) -> Result<(), String> {
     log::info!("Command: update_app_config - sensitivity: {:?}, hotkey: {:?}, auto_copy: {:?}, auto_paste: {:?}, completion_sound: {:?}, hide_window_on_hotkey: {:?}, mini_window: {:?}, manual_stop_only: {:?}, hold_to_record: {:?}, double_space_hotkey: {:?}, device: {:?}, mode: {:?}, openai_key: {}",
         microphone_sensitivity, recording_hotkey, auto_copy_to_clipboard, auto_paste_text, play_completion_sound, hide_recording_window_on_hotkey, show_mini_recording_window, keep_recording_until_manual_stop, hold_to_record, double_space_hotkey_enabled, selected_audio_device, recording_mode, openai_api_key.as_ref().is_some_and(|key| !key.trim().is_empty()));
@@ -4471,8 +4610,10 @@ pub async fn update_app_config(
         && selected_audio_device.is_none()
         && recording_mode.is_none()
         && openai_api_key.is_none()
+        && incoming_translation_delivery.is_none()
+        && incoming_translation_volume.is_none()
     {
-        return Err("update_app_config: не получены поля для обновления. Проверьте, что фронтенд отправляет args в camelCase (например microphoneSensitivity, recordingHotkey, autoCopyToClipboard, autoPasteText, playCompletionSound, hideRecordingWindowOnHotkey, showMiniRecordingWindow, keepRecordingUntilManualStop, holdToRecord, doubleSpaceHotkeyEnabled, selectedAudioDevice, recordingMode, openaiApiKey).".to_string());
+        return Err("update_app_config: не получены поля для обновления. Проверьте, что фронтенд отправляет args в camelCase (например microphoneSensitivity, recordingHotkey, autoCopyToClipboard, autoPasteText, playCompletionSound, hideRecordingWindowOnHotkey, showMiniRecordingWindow, keepRecordingUntilManualStop, holdToRecord, doubleSpaceHotkeyEnabled, selectedAudioDevice, recordingMode, openaiApiKey, incomingTranslationDelivery, incomingTranslationVolume).".to_string());
     }
 
     let requested_double_space_hotkey_enabled = double_space_hotkey_enabled;
@@ -4635,6 +4776,21 @@ pub async fn update_app_config(
                     .is_some_and(|value| !value.trim().is_empty())
             );
             config.openai_api_key = next_key;
+            any_changed = true;
+        }
+    }
+
+    if let Some(delivery) = incoming_translation_delivery {
+        if config.incoming_translation_delivery != delivery {
+            config.incoming_translation_delivery = delivery;
+            any_changed = true;
+        }
+    }
+
+    if let Some(volume) = incoming_translation_volume {
+        let volume = volume.min(100);
+        if config.incoming_translation_volume != volume {
+            config.incoming_translation_volume = volume;
             any_changed = true;
         }
     }

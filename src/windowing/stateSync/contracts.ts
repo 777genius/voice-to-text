@@ -12,6 +12,7 @@ import type { SnapshotEnvelope } from '@statesync/core';
 
 /** Режим записи. Соответствует Rust `RecordingMode`. */
 export type RecordingMode = 'dictation' | 'live_translation';
+export type IncomingTranslationDelivery = 'captions_only' | 'text_and_audio';
 
 /**
  * App-config snapshot for frontend windows.
@@ -32,6 +33,8 @@ export type AppConfigSnapshotData = {
   selected_audio_device: string | null;
   recording_mode: RecordingMode;
   openai_api_key: string | null;
+  incoming_translation_delivery?: IncomingTranslationDelivery;
+  incoming_translation_volume?: number;
 };
 
 /**

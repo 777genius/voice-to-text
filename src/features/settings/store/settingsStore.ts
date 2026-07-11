@@ -14,7 +14,13 @@ import {
   invokeUpdateUiPreferences,
 } from '@/windowing/stateSync';
 import { normalizeUiTheme } from '@/i18n.locales';
-import type { AppTheme, RecordingMode, SaveStatus, SettingsState } from '../domain/types';
+import type {
+  AppTheme,
+  IncomingTranslationDelivery,
+  RecordingMode,
+  SaveStatus,
+  SettingsState,
+} from '../domain/types';
 
 export const useSettingsStore = defineStore('settings', () => {
   // Состояние настроек
@@ -45,6 +51,8 @@ export const useSettingsStore = defineStore('settings', () => {
   const doubleSpaceHotkeyEnabled = ref(false);
   const streamingKeyterms = ref('');
   const recordingMode = ref<RecordingMode>('dictation');
+  const incomingTranslationDelivery = ref<IncomingTranslationDelivery>('captions_only');
+  const incomingTranslationVolume = ref(100);
   const persistedState = ref<SettingsState | null>(null);
 
   // Debounce для автосохранения STT языка
@@ -103,6 +111,8 @@ export const useSettingsStore = defineStore('settings', () => {
     doubleSpaceHotkeyEnabled: doubleSpaceHotkeyEnabled.value,
     streamingKeyterms: streamingKeyterms.value,
     recordingMode: recordingMode.value,
+    incomingTranslationDelivery: incomingTranslationDelivery.value,
+    incomingTranslationVolume: incomingTranslationVolume.value,
   }));
 
   // Действия
@@ -313,6 +323,15 @@ export const useSettingsStore = defineStore('settings', () => {
     recordingMode.value = value === 'live_translation' ? 'live_translation' : 'dictation';
   }
 
+  function setIncomingTranslationDelivery(value: IncomingTranslationDelivery) {
+    incomingTranslationDelivery.value =
+      value === 'text_and_audio' ? 'text_and_audio' : 'captions_only';
+  }
+
+  function setIncomingTranslationVolume(value: number) {
+    incomingTranslationVolume.value = Math.max(0, Math.min(100, Math.round(value)));
+  }
+
   function setAvailableAudioDevices(devices: string[]) {
     availableAudioDevices.value = devices;
   }
@@ -382,6 +401,10 @@ export const useSettingsStore = defineStore('settings', () => {
     if (state.streamingKeyterms !== undefined)
       setStreamingKeyterms(state.streamingKeyterms, { persist: false });
     if (state.recordingMode !== undefined) setRecordingMode(state.recordingMode);
+    if (state.incomingTranslationDelivery !== undefined)
+      setIncomingTranslationDelivery(state.incomingTranslationDelivery);
+    if (state.incomingTranslationVolume !== undefined)
+      setIncomingTranslationVolume(state.incomingTranslationVolume);
   }
 
   function capturePersistedState(state?: SettingsState): void {
@@ -421,6 +444,8 @@ export const useSettingsStore = defineStore('settings', () => {
     doubleSpaceHotkeyEnabled,
     streamingKeyterms,
     recordingMode,
+    incomingTranslationDelivery,
+    incomingTranslationVolume,
     persistedState,
     availableAudioDevices,
     hasAccessibilityPermission,
@@ -459,6 +484,8 @@ export const useSettingsStore = defineStore('settings', () => {
     setDoubleSpaceHotkeyEnabled,
     setStreamingKeyterms,
     setRecordingMode,
+    setIncomingTranslationDelivery,
+    setIncomingTranslationVolume,
     setAvailableAudioDevices,
     setAccessibilityPermission,
     setLoading,

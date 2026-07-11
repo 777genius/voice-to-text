@@ -163,6 +163,8 @@ pub fn run() {
             commands::toggle_incoming_translation,
             commands::get_incoming_translation_status,
             commands::get_incoming_translation_state,
+            commands::set_incoming_translation_muted,
+            commands::get_incoming_spoken_translation_capability,
             commands::get_live_translation_platform_status,
             commands::run_live_translation_health_check,
             commands::log_client_event,

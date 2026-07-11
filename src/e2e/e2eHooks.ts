@@ -24,6 +24,8 @@ type E2eApi = {
     hideRecordingWindowOnHotkey: boolean;
     microphoneSensitivity: number;
     selectedAudioDevice: string;
+    incomingTranslationDelivery: string;
+    incomingTranslationVolume: number;
   };
 
   getSttConfig: () => {
@@ -104,6 +106,8 @@ export function installE2eHooks(pinia: Pinia): void {
       hideRecordingWindowOnHotkey: appConfig.hideRecordingWindowOnHotkey,
       microphoneSensitivity: appConfig.microphoneSensitivity,
       selectedAudioDevice: appConfig.selectedAudioDevice,
+      incomingTranslationDelivery: appConfig.incomingTranslationDelivery,
+      incomingTranslationVolume: appConfig.incomingTranslationVolume,
     }),
     getSttConfig: () => ({
       revision: sttConfig.revision,

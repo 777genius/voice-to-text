@@ -42,6 +42,7 @@ impl MacosSystemAudioCapture {
 
     pub fn preflight(request: SystemAudioCaptureRequest) -> AudioResult<()> {
         validate_capture_request(request)?;
+        build_stream_configuration()?;
         shareable_display().map(|_| ())
     }
 }
