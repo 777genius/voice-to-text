@@ -22,6 +22,7 @@
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -124,6 +125,11 @@ struct ServerErrorBody {
 /// 4. `finish(drain_timeout)` — отправляет `session.close`, ждёт `session.closed` или таймаут.
 /// 5. `abort()` — hard cleanup (если connect не успел или мы хотим без drain).
 pub struct OpenAIRealtimeTranslationClient {
+    endpoint: String,
+    connect_timeout: Duration,
+    session_ready_timeout: Duration,
+    send_timeout: Duration,
+    force_close_timeout: Duration,
     target_language: Option<String>,
     sink: Arc<Mutex<Option<WsSink>>>,
     reader_task: Option<JoinHandle<()>>,
@@ -134,12 +140,38 @@ pub struct OpenAIRealtimeTranslationClient {
 
 impl OpenAIRealtimeTranslationClient {
     pub fn new() -> Self {
+        Self::with_endpoint(OPENAI_REALTIME_TRANSLATION_URL)
+    }
+
+    /// Overrides only the transport destination. This keeps the protocol adapter testable
+    /// against a local WebSocket server without global environment state.
+    pub fn with_endpoint(endpoint: impl Into<String>) -> Self {
         Self {
+            endpoint: endpoint.into(),
+            connect_timeout: WS_CONNECT_TIMEOUT,
+            session_ready_timeout: SESSION_READY_TIMEOUT,
+            send_timeout: WS_SEND_TIMEOUT,
+            force_close_timeout: WS_FORCE_CLOSE_TIMEOUT,
             target_language: None,
             sink: Arc::new(Mutex::new(None)),
             reader_task: None,
             event_tx: None,
         }
+    }
+
+    /// Overrides bounded transport waits for deterministic fault tests and constrained hosts.
+    pub fn with_timeouts(
+        mut self,
+        connect_timeout: Duration,
+        session_ready_timeout: Duration,
+        send_timeout: Duration,
+        force_close_timeout: Duration,
+    ) -> Self {
+        self.connect_timeout = connect_timeout;
+        self.session_ready_timeout = session_ready_timeout;
+        self.send_timeout = send_timeout;
+        self.force_close_timeout = force_close_timeout;
+        self
     }
 
     pub fn target_language(&self) -> Option<&str> {
@@ -162,7 +194,9 @@ impl OpenAIRealtimeTranslationClient {
             ));
         }
 
-        let mut req = OPENAI_REALTIME_TRANSLATION_URL
+        let mut req = self
+            .endpoint
+            .as_str()
             .into_client_request()
             .map_err(|e| RealtimeTranslationError::Internal(format!("invalid url: {}", e)))?;
         let auth_value = build_authorization_header_value(&config.credential)?;
@@ -172,9 +206,10 @@ impl OpenAIRealtimeTranslationClient {
             "Connecting to OpenAI realtime translation: target_language={}",
             config.target_language
         );
+        let handshake_started = Instant::now();
 
         let connect = connect_async_with_config(req, Some(realtime_websocket_config()), false);
-        let (ws, _resp) = match timeout(WS_CONNECT_TIMEOUT, connect).await {
+        let (ws, _resp) = match timeout(self.connect_timeout, connect).await {
             Ok(Ok(pair)) => pair,
             Ok(Err(err)) => {
                 let mapped = map_connect_error(&err);
@@ -183,7 +218,7 @@ impl OpenAIRealtimeTranslationClient {
             Err(_) => {
                 return Err(RealtimeTranslationError::Timeout(format!(
                     "WebSocket connect timed out after {} ms",
-                    WS_CONNECT_TIMEOUT.as_millis()
+                    self.connect_timeout.as_millis()
                 )));
             }
         };
@@ -213,7 +248,7 @@ impl OpenAIRealtimeTranslationClient {
         });
         if let Err(error) = await_ws_operation(
             sink.send(Message::Text(session_update.to_string())),
-            WS_SEND_TIMEOUT,
+            self.send_timeout,
             "session.update send",
         )
         .await
@@ -223,7 +258,7 @@ impl OpenAIRealtimeTranslationClient {
             return Err(error);
         }
 
-        let ready_result = timeout(SESSION_READY_TIMEOUT, ready_rx).await;
+        let ready_result = timeout(self.session_ready_timeout, ready_rx).await;
         match ready_result {
             Ok(Ok(Ok(()))) => {}
             Ok(Ok(Err(error))) => {
@@ -243,7 +278,7 @@ impl OpenAIRealtimeTranslationClient {
                 let _ = reader_task.await;
                 return Err(RealtimeTranslationError::Timeout(format!(
                     "session.updated was not received within {} ms",
-                    SESSION_READY_TIMEOUT.as_millis()
+                    self.session_ready_timeout.as_millis()
                 )));
             }
         }
@@ -256,6 +291,11 @@ impl OpenAIRealtimeTranslationClient {
         self.reader_task = Some(reader_task);
         self.target_language = Some(config.target_language);
         log::info!("OpenAI realtime translation: session.updated confirmed");
+        log::info!(
+            "openai_realtime_handshake target_language={} duration_ms={}",
+            self.target_language.as_deref().unwrap_or("unknown"),
+            handshake_started.elapsed().as_millis()
+        );
         Ok(rx)
     }
 
@@ -279,7 +319,7 @@ impl OpenAIRealtimeTranslationClient {
         };
         await_ws_operation(
             sink.send(Message::Text(msg.to_string())),
-            WS_SEND_TIMEOUT,
+            self.send_timeout,
             "audio send",
         )
         .await
@@ -302,7 +342,7 @@ impl OpenAIRealtimeTranslationClient {
                         sink.send(Message::Text(close_msg.to_string())).await?;
                         sink.flush().await
                     },
-                    WS_SEND_TIMEOUT,
+                    self.send_timeout,
                     "session.close send",
                 )
                 .await?;
@@ -326,7 +366,7 @@ impl OpenAIRealtimeTranslationClient {
                     {
                         let mut guard = self.sink.lock().await;
                         if let Some(sink) = guard.as_mut() {
-                            if timeout(WS_FORCE_CLOSE_TIMEOUT, async {
+                            if timeout(self.force_close_timeout, async {
                                 let _ = sink.send(Message::Close(None)).await;
                                 let _ = sink.flush().await;
                             })
@@ -335,7 +375,7 @@ impl OpenAIRealtimeTranslationClient {
                             {
                                 log::warn!(
                                     "OpenAI realtime translation: websocket force-close timed out after {} ms",
-                                    WS_FORCE_CLOSE_TIMEOUT.as_millis()
+                                    self.force_close_timeout.as_millis()
                                 );
                             }
                         }

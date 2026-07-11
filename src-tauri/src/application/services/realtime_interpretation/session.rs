@@ -1,5 +1,5 @@
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -265,6 +265,133 @@ struct InputWorkerResult {
     aborted: bool,
 }
 
+const UNSET_DIAGNOSTIC_MS: u64 = u64::MAX;
+
+struct RuntimeDiagnostics {
+    session_id: u64,
+    input_source_name: &'static str,
+    output_route_name: &'static str,
+    started_at: Instant,
+    input_audio_micros: AtomicU64,
+    first_input_ms: AtomicU64,
+    first_translated_text_ms: AtomicU64,
+    first_translated_audio_ms: AtomicU64,
+    input_queue_high_water: AtomicUsize,
+    output_queue_high_water: AtomicUsize,
+    output_pending_high_water_ms: AtomicU64,
+    input_drop_count: AtomicU64,
+    output_drop_count: AtomicU64,
+    output_dropped_ms: AtomicU64,
+    reported: AtomicBool,
+}
+
+impl RuntimeDiagnostics {
+    fn new(session_id: u64, policy: &RealtimeInterpretationPolicy) -> Self {
+        Self {
+            session_id,
+            input_source_name: policy.input_source_name,
+            output_route_name: policy.output_route_name,
+            started_at: Instant::now(),
+            input_audio_micros: AtomicU64::new(0),
+            first_input_ms: AtomicU64::new(UNSET_DIAGNOSTIC_MS),
+            first_translated_text_ms: AtomicU64::new(UNSET_DIAGNOSTIC_MS),
+            first_translated_audio_ms: AtomicU64::new(UNSET_DIAGNOSTIC_MS),
+            input_queue_high_water: AtomicUsize::new(0),
+            output_queue_high_water: AtomicUsize::new(0),
+            output_pending_high_water_ms: AtomicU64::new(0),
+            input_drop_count: AtomicU64::new(0),
+            output_drop_count: AtomicU64::new(0),
+            output_dropped_ms: AtomicU64::new(0),
+            reported: AtomicBool::new(false),
+        }
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.started_at.elapsed().as_millis().min(u64::MAX as u128) as u64
+    }
+
+    fn mark_once(&self, metric: &AtomicU64) {
+        let _ = metric.compare_exchange(
+            UNSET_DIAGNOSTIC_MS,
+            self.elapsed_ms(),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+    }
+
+    fn observe_input(&self, chunk: &AudioChunk, queue_depth: usize) {
+        self.mark_once(&self.first_input_ms);
+        let channels = u64::from(chunk.channels.max(1));
+        let sample_rate = u64::from(chunk.sample_rate.max(1));
+        let frames = chunk.data.len() as u64 / channels;
+        self.input_audio_micros.fetch_add(
+            frames.saturating_mul(1_000_000) / sample_rate,
+            Ordering::Relaxed,
+        );
+        self.input_queue_high_water
+            .fetch_max(queue_depth, Ordering::Relaxed);
+    }
+
+    fn observe_translated_text(&self) {
+        self.mark_once(&self.first_translated_text_ms);
+    }
+
+    fn observe_translated_audio(&self, queue_depth: usize) {
+        self.mark_once(&self.first_translated_audio_ms);
+        self.output_queue_high_water
+            .fetch_max(queue_depth, Ordering::Relaxed);
+    }
+
+    fn observe_output_pending(&self, pending: Duration) {
+        self.output_pending_high_water_ms.fetch_max(
+            pending.as_millis().min(u64::MAX as u128) as u64,
+            Ordering::Relaxed,
+        );
+    }
+
+    fn observe_input_drop(&self) {
+        self.input_drop_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn observe_output_drop(&self, duration: Duration, pending: Duration) {
+        self.output_drop_count.fetch_add(1, Ordering::Relaxed);
+        self.output_dropped_ms.fetch_add(
+            duration.as_millis().min(u64::MAX as u128) as u64,
+            Ordering::Relaxed,
+        );
+        self.observe_output_pending(pending);
+    }
+
+    fn report(&self, stop_reason: &'static str, cleanup_ms: u64) {
+        if self.reported.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let optional_ms = |value: &AtomicU64| match value.load(Ordering::Relaxed) {
+            UNSET_DIAGNOSTIC_MS => -1i64,
+            value => value.min(i64::MAX as u64) as i64,
+        };
+        log::info!(
+            "realtime_diagnostics session_id={} input_source={} output_route={} duration_ms={} input_audio_ms={} first_input_ms={} first_text_ms={} first_audio_ms={} input_queue_high_water={} output_queue_high_water={} output_pending_high_water_ms={} input_drops={} output_drops={} output_dropped_ms={} stop_reason={} cleanup_ms={}",
+            self.session_id,
+            self.input_source_name,
+            self.output_route_name,
+            self.elapsed_ms(),
+            self.input_audio_micros.load(Ordering::Relaxed) / 1_000,
+            optional_ms(&self.first_input_ms),
+            optional_ms(&self.first_translated_text_ms),
+            optional_ms(&self.first_translated_audio_ms),
+            self.input_queue_high_water.load(Ordering::Relaxed),
+            self.output_queue_high_water.load(Ordering::Relaxed),
+            self.output_pending_high_water_ms.load(Ordering::Relaxed),
+            self.input_drop_count.load(Ordering::Relaxed),
+            self.output_drop_count.load(Ordering::Relaxed),
+            self.output_dropped_ms.load(Ordering::Relaxed),
+            stop_reason,
+            cleanup_ms,
+        );
+    }
+}
+
 type InputWorkerTask = JoinHandle<Option<InputWorkerResult>>;
 type OutputWorkerTask = JoinHandle<Option<Box<dyn TranslationAudioOutput>>>;
 
@@ -287,6 +414,7 @@ pub struct RealtimeInterpretationSession {
     stop_requested: Arc<AtomicBool>,
     session_id: u64,
     policy: RealtimeInterpretationPolicy,
+    diagnostics: Arc<RuntimeDiagnostics>,
 }
 
 impl RealtimeInterpretationSession {
@@ -301,6 +429,7 @@ impl RealtimeInterpretationSession {
         let (stop_tx, stop_rx) = mpsc::unbounded_channel();
         let reporter = RuntimeStopReporter::new(stop_tx);
         let stop_requested = Arc::new(AtomicBool::new(false));
+        let diagnostics = Arc::new(RuntimeDiagnostics::new(config.session_id, &config.policy));
 
         let (output_tx, output_rx) = mpsc::channel(config.policy.output_queue_capacity_chunks);
         let output_worker_task = spawn_output_worker(
@@ -308,12 +437,14 @@ impl RealtimeInterpretationSession {
             output_rx,
             reporter.clone(),
             config.policy.clone(),
+            diagnostics.clone(),
         );
         let event_forwarder_task = spawn_event_forwarder(
             ports.translation_events,
             output_tx.clone(),
             callbacks.clone(),
             reporter.clone(),
+            diagnostics.clone(),
         );
 
         let (input_tx, input_rx) = mpsc::channel(config.policy.input_queue_capacity_chunks);
@@ -344,6 +475,7 @@ impl RealtimeInterpretationSession {
             stop_requested.clone(),
             config.policy.clone(),
             capture_activity,
+            diagnostics.clone(),
         );
 
         let mut capture = ports.capture;
@@ -375,6 +507,7 @@ impl RealtimeInterpretationSession {
             stop_requested,
             session_id: config.session_id,
             policy: config.policy,
+            diagnostics,
         };
 
         if let Err(error) = session
@@ -434,6 +567,7 @@ impl RealtimeInterpretationSession {
     }
 
     pub async fn shutdown(mut self, mode: RealtimeInterpretationShutdown) {
+        let cleanup_started = Instant::now();
         self.stop_requested.store(true, Ordering::SeqCst);
         if let Some(task) = self.silence_cadence_task.take() {
             task.abort();
@@ -456,6 +590,13 @@ impl RealtimeInterpretationSession {
         }
 
         self.capture = None;
+        self.diagnostics.report(
+            match mode {
+                RealtimeInterpretationShutdown::Graceful => "graceful",
+                RealtimeInterpretationShutdown::Abort => "abort",
+            },
+            cleanup_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        );
         log::info!(
             "RealtimeInterpretationSession: session {} cleaned up ({:?})",
             self.session_id,
@@ -655,6 +796,7 @@ impl Drop for RealtimeInterpretationSession {
         if let Some(task) = self.silence_cadence_task.take() {
             task.abort();
         }
+        self.diagnostics.report("drop", 0);
     }
 }
 
@@ -779,6 +921,7 @@ fn spawn_event_forwarder(
     output_tx: mpsc::Sender<OutputCommand>,
     callbacks: RealtimeInterpretationCallbacks,
     reporter: RuntimeStopReporter,
+    diagnostics: Arc<RuntimeDiagnostics>,
 ) -> JoinHandle<()> {
     let panic_reporter = reporter.clone();
     tokio::spawn(async move {
@@ -787,6 +930,7 @@ fn spawn_event_forwarder(
             output_tx,
             callbacks,
             reporter,
+            diagnostics,
         ))
         .catch_unwind()
         .await
@@ -804,6 +948,7 @@ async fn run_event_forwarder(
     output_tx: mpsc::Sender<OutputCommand>,
     callbacks: RealtimeInterpretationCallbacks,
     reporter: RuntimeStopReporter,
+    diagnostics: Arc<RuntimeDiagnostics>,
 ) {
     while let Some(event) = translation_events.recv().await {
         match event {
@@ -825,8 +970,14 @@ async fn run_event_forwarder(
                     ));
                     return;
                 }
+                diagnostics.observe_translated_audio(
+                    output_tx
+                        .max_capacity()
+                        .saturating_sub(output_tx.capacity()),
+                );
             }
             RealtimeTranslationEvent::TranslatedTextDelta(text) => {
+                diagnostics.observe_translated_text();
                 call_interpretation_callback("translated text", || {
                     (callbacks.on_translated_text)(text)
                 });
@@ -852,12 +1003,19 @@ fn spawn_output_worker(
     output_rx: mpsc::Receiver<OutputCommand>,
     reporter: RuntimeStopReporter,
     policy: RealtimeInterpretationPolicy,
+    diagnostics: Arc<RuntimeDiagnostics>,
 ) -> OutputWorkerTask {
     let panic_reporter = reporter.clone();
     tokio::spawn(async move {
-        match AssertUnwindSafe(run_output_worker(output, output_rx, reporter, policy))
-            .catch_unwind()
-            .await
+        match AssertUnwindSafe(run_output_worker(
+            output,
+            output_rx,
+            reporter,
+            policy,
+            diagnostics,
+        ))
+        .catch_unwind()
+        .await
         {
             Ok(output) => Some(output),
             Err(_) => {
@@ -875,6 +1033,7 @@ async fn run_output_worker(
     mut output_rx: mpsc::Receiver<OutputCommand>,
     reporter: RuntimeStopReporter,
     policy: RealtimeInterpretationPolicy,
+    diagnostics: Arc<RuntimeDiagnostics>,
 ) -> Box<dyn TranslationAudioOutput> {
     let mut health_poll = tokio::time::interval(policy.output_health_poll_interval);
     let mut consecutive_output_drops = 0u64;
@@ -890,11 +1049,13 @@ async fn run_output_worker(
                 match command {
                     OutputCommand::Audio(samples) => {
                         match output.enqueue_pcm16(&samples).await {
-                            Ok(AudioEnqueueOutcome::Queued { .. }) => {
+                            Ok(AudioEnqueueOutcome::Queued { pending }) => {
                                 consecutive_output_drops = 0;
+                                diagnostics.observe_output_pending(pending);
                             }
                             Ok(AudioEnqueueOutcome::DroppedOldest { duration, pending }) => {
                                 consecutive_output_drops = consecutive_output_drops.saturating_add(1);
+                                diagnostics.observe_output_drop(duration, pending);
                                 log::warn!(
                                     "RealtimeInterpretationSession: {} output dropped {} ms (pending={} ms, consecutive={})",
                                     policy.output_route_name,
@@ -1010,15 +1171,25 @@ fn build_capture_callback(
     stop_requested: Arc<AtomicBool>,
     policy: RealtimeInterpretationPolicy,
     capture_activity: Arc<CaptureActivity>,
+    diagnostics: Arc<RuntimeDiagnostics>,
 ) -> AudioChunkCallback {
     let consecutive_drops = AtomicU64::new(0);
     Arc::new(move |chunk| {
         capture_activity.touch();
+        let queue_capacity = input_tx.max_capacity();
+        diagnostics.observe_input(
+            &chunk,
+            queue_capacity
+                .saturating_sub(input_tx.capacity())
+                .saturating_add(1)
+                .min(queue_capacity),
+        );
         match try_enqueue_audio_chunk(&input_tx, chunk, &consecutive_drops) {
             Ok(()) => {}
             Err(AudioQueueEnqueueError::Full(drops))
                 if drops == policy.input_overload_drop_threshold =>
             {
+                diagnostics.observe_input_drop();
                 reporter.error(RealtimeInterpretationError::InputOverload(format!(
                     "{} audio processing cannot keep up; translation was stopped to avoid silently losing speech",
                     policy.input_source_name
@@ -1030,6 +1201,7 @@ fn build_capture_callback(
                     policy.input_source_name
                 )));
             }
+            Err(AudioQueueEnqueueError::Full(_)) => diagnostics.observe_input_drop(),
             Err(_) => {}
         }
     })
@@ -1175,6 +1347,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_input_queue_drops_are_a_terminal_overload_error() {
+        let (input_tx, _input_rx) = mpsc::channel(1);
+        let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
+        let mut policy = RealtimeInterpretationPolicy::incoming_spoken();
+        policy.input_overload_drop_threshold = 2;
+        let diagnostics = Arc::new(RuntimeDiagnostics::new(10, &policy));
+        let callback = build_capture_callback(
+            input_tx,
+            RuntimeStopReporter::new(stop_tx),
+            Arc::new(AtomicBool::new(false)),
+            policy,
+            Arc::new(CaptureActivity::new()),
+            diagnostics.clone(),
+        );
+
+        callback(AudioChunk::new(vec![1; 4_800], 24_000, 1));
+        callback(AudioChunk::new(vec![2; 4_800], 24_000, 1));
+        callback(AudioChunk::new(vec![3; 4_800], 24_000, 1));
+
+        assert!(matches!(
+            stop_rx.recv().await,
+            Some(RealtimeInterpretationStop::Error(
+                RealtimeInterpretationError::InputOverload(message)
+            )) if message.contains("cannot keep up")
+        ));
+        assert_eq!(diagnostics.input_drop_count.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn runtime_diagnostics_track_latency_queue_and_drop_bounds_without_payloads() {
+        let policy = RealtimeInterpretationPolicy::incoming_spoken();
+        let diagnostics = RuntimeDiagnostics::new(11, &policy);
+        diagnostics.observe_input(&AudioChunk::new(vec![7; 2_400], 24_000, 1), 3);
+        diagnostics.observe_translated_text();
+        diagnostics.observe_translated_audio(4);
+        diagnostics.observe_output_pending(Duration::from_millis(125));
+        diagnostics.observe_input_drop();
+        diagnostics.observe_output_drop(Duration::from_millis(80), Duration::from_millis(240));
+
+        assert_eq!(
+            diagnostics.input_audio_micros.load(Ordering::Relaxed),
+            100_000
+        );
+        assert_ne!(
+            diagnostics.first_input_ms.load(Ordering::Relaxed),
+            UNSET_DIAGNOSTIC_MS
+        );
+        assert_ne!(
+            diagnostics.first_translated_text_ms.load(Ordering::Relaxed),
+            UNSET_DIAGNOSTIC_MS
+        );
+        assert_ne!(
+            diagnostics
+                .first_translated_audio_ms
+                .load(Ordering::Relaxed),
+            UNSET_DIAGNOSTIC_MS
+        );
+        assert_eq!(
+            diagnostics.input_queue_high_water.load(Ordering::Relaxed),
+            3
+        );
+        assert_eq!(
+            diagnostics.output_queue_high_water.load(Ordering::Relaxed),
+            4
+        );
+        assert_eq!(
+            diagnostics
+                .output_pending_high_water_ms
+                .load(Ordering::Relaxed),
+            240
+        );
+        assert_eq!(diagnostics.input_drop_count.load(Ordering::Relaxed), 1);
+        assert_eq!(diagnostics.output_drop_count.load(Ordering::Relaxed), 1);
+        assert_eq!(diagnostics.output_dropped_ms.load(Ordering::Relaxed), 80);
+    }
+
+    #[tokio::test]
     async fn incoming_silence_cadence_injects_one_bounded_frame_after_gap() {
         let (input_tx, mut input_rx) = mpsc::channel(1);
         let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
@@ -1252,6 +1501,10 @@ mod tests {
             output_tx,
             callbacks,
             RuntimeStopReporter::new(stop_tx),
+            Arc::new(RuntimeDiagnostics::new(
+                1,
+                &RealtimeInterpretationPolicy::outgoing(),
+            )),
         )
         .await;
 
@@ -1498,12 +1751,14 @@ mod tests {
         let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
         let mut policy = RealtimeInterpretationPolicy::outgoing();
         policy.output_health_poll_interval = Duration::from_millis(5);
+        let diagnostics = Arc::new(RuntimeDiagnostics::new(1, &policy));
 
         let output_task = tokio::spawn(run_output_worker(
             Box::new(ContractOutput { state }),
             command_rx,
             RuntimeStopReporter::new(stop_tx),
             policy,
+            diagnostics,
         ));
         let stop = tokio::time::timeout(Duration::from_secs(1), stop_rx.recv())
             .await
@@ -1528,12 +1783,14 @@ mod tests {
         let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
         let mut policy = RealtimeInterpretationPolicy::outgoing();
         policy.output_overload_drop_threshold = 2;
+        let diagnostics = Arc::new(RuntimeDiagnostics::new(2, &policy));
 
         let output_task = tokio::spawn(run_output_worker(
             Box::new(ContractOutput { state }),
             command_rx,
             RuntimeStopReporter::new(stop_tx),
             policy,
+            diagnostics,
         ));
         command_tx
             .send(OutputCommand::Audio(vec![1]))

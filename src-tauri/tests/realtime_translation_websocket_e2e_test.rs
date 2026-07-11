@@ -1,0 +1,793 @@
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use app_lib::application::{
+    IncomingTranslationCallbacks, IncomingTranslationConfig, IncomingTranslationFacade,
+};
+use app_lib::domain::{
+    AudioCapture, AudioCaptureTarget, AudioChunk, AudioChunkCallback, AudioConfig,
+    AudioEnqueueOutcome, AudioResult, LocalPlaybackOutputFactory, LocalPlaybackRoute,
+    RealtimeTranslationConfig, RealtimeTranslationErrorKind, RealtimeTranslationEvent,
+    RealtimeTranslationFactory, RealtimeTranslationSession, RecordingStatus,
+    SpokenIncomingCapability, SpokenTranslationCapability, SttConfig, SystemAudioCaptureFactory,
+    SystemAudioCaptureRequest, TranslationAudioOutput, TranslationAudioOutputConfig,
+    TranslationAudioOutputResult,
+};
+use app_lib::infrastructure::openai::OpenAIRealtimeTranslationClient;
+use async_trait::async_trait;
+use base64::Engine;
+use futures_util::{SinkExt, StreamExt};
+use serde_json::{json, Value};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinHandle;
+use tokio_tungstenite::accept_async;
+use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{accept_hdr_async, WebSocketStream};
+
+const TEST_CREDENTIAL: &str = "integration-placeholder";
+const TEST_TIMEOUT: Duration = Duration::from_secs(2);
+
+async fn spawn_tcp_server<F, Fut>(script: F) -> (String, JoinHandle<()>)
+where
+    F: FnOnce(TcpStream) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        script(stream).await;
+    });
+    (
+        format!("ws://{address}/v1/realtime/translations?model=test"),
+        task,
+    )
+}
+
+async fn receive_json(ws: &mut WebSocketStream<TcpStream>) -> Value {
+    let message = tokio::time::timeout(TEST_TIMEOUT, ws.next())
+        .await
+        .expect("WebSocket message timed out")
+        .expect("WebSocket closed unexpectedly")
+        .expect("WebSocket read failed");
+    let Message::Text(text) = message else {
+        panic!("expected text WebSocket message");
+    };
+    serde_json::from_str(&text).expect("client message must be JSON")
+}
+
+async fn send_json(ws: &mut WebSocketStream<TcpStream>, value: Value) {
+    ws.send(Message::Text(value.to_string()))
+        .await
+        .expect("server event send must succeed");
+}
+
+fn pcm16_base64(samples: &[i16]) -> String {
+    let bytes: Vec<u8> = samples
+        .iter()
+        .flat_map(|sample| sample.to_le_bytes())
+        .collect();
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+#[derive(Default)]
+struct SyntheticFlowState {
+    capture_request: Mutex<Option<SystemAudioCaptureRequest>>,
+    capture_started: AtomicBool,
+    capture_stopped: AtomicBool,
+    output_opened: AtomicBool,
+    output_closed: AtomicBool,
+    output_samples: Mutex<Vec<i16>>,
+    output_gain: Mutex<Option<f32>>,
+}
+
+struct SyntheticCaptureFactory {
+    state: Arc<SyntheticFlowState>,
+    samples: Arc<Vec<i16>>,
+}
+
+impl SystemAudioCaptureFactory for SyntheticCaptureFactory {
+    fn preflight_system_audio_capture(
+        &self,
+        request: SystemAudioCaptureRequest,
+    ) -> AudioResult<()> {
+        *self.state.capture_request.lock().unwrap() = Some(request);
+        Ok(())
+    }
+
+    fn create_system_audio_capture(
+        &self,
+        request: SystemAudioCaptureRequest,
+    ) -> AudioResult<Box<dyn AudioCapture>> {
+        assert_eq!(request, SystemAudioCaptureRequest::isolated(request.target));
+        Ok(Box::new(SyntheticCapture {
+            state: self.state.clone(),
+            samples: self.samples.clone(),
+            config: AudioConfig::default(),
+        }))
+    }
+}
+
+struct SyntheticCapture {
+    state: Arc<SyntheticFlowState>,
+    samples: Arc<Vec<i16>>,
+    config: AudioConfig,
+}
+
+#[async_trait]
+impl AudioCapture for SyntheticCapture {
+    async fn initialize(&mut self, config: AudioConfig) -> AudioResult<()> {
+        self.config = config;
+        Ok(())
+    }
+
+    async fn start_capture(&mut self, on_chunk: AudioChunkCallback) -> AudioResult<()> {
+        self.state.capture_started.store(true, Ordering::SeqCst);
+        for samples in self.samples.chunks(4_800) {
+            on_chunk(AudioChunk::new(
+                samples.to_vec(),
+                self.config.sample_rate,
+                self.config.channels,
+            ));
+        }
+        Ok(())
+    }
+
+    async fn stop_capture(&mut self) -> AudioResult<()> {
+        self.state.capture_stopped.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn is_capturing(&self) -> bool {
+        self.state.capture_started.load(Ordering::SeqCst)
+            && !self.state.capture_stopped.load(Ordering::SeqCst)
+    }
+
+    fn config(&self) -> AudioConfig {
+        self.config
+    }
+}
+
+struct CollectingOutputFactory {
+    state: Arc<SyntheticFlowState>,
+}
+
+impl LocalPlaybackOutputFactory for CollectingOutputFactory {
+    fn create_local_playback_output(
+        &self,
+        route: LocalPlaybackRoute,
+    ) -> TranslationAudioOutputResult<Box<dyn TranslationAudioOutput>> {
+        assert_eq!(route, LocalPlaybackRoute::SystemDefault);
+        Ok(Box::new(CollectingOutput {
+            state: self.state.clone(),
+        }))
+    }
+}
+
+struct CollectingOutput {
+    state: Arc<SyntheticFlowState>,
+}
+
+#[async_trait]
+impl TranslationAudioOutput for CollectingOutput {
+    async fn open(
+        &mut self,
+        config: TranslationAudioOutputConfig,
+    ) -> TranslationAudioOutputResult<()> {
+        self.state.output_opened.store(true, Ordering::SeqCst);
+        *self.state.output_gain.lock().unwrap() = Some(config.gain);
+        Ok(())
+    }
+
+    async fn enqueue_pcm16(
+        &self,
+        samples: &[i16],
+    ) -> TranslationAudioOutputResult<AudioEnqueueOutcome> {
+        self.state
+            .output_samples
+            .lock()
+            .unwrap()
+            .extend_from_slice(samples);
+        Ok(AudioEnqueueOutcome::Queued {
+            pending: Duration::ZERO,
+        })
+    }
+
+    async fn close(&mut self) -> TranslationAudioOutputResult<()> {
+        self.state.output_closed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn set_gain(&mut self, gain: f32) -> TranslationAudioOutputResult<()> {
+        *self.state.output_gain.lock().unwrap() = Some(gain);
+        Ok(())
+    }
+
+    fn is_open(&self) -> bool {
+        self.state.output_opened.load(Ordering::SeqCst)
+            && !self.state.output_closed.load(Ordering::SeqCst)
+    }
+
+    fn device_name(&self) -> Option<String> {
+        Some("synthetic-system-default".into())
+    }
+
+    fn begin_drain_mode(&self) {}
+
+    fn prepare_for_drain(&self) -> TranslationAudioOutputResult<Duration> {
+        Ok(Duration::ZERO)
+    }
+
+    fn pending_playback_duration(&self) -> Duration {
+        Duration::ZERO
+    }
+}
+
+struct ReadyCapability;
+
+impl SpokenTranslationCapability for ReadyCapability {
+    fn check(&self, _target_language: &str) -> SpokenIncomingCapability {
+        SpokenIncomingCapability::Ready
+    }
+}
+
+struct LocalWebSocketTranslationFactory {
+    endpoint: String,
+}
+
+impl RealtimeTranslationFactory for LocalWebSocketTranslationFactory {
+    fn create(&self) -> Box<dyn RealtimeTranslationSession> {
+        Box::new(
+            OpenAIRealtimeTranslationClient::with_endpoint(self.endpoint.clone()).with_timeouts(
+                TEST_TIMEOUT,
+                TEST_TIMEOUT,
+                TEST_TIMEOUT,
+                Duration::from_millis(100),
+            ),
+        )
+    }
+}
+
+#[derive(Default)]
+struct ServerObservation {
+    authorization: Mutex<Option<String>>,
+    path: Mutex<Option<String>>,
+    target_language: Mutex<Option<String>>,
+    appended_samples: Mutex<Vec<i16>>,
+    close_received: AtomicBool,
+}
+
+#[tokio::test]
+#[allow(clippy::result_large_err)]
+async fn spoken_facade_runs_synthetic_audio_through_local_websocket_and_playback() {
+    let server_observation = Arc::new(ServerObservation::default());
+    let server_state = server_observation.clone();
+    let (endpoint, server_task) = spawn_tcp_server(move |stream| async move {
+        let header_state = server_state.clone();
+        let mut ws = accept_hdr_async(stream, move |request: &Request, response: Response| {
+            *header_state.authorization.lock().unwrap() = request
+                .headers()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            *header_state.path.lock().unwrap() = Some(request.uri().to_string());
+            Ok(response)
+        })
+        .await
+        .expect("local WebSocket handshake must succeed");
+
+        let update = receive_json(&mut ws).await;
+        assert_eq!(update["type"], "session.update");
+        *server_state.target_language.lock().unwrap() = update
+            .pointer("/session/audio/output/language")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        send_json(&mut ws, json!({ "type": "session.created" })).await;
+        send_json(&mut ws, json!({ "type": "session.updated" })).await;
+
+        let append = receive_json(&mut ws).await;
+        assert_eq!(append["type"], "session.input_audio_buffer.append");
+        let audio = append["audio"].as_str().expect("append must contain audio");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(audio)
+            .expect("append audio must be base64");
+        let samples: Vec<i16> = bytes
+            .chunks_exact(2)
+            .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+            .collect();
+        server_state
+            .appended_samples
+            .lock()
+            .unwrap()
+            .extend_from_slice(&samples);
+
+        send_json(
+            &mut ws,
+            json!({ "type": "future.server.event", "ignored": true }),
+        )
+        .await;
+        send_json(
+            &mut ws,
+            json!({ "type": "session.input_transcript.delta", "delta": "hello caller" }),
+        )
+        .await;
+        send_json(
+            &mut ws,
+            json!({ "type": "session.output_transcript.delta", "delta": "привет" }),
+        )
+        .await;
+        send_json(
+            &mut ws,
+            json!({
+                "type": "session.output_audio.delta",
+                "delta": pcm16_base64(&[120, -240, 360])
+            }),
+        )
+        .await;
+
+        loop {
+            let message = receive_json(&mut ws).await;
+            if message["type"] == "session.close" {
+                server_state.close_received.store(true, Ordering::SeqCst);
+                break;
+            }
+        }
+        send_json(
+            &mut ws,
+            json!({ "type": "session.output_transcript.delta", "delta": " мир" }),
+        )
+        .await;
+        send_json(
+            &mut ws,
+            json!({
+                "type": "session.output_audio.delta",
+                "audio": pcm16_base64(&[-480, 600])
+            }),
+        )
+        .await;
+        send_json(&mut ws, json!({ "type": "session.closed" })).await;
+    })
+    .await;
+
+    let flow_state = Arc::new(SyntheticFlowState::default());
+    let input_samples: Arc<Vec<i16>> = Arc::new((0..4_800).map(|value| value as i16).collect());
+    let service = IncomingTranslationFacade::new_spoken_with_factories(
+        Arc::new(SyntheticCaptureFactory {
+            state: flow_state.clone(),
+            samples: input_samples.clone(),
+        }),
+        Arc::new(CollectingOutputFactory {
+            state: flow_state.clone(),
+        }),
+        Arc::new(LocalWebSocketTranslationFactory { endpoint }),
+        Arc::new(ReadyCapability),
+    );
+    let source_text = Arc::new(Mutex::new(String::new()));
+    let translated_text = Arc::new(Mutex::new(String::new()));
+    let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+    let statuses = Arc::new(Mutex::new(Vec::<RecordingStatus>::new()));
+    let callbacks = IncomingTranslationCallbacks {
+        on_source_final: {
+            let source_text = source_text.clone();
+            Arc::new(move |delta| source_text.lock().unwrap().push_str(&delta))
+        },
+        on_translation_delta: {
+            let translated_text = translated_text.clone();
+            Arc::new(move |delta| translated_text.lock().unwrap().push_str(&delta))
+        },
+        on_error: {
+            let errors = errors.clone();
+            Arc::new(move |error| errors.lock().unwrap().push(error.to_string()))
+        },
+        on_status: {
+            let statuses = statuses.clone();
+            Arc::new(move |status| statuses.lock().unwrap().push(status))
+        },
+    };
+    let mut config = IncomingTranslationConfig::new_with_defaults(SttConfig::default(), 8_001);
+    config.openai_api_key = TEST_CREDENTIAL.into();
+    config.target_language = "ru".into();
+    config.playback_gain = 0.65;
+
+    service.start(config, callbacks).await.unwrap();
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            if translated_text.lock().unwrap().contains("привет")
+                && !flow_state.output_samples.lock().unwrap().is_empty()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("translated text and audio must reach application callbacks");
+    service.stop().await.unwrap();
+    tokio::time::timeout(TEST_TIMEOUT, server_task)
+        .await
+        .expect("fake WebSocket server must stop")
+        .expect("fake WebSocket server task must not panic");
+
+    assert_eq!(service.get_status().await, RecordingStatus::Idle);
+    assert!(flow_state.capture_started.load(Ordering::SeqCst));
+    assert!(flow_state.capture_stopped.load(Ordering::SeqCst));
+    assert!(flow_state.output_opened.load(Ordering::SeqCst));
+    assert!(flow_state.output_closed.load(Ordering::SeqCst));
+    assert_eq!(*flow_state.output_gain.lock().unwrap(), Some(0.65));
+    assert_eq!(
+        *flow_state.output_samples.lock().unwrap(),
+        vec![120, -240, 360, -480, 600]
+    );
+    assert_eq!(&*source_text.lock().unwrap(), "hello caller");
+    assert_eq!(&*translated_text.lock().unwrap(), "привет мир");
+    assert!(errors.lock().unwrap().is_empty());
+    assert!(statuses
+        .lock()
+        .unwrap()
+        .contains(&RecordingStatus::Starting));
+    assert!(statuses
+        .lock()
+        .unwrap()
+        .contains(&RecordingStatus::Recording));
+    assert!(statuses
+        .lock()
+        .unwrap()
+        .contains(&RecordingStatus::Processing));
+    assert!(statuses.lock().unwrap().contains(&RecordingStatus::Idle));
+
+    let request = flow_state.capture_request.lock().unwrap().unwrap();
+    assert_eq!(
+        request.target,
+        AudioCaptureTarget::incoming_realtime_translation()
+    );
+    assert_eq!(
+        &*server_observation.authorization.lock().unwrap(),
+        &Some(format!("Bearer {TEST_CREDENTIAL}"))
+    );
+    assert_eq!(
+        server_observation.path.lock().unwrap().as_deref(),
+        Some("/v1/realtime/translations?model=test")
+    );
+    assert_eq!(
+        server_observation
+            .target_language
+            .lock()
+            .unwrap()
+            .as_deref(),
+        Some("ru")
+    );
+    assert_eq!(
+        &*server_observation.appended_samples.lock().unwrap(),
+        &*input_samples
+    );
+    assert!(server_observation.close_received.load(Ordering::SeqCst));
+}
+
+fn local_client(endpoint: String, ready_timeout: Duration) -> OpenAIRealtimeTranslationClient {
+    OpenAIRealtimeTranslationClient::with_endpoint(endpoint).with_timeouts(
+        TEST_TIMEOUT,
+        ready_timeout,
+        TEST_TIMEOUT,
+        Duration::from_millis(50),
+    )
+}
+
+#[tokio::test]
+async fn delayed_ready_succeeds_but_missing_ready_times_out() {
+    let (endpoint, server) = spawn_tcp_server(|stream| async move {
+        let mut ws = accept_async(stream).await.unwrap();
+        assert_eq!(receive_json(&mut ws).await["type"], "session.update");
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        send_json(&mut ws, json!({ "type": "session.updated" })).await;
+        assert_eq!(receive_json(&mut ws).await["type"], "session.close");
+        send_json(&mut ws, json!({ "type": "session.closed" })).await;
+    })
+    .await;
+    let mut client = local_client(endpoint, Duration::from_millis(300));
+    client
+        .connect(RealtimeTranslationConfig::new(
+            TEST_CREDENTIAL.into(),
+            "ru".into(),
+        ))
+        .await
+        .expect("delayed readiness inside timeout must succeed");
+    client.finish(Duration::from_millis(100)).await.unwrap();
+    server.await.unwrap();
+
+    let (endpoint, server) = spawn_tcp_server(|stream| async move {
+        let mut ws = accept_async(stream).await.unwrap();
+        assert_eq!(receive_json(&mut ws).await["type"], "session.update");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    })
+    .await;
+    let mut client = local_client(endpoint, Duration::from_millis(30));
+    let started = Instant::now();
+    let error = client
+        .connect(RealtimeTranslationConfig::new(
+            TEST_CREDENTIAL.into(),
+            "ru".into(),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), RealtimeTranslationErrorKind::Timeout);
+    assert!(started.elapsed() < Duration::from_millis(300));
+    server.await.unwrap();
+}
+
+async fn assert_runtime_protocol_failure(server_event: Message) {
+    let (endpoint, server) = spawn_tcp_server(move |stream| async move {
+        let mut ws = accept_async(stream).await.unwrap();
+        assert_eq!(receive_json(&mut ws).await["type"], "session.update");
+        send_json(&mut ws, json!({ "type": "session.updated" })).await;
+        ws.send(server_event).await.unwrap();
+    })
+    .await;
+    let mut client = local_client(endpoint, TEST_TIMEOUT);
+    let mut events = client
+        .connect(RealtimeTranslationConfig::new(
+            TEST_CREDENTIAL.into(),
+            "ru".into(),
+        ))
+        .await
+        .unwrap();
+    let event = tokio::time::timeout(TEST_TIMEOUT, events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        event,
+        RealtimeTranslationEvent::Failed(error)
+            if error.kind() == RealtimeTranslationErrorKind::Protocol
+    ));
+    client.abort().await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn malformed_json_and_base64_are_terminal_protocol_failures() {
+    assert_runtime_protocol_failure(Message::Text("{not-json".into())).await;
+    assert_runtime_protocol_failure(Message::Text(
+        json!({ "type": "session.output_audio.delta", "delta": "%%%" }).to_string(),
+    ))
+    .await;
+}
+
+async fn assert_handshake_status_kind(
+    status: u16,
+    reason: &str,
+    expected: RealtimeTranslationErrorKind,
+) {
+    let reason = reason.to_string();
+    let (endpoint, server) = spawn_tcp_server(move |mut stream| async move {
+        let mut request = [0u8; 2048];
+        let _ = stream.read(&mut request).await.unwrap();
+        let response =
+            format!("HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        stream.write_all(response.as_bytes()).await.unwrap();
+    })
+    .await;
+    let mut client = local_client(endpoint, TEST_TIMEOUT);
+    let error = client
+        .connect(RealtimeTranslationConfig::new(
+            TEST_CREDENTIAL.into(),
+            "ru".into(),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), expected);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn handshake_401_and_429_keep_typed_error_categories() {
+    assert_handshake_status_kind(
+        401,
+        "Unauthorized",
+        RealtimeTranslationErrorKind::Authentication,
+    )
+    .await;
+    assert_handshake_status_kind(
+        429,
+        "Too Many Requests",
+        RealtimeTranslationErrorKind::RateLimited,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn abrupt_close_emits_closed_and_stalled_close_is_bounded() {
+    let (endpoint, server) = spawn_tcp_server(|stream| async move {
+        let mut ws = accept_async(stream).await.unwrap();
+        assert_eq!(receive_json(&mut ws).await["type"], "session.update");
+        send_json(&mut ws, json!({ "type": "session.updated" })).await;
+        ws.send(Message::Close(None)).await.unwrap();
+    })
+    .await;
+    let mut client = local_client(endpoint, TEST_TIMEOUT);
+    let mut events = client
+        .connect(RealtimeTranslationConfig::new(
+            TEST_CREDENTIAL.into(),
+            "ru".into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(TEST_TIMEOUT, events.recv())
+            .await
+            .unwrap(),
+        Some(RealtimeTranslationEvent::Closed)
+    );
+    client.abort().await;
+    server.await.unwrap();
+
+    let (endpoint, server) = spawn_tcp_server(|stream| async move {
+        let mut ws = accept_async(stream).await.unwrap();
+        assert_eq!(receive_json(&mut ws).await["type"], "session.update");
+        send_json(&mut ws, json!({ "type": "session.updated" })).await;
+        assert_eq!(receive_json(&mut ws).await["type"], "session.close");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    })
+    .await;
+    let mut client = local_client(endpoint, TEST_TIMEOUT);
+    let _events = client
+        .connect(RealtimeTranslationConfig::new(
+            TEST_CREDENTIAL.into(),
+            "ru".into(),
+        ))
+        .await
+        .unwrap();
+    let started = Instant::now();
+    client.finish(Duration::from_millis(50)).await.unwrap();
+    assert!(started.elapsed() < Duration::from_millis(400));
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn oversized_server_message_is_rejected_by_websocket_limit() {
+    let (endpoint, server) = spawn_tcp_server(|stream| async move {
+        let mut ws = accept_async(stream).await.unwrap();
+        assert_eq!(receive_json(&mut ws).await["type"], "session.update");
+        send_json(&mut ws, json!({ "type": "session.updated" })).await;
+        let oversized = "x".repeat(8 * 1024 * 1024 + 1);
+        let _ = ws.send(Message::Text(oversized)).await;
+    })
+    .await;
+    let mut client = local_client(endpoint, TEST_TIMEOUT);
+    let mut events = client
+        .connect(RealtimeTranslationConfig::new(
+            TEST_CREDENTIAL.into(),
+            "ru".into(),
+        ))
+        .await
+        .unwrap();
+    let event = tokio::time::timeout(TEST_TIMEOUT, events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        event,
+        RealtimeTranslationEvent::Failed(error)
+            if error.kind() == RealtimeTranslationErrorKind::Connection
+    ));
+    client.abort().await;
+    server.await.unwrap();
+}
+
+fn spoken_soak_duration() -> Duration {
+    std::env::var("SPOKEN_TRANSLATION_SOAK_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(30 * 60))
+}
+
+#[tokio::test]
+#[ignore = "30-minute synthetic spoken soak; set SPOKEN_TRANSLATION_SOAK_SECONDS for a shorter manual run"]
+async fn spoken_runtime_long_soak_keeps_audio_flow_bounded_and_stops_cleanly() {
+    let emitted_audio_events = Arc::new(AtomicUsize::new(0));
+    let server_event_count = emitted_audio_events.clone();
+    let (endpoint, server) = spawn_tcp_server(move |stream| async move {
+        let mut ws = accept_async(stream).await.unwrap();
+        assert_eq!(receive_json(&mut ws).await["type"], "session.update");
+        send_json(&mut ws, json!({ "type": "session.updated" })).await;
+        let mut ticker = tokio::time::interval(Duration::from_millis(100));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    let index = server_event_count.fetch_add(1, Ordering::SeqCst);
+                    send_json(
+                        &mut ws,
+                        json!({
+                            "type": "session.output_audio.delta",
+                            "delta": pcm16_base64(&[index as i16, -(index as i16), 1])
+                        }),
+                    )
+                    .await;
+                    if index % 10 == 0 {
+                        send_json(
+                            &mut ws,
+                            json!({ "type": "session.output_transcript.delta", "delta": "." }),
+                        )
+                        .await;
+                    }
+                }
+                message = ws.next() => {
+                    let Some(Ok(Message::Text(text))) = message else {
+                        return;
+                    };
+                    let message: Value = serde_json::from_str(&text).unwrap();
+                    if message["type"] == "session.close" {
+                        send_json(&mut ws, json!({ "type": "session.closed" })).await;
+                        return;
+                    }
+                }
+            }
+        }
+    })
+    .await;
+
+    let flow_state = Arc::new(SyntheticFlowState::default());
+    let service = IncomingTranslationFacade::new_spoken_with_factories(
+        Arc::new(SyntheticCaptureFactory {
+            state: flow_state.clone(),
+            samples: Arc::new(vec![7; 4_800]),
+        }),
+        Arc::new(CollectingOutputFactory {
+            state: flow_state.clone(),
+        }),
+        Arc::new(LocalWebSocketTranslationFactory { endpoint }),
+        Arc::new(ReadyCapability),
+    );
+    let translated_text = Arc::new(Mutex::new(String::new()));
+    let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+    let callbacks = IncomingTranslationCallbacks {
+        on_source_final: Arc::new(|_| {}),
+        on_translation_delta: {
+            let translated_text = translated_text.clone();
+            Arc::new(move |delta| translated_text.lock().unwrap().push_str(&delta))
+        },
+        on_error: {
+            let errors = errors.clone();
+            Arc::new(move |error| errors.lock().unwrap().push(error.to_string()))
+        },
+        on_status: Arc::new(|_| {}),
+    };
+    let mut config = IncomingTranslationConfig::new_with_defaults(SttConfig::default(), 8_002);
+    config.openai_api_key = TEST_CREDENTIAL.into();
+    config.target_language = "ru".into();
+    let duration = spoken_soak_duration();
+
+    service.start(config, callbacks).await.unwrap();
+    let deadline = tokio::time::Instant::now() + duration;
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_secs(1).min(duration)).await;
+        assert_eq!(service.get_status().await, RecordingStatus::Recording);
+        assert!(errors.lock().unwrap().is_empty());
+    }
+    service.stop().await.unwrap();
+    tokio::time::timeout(TEST_TIMEOUT, server)
+        .await
+        .expect("soak server must observe graceful close")
+        .expect("soak server must not panic");
+
+    let events = emitted_audio_events.load(Ordering::SeqCst);
+    let samples = flow_state.output_samples.lock().unwrap().len();
+    println!(
+        "spoken_soak_seconds={}, audio_events={events}, output_samples={samples}, text_chars={}",
+        duration.as_secs(),
+        translated_text.lock().unwrap().len()
+    );
+    assert!(events > 0);
+    assert_eq!(samples, events * 3);
+    assert!(samples <= (duration.as_secs() as usize + 2) * 33);
+    assert!(flow_state.capture_stopped.load(Ordering::SeqCst));
+    assert!(flow_state.output_closed.load(Ordering::SeqCst));
+    assert_eq!(service.get_status().await, RecordingStatus::Idle);
+}

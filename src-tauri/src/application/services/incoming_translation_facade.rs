@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use crate::domain::{
-    IncomingTranslationDelivery, PlatformAudioFactory, RecordingStatus, SttProviderFactory,
-    TranslationLanguage,
+    IncomingTranslationDelivery, LocalPlaybackOutputFactory, PlatformAudioFactory,
+    RealtimeTranslationFactory, RecordingStatus, SpokenTranslationCapability, SttProviderFactory,
+    SystemAudioCaptureFactory, TranslationLanguage,
 };
 
 use super::{
@@ -50,6 +51,22 @@ impl IncomingTranslationFacade {
     pub fn new_spoken() -> Self {
         Self {
             runtime: IncomingRuntime::Spoken(IncomingSpokenTranslationService::new()),
+        }
+    }
+
+    pub fn new_spoken_with_factories(
+        capture_factory: Arc<dyn SystemAudioCaptureFactory>,
+        output_factory: Arc<dyn LocalPlaybackOutputFactory>,
+        translation_factory: Arc<dyn RealtimeTranslationFactory>,
+        capability: Arc<dyn SpokenTranslationCapability>,
+    ) -> Self {
+        Self {
+            runtime: IncomingRuntime::Spoken(IncomingSpokenTranslationService::new_with_factories(
+                capture_factory,
+                output_factory,
+                translation_factory,
+                capability,
+            )),
         }
     }
 

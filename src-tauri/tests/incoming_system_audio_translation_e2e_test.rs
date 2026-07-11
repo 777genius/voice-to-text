@@ -12,13 +12,16 @@ use app_lib::application::{
 };
 use app_lib::domain::{
     AudioCaptureTarget, AudioChunk, AudioConfig, AudioEnqueueOutcome, ConnectionQualityCallback,
-    ErrorCallback, LocalPlaybackOutputFactory, LocalPlaybackRoute, RecordingStatus, SttConfig,
-    SttError, SttProvider, SttProviderFactory, SttResult, SystemAudioCaptureFactory,
-    SystemAudioCaptureRequest, Transcription, TranscriptionCallback, TranslationAudioOutputConfig,
+    ErrorCallback, LocalPlaybackOutputFactory, LocalPlaybackRoute, RealtimeTranslationFactory,
+    RecordingStatus, SpokenIncomingCapability, SpokenTranslationCapability, SttConfig, SttError,
+    SttProvider, SttProviderFactory, SttResult, SystemAudioCaptureFactory,
+    SystemAudioCaptureRequest, Transcription, TranscriptionCallback, TranslationAudioOutput,
+    TranslationAudioOutputConfig, TranslationAudioOutputResult,
 };
 use app_lib::infrastructure::audio::{
     DefaultLocalPlaybackOutputFactory, DefaultPlatformAudioFactory,
 };
+use app_lib::infrastructure::openai::OpenAIRealtimeTranslationFactory;
 use async_trait::async_trait;
 use reqwest::header::CONTENT_TYPE;
 
@@ -165,6 +168,96 @@ fn join_named_thread(handle: std::thread::JoinHandle<()>, name: &str) -> Result<
             .unwrap_or_else(|| "unknown panic payload".to_string());
         format!("{name} thread panicked: {reason}")
     })
+}
+
+#[derive(Default)]
+struct PaidSpokenOutputState {
+    opened: AtomicBool,
+    closed: AtomicBool,
+    samples: Mutex<Vec<i16>>,
+    gain: Mutex<Option<f32>>,
+}
+
+struct PaidSpokenOutputFactory {
+    state: Arc<PaidSpokenOutputState>,
+}
+
+impl LocalPlaybackOutputFactory for PaidSpokenOutputFactory {
+    fn create_local_playback_output(
+        &self,
+        route: LocalPlaybackRoute,
+    ) -> TranslationAudioOutputResult<Box<dyn TranslationAudioOutput>> {
+        assert_eq!(route, LocalPlaybackRoute::SystemDefault);
+        Ok(Box::new(PaidSpokenOutput {
+            state: self.state.clone(),
+        }))
+    }
+}
+
+struct PaidSpokenOutput {
+    state: Arc<PaidSpokenOutputState>,
+}
+
+#[async_trait]
+impl TranslationAudioOutput for PaidSpokenOutput {
+    async fn open(
+        &mut self,
+        config: TranslationAudioOutputConfig,
+    ) -> TranslationAudioOutputResult<()> {
+        self.state.opened.store(true, Ordering::SeqCst);
+        *self.state.gain.lock().unwrap() = Some(config.gain);
+        Ok(())
+    }
+
+    async fn enqueue_pcm16(
+        &self,
+        samples: &[i16],
+    ) -> TranslationAudioOutputResult<AudioEnqueueOutcome> {
+        self.state
+            .samples
+            .lock()
+            .unwrap()
+            .extend_from_slice(samples);
+        Ok(AudioEnqueueOutcome::Queued {
+            pending: Duration::ZERO,
+        })
+    }
+
+    async fn close(&mut self) -> TranslationAudioOutputResult<()> {
+        self.state.closed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn set_gain(&mut self, gain: f32) -> TranslationAudioOutputResult<()> {
+        *self.state.gain.lock().unwrap() = Some(gain);
+        Ok(())
+    }
+
+    fn is_open(&self) -> bool {
+        self.state.opened.load(Ordering::SeqCst) && !self.state.closed.load(Ordering::SeqCst)
+    }
+
+    fn device_name(&self) -> Option<String> {
+        Some("paid-e2e-collector".into())
+    }
+
+    fn begin_drain_mode(&self) {}
+
+    fn prepare_for_drain(&self) -> TranslationAudioOutputResult<Duration> {
+        Ok(Duration::ZERO)
+    }
+
+    fn pending_playback_duration(&self) -> Duration {
+        Duration::ZERO
+    }
+}
+
+struct PaidSpokenReadyCapability;
+
+impl SpokenTranslationCapability for PaidSpokenReadyCapability {
+    fn check(&self, _target_language: &str) -> SpokenIncomingCapability {
+        SpokenIncomingCapability::Ready
+    }
 }
 
 #[tokio::test]
@@ -322,6 +415,91 @@ async fn system_default_playback_is_drained_and_excluded_from_system_capture() {
         same_process_power < external_power * 0.05,
         "same-process 880 Hz leaked into capture: external={external_power:e}, self={same_process_power:e}"
     );
+}
+
+#[tokio::test]
+#[ignore = "paid/manual: requires macOS Screen & System Audio permission, audible system output, and OPENAI_API_KEY"]
+async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system_capture() {
+    let api_key = load_openai_api_key();
+    let fixture = generate_system_audio_fixture();
+    let output_state = Arc::new(PaidSpokenOutputState::default());
+    let realtime_factory: Arc<dyn RealtimeTranslationFactory> =
+        Arc::new(OpenAIRealtimeTranslationFactory);
+    let service = IncomingTranslationFacade::new_spoken_with_factories(
+        Arc::new(DefaultPlatformAudioFactory::new()),
+        Arc::new(PaidSpokenOutputFactory {
+            state: output_state.clone(),
+        }),
+        realtime_factory,
+        Arc::new(PaidSpokenReadyCapability),
+    );
+    let source_text = Arc::new(Mutex::new(String::new()));
+    let translated_text = Arc::new(Mutex::new(String::new()));
+    let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+    let callbacks = IncomingTranslationCallbacks {
+        on_source_final: {
+            let source_text = source_text.clone();
+            Arc::new(move |delta| source_text.lock().unwrap().push_str(&delta))
+        },
+        on_translation_delta: {
+            let translated_text = translated_text.clone();
+            Arc::new(move |delta| translated_text.lock().unwrap().push_str(&delta))
+        },
+        on_error: {
+            let errors = errors.clone();
+            Arc::new(move |error| errors.lock().unwrap().push(error.to_string()))
+        },
+        on_status: Arc::new(|_| {}),
+    };
+    let mut config = IncomingTranslationConfig::new_with_defaults(SttConfig::default(), 30_001);
+    config.openai_api_key = api_key;
+    config.target_language = "ru".into();
+    config.playback_gain = 0.8;
+
+    service
+        .start(config, callbacks)
+        .await
+        .expect("paid incoming spoken translation must start");
+    play_system_audio(fixture.path());
+    let result = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if !translated_text.lock().unwrap().trim().is_empty()
+                && !output_state.samples.lock().unwrap().is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    service
+        .stop()
+        .await
+        .expect("paid incoming spoken translation must stop");
+    result.expect("OpenAI must return translated text and PCM audio within 20 seconds");
+
+    let source = source_text.lock().unwrap().clone();
+    let translated = translated_text.lock().unwrap().clone();
+    let translated_audio_samples = output_state.samples.lock().unwrap().len();
+    println!("paid_incoming_source_text={source}");
+    println!("paid_incoming_translated_text={translated}");
+    println!("paid_incoming_audio_samples={translated_audio_samples}");
+    assert!(source.to_lowercase().contains("call") || source.to_lowercase().contains("subtitle"));
+    assert!(
+        translated
+            .chars()
+            .any(|character| ('\u{0400}'..='\u{04ff}').contains(&character)),
+        "expected Russian translated text, got: {translated}"
+    );
+    assert!(
+        translated_audio_samples > 0,
+        "translated PCM audio is empty"
+    );
+    assert!(errors.lock().unwrap().is_empty());
+    assert!(output_state.opened.load(Ordering::SeqCst));
+    assert!(output_state.closed.load(Ordering::SeqCst));
+    assert_eq!(*output_state.gain.lock().unwrap(), Some(0.8));
+    assert_eq!(service.get_status().await, RecordingStatus::Idle);
 }
 
 fn wav_pcm16(sample_rate: u32, channels: u16, samples: &[i16]) -> Vec<u8> {

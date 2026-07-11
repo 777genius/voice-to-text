@@ -69,6 +69,9 @@ impl OutputDeviceSelector {
 struct OutputPlaybackState {
     prebuffering: bool,
     draining: bool,
+    underrun_count: u64,
+    overflow_count: u64,
+    dropped_audio_ms: u64,
 }
 
 impl Default for OutputPlaybackState {
@@ -76,6 +79,9 @@ impl Default for OutputPlaybackState {
         Self {
             prebuffering: true,
             draining: false,
+            underrun_count: 0,
+            overflow_count: 0,
+            dropped_audio_ms: 0,
         }
     }
 }
@@ -724,8 +730,15 @@ impl TranslationAudioOutput for CpalAudioOutput {
             );
             let dropped_output_duration =
                 Duration::from_secs_f64(dropped_frames as f64 / native_sample_rate as f64);
+            let dropped_duration = dropped_source_duration.saturating_add(dropped_output_duration);
+            if let Ok(mut state) = self.playback_state.lock() {
+                state.overflow_count = state.overflow_count.saturating_add(1);
+                state.dropped_audio_ms = state
+                    .dropped_audio_ms
+                    .saturating_add(dropped_duration.as_millis().min(u64::MAX as u128) as u64);
+            }
             Ok(AudioEnqueueOutcome::DroppedOldest {
-                duration: dropped_source_duration.saturating_add(dropped_output_duration),
+                duration: dropped_duration,
                 pending,
             })
         }
@@ -733,6 +746,7 @@ impl TranslationAudioOutput for CpalAudioOutput {
 
     async fn close(&mut self) -> AudioOutputResult<()> {
         self.is_open = false;
+        let closed_device_name = self.device_name.as_deref().unwrap_or("unknown").to_string();
         if let Some(s) = self.stream.take() {
             drop(s);
         }
@@ -748,8 +762,18 @@ impl TranslationAudioOutput for CpalAudioOutput {
             q.clear();
         }
         if let Ok(mut state) = self.playback_state.lock() {
+            log::info!(
+                "cpal_output_diagnostics device={} underruns={} overflows={} dropped_audio_ms={}",
+                closed_device_name,
+                state.underrun_count,
+                state.overflow_count,
+                state.dropped_audio_ms
+            );
             state.prebuffering = true;
             state.draining = false;
+            state.underrun_count = 0;
+            state.overflow_count = 0;
+            state.dropped_audio_ms = 0;
         }
         if let Ok(mut stream_error) = self.stream_error.lock() {
             *stream_error = None;
@@ -838,6 +862,7 @@ fn fill_output(
         }
 
         if pulled < out.len() && !state.draining {
+            state.underrun_count = state.underrun_count.saturating_add(1);
             state.prebuffering = true;
         }
     }
@@ -1052,6 +1077,7 @@ mod tests {
         let state = Arc::new(Mutex::new(OutputPlaybackState {
             prebuffering: false,
             draining: true,
+            ..OutputPlaybackState::default()
         }));
         let mut underrun = [1.0f32; 4];
 

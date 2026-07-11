@@ -1,5 +1,5 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use tokio::sync::{Mutex, RwLock};
 
@@ -253,6 +253,11 @@ impl IncomingSpokenTranslationService {
         callbacks: IncomingSpokenTranslationCallbacks,
     ) -> Result<(), IncomingSpokenTranslationError> {
         let _lifecycle_guard = self.lifecycle.lock().await;
+        log::info!(
+            "incoming_spoken_start session_id={} target_language={} output_route=system_default",
+            config.session_id,
+            config.target_language.as_str()
+        );
         if self.inner.lock().await.is_some() {
             return Err(IncomingSpokenTranslationError::Configuration(
                 "incoming spoken translation session is already active".into(),
@@ -391,7 +396,7 @@ impl IncomingSpokenTranslationService {
             muted: playback_gain == 0.0,
         });
         spawn_spoken_runtime_cleanup_monitor(
-            self.inner.clone(),
+            Arc::downgrade(&self.inner),
             self.status.clone(),
             callbacks.clone(),
             runtime_stop_rx,
@@ -554,7 +559,7 @@ fn map_runtime_stop(stop: RealtimeInterpretationStop) -> IncomingSpokenTranslati
 }
 
 fn spawn_spoken_runtime_cleanup_monitor(
-    inner: Arc<Mutex<Option<RunningIncomingSpokenSession>>>,
+    inner: Weak<Mutex<Option<RunningIncomingSpokenSession>>>,
     status: Arc<RwLock<RecordingStatus>>,
     callbacks: IncomingSpokenTranslationCallbacks,
     runtime_stop_rx: tokio::sync::mpsc::UnboundedReceiver<RealtimeInterpretationStop>,
@@ -564,6 +569,9 @@ fn spawn_spoken_runtime_cleanup_monitor(
         session_id,
         runtime_stop_rx,
         move |session_id, stop| async move {
+            let Some(inner) = inner.upgrade() else {
+                return;
+            };
             let session = {
                 let mut guard = inner.lock().await;
                 let is_current = guard
@@ -627,6 +635,9 @@ mod tests {
         translation_append_calls: AtomicUsize,
         translation_finish_calls: AtomicUsize,
         translation_abort_calls: AtomicUsize,
+        capture_drop_calls: AtomicUsize,
+        output_drop_calls: AtomicUsize,
+        translation_drop_calls: AtomicUsize,
         requested_capture: StdMutex<Option<SystemAudioCaptureRequest>>,
         requested_route: StdMutex<Option<LocalPlaybackRoute>>,
         requested_language: StdMutex<Option<String>>,
@@ -685,6 +696,12 @@ mod tests {
         running: bool,
         callback: Option<AudioChunkCallback>,
         error_callback: Option<AudioCaptureErrorCallback>,
+    }
+
+    impl Drop for FakeCapture {
+        fn drop(&mut self) {
+            self.state.capture_drop_calls.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     #[async_trait]
@@ -756,6 +773,12 @@ mod tests {
         state: Arc<FakeState>,
         fail_open: bool,
         open: bool,
+    }
+
+    impl Drop for FakeOutput {
+        fn drop(&mut self) {
+            self.state.output_drop_calls.fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     #[async_trait]
@@ -842,6 +865,14 @@ mod tests {
         fail_connect: bool,
         events: Option<mpsc::Sender<RealtimeTranslationEvent>>,
         emitted: AtomicBool,
+    }
+
+    impl Drop for FakeTranslation {
+        fn drop(&mut self) {
+            self.state
+                .translation_drop_calls
+                .fetch_add(1, Ordering::SeqCst);
+        }
     }
 
     #[async_trait]
@@ -1187,5 +1218,42 @@ mod tests {
         assert_eq!(state.translation_connect_calls.load(Ordering::SeqCst), 1);
         assert_eq!(state.capture_start_calls.load(Ordering::SeqCst), 1);
         service.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_active_service_releases_all_runtime_owners() {
+        let state = Arc::new(FakeState::default());
+        let service = service_with_fakes(
+            state.clone(),
+            SpokenIncomingCapability::Ready,
+            false,
+            false,
+            false,
+        );
+
+        service.start(config(404), no_op_callbacks()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while state.translation_append_calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("active service must own all runtime workers before drop");
+        drop(service);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while state.capture_drop_calls.load(Ordering::SeqCst) == 0
+                || state.output_drop_calls.load(Ordering::SeqCst) == 0
+                || state.translation_drop_calls.load(Ordering::SeqCst) == 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the service must release capture, output, and translation owners");
+
+        assert_eq!(state.capture_drop_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.output_drop_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.translation_drop_calls.load(Ordering::SeqCst), 1);
     }
 }

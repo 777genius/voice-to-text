@@ -167,14 +167,24 @@ function mountRecordingPopover() {
   app.use(createI18n({
     legacy: false,
     locale: 'en',
-    messages: {
-      en: {
-        main: {
+      messages: {
+        en: {
+          app: {
+            title: 'VoicetextAI',
+          },
+          main: {
           miniHotkeyPrompt: 'Press {hotkey}',
           errorGeneric: 'Error',
           connecting: 'Connecting',
           listening: 'Listening',
           incomingTranslationEmpty: 'Incoming subtitles will appear here',
+          incomingTranslation: 'Incoming translation',
+          incomingTranslationMute: 'Mute translated audio',
+            incomingTranslationUnmute: 'Unmute translated audio',
+            incomingTranslationStart: 'Start incoming translation',
+            incomingTranslationStop: 'Stop incoming translation',
+            healthCheckStart: 'Run health check',
+            hotkeyHint: 'Hotkey: {hotkey}',
           minimize: 'Minimize',
           close: 'Close',
           settings: 'Settings',
@@ -438,6 +448,44 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     expect(textInner!.textContent?.trim()).toBe('temporary incoming translation failure');
     expect(statusDot!.classList.contains('error')).toBe(true);
 
+    wrapper.unmount();
+  });
+
+  it('shows a session-scoped mute control only for active spoken incoming translation', async () => {
+    appConfigMock.showMiniRecordingWindow = false;
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === 'set_incoming_translation_muted') {
+        expect(args).toEqual({ muted: true });
+        return { session_id: 901, state: 'playing', muted: true };
+      }
+      if (command === 'is_cursor_over_recording_window') return false;
+      return null;
+    });
+    const wrapper = mountRecordingPopover();
+    await flushMicrotasks();
+    await nextTick();
+    const store = useTranscriptionStore();
+
+    store.incomingTranslationStatus = RecordingStatus.Recording;
+    store.incomingTranslationSessionId = 901;
+    store.incomingTranslationDelivery = 'captions_only';
+    await nextTick();
+    expect(document.querySelector('[data-testid="incoming-translation-mute"]')).toBeNull();
+
+    store.incomingTranslationDelivery = 'text_and_audio';
+    await nextTick();
+    const mute = document.querySelector<HTMLButtonElement>(
+      '[data-testid="incoming-translation-mute"]',
+    );
+    expect(mute).not.toBeNull();
+    expect(mute!.title).toBe('Mute translated audio');
+    mute!.click();
+    await flushMicrotasks();
+    await nextTick();
+
+    expect(invokeMock).toHaveBeenCalledWith('set_incoming_translation_muted', { muted: true });
+    expect(store.incomingTranslationMuted).toBe(true);
+    expect(mute!.querySelector('.mdi')?.classList.contains('mdi-volume-off')).toBe(true);
     wrapper.unmount();
   });
 
