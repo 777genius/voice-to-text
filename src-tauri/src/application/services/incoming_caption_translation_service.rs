@@ -1,4 +1,4 @@
-//! IncomingTranslationService - text subtitles for system audio.
+//! IncomingCaptionTranslationService - text subtitles for system audio.
 //!
 //! Pipeline:
 //! - platform system audio capture, 16 kHz mono PCM16
@@ -164,7 +164,10 @@ fn notify_incoming_runtime_error(
 
 fn call_incoming_callback(label: &str, callback: impl FnOnce()) {
     if std::panic::catch_unwind(AssertUnwindSafe(callback)).is_err() {
-        log::error!("IncomingTranslationService: {} callback panicked", label);
+        log::error!(
+            "IncomingCaptionTranslationService: {} callback panicked",
+            label
+        );
     }
 }
 
@@ -242,7 +245,7 @@ where
     }
 }
 
-pub struct IncomingTranslationService {
+pub(super) struct IncomingCaptionTranslationService {
     status: Arc<RwLock<RecordingStatus>>,
     stt_factory: Arc<dyn SttProviderFactory>,
     audio_factory: Arc<dyn PlatformAudioFactory>,
@@ -356,21 +359,21 @@ impl TextTranslator for OpenAITextTranslationClient {
     }
 }
 
-impl Default for IncomingTranslationService {
+impl Default for IncomingCaptionTranslationService {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl IncomingTranslationService {
-    pub fn new() -> Self {
+impl IncomingCaptionTranslationService {
+    pub(super) fn new() -> Self {
         Self::new_with_factories(
             Arc::new(DefaultSttProviderFactory::new()),
             Arc::new(DefaultPlatformAudioFactory::new()),
         )
     }
 
-    pub fn new_with_factories(
+    pub(super) fn new_with_factories(
         stt_factory: Arc<dyn SttProviderFactory>,
         audio_factory: Arc<dyn PlatformAudioFactory>,
     ) -> Self {
@@ -378,17 +381,6 @@ impl IncomingTranslationService {
             status: Arc::new(RwLock::new(RecordingStatus::Idle)),
             stt_factory,
             audio_factory,
-            translator_factory: Arc::new(OpenAITextTranslatorFactory),
-            inner: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    #[cfg(test)]
-    pub fn new_with_factory(stt_factory: Arc<dyn SttProviderFactory>) -> Self {
-        Self {
-            status: Arc::new(RwLock::new(RecordingStatus::Idle)),
-            stt_factory,
-            audio_factory: Arc::new(DefaultPlatformAudioFactory::new()),
             translator_factory: Arc::new(OpenAITextTranslatorFactory),
             inner: Arc::new(Mutex::new(None)),
         }
@@ -409,11 +401,11 @@ impl IncomingTranslationService {
         }
     }
 
-    pub async fn get_status(&self) -> RecordingStatus {
+    pub(super) async fn get_status(&self) -> RecordingStatus {
         *self.status.read().await
     }
 
-    pub async fn active_session_id(&self) -> Option<u64> {
+    pub(super) async fn active_session_id(&self) -> Option<u64> {
         self.inner
             .lock()
             .await
@@ -421,14 +413,14 @@ impl IncomingTranslationService {
             .map(|session| session.session_id)
     }
 
-    pub async fn state_snapshot(&self) -> (Option<u64>, RecordingStatus) {
+    pub(super) async fn state_snapshot(&self) -> (Option<u64>, RecordingStatus) {
         let guard = self.inner.lock().await;
         let session_id = guard.as_ref().map(|session| session.session_id);
         let status = *self.status.read().await;
         (session_id, status)
     }
 
-    pub async fn start(
+    pub(super) async fn start(
         &self,
         config: IncomingTranslationConfig,
         callbacks: IncomingTranslationCallbacks,
@@ -686,13 +678,13 @@ impl IncomingTranslationService {
         );
         if mark_incoming_recording_started(&self.status, &running, &callbacks).await {
             log::info!(
-                "IncomingTranslationService: session {} started, target={}",
+                "IncomingCaptionTranslationService: session {} started, target={}",
                 config.session_id,
                 target_language
             );
         } else {
             log::warn!(
-                "IncomingTranslationService: session {} failed before start completed",
+                "IncomingCaptionTranslationService: session {} failed before start completed",
                 config.session_id
             );
             *self.status.write().await = RecordingStatus::Error;
@@ -714,7 +706,7 @@ impl IncomingTranslationService {
         *self.status.write().await = RecordingStatus::Idle;
     }
 
-    pub async fn stop(&self) -> Result<(), IncomingTranslationError> {
+    pub(super) async fn stop(&self) -> Result<(), IncomingTranslationError> {
         let mut guard = self.inner.lock().await;
         let Some(mut session) = guard.take() else {
             *self.status.write().await = RecordingStatus::Idle;
@@ -726,7 +718,7 @@ impl IncomingTranslationService {
 
         if let Err(e) = session.capture.stop_capture().await {
             log::warn!(
-                "IncomingTranslationService: stop capture failed for session {}: {}",
+                "IncomingCaptionTranslationService: stop capture failed for session {}: {}",
                 session.session_id,
                 e
             );
@@ -787,7 +779,7 @@ fn handle_finalized_transcription(
 
     if !should_translate {
         log::debug!(
-            "IncomingTranslationService: skip duplicate {} segment '{}'",
+            "IncomingCaptionTranslationService: skip duplicate {} segment '{}'",
             source,
             text
         );
@@ -795,7 +787,7 @@ fn handle_finalized_transcription(
     }
 
     log::info!(
-        "IncomingTranslationService: translate {} segment len={}, start={:.2}s, duration={:.2}s",
+        "IncomingCaptionTranslationService: translate {} segment len={}, start={:.2}s, duration={:.2}s",
         source,
         text.len(),
         transcription.start,
@@ -817,7 +809,7 @@ fn handle_finalized_transcription(
             forget_translated_segment_key(&translated_segment_keys, key);
         }
         log::warn!(
-            "IncomingTranslationService: translation queue unavailable for {} segment: {}",
+            "IncomingCaptionTranslationService: translation queue unavailable for {} segment: {}",
             source,
             err
         );
@@ -836,7 +828,7 @@ fn remember_translated_segment_key(
         Ok(mut seen) => seen.remember(key.to_string()),
         Err(err) => {
             log::warn!(
-                "IncomingTranslationService: segment dedupe lock poisoned: {}",
+                "IncomingCaptionTranslationService: segment dedupe lock poisoned: {}",
                 err
             );
             true
@@ -896,7 +888,7 @@ async fn run_translation_worker(
         }
 
         log::info!(
-            "IncomingTranslationService: request {} translation len={}, start={:.2}s, duration={:.2}s",
+            "IncomingCaptionTranslationService: request {} translation len={}, start={:.2}s, duration={:.2}s",
             job.source,
             job.text.len(),
             job.start,
@@ -930,7 +922,7 @@ async fn run_translation_worker(
                 ) || consecutive_failures >= TRANSLATION_FAILURES_BEFORE_UI_ERROR;
 
                 log::warn!(
-                    "IncomingTranslationService: translation failed ({}/{} before UI error): {}",
+                    "IncomingCaptionTranslationService: translation failed ({}/{} before UI error): {}",
                     consecutive_failures,
                     TRANSLATION_FAILURES_BEFORE_UI_ERROR,
                     err
@@ -969,7 +961,7 @@ async fn translate_text_with_retry(
                     ) =>
             {
                 log::warn!(
-                    "IncomingTranslationService: transient translation attempt {}/{} failed, retrying: {}",
+                    "IncomingCaptionTranslationService: transient translation attempt {}/{} failed, retrying: {}",
                     attempt,
                     TRANSLATION_MAX_ATTEMPTS,
                     err
@@ -1022,7 +1014,7 @@ fn try_enqueue_audio_chunk(
             let dropped = consecutive_dropped_audio_chunks.fetch_add(1, Ordering::Relaxed) + 1;
             if dropped == 1 || dropped % 100 == 0 {
                 log::warn!(
-                    "IncomingTranslationService: dropped {} consecutive system audio chunks because STT input queue is full",
+                    "IncomingCaptionTranslationService: dropped {} consecutive system audio chunks because STT input queue is full",
                     dropped
                 );
             }
@@ -1119,7 +1111,7 @@ async fn cleanup_session_after_runtime_error(mut session: RunningIncomingSession
 
     if let Err(e) = session.capture.stop_capture().await {
         log::warn!(
-            "IncomingTranslationService runtime cleanup: stop capture failed for session {}: {}",
+            "IncomingCaptionTranslationService runtime cleanup: stop capture failed for session {}: {}",
             session_id,
             e
         );
@@ -1139,7 +1131,7 @@ async fn cleanup_session_after_runtime_error(mut session: RunningIncomingSession
     let _ = session.translation_task.await;
 
     log::info!(
-        "IncomingTranslationService: session {} cleaned up after runtime error",
+        "IncomingCaptionTranslationService: session {} cleaned up after runtime error",
         session_id
     );
 }
@@ -1167,7 +1159,7 @@ async fn abort_initialized_stt_after_start_failure(
         await_stt_operation(provider.abort(), STT_ABORT_TIMEOUT, "incoming STT abort").await
     {
         log::warn!(
-            "IncomingTranslationService: stt abort after {} failure failed for session {}: {}",
+            "IncomingCaptionTranslationService: stt abort after {} failure failed for session {}: {}",
             reason,
             session_id,
             abort_err
@@ -1191,7 +1183,7 @@ async fn stop_stt_provider_with_abort(
     };
     if let Err(err) = stop_result {
         log::warn!(
-            "IncomingTranslationService: stt stop failed during {} for session {}: {}",
+            "IncomingCaptionTranslationService: stt stop failed during {} for session {}: {}",
             reason,
             session_id,
             err
@@ -1202,7 +1194,7 @@ async fn stop_stt_provider_with_abort(
         };
         if let Err(abort_err) = abort_result {
             log::warn!(
-                "IncomingTranslationService: stt abort failed during {} for session {}: {}",
+                "IncomingCaptionTranslationService: stt abort failed during {} for session {}: {}",
                 reason,
                 session_id,
                 abort_err
@@ -1233,7 +1225,7 @@ async fn wait_task_done(task: &mut JoinHandle<()>, timeout: Duration, session_id
         result = &mut *task => {
             if let Err(e) = result {
                 if !e.is_cancelled() {
-                    log::warn!("IncomingTranslationService: audio pump join failed for session {}: {}", session_id, e);
+                    log::warn!("IncomingCaptionTranslationService: audio pump join failed for session {}: {}", session_id, e);
                 }
             }
             true
@@ -1256,7 +1248,7 @@ async fn wait_pending_translations(
         let now = tokio::time::Instant::now();
         if now >= deadline {
             log::warn!(
-                "IncomingTranslationService: translation drain timeout for session {} (pending={})",
+                "IncomingCaptionTranslationService: translation drain timeout for session {} (pending={})",
                 session_id,
                 pending_translations.load(Ordering::SeqCst)
             );
@@ -1853,7 +1845,7 @@ mod tests {
     }
 
     async fn wait_until_runtime_cleanup(
-        service: &IncomingTranslationService,
+        service: &IncomingCaptionTranslationService,
         capture_state: &SyntheticIncomingCaptureState,
         provider_state: &SyntheticIncomingProviderState,
     ) {
@@ -2382,7 +2374,7 @@ mod tests {
     async fn start_aborts_stt_provider_after_initialize_failure() {
         let provider_state = std::sync::Arc::new(TrackingProviderState::default());
         let capture_state = std::sync::Arc::new(SyntheticIncomingCaptureState::default());
-        let service = IncomingTranslationService::new_with_factories(
+        let service = IncomingCaptionTranslationService::new_with_factories(
             std::sync::Arc::new(TrackingSttFactory {
                 state: provider_state.clone(),
                 fail_initialize: true,
@@ -2422,7 +2414,7 @@ mod tests {
     #[tokio::test]
     async fn start_cleans_stt_stream_when_loopback_capture_start_fails() {
         let provider_state = std::sync::Arc::new(TrackingProviderState::default());
-        let service = IncomingTranslationService::new_with_factories(
+        let service = IncomingCaptionTranslationService::new_with_factories(
             std::sync::Arc::new(TrackingSttFactory {
                 state: provider_state.clone(),
                 fail_initialize: false,
@@ -2459,7 +2451,7 @@ mod tests {
     #[tokio::test]
     async fn start_aborts_stt_stream_if_cleanup_stop_fails() {
         let provider_state = std::sync::Arc::new(TrackingProviderState::default());
-        let service = IncomingTranslationService::new_with_factories(
+        let service = IncomingCaptionTranslationService::new_with_factories(
             std::sync::Arc::new(TrackingSttFactory {
                 state: provider_state.clone(),
                 fail_initialize: false,
@@ -2493,7 +2485,7 @@ mod tests {
         let provider_state = std::sync::Arc::new(TrackingProviderState::default());
         let capture_state = std::sync::Arc::new(SyntheticIncomingCaptureState::default());
         let requested_target = std::sync::Arc::new(StdMutex::new(None));
-        let service = IncomingTranslationService::new_with_all_factories(
+        let service = IncomingCaptionTranslationService::new_with_all_factories(
             std::sync::Arc::new(TrackingSttFactory {
                 state: provider_state.clone(),
                 fail_initialize: false,
@@ -2534,7 +2526,7 @@ mod tests {
         let capture_state = std::sync::Arc::new(SyntheticIncomingCaptureState::default());
         let provider_state = std::sync::Arc::new(SyntheticIncomingProviderState::default());
         let translator_state = std::sync::Arc::new(SyntheticTextTranslatorState::default());
-        let service = IncomingTranslationService::new_with_all_factories(
+        let service = IncomingCaptionTranslationService::new_with_all_factories(
             std::sync::Arc::new(SyntheticIncomingSttFactory {
                 state: provider_state,
             }),
@@ -2580,7 +2572,7 @@ mod tests {
         let requested_target = std::sync::Arc::new(StdMutex::new(None));
         let provider_state = std::sync::Arc::new(SyntheticIncomingProviderState::default());
         let translator_state = std::sync::Arc::new(SyntheticTextTranslatorState::default());
-        let service = IncomingTranslationService::new_with_all_factories(
+        let service = IncomingCaptionTranslationService::new_with_all_factories(
             std::sync::Arc::new(SyntheticIncomingSttFactory {
                 state: provider_state.clone(),
             }),
@@ -2670,7 +2662,7 @@ mod tests {
     #[tokio::test]
     async fn status_callback_panic_does_not_break_incoming_session_lifecycle() {
         let capture_state = std::sync::Arc::new(SyntheticIncomingCaptureState::default());
-        let service = IncomingTranslationService::new_with_all_factories(
+        let service = IncomingCaptionTranslationService::new_with_all_factories(
             std::sync::Arc::new(SyntheticIncomingSttFactory {
                 state: std::sync::Arc::new(SyntheticIncomingProviderState::default()),
             }),
@@ -2708,7 +2700,7 @@ mod tests {
         let capture_state = std::sync::Arc::new(SyntheticIncomingCaptureState::default());
         let requested_target = std::sync::Arc::new(StdMutex::new(None));
         let provider_state = std::sync::Arc::new(SyntheticIncomingProviderState::default());
-        let service = IncomingTranslationService::new_with_all_factories(
+        let service = IncomingCaptionTranslationService::new_with_all_factories(
             std::sync::Arc::new(SyntheticIncomingSttFactory {
                 state: provider_state.clone(),
             }),
@@ -2781,7 +2773,7 @@ mod tests {
         let provider_state = std::sync::Arc::new(SyntheticIncomingProviderState::default());
         provider_state.fail_send.store(true, Ordering::SeqCst);
         let translator_state = std::sync::Arc::new(SyntheticTextTranslatorState::default());
-        let service = IncomingTranslationService::new_with_all_factories(
+        let service = IncomingCaptionTranslationService::new_with_all_factories(
             std::sync::Arc::new(SyntheticIncomingSttFactory {
                 state: provider_state.clone(),
             }),
@@ -2855,7 +2847,7 @@ mod tests {
         let requested_target = std::sync::Arc::new(StdMutex::new(None));
         let provider_state = std::sync::Arc::new(SyntheticIncomingProviderState::default());
         let translator_state = std::sync::Arc::new(SyntheticTextTranslatorState::default());
-        let service = IncomingTranslationService::new_with_all_factories(
+        let service = IncomingCaptionTranslationService::new_with_all_factories(
             std::sync::Arc::new(SyntheticIncomingSttFactory {
                 state: provider_state.clone(),
             }),
@@ -2942,7 +2934,7 @@ mod tests {
             .fail_during_start
             .store(true, Ordering::SeqCst);
         let translator_state = std::sync::Arc::new(SyntheticTextTranslatorState::default());
-        let service = IncomingTranslationService::new_with_all_factories(
+        let service = IncomingCaptionTranslationService::new_with_all_factories(
             std::sync::Arc::new(SyntheticIncomingSttFactory {
                 state: provider_state.clone(),
             }),
@@ -3006,7 +2998,7 @@ mod tests {
         let requested_target = std::sync::Arc::new(StdMutex::new(None));
         let provider_state = std::sync::Arc::new(StopFinalProviderState::default());
         let translator_state = std::sync::Arc::new(SyntheticTextTranslatorState::default());
-        let service = IncomingTranslationService::new_with_all_factories(
+        let service = IncomingCaptionTranslationService::new_with_all_factories(
             std::sync::Arc::new(StopFinalSttFactory {
                 state: provider_state.clone(),
             }),

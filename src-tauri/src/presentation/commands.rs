@@ -1218,21 +1218,21 @@ async fn stop_live_translation_recording(
     Ok("LiveTranslation stopped".to_string())
 }
 
-async fn get_or_create_incoming_translation_service(
+async fn get_or_create_incoming_translation_facade(
     state: &AppState,
-) -> std::sync::Arc<crate::application::services::IncomingTranslationService> {
+) -> std::sync::Arc<crate::application::services::IncomingTranslationFacade> {
     {
-        let guard = state.incoming_translation_service.read().await;
+        let guard = state.incoming_translation_facade.read().await;
         if let Some(existing) = guard.as_ref() {
             return existing.clone();
         }
     }
-    let mut guard = state.incoming_translation_service.write().await;
+    let mut guard = state.incoming_translation_facade.write().await;
     if let Some(existing) = guard.as_ref() {
         return existing.clone();
     }
     let service =
-        std::sync::Arc::new(crate::application::services::IncomingTranslationService::new());
+        std::sync::Arc::new(crate::application::services::IncomingTranslationFacade::new());
     *guard = Some(service.clone());
     service
 }
@@ -1253,7 +1253,7 @@ pub async fn start_incoming_translation(
     let _lifecycle_guard = state.incoming_translation_lifecycle_guard.lock().await;
     let _audio_start_guard = state.audio_start_guard.lock().await;
 
-    let service = get_or_create_incoming_translation_service(state.inner()).await;
+    let service = get_or_create_incoming_translation_facade(state.inner()).await;
     match service.get_status().await {
         RecordingStatus::Idle => {}
         RecordingStatus::Error => {
@@ -1367,7 +1367,7 @@ pub async fn stop_incoming_translation(
     let _lifecycle_guard = state.incoming_translation_lifecycle_guard.lock().await;
 
     let service = {
-        let guard = state.incoming_translation_service.read().await;
+        let guard = state.incoming_translation_facade.read().await;
         guard.as_ref().cloned()
     };
     let sequence_session_id = state
@@ -1408,7 +1408,7 @@ pub async fn toggle_incoming_translation(
     state: State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<String, String> {
-    let service = get_or_create_incoming_translation_service(state.inner()).await;
+    let service = get_or_create_incoming_translation_facade(state.inner()).await;
     if should_start_incoming_translation_on_toggle(service.get_status().await) {
         start_incoming_translation(state, app_handle).await
     } else {
@@ -1425,7 +1425,7 @@ pub async fn get_incoming_translation_status(
     state: State<'_, AppState>,
 ) -> Result<RecordingStatus, String> {
     let service = {
-        let guard = state.incoming_translation_service.read().await;
+        let guard = state.incoming_translation_facade.read().await;
         guard.as_ref().cloned()
     };
     if let Some(service) = service {
@@ -1440,7 +1440,7 @@ pub async fn get_incoming_translation_state(
     state: State<'_, AppState>,
 ) -> Result<IncomingTranslationStatusPayload, String> {
     let service = {
-        let guard = state.incoming_translation_service.read().await;
+        let guard = state.incoming_translation_facade.read().await;
         guard.as_ref().cloned()
     };
     let sequence_id = state
@@ -1772,7 +1772,7 @@ async fn live_translation_health_check_busy_reason(state: &AppState) -> Option<S
     }
 
     let incoming_service = {
-        let guard = state.incoming_translation_service.read().await;
+        let guard = state.incoming_translation_facade.read().await;
         guard.as_ref().cloned()
     };
     if let Some(service) = incoming_service {

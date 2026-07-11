@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use app_lib::application::{
-    IncomingTranslationCallbacks, IncomingTranslationConfig, IncomingTranslationService,
+    IncomingTranslationCallbacks, IncomingTranslationConfig, IncomingTranslationFacade,
 };
 use app_lib::domain::{
     AudioChunk, ConnectionQualityCallback, ErrorCallback, RecordingStatus, SttConfig, SttError,
@@ -363,7 +363,7 @@ async fn incoming_translation_service_captures_system_audio_and_emits_translated
     let api_key = load_openai_api_key();
     let fixture = generate_system_audio_fixture();
     let stt_state = Arc::new(OpenAiLoopbackSttState::default());
-    let service = IncomingTranslationService::new_with_factories(
+    let service = IncomingTranslationFacade::new_with_factories(
         Arc::new(OpenAiLoopbackSttFactory {
             state: stt_state.clone(),
             api_key: api_key.clone(),
@@ -463,7 +463,7 @@ async fn incoming_translation_service_long_running_system_audio_soak() {
     let soak_duration = live_audio_soak_duration();
     let fixture = generate_system_audio_fixture();
     let stt_state = Arc::new(OpenAiLoopbackSttState::default());
-    let service = IncomingTranslationService::new_with_factories(
+    let service = IncomingTranslationFacade::new_with_factories(
         Arc::new(OpenAiLoopbackSttFactory {
             state: stt_state.clone(),
             api_key: api_key.clone(),

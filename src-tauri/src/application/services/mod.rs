@@ -1,14 +1,15 @@
 mod audio_spectrum;
-mod incoming_translation_service;
+mod incoming_caption_translation_service;
+mod incoming_translation_facade;
 mod live_translation_service;
 mod realtime_interpretation;
 mod transcription_service;
 
 pub use audio_spectrum::*;
-pub use incoming_translation_service::{
+pub use incoming_caption_translation_service::{
     IncomingTranslationCallbacks, IncomingTranslationConfig, IncomingTranslationError,
-    IncomingTranslationService,
 };
+pub use incoming_translation_facade::IncomingTranslationFacade;
 pub use live_translation_service::{
     LiveTranslationCallbacks, LiveTranslationConfig, LiveTranslationError, LiveTranslationService,
 };

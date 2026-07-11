@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::RwLock;
 
-use crate::application::services::{IncomingTranslationService, LiveTranslationService};
+use crate::application::services::{IncomingTranslationFacade, LiveTranslationService};
 use crate::application::TranscriptionService;
 use crate::domain::{
     AppConfig, AudioCapture, AudioError, RecordingMode, Transcription, UiPreferences,
@@ -249,9 +249,9 @@ pub struct AppState {
     /// потому что connect к OpenAI стоит денег и не должен происходить до явного намерения.
     pub live_translation_service: Arc<RwLock<Option<Arc<LiveTranslationService>>>>,
 
-    /// Incoming subtitles service: system audio -> STT -> text translation -> UI.
+    /// Incoming translation facade: system audio -> selected delivery pipeline.
     /// Separate from active_recording_mode so it can run alongside outgoing translation later.
-    pub incoming_translation_service: Arc<RwLock<Option<Arc<IncomingTranslationService>>>>,
+    pub incoming_translation_facade: Arc<RwLock<Option<Arc<IncomingTranslationFacade>>>>,
 
     /// Счётчик сессий входящих субтитров. Отдельный от recording session id.
     pub incoming_translation_session_seq: AtomicU64,
@@ -331,7 +331,7 @@ impl AppState {
                     active_transcription_session_id: Arc::new(AtomicU64::new(0)),
                     active_recording_mode: Arc::new(RwLock::new(None)),
                     live_translation_service: Arc::new(RwLock::new(None)),
-                    incoming_translation_service: Arc::new(RwLock::new(None)),
+                    incoming_translation_facade: Arc::new(RwLock::new(None)),
                     incoming_translation_session_seq: AtomicU64::new(0),
                     recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),
                 };
@@ -406,7 +406,7 @@ impl AppState {
                     active_transcription_session_id: Arc::new(AtomicU64::new(0)),
                     active_recording_mode: Arc::new(RwLock::new(None)),
                     live_translation_service: Arc::new(RwLock::new(None)),
-                    incoming_translation_service: Arc::new(RwLock::new(None)),
+                    incoming_translation_facade: Arc::new(RwLock::new(None)),
                     incoming_translation_session_seq: AtomicU64::new(0),
                     recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),
                 };
@@ -501,7 +501,7 @@ impl AppState {
             active_transcription_session_id,
             active_recording_mode: Arc::new(RwLock::new(None)),
             live_translation_service: Arc::new(RwLock::new(None)),
-            incoming_translation_service: Arc::new(RwLock::new(None)),
+            incoming_translation_facade: Arc::new(RwLock::new(None)),
             incoming_translation_session_seq: AtomicU64::new(0),
             recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),
         }
