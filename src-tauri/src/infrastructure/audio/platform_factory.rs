@@ -4,8 +4,8 @@ use cpal::traits::{DeviceTrait, HostTrait};
 
 use crate::domain::{
     AudioCapture, AudioCaptureTarget, AudioError, AudioResult, PlatformAudioFactory,
-    PlatformAudioSetupState, PlatformAudioSetupStatus, TranslationAudioOutput,
-    TranslationAudioOutputResult,
+    PlatformAudioSetupState, PlatformAudioSetupStatus, SystemAudioCaptureFactory,
+    SystemAudioCaptureRequest, TranslationAudioOutput, TranslationAudioOutputResult,
 };
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -32,6 +32,46 @@ pub struct DefaultPlatformAudioFactory;
 impl DefaultPlatformAudioFactory {
     pub fn new() -> Self {
         Self
+    }
+}
+
+impl SystemAudioCaptureFactory for DefaultPlatformAudioFactory {
+    fn preflight_system_audio_capture(
+        &self,
+        request: SystemAudioCaptureRequest,
+    ) -> AudioResult<()> {
+        #[cfg(target_os = "macos")]
+        {
+            MacosSystemAudioCapture::preflight(request)
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = request;
+            Err(AudioError::Configuration(format!(
+                "Isolated realtime system audio capture is unsupported on {}",
+                std::env::consts::OS
+            )))
+        }
+    }
+
+    fn create_system_audio_capture(
+        &self,
+        request: SystemAudioCaptureRequest,
+    ) -> AudioResult<Box<dyn AudioCapture>> {
+        #[cfg(target_os = "macos")]
+        {
+            Ok(Box::new(MacosSystemAudioCapture::new(request)?))
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = request;
+            Err(AudioError::Configuration(format!(
+                "Isolated realtime system audio capture is unsupported on {}",
+                std::env::consts::OS
+            )))
+        }
     }
 }
 
@@ -87,11 +127,7 @@ impl PlatformAudioFactory for DefaultPlatformAudioFactory {
     ) -> AudioResult<Box<dyn AudioCapture>> {
         #[cfg(target_os = "macos")]
         {
-            let _ = target;
-            Ok(Box::new(
-                MacosSystemAudioCapture::new()
-                    .map_err(|e| AudioError::Configuration(e.to_string()))?,
-            ))
+            self.create_system_audio_capture(SystemAudioCaptureRequest::isolated(target))
         }
 
         #[cfg(target_os = "windows")]

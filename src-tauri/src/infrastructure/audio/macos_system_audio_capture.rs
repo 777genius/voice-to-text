@@ -8,32 +8,41 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::domain::{
-    AudioCapture, AudioChunk, AudioChunkCallback, AudioConfig, AudioError, AudioResult,
+    AudioCapture, AudioCaptureErrorCallback, AudioCaptureTarget, AudioChunk, AudioChunkCallback,
+    AudioConfig, AudioError, AudioResult, SelfAudioExclusionRequirement, SystemAudioCaptureRequest,
 };
 
-const TARGET_SAMPLE_RATE: u32 = 16_000;
-const TARGET_CHANNELS: u16 = 1;
+const NATIVE_SAMPLE_RATE: u32 = 48_000;
+const NATIVE_CHANNELS: u16 = 2;
 const TARGET_FRAME_MS: usize = 30;
-const TARGET_FRAME_SAMPLES: usize = (TARGET_SAMPLE_RATE as usize * TARGET_FRAME_MS) / 1000;
 
 /// macOS system output audio capture via ScreenCaptureKit.
 ///
-/// Captures what the user hears and emits 16 kHz mono PCM16 frames for STT.
+/// Captures what the user hears, excludes this process, and emits target PCM16 frames.
 pub struct MacosSystemAudioCapture {
     stream: Option<SCStream>,
+    target: AudioCaptureTarget,
     audio_config: AudioConfig,
-    is_capturing: bool,
     callback_gate: CaptureCallbackGate,
+    terminal_error_callback: CaptureErrorCallbackSlot,
 }
 
 impl MacosSystemAudioCapture {
-    pub fn new() -> AudioResult<Self> {
+    pub fn new(request: SystemAudioCaptureRequest) -> AudioResult<Self> {
+        validate_capture_request(request)?;
+        let target = request.target;
         Ok(Self {
             stream: None,
-            audio_config: AudioConfig::default(),
-            is_capturing: false,
+            target,
+            audio_config: target_audio_config(target),
             callback_gate: CaptureCallbackGate::default(),
+            terminal_error_callback: Arc::new(Mutex::new(None)),
         })
+    }
+
+    pub fn preflight(request: SystemAudioCaptureRequest) -> AudioResult<()> {
+        validate_capture_request(request)?;
+        shareable_display().map(|_| ())
     }
 }
 
@@ -44,6 +53,7 @@ struct CaptureCallbackGate {
 }
 
 type CaptureCallbackSlot = Arc<Mutex<Option<AudioChunkCallback>>>;
+type CaptureErrorCallbackSlot = Arc<Mutex<Option<AudioCaptureErrorCallback>>>;
 
 impl CaptureCallbackGate {
     fn begin_capture(&self) -> u64 {
@@ -52,15 +62,70 @@ impl CaptureCallbackGate {
         generation
     }
 
-    fn stop_capture(&self) {
-        self.running.store(false, Ordering::SeqCst);
+    fn stop_capture(&self) -> bool {
+        let was_running = self.running.swap(false, Ordering::SeqCst);
         self.generation.fetch_add(1, Ordering::SeqCst);
+        was_running
     }
 
     fn should_emit(&self, generation: u64) -> bool {
         self.running.load(Ordering::Relaxed)
             && self.generation.load(Ordering::Relaxed) == generation
     }
+
+    fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+}
+
+fn validate_capture_request(request: SystemAudioCaptureRequest) -> AudioResult<()> {
+    if request.self_audio_exclusion != SelfAudioExclusionRequirement::Required {
+        return Err(AudioError::Configuration(
+            "macOS realtime system capture requires current-process audio exclusion".into(),
+        ));
+    }
+    if request.target.sample_rate == 0 || request.target.channels != 1 {
+        return Err(AudioError::Configuration(format!(
+            "macOS system capture target must be mono with a non-zero sample rate, got {} Hz {} ch",
+            request.target.sample_rate, request.target.channels
+        )));
+    }
+    Ok(())
+}
+
+fn target_audio_config(target: AudioCaptureTarget) -> AudioConfig {
+    AudioConfig {
+        sample_rate: target.sample_rate,
+        channels: target.channels,
+        buffer_size: ((target.sample_rate as usize * TARGET_FRAME_MS) / 1000).max(1) as u32,
+    }
+}
+
+fn shareable_display() -> AudioResult<SCDisplay> {
+    let content = SCShareableContent::get().map_err(|error| {
+        AudioError::AccessDenied(format!(
+            "ScreenCaptureKit unavailable: {error}. Откройте macOS System Settings -> Privacy & Security -> Screen & System Audio Recording и разрешите доступ для приложения."
+        ))
+    })?;
+    content.displays().into_iter().next().ok_or_else(|| {
+        AudioError::DeviceNotFound("No displays found for system audio capture".into())
+    })
+}
+
+fn build_stream_configuration() -> AudioResult<SCStreamConfiguration> {
+    let config = SCStreamConfiguration::new()
+        .with_width(2)
+        .with_height(2)
+        .with_captures_audio(true)
+        .with_excludes_current_process_audio(true)
+        .with_sample_rate(NATIVE_SAMPLE_RATE as i32)
+        .with_channel_count(NATIVE_CHANNELS as i32);
+    if !config.excludes_current_process_audio() {
+        return Err(AudioError::Configuration(
+            "ScreenCaptureKit did not accept required current-process audio exclusion".into(),
+        ));
+    }
+    Ok(config)
 }
 
 fn emit_capture_chunk(callback_slot: &CaptureCallbackSlot, chunk: AudioChunk) {
@@ -88,8 +153,10 @@ fn emit_capture_chunk(callback_slot: &CaptureCallbackSlot, chunk: AudioChunk) {
 fn deactivate_capture_after_stream_error(
     callback_gate: &CaptureCallbackGate,
     callback_slot: &CaptureCallbackSlot,
+    error_callback_slot: &CaptureErrorCallbackSlot,
+    message: String,
 ) {
-    callback_gate.stop_capture();
+    let should_report = callback_gate.stop_capture();
     match callback_slot.lock() {
         Ok(mut callback) => {
             *callback = None;
@@ -99,6 +166,27 @@ fn deactivate_capture_after_stream_error(
                 "ScreenCaptureKit callback slot poisoned during stream failure: {}",
                 err
             );
+        }
+    }
+    if should_report {
+        emit_terminal_capture_error(error_callback_slot, message);
+    }
+}
+
+fn emit_terminal_capture_error(callback_slot: &CaptureErrorCallbackSlot, message: String) {
+    let callback = match callback_slot.lock() {
+        Ok(callback) => callback.clone(),
+        Err(error) => {
+            log::error!("ScreenCaptureKit error callback slot poisoned: {}", error);
+            return;
+        }
+    };
+    if let Some(callback) = callback {
+        if catch_unwind(AssertUnwindSafe(|| callback(AudioError::Capture(message)))).is_err() {
+            log::error!("ScreenCaptureKit terminal error callback panicked; revoking it");
+            if let Ok(mut callback) = callback_slot.lock() {
+                *callback = None;
+            }
         }
     }
 }
@@ -111,6 +199,7 @@ struct ResamplePipeline {
     native_mono: Vec<f32>,
     out_i16: Vec<i16>,
     input_frame_samples: usize,
+    target_frame_samples: usize,
 }
 
 enum PipelineState {
@@ -122,11 +211,13 @@ enum PipelineState {
 impl ResamplePipeline {
     fn new(
         from_sample_rate: u32,
+        target: AudioCaptureTarget,
         is_float: bool,
         is_big_endian: bool,
         bits_per_channel: u32,
     ) -> AudioResult<Self> {
         let input_frame_samples = ((from_sample_rate as usize) * TARGET_FRAME_MS / 1000).max(1);
+        let target_frame_samples = ((target.sample_rate as usize) * TARGET_FRAME_MS / 1000).max(1);
         let params = SincInterpolationParameters {
             sinc_len: 256,
             f_cutoff: 0.95,
@@ -135,7 +226,7 @@ impl ResamplePipeline {
             window: WindowFunction::BlackmanHarris2,
         };
         let resampler = SincFixedIn::<f32>::new(
-            TARGET_SAMPLE_RATE as f64 / from_sample_rate as f64,
+            target.sample_rate as f64 / from_sample_rate as f64,
             2.0,
             params,
             input_frame_samples,
@@ -149,8 +240,9 @@ impl ResamplePipeline {
             bits_per_channel,
             resampler,
             native_mono: Vec::with_capacity(input_frame_samples * 4),
-            out_i16: Vec::with_capacity(TARGET_FRAME_SAMPLES * 6),
+            out_i16: Vec::with_capacity(target_frame_samples * 6),
             input_frame_samples,
+            target_frame_samples,
         })
     }
 
@@ -241,8 +333,8 @@ impl ResamplePipeline {
             }
         }
 
-        while self.out_i16.len() >= TARGET_FRAME_SAMPLES {
-            frames.push(self.out_i16.drain(..TARGET_FRAME_SAMPLES).collect());
+        while self.out_i16.len() >= self.target_frame_samples {
+            frames.push(self.out_i16.drain(..self.target_frame_samples).collect());
         }
 
         frames
@@ -251,15 +343,16 @@ impl ResamplePipeline {
 
 fn build_resample_pipeline(
     sample_rate: u32,
+    target: AudioCaptureTarget,
     is_float: bool,
     is_big_endian: bool,
     bits: u32,
 ) -> Option<ResamplePipeline> {
-    match ResamplePipeline::new(sample_rate, is_float, is_big_endian, bits) {
+    match ResamplePipeline::new(sample_rate, target, is_float, is_big_endian, bits) {
         Ok(pipe) => Some(pipe),
         Err(primary_err) => {
             log::error!("Failed to init ScreenCaptureKit resampler: {}", primary_err);
-            match ResamplePipeline::new(48_000, true, false, 32) {
+            match ResamplePipeline::new(NATIVE_SAMPLE_RATE, target, true, false, 32) {
                 Ok(pipe) => Some(pipe),
                 Err(fallback_err) => {
                     log::error!(
@@ -276,38 +369,37 @@ fn build_resample_pipeline(
 #[async_trait]
 impl AudioCapture for MacosSystemAudioCapture {
     async fn initialize(&mut self, config: AudioConfig) -> AudioResult<()> {
+        if config.sample_rate != self.target.sample_rate || config.channels != self.target.channels
+        {
+            return Err(AudioError::Configuration(format!(
+                "macOS system capture was created for {} Hz {} ch but initialized with {} Hz {} ch",
+                self.target.sample_rate, self.target.channels, config.sample_rate, config.channels
+            )));
+        }
         self.audio_config = config;
         Ok(())
     }
 
     async fn start_capture(&mut self, on_chunk: AudioChunkCallback) -> AudioResult<()> {
-        if self.is_capturing {
+        if self.callback_gate.is_running() {
             return Err(AudioError::Capture("Already capturing audio".to_string()));
+        }
+        if let Some(stale_stream) = self.stream.take() {
+            let _ = stale_stream.stop_capture();
         }
         let capture_generation = self.callback_gate.begin_capture();
 
-        let content = SCShareableContent::get().map_err(|e| {
+        let display = shareable_display().inspect_err(|_| {
             self.callback_gate.stop_capture();
-            AudioError::AccessDenied(format!(
-                "ScreenCaptureKit unavailable: {e}. Откройте macOS System Settings -> Privacy & Security -> Screen & System Audio Recording и разрешите доступ для приложения."
-            ))
-        })?;
-        let display = content.displays().into_iter().next().ok_or_else(|| {
-            self.callback_gate.stop_capture();
-            AudioError::DeviceNotFound("No displays found for capture".into())
         })?;
 
         let filter = SCContentFilter::create()
             .with_display(&display)
             .with_excluding_windows(&[])
             .build();
-        let config = SCStreamConfiguration::new()
-            .with_width(2)
-            .with_height(2)
-            .with_captures_audio(true)
-            .with_excludes_current_process_audio(true)
-            .with_sample_rate(48_000)
-            .with_channel_count(2);
+        let config = build_stream_configuration().inspect_err(|_| {
+            self.callback_gate.stop_capture();
+        })?;
 
         let pipeline: Arc<Mutex<PipelineState>> = Arc::new(Mutex::new(PipelineState::Pending));
         let pipeline_for_cb = pipeline.clone();
@@ -316,13 +408,18 @@ impl AudioCapture for MacosSystemAudioCapture {
         let callback_gate = self.callback_gate.clone();
         let callback_gate_for_error = self.callback_gate.clone();
         let callback_slot_for_error = callback_slot.clone();
+        let error_callback_slot = self.terminal_error_callback.clone();
         let error_handler = ErrorHandler::new(move |error| {
-            log::error!("ScreenCaptureKit stream error: {}", error);
+            let message = error.to_string();
+            log::error!("ScreenCaptureKit stream error: {}", message);
             deactivate_capture_after_stream_error(
                 &callback_gate_for_error,
                 &callback_slot_for_error,
+                &error_callback_slot,
+                message,
             );
         });
+        let target = self.target;
 
         let mut stream = SCStream::new_with_delegate(&filter, &config, error_handler);
         let added = stream.add_output_handler(
@@ -359,7 +456,7 @@ impl AudioCapture for MacosSystemAudioCapture {
 
                 if matches!(*guard, PipelineState::Pending) {
                     let Some(pipe) =
-                        build_resample_pipeline(sample_rate, is_float, is_big_endian, bits)
+                        build_resample_pipeline(sample_rate, target, is_float, is_big_endian, bits)
                     else {
                         *guard = PipelineState::Failed;
                         return;
@@ -382,7 +479,7 @@ impl AudioCapture for MacosSystemAudioCapture {
                     if !frame.is_empty() {
                         emit_capture_chunk(
                             &callback_slot_for_audio,
-                            AudioChunk::new(frame, TARGET_SAMPLE_RATE, TARGET_CHANNELS),
+                            AudioChunk::new(frame, target.sample_rate, target.channels),
                         );
                     }
                 }
@@ -405,24 +502,37 @@ impl AudioCapture for MacosSystemAudioCapture {
         })?;
 
         self.stream = Some(stream);
-        self.is_capturing = true;
+        if !self.callback_gate.is_running() {
+            if let Some(failed_stream) = self.stream.take() {
+                let _ = failed_stream.stop_capture();
+            }
+            return Err(AudioError::Capture(
+                "ScreenCaptureKit stream failed during startup".into(),
+            ));
+        }
         Ok(())
     }
 
     async fn stop_capture(&mut self) -> AudioResult<()> {
-        if !self.is_capturing {
-            return Ok(());
-        }
         self.callback_gate.stop_capture();
         if let Some(stream) = self.stream.take() {
             let _ = stream.stop_capture();
         }
-        self.is_capturing = false;
         Ok(())
     }
 
+    fn set_terminal_error_callback(&mut self, callback: Option<AudioCaptureErrorCallback>) {
+        match self.terminal_error_callback.lock() {
+            Ok(mut slot) => *slot = callback,
+            Err(error) => log::error!(
+                "ScreenCaptureKit terminal error callback slot poisoned: {}",
+                error
+            ),
+        }
+    }
+
     fn is_capturing(&self) -> bool {
-        self.is_capturing
+        self.callback_gate.is_running()
     }
 
     fn config(&self) -> AudioConfig {
@@ -545,11 +655,30 @@ mod tests {
         let gate = CaptureCallbackGate::default();
         let generation = gate.begin_capture();
         let callback_slot: CaptureCallbackSlot = Arc::new(Mutex::new(Some(Arc::new(|_chunk| {}))));
+        let errors = Arc::new(AtomicU64::new(0));
+        let error_callback_slot: CaptureErrorCallbackSlot = Arc::new(Mutex::new(Some({
+            let errors = errors.clone();
+            Arc::new(move |_error| {
+                errors.fetch_add(1, Ordering::SeqCst);
+            })
+        })));
 
-        deactivate_capture_after_stream_error(&gate, &callback_slot);
+        deactivate_capture_after_stream_error(
+            &gate,
+            &callback_slot,
+            &error_callback_slot,
+            "device lost".into(),
+        );
+        deactivate_capture_after_stream_error(
+            &gate,
+            &callback_slot,
+            &error_callback_slot,
+            "duplicate native error".into(),
+        );
 
         assert!(!gate.should_emit(generation));
         assert!(callback_slot.lock().unwrap().is_none());
+        assert_eq!(errors.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -591,5 +720,78 @@ mod tests {
         decode_non_interleaved_to_mono(&[&left, &right], 4, false, &mut out);
 
         assert_eq!(out, vec![0.5, 0.0]);
+    }
+
+    #[test]
+    fn stream_configuration_enforces_native_audio_and_self_exclusion() {
+        let config = build_stream_configuration().unwrap();
+
+        assert!(config.captures_audio());
+        assert!(config.excludes_current_process_audio());
+        assert_eq!(config.sample_rate(), NATIVE_SAMPLE_RATE as i32);
+        assert_eq!(config.channel_count(), NATIVE_CHANNELS as i32);
+    }
+
+    #[test]
+    fn capture_keeps_requested_caption_and_realtime_targets() {
+        for target in [
+            AudioCaptureTarget::incoming_subtitles(),
+            AudioCaptureTarget::incoming_realtime_translation(),
+        ] {
+            let capture =
+                MacosSystemAudioCapture::new(SystemAudioCaptureRequest::isolated(target)).unwrap();
+
+            assert_eq!(capture.target, target);
+            assert_eq!(capture.config().sample_rate, target.sample_rate);
+            assert_eq!(capture.config().channels, target.channels);
+            assert_eq!(
+                capture.config().buffer_size,
+                target.sample_rate * TARGET_FRAME_MS as u32 / 1000
+            );
+        }
+    }
+
+    #[test]
+    fn resampler_emits_frames_for_each_requested_target() {
+        for (target, expected_frame_samples) in [
+            (AudioCaptureTarget::incoming_subtitles(), 480usize),
+            (
+                AudioCaptureTarget::incoming_realtime_translation(),
+                720usize,
+            ),
+        ] {
+            let mut pipeline =
+                ResamplePipeline::new(NATIVE_SAMPLE_RATE, target, true, false, 32).unwrap();
+            pipeline
+                .native_mono
+                .resize(pipeline.input_frame_samples * 4, 0.25);
+
+            let frames = pipeline.drain_frames();
+
+            assert!(!frames.is_empty());
+            assert!(
+                frames
+                    .iter()
+                    .all(|frame| frame.len() == expected_frame_samples),
+                "unexpected frame size for {target:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn initialize_rejects_config_that_does_not_match_factory_target() {
+        let mut capture = MacosSystemAudioCapture::new(SystemAudioCaptureRequest::isolated(
+            AudioCaptureTarget::incoming_realtime_translation(),
+        ))
+        .unwrap();
+
+        let error = capture
+            .initialize(AudioConfig::default())
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, AudioError::Configuration(message) if message.contains("24_000") || message.contains("24000"))
+        );
     }
 }

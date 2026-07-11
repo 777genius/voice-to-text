@@ -60,7 +60,7 @@ pub trait TranslationAudioOutput: Send + Sync {
     fn pending_playback_duration(&self) -> Duration;
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioCaptureTarget {
     pub sample_rate: u32,
     pub channels: u16,
@@ -84,6 +84,13 @@ impl AudioCaptureTarget {
     pub fn incoming_subtitles() -> Self {
         Self {
             sample_rate: 16_000,
+            channels: 1,
+        }
+    }
+
+    pub fn incoming_realtime_translation() -> Self {
+        Self {
+            sample_rate: 24_000,
             channels: 1,
         }
     }

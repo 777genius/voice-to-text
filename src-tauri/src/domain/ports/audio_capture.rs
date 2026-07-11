@@ -27,6 +27,7 @@ pub enum AudioError {
 
 /// Callback type for receiving audio chunks
 pub type AudioChunkCallback = Arc<dyn Fn(AudioChunk) + Send + Sync>;
+pub type AudioCaptureErrorCallback = Arc<dyn Fn(AudioError) + Send + Sync>;
 
 /// Trait defining the contract for audio capture
 ///
@@ -45,6 +46,10 @@ pub trait AudioCapture: Send + Sync {
 
     /// Stop capturing audio
     async fn stop_capture(&mut self) -> AudioResult<()>;
+
+    /// Registers a callback for terminal native stream errors after a successful start.
+    /// Implementations without an asynchronous device error channel may keep the default no-op.
+    fn set_terminal_error_callback(&mut self, _callback: Option<AudioCaptureErrorCallback>) {}
 
     /// Check if currently capturing
     fn is_capturing(&self) -> bool;

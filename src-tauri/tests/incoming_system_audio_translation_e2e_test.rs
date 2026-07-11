@@ -11,8 +11,9 @@ use app_lib::application::{
     IncomingTranslationCallbacks, IncomingTranslationConfig, IncomingTranslationFacade,
 };
 use app_lib::domain::{
-    AudioChunk, ConnectionQualityCallback, ErrorCallback, RecordingStatus, SttConfig, SttError,
-    SttProvider, SttProviderFactory, SttResult, Transcription, TranscriptionCallback,
+    AudioCaptureTarget, AudioChunk, AudioConfig, ConnectionQualityCallback, ErrorCallback,
+    RecordingStatus, SttConfig, SttError, SttProvider, SttProviderFactory, SttResult,
+    SystemAudioCaptureFactory, SystemAudioCaptureRequest, Transcription, TranscriptionCallback,
 };
 use app_lib::infrastructure::audio::DefaultPlatformAudioFactory;
 use async_trait::async_trait;
@@ -127,6 +128,73 @@ fn join_named_thread(handle: std::thread::JoinHandle<()>, name: &str) -> Result<
             .unwrap_or_else(|| "unknown panic payload".to_string());
         format!("{name} thread panicked: {reason}")
     })
+}
+
+#[tokio::test]
+#[ignore = "requires macOS Screen & System Audio permission and audible system output"]
+async fn isolated_realtime_capture_emits_24khz_mono_and_stops_callbacks() {
+    let fixture = generate_system_audio_fixture();
+    let factory = DefaultPlatformAudioFactory::new();
+    let target = AudioCaptureTarget::incoming_realtime_translation();
+    let request = SystemAudioCaptureRequest::isolated(target);
+    factory
+        .preflight_system_audio_capture(request)
+        .expect("isolated ScreenCaptureKit preflight must pass before network connect");
+    let mut capture = factory
+        .create_system_audio_capture(request)
+        .expect("isolated realtime capture must be created");
+    capture
+        .initialize(AudioConfig {
+            sample_rate: target.sample_rate,
+            channels: target.channels,
+            buffer_size: 720,
+        })
+        .await
+        .expect("realtime capture target must initialize");
+
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<AudioChunk>();
+    capture
+        .start_capture(Arc::new(move |chunk| {
+            let _ = chunk_tx.send(chunk);
+        }))
+        .await
+        .expect("isolated ScreenCaptureKit capture must start");
+    let mut player = Command::new("afplay")
+        .arg(fixture.path())
+        .spawn()
+        .expect("must run afplay");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut chunks = Vec::new();
+    while tokio::time::Instant::now() < deadline && chunks.len() < 4 {
+        if let Ok(Some(chunk)) =
+            tokio::time::timeout(Duration::from_millis(500), chunk_rx.recv()).await
+        {
+            chunks.push(chunk);
+        }
+    }
+    let _ = player.wait();
+    capture
+        .stop_capture()
+        .await
+        .expect("isolated capture must stop");
+
+    assert!(
+        !chunks.is_empty(),
+        "system audio produced no capture chunks"
+    );
+    assert!(chunks.iter().all(|chunk| {
+        chunk.sample_rate == target.sample_rate
+            && chunk.channels == target.channels
+            && chunk.data.len() == 720
+    }));
+    while chunk_rx.try_recv().is_ok() {}
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert!(
+        chunk_rx.try_recv().is_err(),
+        "capture emitted a callback after stop"
+    );
+    assert!(!capture.is_capturing());
 }
 
 fn wav_pcm16(sample_rate: u32, channels: u16, samples: &[i16]) -> Vec<u8> {

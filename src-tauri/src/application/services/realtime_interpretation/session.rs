@@ -8,9 +8,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::domain::{
-    amplify_i16_samples, AudioCapture, AudioChunk, AudioChunkCallback, RealtimeTranslationError,
-    RealtimeTranslationErrorKind, RealtimeTranslationEvent, RealtimeTranslationSession,
-    TranslationAudioOutput,
+    amplify_i16_samples, AudioCapture, AudioCaptureErrorCallback, AudioChunk, AudioChunkCallback,
+    RealtimeTranslationError, RealtimeTranslationErrorKind, RealtimeTranslationEvent,
+    RealtimeTranslationSession, TranslationAudioOutput,
 };
 
 use super::frame_assembler::Pcm16FrameAssembler;
@@ -269,13 +269,27 @@ impl RealtimeInterpretationSession {
         );
         let capture_callback = build_capture_callback(
             input_tx,
-            reporter,
+            reporter.clone(),
             stop_requested.clone(),
             config.policy.clone(),
         );
 
+        let mut capture = ports.capture;
+        let capture_reporter = reporter.clone();
+        let capture_stop_requested = stop_requested.clone();
+        let input_source_name = config.policy.input_source_name;
+        let capture_error_callback: AudioCaptureErrorCallback = Arc::new(move |error| {
+            if !capture_stop_requested.load(Ordering::SeqCst) {
+                capture_reporter.error(RealtimeInterpretationError::Processing(format!(
+                    "{} capture failed: {}",
+                    input_source_name, error
+                )));
+            }
+        });
+        capture.set_terminal_error_callback(Some(capture_error_callback));
+
         let mut session = Self {
-            capture: Some(ports.capture),
+            capture: Some(capture),
             input_abort_tx,
             input_worker_task: Some(input_worker_task),
             event_forwarder_task: Some(event_forwarder_task),
@@ -317,6 +331,7 @@ impl RealtimeInterpretationSession {
                     error
                 );
             }
+            capture.set_terminal_error_callback(None);
         }
 
         match mode {
@@ -886,7 +901,7 @@ fn call_interpretation_callback(label: &str, callback: impl FnOnce()) {
 mod tests {
     use super::*;
     use crate::domain::{
-        AudioConfig, RealtimeTranslationConfig, TranslationAudioOutputConfig,
+        AudioConfig, AudioError, RealtimeTranslationConfig, TranslationAudioOutputConfig,
         TranslationAudioOutputResult,
     };
     use std::sync::atomic::AtomicUsize;
@@ -986,6 +1001,7 @@ mod tests {
         output_closed: AtomicBool,
         output_enqueue_entered: AtomicBool,
         output_dropped: AtomicBool,
+        capture_error_callback: StdMutex<Option<AudioCaptureErrorCallback>>,
         input_samples: StdMutex<Vec<i16>>,
         output_samples: StdMutex<Vec<i16>>,
     }
@@ -1014,6 +1030,10 @@ mod tests {
             self.state.capture_stopped.store(true, Ordering::SeqCst);
             self.callback = None;
             Ok(())
+        }
+
+        fn set_terminal_error_callback(&mut self, callback: Option<AudioCaptureErrorCallback>) {
+            *self.state.capture_error_callback.lock().unwrap() = callback;
         }
 
         fn is_capturing(&self) -> bool {
@@ -1212,6 +1232,56 @@ mod tests {
                 if message.contains("virtual microphone output stream stopped unexpectedly")
         ));
         output_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_capture_error_reaches_supervisor_once() {
+        let state = Arc::new(ContractState::default());
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let (session, mut stop_rx) = RealtimeInterpretationSession::start(
+            RealtimeInterpretationConfig::outgoing(76, 1.0),
+            RealtimeInterpretationPorts {
+                capture: Box::new(ContractCapture {
+                    state: state.clone(),
+                    callback: None,
+                }),
+                output: Box::new(ContractOutput {
+                    state: state.clone(),
+                }),
+                translation: Box::new(ContractTranslationSession {
+                    state: state.clone(),
+                    events: event_tx,
+                }),
+                translation_events: event_rx,
+            },
+            RealtimeInterpretationCallbacks::no_op(),
+        )
+        .await
+        .unwrap();
+        let error_callback = state
+            .capture_error_callback
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("session must register capture error callback");
+
+        error_callback(AudioError::Capture("device lost".into()));
+        error_callback(AudioError::Capture("duplicate device error".into()));
+
+        let stop = tokio::time::timeout(Duration::from_secs(1), stop_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            stop,
+            RealtimeInterpretationStop::Error(RealtimeInterpretationError::Processing(message))
+                if message.contains("Microphone capture failed") && message.contains("device lost")
+        ));
+        assert!(stop_rx.try_recv().is_err());
+
+        session
+            .shutdown(RealtimeInterpretationShutdown::Abort)
+            .await;
     }
 
     #[tokio::test]
