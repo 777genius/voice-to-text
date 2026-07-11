@@ -10,8 +10,8 @@
 //! - нет VAD (translation идёт сплошным потоком, включая тишину).
 
 use std::panic::AssertUnwindSafe;
-use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, Weak};
 
 use tokio::sync::{Mutex, RwLock};
 
@@ -140,6 +140,7 @@ impl From<RealtimeInterpretationError> for LiveTranslationError {
 pub struct LiveTranslationService {
     status: Arc<RwLock<RecordingStatus>>,
     inner: Arc<Mutex<Option<RealtimeInterpretationSession>>>,
+    lifecycle: Arc<Mutex<()>>,
     audio_factory: Arc<dyn PlatformAudioFactory>,
     client_factory: Arc<dyn RealtimeTranslationFactory>,
 }
@@ -179,6 +180,7 @@ impl LiveTranslationService {
         Self {
             status: Arc::new(RwLock::new(RecordingStatus::Idle)),
             inner: Arc::new(Mutex::new(None)),
+            lifecycle: Arc::new(Mutex::new(())),
             audio_factory,
             client_factory,
         }
@@ -204,15 +206,18 @@ impl LiveTranslationService {
         config: LiveTranslationConfig,
         callbacks: LiveTranslationCallbacks,
     ) -> Result<(), LiveTranslationError> {
-        let mut guard = self.inner.lock().await;
-        if guard.is_some() && *self.status.read().await == RecordingStatus::Error {
-            if let Some(stale_session) = guard.take() {
-                stale_session
-                    .shutdown(RealtimeInterpretationShutdown::Abort)
-                    .await;
-            }
+        let _lifecycle_guard = self.lifecycle.lock().await;
+        let stale_session = if *self.status.read().await == RecordingStatus::Error {
+            self.inner.lock().await.take()
+        } else {
+            None
+        };
+        if let Some(stale_session) = stale_session {
+            stale_session
+                .shutdown(RealtimeInterpretationShutdown::Abort)
+                .await;
         }
-        if guard.is_some() {
+        if self.inner.lock().await.is_some() {
             return Err(LiveTranslationError::Configuration(
                 "Translation session уже активна".into(),
             ));
@@ -339,9 +344,9 @@ impl LiveTranslationService {
             }
         };
 
-        *guard = Some(session);
+        *self.inner.lock().await = Some(session);
         spawn_live_runtime_cleanup_monitor(
-            self.inner.clone(),
+            Arc::downgrade(&self.inner),
             self.status.clone(),
             callbacks.clone(),
             runtime_stop_rx,
@@ -369,8 +374,9 @@ impl LiveTranslationService {
     /// 3) translation session finish принимает финальный text/audio tail
     /// 4) output worker дожидается фактического хвоста и закрывается
     pub async fn stop_translation(&self) -> Result<(), LiveTranslationError> {
-        let mut guard = self.inner.lock().await;
-        let Some(session) = guard.take() else {
+        let _lifecycle_guard = self.lifecycle.lock().await;
+        let session = self.inner.lock().await.take();
+        let Some(session) = session else {
             return Ok(());
         };
         *self.status.write().await = RecordingStatus::Processing;
@@ -410,7 +416,7 @@ async fn mark_live_recording_started(
 }
 
 fn spawn_live_runtime_cleanup_monitor(
-    inner: Arc<Mutex<Option<RealtimeInterpretationSession>>>,
+    inner: Weak<Mutex<Option<RealtimeInterpretationSession>>>,
     status: Arc<RwLock<RecordingStatus>>,
     callbacks: LiveTranslationCallbacks,
     runtime_stop_rx: tokio::sync::mpsc::UnboundedReceiver<RealtimeInterpretationStop>,
@@ -420,12 +426,21 @@ fn spawn_live_runtime_cleanup_monitor(
         session_id,
         runtime_stop_rx,
         move |session_id, stop| async move {
-            let mut guard = inner.lock().await;
-            let is_current = guard
-                .as_ref()
-                .map(|session| session.session_id() == session_id)
-                .unwrap_or(false);
-            let session = if is_current { guard.take() } else { None };
+            let Some(inner) = inner.upgrade() else {
+                return;
+            };
+            let session = {
+                let mut guard = inner.lock().await;
+                let is_current = guard
+                    .as_ref()
+                    .map(|session| session.session_id() == session_id)
+                    .unwrap_or(false);
+                if is_current {
+                    guard.take()
+                } else {
+                    None
+                }
+            };
             let Some(session) = session else {
                 return;
             };
@@ -1178,6 +1193,40 @@ mod tests {
             statuses.lock().unwrap().as_slice(),
             &[RecordingStatus::Starting, RecordingStatus::Recording]
         );
+    }
+
+    #[tokio::test]
+    async fn dropping_active_outgoing_service_releases_runtime_owners() {
+        let output_state = Arc::new(SyntheticOutputState::default());
+        let realtime_state = Arc::new(SyntheticRealtimeState::default());
+        let svc = LiveTranslationService::new_with_factories(
+            Arc::new(SyntheticPlatformAudioFactory {
+                output_state: output_state.clone(),
+                capture_started: Arc::new(AtomicBool::new(false)),
+                capture_stopped: Arc::new(AtomicBool::new(false)),
+                mic_target: Arc::new(StdMutex::new(None)),
+            }),
+            Arc::new(SyntheticRealtimeClientFactory {
+                state: realtime_state.clone(),
+            }),
+        );
+
+        svc.start_translation(valid_config(92), test_callbacks())
+            .await
+            .unwrap();
+        assert!(Arc::strong_count(&output_state) > 1);
+        assert!(Arc::strong_count(&realtime_state) > 1);
+
+        drop(svc);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while tokio::time::Instant::now() < deadline
+            && (Arc::strong_count(&output_state) > 1 || Arc::strong_count(&realtime_state) > 1)
+        {
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(Arc::strong_count(&output_state), 1);
+        assert_eq!(Arc::strong_count(&realtime_state), 1);
     }
 
     #[tokio::test]
