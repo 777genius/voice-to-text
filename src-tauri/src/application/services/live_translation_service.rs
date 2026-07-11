@@ -1,55 +1,36 @@
-//! LiveTranslationService — orchestrator для live-перевода голоса.
+//! LiveTranslationService - outgoing facade для live-перевода голоса.
 //!
-//! Pipeline:
-//! - mic 24 kHz mono через platform audio factory
-//!   - применяем microphone_sensitivity gain
-//!   - feed-им в audio_spectrum analyzer
-//!   - отправляем в OpenAI realtime translation client (PCM16 base64)
-//! - OpenAI отдаёт events:
-//!   - `AudioDelta(Vec<i16>)` → `TranslationAudioOutput.enqueue_pcm16(...)`
-//!   - `TranscriptDelta(String)` → callback в UI (popover)
-//!   - `Error(...)` → callback в UI + статус Error
-//!   - `Closed` → если незапланированно → callback в UI
+//! Facade отвечает за outgoing-specific preflight, factories, spectrum callback и UI status.
+//! Bounded queues, PCM framing, translation/output owner tasks, supervision и cleanup находятся
+//! в `RealtimeInterpretationSession`, общем для outgoing и будущего incoming spoken mode.
 //!
 //! Этот сервис намеренно НЕ повторяет логику TranscriptionService:
 //! - нет auto-paste/copy/history;
 //! - нет STT auth retry/logout;
 //! - нет VAD (translation идёт сплошным потоком, включая тишину).
 
-use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::Mutex as StdMutex;
 
-use futures_util::FutureExt;
-use tokio::sync::{mpsc, Mutex, RwLock};
-use tokio::task::JoinHandle;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::domain::{
-    amplify_i16_samples, microphone_sensitivity_gain, AudioCapture, AudioCaptureTarget, AudioChunk,
-    AudioChunkCallback, AudioConfig, PlatformAudioFactory, RealtimeTranslationConfig,
-    RealtimeTranslationError, RealtimeTranslationErrorKind, RealtimeTranslationEvent,
-    RealtimeTranslationFactory, RealtimeTranslationSession, RecordingStatus,
-    TranslationAudioOutput, TranslationAudioOutputConfig,
+    microphone_sensitivity_gain, AudioCaptureTarget, AudioConfig, PlatformAudioFactory,
+    RealtimeTranslationConfig, RealtimeTranslationError, RealtimeTranslationErrorKind,
+    RealtimeTranslationFactory, RecordingStatus, TranslationAudioOutputConfig,
 };
 use crate::infrastructure::audio::DefaultPlatformAudioFactory;
 use crate::infrastructure::openai::OpenAIRealtimeTranslationFactory;
 
-use super::audio_spectrum::AudioSpectrumAnalyzer;
+use super::{
+    spawn_realtime_interpretation_supervisor, AudioSpectrumAnalyzer,
+    RealtimeInterpretationCallbacks, RealtimeInterpretationConfig, RealtimeInterpretationError,
+    RealtimeInterpretationPorts, RealtimeInterpretationSession, RealtimeInterpretationShutdown,
+    RealtimeInterpretationStop,
+};
 
 const TRANSLATION_TARGET_LANGUAGE_DEFAULT: &str = "en";
-const OPENAI_INPUT_FRAME_SAMPLES: usize = 4_800; // 200 ms at 24 kHz mono.
-const MIC_QUEUE_CAPACITY_CHUNKS: usize = 160; // Roughly a few seconds, depending on device chunking.
-const MIC_QUEUE_OVERLOAD_DROP_THRESHOLD: u64 = 32;
-const GRACEFUL_CLOSE_TIMEOUT_MS: u64 = 8_000;
-const MIC_PUMP_DRAIN_TIMEOUT_MS: u64 = 1_500;
-const FORWARDER_DRAIN_TIMEOUT_MS: u64 = 1_500;
-const OUTPUT_HEALTH_POLL_INTERVAL_MS: u64 = 250;
-const OUTPUT_DRAIN_SAFETY_MS: u64 = 250;
-const OUTPUT_DRAIN_MAX_MS: u64 = 12_000;
-const OUTPUT_DRAIN_POLL_MS: u64 = 50;
-const OUTPUT_DRAIN_EMPTY_THRESHOLD_MS: u64 = 30;
 
 #[derive(Debug, Clone)]
 pub struct LiveTranslationConfig {
@@ -139,50 +120,23 @@ impl From<RealtimeTranslationError> for LiveTranslationError {
     }
 }
 
+impl From<RealtimeInterpretationError> for LiveTranslationError {
+    fn from(error: RealtimeInterpretationError) -> Self {
+        match error {
+            RealtimeInterpretationError::Authentication(message) => Self::Authentication(message),
+            RealtimeInterpretationError::RateLimited(message) => Self::RateLimited(message),
+            RealtimeInterpretationError::Connection(message) => Self::Connection(message),
+            RealtimeInterpretationError::Timeout(message) => Self::Timeout(message),
+            RealtimeInterpretationError::Processing(message) => Self::Processing(message),
+        }
+    }
+}
+
 pub struct LiveTranslationService {
     status: Arc<RwLock<RecordingStatus>>,
-    inner: Arc<Mutex<Option<RunningSession>>>,
+    inner: Arc<Mutex<Option<RealtimeInterpretationSession>>>,
     audio_factory: Arc<dyn PlatformAudioFactory>,
     client_factory: Arc<dyn RealtimeTranslationFactory>,
-}
-
-struct RunningSession {
-    capture: Arc<RwLock<Box<dyn AudioCapture>>>,
-    output: Arc<RwLock<Box<dyn TranslationAudioOutput>>>,
-    client: Arc<Mutex<Box<dyn RealtimeTranslationSession>>>,
-    forwarder_task: JoinHandle<()>,
-    audio_pump_task: JoinHandle<()>,
-    stop_requested: Arc<AtomicBool>,
-    session_id: u64,
-}
-
-#[derive(Debug, Clone)]
-enum RuntimeStop {
-    Error(LiveTranslationError),
-    Closed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AudioQueueEnqueueError {
-    Full(u64),
-    Closed,
-}
-
-fn spawn_live_runtime_task<F>(
-    label: &'static str,
-    future: F,
-    runtime_stop_tx: mpsc::UnboundedSender<RuntimeStop>,
-) -> JoinHandle<()>
-where
-    F: Future<Output = ()> + Send + 'static,
-{
-    tokio::spawn(async move {
-        if AssertUnwindSafe(future).catch_unwind().await.is_err() {
-            let _ = runtime_stop_tx.send(RuntimeStop::Error(LiveTranslationError::Processing(
-                format!("{} task panicked", label),
-            )));
-        }
-    })
 }
 
 fn notify_live_runtime_error(callbacks: &LiveTranslationCallbacks, error: LiveTranslationError) {
@@ -196,12 +150,6 @@ fn call_live_callback(label: &str, callback: impl FnOnce()) {
     if std::panic::catch_unwind(AssertUnwindSafe(callback)).is_err() {
         log::error!("LiveTranslationService: {} callback panicked", label);
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum CleanupMode {
-    GracefulStop,
-    RuntimeFailure,
 }
 
 impl Default for LiveTranslationService {
@@ -236,7 +184,11 @@ impl LiveTranslationService {
     }
 
     pub async fn active_session_id(&self) -> Option<u64> {
-        self.inner.lock().await.as_ref().map(|s| s.session_id)
+        self.inner
+            .lock()
+            .await
+            .as_ref()
+            .map(RealtimeInterpretationSession::session_id)
     }
 
     /// Полный preflight + старт всех потоков.
@@ -250,7 +202,9 @@ impl LiveTranslationService {
         let mut guard = self.inner.lock().await;
         if guard.is_some() && *self.status.read().await == RecordingStatus::Error {
             if let Some(stale_session) = guard.take() {
-                cleanup_session(stale_session, CleanupMode::RuntimeFailure).await;
+                stale_session
+                    .shutdown(RealtimeInterpretationShutdown::Abort)
+                    .await;
             }
         }
         if guard.is_some() {
@@ -292,11 +246,9 @@ impl LiveTranslationService {
             self.transition_to_error().await;
             return Err(err);
         }
-        let output = Arc::new(RwLock::new(output_concrete));
-
         // 3. Mic preflight. Do this before paid OpenAI session creation.
         if let Err(e) = self.audio_factory.microphone_preflight() {
-            let _ = output.write().await.close().await;
+            let _ = output_concrete.close().await;
             let err = LiveTranslationError::Configuration(e.to_string());
             self.transition_to_error().await;
             return Err(err);
@@ -309,16 +261,14 @@ impl LiveTranslationService {
         let capture = match capture_result {
             Ok(c) => c,
             Err(e) => {
-                let _ = output.write().await.close().await;
+                let _ = output_concrete.close().await;
                 let err = LiveTranslationError::Configuration(format!("mic init: {}", e));
                 self.transition_to_error().await;
                 return Err(err);
             }
         };
-        let capture = Arc::new(RwLock::new(capture));
+        let mut capture = capture;
         if let Err(e) = capture
-            .write()
-            .await
             .initialize(AudioConfig {
                 sample_rate: AudioCaptureTarget::outgoing_translation().sample_rate,
                 channels: AudioCaptureTarget::outgoing_translation().channels,
@@ -326,7 +276,7 @@ impl LiveTranslationService {
             })
             .await
         {
-            let _ = output.write().await.close().await;
+            let _ = output_concrete.close().await;
             let err = LiveTranslationError::Configuration(format!("mic init: {}", e));
             self.transition_to_error().await;
             return Err(err);
@@ -340,125 +290,52 @@ impl LiveTranslationService {
             Ok(rx) => rx,
             Err(e) => {
                 // откатываем output
-                let _ = output.write().await.close().await;
+                let _ = output_concrete.close().await;
                 let mapped: LiveTranslationError = e.into();
                 self.transition_to_error().await;
                 return Err(mapped);
             }
         };
-        let client = Arc::new(Mutex::new(client));
-
-        // 5. Bridge sync mic callback -> async pump
-        // SystemAudioCapture зовёт on_chunk из cpal-thread синхронно. Сразу пушим в mpsc.
-        let (mic_tx, mic_rx) = mpsc::channel::<AudioChunk>(MIC_QUEUE_CAPACITY_CHUNKS);
-        let consecutive_dropped_mic_chunks = Arc::new(AtomicU64::new(0));
-        let (runtime_stop_tx, runtime_stop_rx) = mpsc::unbounded_channel::<RuntimeStop>();
-        let runtime_stop_tx_for_mic = runtime_stop_tx.clone();
-        let stop_requested = Arc::new(AtomicBool::new(false));
-        let stop_requested_for_mic = stop_requested.clone();
-        let mic_terminal_error_reported = AtomicBool::new(false);
-        let mic_callback: AudioChunkCallback = Arc::new(move |chunk: AudioChunk| {
-            match try_enqueue_mic_chunk(&mic_tx, chunk, &consecutive_dropped_mic_chunks) {
-                Ok(()) => {}
-                Err(AudioQueueEnqueueError::Full(consecutive_drops))
-                    if consecutive_drops == MIC_QUEUE_OVERLOAD_DROP_THRESHOLD
-                        && mic_terminal_error_reported
-                            .compare_exchange(
-                                false,
-                                true,
-                                AtomicOrdering::SeqCst,
-                                AtomicOrdering::SeqCst,
-                            )
-                            .is_ok() =>
-                {
-                    let _ = runtime_stop_tx_for_mic.send(RuntimeStop::Error(
-                        LiveTranslationError::Processing(
-                            "Microphone audio processing cannot keep up; translation was stopped to avoid silently losing speech"
-                                .to_string(),
-                        ),
-                    ));
+        let spectrum = Arc::new(StdMutex::new(AudioSpectrumAnalyzer::new()));
+        let on_spectrum = callbacks.on_audio_spectrum.clone();
+        let core_callbacks = RealtimeInterpretationCallbacks {
+            on_translated_text: callbacks.on_transcript_delta.clone(),
+            on_source_text: Arc::new(|text| {
+                log::debug!("translation source delta received ({} bytes)", text.len());
+            }),
+            on_input_audio: Arc::new(move |samples| {
+                let mut analyzer = spectrum.lock().unwrap_or_else(|error| error.into_inner());
+                if let Some(bars) = analyzer.push_samples(samples) {
+                    call_live_callback("audio spectrum", || on_spectrum(bars));
                 }
-                Err(AudioQueueEnqueueError::Closed)
-                    if !stop_requested_for_mic.load(AtomicOrdering::SeqCst)
-                        && mic_terminal_error_reported
-                            .compare_exchange(
-                                false,
-                                true,
-                                AtomicOrdering::SeqCst,
-                                AtomicOrdering::SeqCst,
-                            )
-                            .is_ok() =>
-                {
-                    let _ = runtime_stop_tx_for_mic.send(RuntimeStop::Error(
-                        LiveTranslationError::Processing(
-                            "Microphone audio processor stopped unexpectedly".to_string(),
-                        ),
-                    ));
-                }
-                Err(_) => {}
+            }),
+        };
+        let core_config = RealtimeInterpretationConfig::outgoing(
+            config.session_id,
+            microphone_sensitivity_gain(config.microphone_sensitivity),
+        );
+        let (session, runtime_stop_rx) = match RealtimeInterpretationSession::start(
+            core_config,
+            RealtimeInterpretationPorts {
+                capture,
+                output: output_concrete,
+                translation: client,
+                translation_events: openai_rx,
+            },
+            core_callbacks,
+        )
+        .await
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let error = LiveTranslationError::Configuration(error.to_string());
+                self.transition_to_error().await;
+                return Err(error);
             }
-        });
-
-        // 6. Start mic capture
-        if let Err(e) = capture.write().await.start_capture(mic_callback).await {
-            // hard cleanup
-            client.lock().await.abort().await;
-            let _ = output.write().await.close().await;
-            let err = LiveTranslationError::Configuration(format!("mic start: {}", e));
-            self.transition_to_error().await;
-            return Err(err);
-        }
-
-        // 7. Spawn runtime tasks. Fatal task exits go through runtime_stop_tx so the
-        // service can clean capture/output/client and not leave inner stuck Some(...).
-        let audio_pump_task = {
-            let client = client.clone();
-            let sensitivity = config.microphone_sensitivity;
-            let on_spectrum = callbacks.on_audio_spectrum.clone();
-            let runtime_stop_tx = runtime_stop_tx.clone();
-            let panic_stop_tx = runtime_stop_tx.clone();
-            let stop_requested = stop_requested.clone();
-            spawn_live_runtime_task(
-                "audio pump",
-                async move {
-                    run_audio_pump(
-                        mic_rx,
-                        client,
-                        sensitivity,
-                        on_spectrum,
-                        stop_requested,
-                        runtime_stop_tx,
-                    )
-                    .await;
-                },
-                panic_stop_tx,
-            )
         };
 
-        let forwarder_task = {
-            let output = output.clone();
-            let on_transcript = callbacks.on_transcript_delta.clone();
-            let runtime_stop_tx = runtime_stop_tx.clone();
-            let panic_stop_tx = runtime_stop_tx.clone();
-            spawn_live_runtime_task(
-                "event forwarder",
-                async move {
-                    run_event_forwarder(openai_rx, output, on_transcript, runtime_stop_tx).await;
-                },
-                panic_stop_tx,
-            )
-        };
-
-        *guard = Some(RunningSession {
-            capture,
-            output,
-            client,
-            forwarder_task,
-            audio_pump_task,
-            stop_requested,
-            session_id: config.session_id,
-        });
-        spawn_runtime_cleanup_monitor(
+        *guard = Some(session);
+        spawn_live_runtime_cleanup_monitor(
             self.inner.clone(),
             self.status.clone(),
             callbacks.clone(),
@@ -483,11 +360,9 @@ impl LiveTranslationService {
 
     /// Graceful stop:
     /// 1) mic capture stop сразу
-    /// 2) даём audio pump дослать уже захваченные mic chunks
-    /// 3) openai client.close(drain timeout) - даём дотечь хвосту
-    /// 4) ждём фактический хвост output queue, а не фиксированное время
-    /// 5) output close
-    /// 6) abort pumps
+    /// 2) общий input worker досылает уже принятые mic chunks
+    /// 3) translation session finish принимает финальный text/audio tail
+    /// 4) output worker дожидается фактического хвоста и закрывается
     pub async fn stop_translation(&self) -> Result<(), LiveTranslationError> {
         let mut guard = self.inner.lock().await;
         let Some(session) = guard.take() else {
@@ -495,7 +370,9 @@ impl LiveTranslationService {
         };
         *self.status.write().await = RecordingStatus::Processing;
 
-        cleanup_session(session, CleanupMode::GracefulStop).await;
+        session
+            .shutdown(RealtimeInterpretationShutdown::Graceful)
+            .await;
 
         *self.status.write().await = RecordingStatus::Idle;
         Ok(())
@@ -527,504 +404,56 @@ async fn mark_live_recording_started(
     true
 }
 
-fn take_ready_openai_input_frames(buffer: &mut Vec<i16>) -> Vec<Vec<i16>> {
-    let mut frames = Vec::new();
-    while buffer.len() >= OPENAI_INPUT_FRAME_SAMPLES {
-        frames.push(buffer.drain(..OPENAI_INPUT_FRAME_SAMPLES).collect());
-    }
-    frames
-}
-
-fn take_padded_final_openai_input_frame(buffer: &mut Vec<i16>) -> Option<Vec<i16>> {
-    if buffer.is_empty() {
-        return None;
-    }
-
-    let mut frame = std::mem::take(buffer);
-    frame.resize(OPENAI_INPUT_FRAME_SAMPLES, 0);
-    Some(frame)
-}
-
-async fn send_openai_input_frame(
-    client: &Arc<Mutex<Box<dyn RealtimeTranslationSession>>>,
-    frame: &[i16],
-) -> Result<(), LiveTranslationError> {
-    let mut client = client.lock().await;
-    client.append_pcm16(frame).await.map_err(Into::into)
-}
-
-async fn run_audio_pump(
-    mut mic_rx: mpsc::Receiver<AudioChunk>,
-    client: Arc<Mutex<Box<dyn RealtimeTranslationSession>>>,
-    sensitivity: u8,
-    on_spectrum: Arc<dyn Fn([f32; 48]) + Send + Sync>,
-    stop_requested: Arc<AtomicBool>,
-    runtime_stop_tx: mpsc::UnboundedSender<RuntimeStop>,
-) {
-    let gain = microphone_sensitivity_gain(sensitivity);
-    let mut spectrum = AudioSpectrumAnalyzer::new();
-    let mut openai_input_buffer = Vec::<i16>::with_capacity(OPENAI_INPUT_FRAME_SAMPLES * 2);
-    let mut failed = false;
-
-    while let Some(chunk) = mic_rx.recv().await {
-        // gain
-        let amplified = if (gain - 1.0).abs() < f32::EPSILON {
-            chunk.data
-        } else {
-            amplify_i16_samples(&chunk.data, gain)
-        };
-
-        // spectrum (cheap, FFT 256-1024 samples)
-        if let Some(bars) = spectrum.push_samples(&amplified) {
-            call_live_callback("audio spectrum", || on_spectrum(bars));
-        }
-
-        openai_input_buffer.extend_from_slice(&amplified);
-        for frame in take_ready_openai_input_frames(&mut openai_input_buffer) {
-            if let Err(kind_err) = send_openai_input_frame(&client, &frame).await {
-                log::warn!("LiveTranslationService audio pump send error: {}", kind_err);
-                let _ = runtime_stop_tx.send(RuntimeStop::Error(kind_err));
-                failed = true;
-                break;
-            }
-        }
-
-        if failed {
-            break;
-        }
-    }
-
-    if !failed {
-        if let Some(frame) = take_padded_final_openai_input_frame(&mut openai_input_buffer) {
-            if let Err(kind_err) = send_openai_input_frame(&client, &frame).await {
-                log::warn!(
-                    "LiveTranslationService final audio frame send error: {}",
-                    kind_err
-                );
-                let _ = runtime_stop_tx.send(RuntimeStop::Error(kind_err));
-                failed = true;
-            }
-        }
-    }
-
-    if !failed && !stop_requested.load(AtomicOrdering::SeqCst) {
-        let _ = runtime_stop_tx.send(RuntimeStop::Error(LiveTranslationError::Connection(
-            "microphone capture stopped unexpectedly".to_string(),
-        )));
-    }
-
-    log::info!("LiveTranslationService: audio pump exited");
-}
-
-fn try_enqueue_mic_chunk(
-    mic_tx: &mpsc::Sender<AudioChunk>,
-    chunk: AudioChunk,
-    consecutive_dropped_mic_chunks: &AtomicU64,
-) -> Result<(), AudioQueueEnqueueError> {
-    match mic_tx.try_send(chunk) {
-        Ok(()) => {
-            consecutive_dropped_mic_chunks.store(0, AtomicOrdering::Relaxed);
-            Ok(())
-        }
-        Err(mpsc::error::TrySendError::Full(_chunk)) => {
-            let dropped = consecutive_dropped_mic_chunks.fetch_add(1, AtomicOrdering::Relaxed) + 1;
-            if dropped == 1 || dropped % 100 == 0 {
-                log::warn!(
-                    "LiveTranslationService: dropped {} consecutive mic chunks because OpenAI input queue is full",
-                    dropped
-                );
-            }
-            Err(AudioQueueEnqueueError::Full(dropped))
-        }
-        Err(mpsc::error::TrySendError::Closed(_chunk)) => Err(AudioQueueEnqueueError::Closed),
-    }
-}
-
-async fn run_event_forwarder(
-    mut openai_rx: mpsc::Receiver<RealtimeTranslationEvent>,
-    output: Arc<RwLock<Box<dyn TranslationAudioOutput>>>,
-    on_transcript: Arc<dyn Fn(String) + Send + Sync>,
-    runtime_stop_tx: mpsc::UnboundedSender<RuntimeStop>,
-) {
-    let mut health_poll =
-        tokio::time::interval(Duration::from_millis(OUTPUT_HEALTH_POLL_INTERVAL_MS));
-    health_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    health_poll.tick().await;
-
-    loop {
-        let ev = tokio::select! {
-            event = openai_rx.recv() => {
-                let Some(event) = event else {
-                    let _ = runtime_stop_tx.send(RuntimeStop::Closed);
-                    break;
-                };
-                event
-            }
-            _ = health_poll.tick() => {
-                if !output.read().await.is_open() {
-                    let _ = runtime_stop_tx.send(RuntimeStop::Error(
-                        LiveTranslationError::Processing(
-                            "virtual microphone output stream stopped unexpectedly".to_string(),
-                        ),
-                    ));
-                    break;
-                }
-                continue;
-            }
-        };
-
-        match ev {
-            RealtimeTranslationEvent::TranslatedAudio {
-                pcm16,
-                sample_rate,
-                channels,
-            } => {
-                if sample_rate != 24_000 || channels != 1 {
-                    let _ = runtime_stop_tx.send(RuntimeStop::Error(
-                        LiveTranslationError::Processing(format!(
-                            "unsupported translated audio format: {} Hz, {} channels",
-                            sample_rate, channels
-                        )),
-                    ));
-                    break;
-                }
-                let out = output.read().await;
-                if let Err(e) = out.enqueue_pcm16(&pcm16).await {
-                    log::warn!("LiveTranslationService: output enqueue failed: {}", e);
-                    let _ = runtime_stop_tx.send(RuntimeStop::Error(
-                        LiveTranslationError::Processing(e.to_string()),
-                    ));
-                    break;
-                }
-            }
-            RealtimeTranslationEvent::TranslatedTextDelta(text) => {
-                call_live_callback("transcript delta", || on_transcript(text));
-            }
-            RealtimeTranslationEvent::SourceTextDelta(text) => {
-                log::debug!("translation source delta received ({} bytes)", text.len());
-            }
-            RealtimeTranslationEvent::Failed(error) => {
-                let kind_err = LiveTranslationError::from(error);
-                log::error!(
-                    "LiveTranslationService: realtime translation error: {}",
-                    kind_err
-                );
-                let _ = runtime_stop_tx.send(RuntimeStop::Error(kind_err));
-                break;
-            }
-            RealtimeTranslationEvent::Closed => {
-                log::info!("LiveTranslationService: openai session closed");
-                let _ = runtime_stop_tx.send(RuntimeStop::Closed);
-                break;
-            }
-        }
-    }
-    log::info!("LiveTranslationService: event forwarder exited");
-}
-
-fn spawn_runtime_cleanup_monitor(
-    inner: Arc<Mutex<Option<RunningSession>>>,
+fn spawn_live_runtime_cleanup_monitor(
+    inner: Arc<Mutex<Option<RealtimeInterpretationSession>>>,
     status: Arc<RwLock<RecordingStatus>>,
     callbacks: LiveTranslationCallbacks,
-    mut runtime_stop_rx: mpsc::UnboundedReceiver<RuntimeStop>,
+    runtime_stop_rx: tokio::sync::mpsc::UnboundedReceiver<RealtimeInterpretationStop>,
     session_id: u64,
 ) {
-    tokio::spawn(async move {
-        let Some(stop) = runtime_stop_rx.recv().await else {
-            return;
-        };
-
-        let mut guard = inner.lock().await;
-        let is_current = guard
-            .as_ref()
-            .map(|session| session.session_id == session_id)
-            .unwrap_or(false);
-        let session = if is_current { guard.take() } else { None };
-
-        let Some(session) = session else {
-            // Manual stop already took ownership. Ignore close/error from the shutdown path.
-            return;
-        };
-
-        let err = match stop {
-            RuntimeStop::Error(err) => err,
-            RuntimeStop::Closed => LiveTranslationError::Connection(
-                "OpenAI realtime translation session closed unexpectedly".to_string(),
-            ),
-        };
-
-        *status.write().await = RecordingStatus::Error;
-        notify_live_runtime_error(&callbacks, err);
-
-        cleanup_session(session, CleanupMode::RuntimeFailure).await;
-        drop(guard);
-    });
-}
-
-async fn cleanup_session(mut session: RunningSession, mode: CleanupMode) {
-    let session_id = session.session_id;
-    session.stop_requested.store(true, AtomicOrdering::SeqCst);
-
-    if let Err(e) = session.capture.write().await.stop_capture().await {
-        log::warn!(
-            "LiveTranslationService cleanup: mic stop_capture failed for session {}: {}",
-            session_id,
-            e
-        );
-    }
-
-    match mode {
-        CleanupMode::GracefulStop => {
-            {
-                let out = session.output.read().await;
-                out.begin_drain_mode();
-            }
-
-            let audio_pump_finished = wait_task_done(
-                &mut session.audio_pump_task,
-                Duration::from_millis(MIC_PUMP_DRAIN_TIMEOUT_MS),
-                "audio pump",
-                session_id,
-            )
-            .await;
-            if !audio_pump_finished {
-                abort_task_done(
-                    &mut session.audio_pump_task,
-                    Duration::from_millis(MIC_PUMP_DRAIN_TIMEOUT_MS),
-                    "audio pump",
-                    session_id,
-                )
-                .await;
-            }
-
-            let close_res = {
-                let mut client = session.client.lock().await;
-                client
-                    .finish(Duration::from_millis(GRACEFUL_CLOSE_TIMEOUT_MS))
-                    .await
-            };
-            if let Err(e) = close_res {
-                log::warn!(
-                    "LiveTranslationService cleanup: openai close failed for session {}: {}",
-                    session_id,
-                    e
-                );
-                session.client.lock().await.abort().await;
-            }
-
-            let forwarder_finished = wait_task_done(
-                &mut session.forwarder_task,
-                Duration::from_millis(FORWARDER_DRAIN_TIMEOUT_MS),
-                "event forwarder",
-                session_id,
-            )
-            .await;
-            if !forwarder_finished {
-                abort_task_done(
-                    &mut session.forwarder_task,
-                    Duration::from_millis(FORWARDER_DRAIN_TIMEOUT_MS),
-                    "event forwarder",
-                    session_id,
-                )
-                .await;
-            }
-
-            drain_output_tail(session.output.clone(), session_id).await;
-        }
-        CleanupMode::RuntimeFailure => {
-            // The audio pump holds the client mutex while awaiting a network send.
-            // Abort runtime tasks first so a stuck send cannot deadlock cleanup.
-            abort_task_done(
-                &mut session.audio_pump_task,
-                Duration::from_millis(MIC_PUMP_DRAIN_TIMEOUT_MS),
-                "audio pump",
-                session_id,
-            )
-            .await;
-            abort_task_done(
-                &mut session.forwarder_task,
-                Duration::from_millis(FORWARDER_DRAIN_TIMEOUT_MS),
-                "event forwarder",
-                session_id,
-            )
-            .await;
-            session.client.lock().await.abort().await;
-        }
-    }
-
-    if let Err(e) = session.output.write().await.close().await {
-        log::warn!(
-            "LiveTranslationService cleanup: output close failed for session {}: {}",
-            session_id,
-            e
-        );
-    }
-
-    if matches!(mode, CleanupMode::GracefulStop) {
-        session.audio_pump_task.abort();
-        session.forwarder_task.abort();
-    }
-
-    log::info!(
-        "LiveTranslationService: session {} cleaned up ({:?})",
+    let _supervisor = spawn_realtime_interpretation_supervisor(
         session_id,
-        mode
-    );
-}
-
-async fn wait_task_done(
-    task: &mut JoinHandle<()>,
-    timeout: Duration,
-    label: &str,
-    session_id: u64,
-) -> bool {
-    match tokio::time::timeout(timeout, task).await {
-        Ok(Ok(())) => {
-            log::debug!(
-                "LiveTranslationService cleanup: {} drained for session {}",
-                label,
-                session_id
-            );
-            true
-        }
-        Ok(Err(e)) => {
-            log::warn!(
-                "LiveTranslationService cleanup: {} join failed for session {}: {}",
-                label,
-                session_id,
-                e
-            );
-            true
-        }
-        Err(_) => {
-            log::debug!(
-                "LiveTranslationService cleanup: {} did not drain within {} ms for session {}",
-                label,
-                timeout.as_millis(),
-                session_id
-            );
-            false
-        }
-    }
-}
-
-async fn abort_task_done(
-    task: &mut JoinHandle<()>,
-    timeout: Duration,
-    label: &str,
-    session_id: u64,
-) -> bool {
-    task.abort();
-    match tokio::time::timeout(timeout, task).await {
-        Ok(Ok(())) => {
-            log::debug!(
-                "LiveTranslationService cleanup: {} stopped for session {}",
-                label,
-                session_id
-            );
-            true
-        }
-        Ok(Err(e)) if e.is_cancelled() => {
-            log::debug!(
-                "LiveTranslationService cleanup: {} aborted for session {}",
-                label,
-                session_id
-            );
-            true
-        }
-        Ok(Err(e)) => {
-            log::warn!(
-                "LiveTranslationService cleanup: {} abort join failed for session {}: {}",
-                label,
-                session_id,
-                e
-            );
-            true
-        }
-        Err(_) => {
-            log::warn!(
-                "LiveTranslationService cleanup: {} did not abort within {} ms for session {}",
-                label,
-                timeout.as_millis(),
-                session_id
-            );
-            false
-        }
-    }
-}
-
-async fn drain_output_tail(output: Arc<RwLock<Box<dyn TranslationAudioOutput>>>, session_id: u64) {
-    let initial_pending = {
-        let out = output.read().await;
-        match out.prepare_for_drain() {
-            Ok(pending) => pending,
-            Err(e) => {
-                log::warn!(
-                    "LiveTranslationService cleanup: output drain prepare failed for session {}: {}",
-                    session_id,
-                    e
-                );
+        runtime_stop_rx,
+        move |session_id, stop| async move {
+            let mut guard = inner.lock().await;
+            let is_current = guard
+                .as_ref()
+                .map(|session| session.session_id() == session_id)
+                .unwrap_or(false);
+            let session = if is_current { guard.take() } else { None };
+            let Some(session) = session else {
                 return;
-            }
-        }
-    };
+            };
 
-    if initial_pending <= Duration::from_millis(OUTPUT_DRAIN_EMPTY_THRESHOLD_MS) {
-        return;
-    }
+            let error = match stop {
+                RealtimeInterpretationStop::Error(error) => error.into(),
+                RealtimeInterpretationStop::Closed => LiveTranslationError::Connection(
+                    "OpenAI realtime translation session closed unexpectedly".to_string(),
+                ),
+            };
 
-    let requested_wait =
-        initial_pending.saturating_add(Duration::from_millis(OUTPUT_DRAIN_SAFETY_MS));
-    let max_wait = Duration::from_millis(OUTPUT_DRAIN_MAX_MS);
-    let wait_budget = requested_wait.min(max_wait);
-    let deadline = tokio::time::Instant::now() + wait_budget;
-
-    log::info!(
-        "LiveTranslationService cleanup: draining output tail for session {} (pending={} ms, budget={} ms)",
-        session_id,
-        initial_pending.as_millis(),
-        wait_budget.as_millis()
+            session
+                .shutdown(RealtimeInterpretationShutdown::Abort)
+                .await;
+            *status.write().await = RecordingStatus::Error;
+            notify_live_runtime_error(&callbacks, error);
+        },
     );
-
-    loop {
-        let pending = {
-            let out = output.read().await;
-            out.pending_playback_duration()
-        };
-
-        if pending <= Duration::from_millis(OUTPUT_DRAIN_EMPTY_THRESHOLD_MS) {
-            log::debug!(
-                "LiveTranslationService cleanup: output tail drained for session {}",
-                session_id
-            );
-            return;
-        }
-
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            log::warn!(
-                "LiveTranslationService cleanup: output tail drain timeout for session {} (pending={} ms)",
-                session_id,
-                pending.as_millis()
-            );
-            return;
-        }
-
-        let remaining = deadline.saturating_duration_since(now);
-        tokio::time::sleep(
-            Duration::from_millis(OUTPUT_DRAIN_POLL_MS)
-                .min(pending)
-                .min(remaining),
-        )
-        .await;
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{
+        AudioCapture, AudioChunk, AudioChunkCallback, RealtimeTranslationEvent,
+        RealtimeTranslationSession, TranslationAudioOutput,
+    };
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+
+    const OPENAI_INPUT_FRAME_SAMPLES: usize = 4_800;
 
     #[test]
     fn error_type_strings_are_stable() {
@@ -1074,88 +503,6 @@ mod tests {
     }
 
     #[test]
-    fn openai_input_buffer_emits_200ms_frames() {
-        let mut buffer = vec![1; 2_000];
-        assert!(take_ready_openai_input_frames(&mut buffer).is_empty());
-
-        buffer.extend(std::iter::repeat_n(2, 2_800));
-        let frames = take_ready_openai_input_frames(&mut buffer);
-
-        assert_eq!(frames.len(), 1);
-        assert_eq!(frames[0].len(), OPENAI_INPUT_FRAME_SAMPLES);
-        assert!(buffer.is_empty());
-    }
-
-    #[test]
-    fn final_openai_input_frame_is_padded_to_200ms() {
-        let mut buffer = vec![7; 123];
-        let frame = take_padded_final_openai_input_frame(&mut buffer).unwrap();
-
-        assert_eq!(frame.len(), OPENAI_INPUT_FRAME_SAMPLES);
-        assert!(frame[..123].iter().all(|sample| *sample == 7));
-        assert!(frame[123..].iter().all(|sample| *sample == 0));
-        assert!(buffer.is_empty());
-    }
-
-    #[test]
-    fn try_enqueue_mic_chunk_tracks_only_consecutive_queue_drops() {
-        let (tx, mut rx) = mpsc::channel::<AudioChunk>(1);
-        let dropped = AtomicU64::new(0);
-        let first = AudioChunk::new(vec![1; 10], 24_000, 1);
-        let second = AudioChunk::new(vec![2; 10], 24_000, 1);
-        let third = AudioChunk::new(vec![3; 10], 24_000, 1);
-
-        assert_eq!(try_enqueue_mic_chunk(&tx, first.clone(), &dropped), Ok(()));
-        for expected in 1..=MIC_QUEUE_OVERLOAD_DROP_THRESHOLD {
-            assert_eq!(
-                try_enqueue_mic_chunk(&tx, second.clone(), &dropped),
-                Err(AudioQueueEnqueueError::Full(expected))
-            );
-        }
-
-        assert_eq!(
-            dropped.load(AtomicOrdering::Relaxed),
-            MIC_QUEUE_OVERLOAD_DROP_THRESHOLD
-        );
-        assert_eq!(rx.try_recv().unwrap().data, first.data);
-        assert_eq!(try_enqueue_mic_chunk(&tx, third, &dropped), Ok(()));
-        assert_eq!(dropped.load(AtomicOrdering::Relaxed), 0);
-    }
-
-    #[test]
-    fn try_enqueue_mic_chunk_reports_closed_processor_queue() {
-        let (tx, rx) = mpsc::channel::<AudioChunk>(1);
-        drop(rx);
-
-        assert_eq!(
-            try_enqueue_mic_chunk(
-                &tx,
-                AudioChunk::new(vec![1; 10], 24_000, 1),
-                &AtomicU64::new(0),
-            ),
-            Err(AudioQueueEnqueueError::Closed)
-        );
-    }
-
-    #[tokio::test]
-    async fn runtime_task_panic_reports_terminal_error() {
-        let (runtime_stop_tx, mut runtime_stop_rx) = mpsc::unbounded_channel();
-        let task = spawn_live_runtime_task(
-            "test worker",
-            async move { panic!("simulated live task panic") },
-            runtime_stop_tx,
-        );
-
-        task.await
-            .expect("panic must be contained by runtime guard");
-        assert!(matches!(
-            runtime_stop_rx.try_recv(),
-            Ok(RuntimeStop::Error(LiveTranslationError::Processing(message)))
-                if message.contains("test worker task panicked")
-        ));
-    }
-
-    #[test]
     fn runtime_error_callback_panic_does_not_skip_status_callback() {
         let status_called = Arc::new(AtomicBool::new(false));
         let callbacks = LiveTranslationCallbacks {
@@ -1166,7 +513,7 @@ mod tests {
                 let status_called = status_called.clone();
                 Arc::new(move |status| {
                     if status == RecordingStatus::Error {
-                        status_called.store(true, AtomicOrdering::SeqCst);
+                        status_called.store(true, Ordering::SeqCst);
                     }
                 })
             },
@@ -1177,57 +524,7 @@ mod tests {
             LiveTranslationError::Processing("test failure".to_string()),
         );
 
-        assert!(status_called.load(AtomicOrdering::SeqCst));
-    }
-
-    #[tokio::test]
-    async fn audio_pump_reports_unexpected_microphone_channel_close() {
-        let (mic_tx, mic_rx) = mpsc::channel::<AudioChunk>(1);
-        drop(mic_tx);
-        let client: Arc<Mutex<Box<dyn RealtimeTranslationSession>>> =
-            Arc::new(Mutex::new(Box::new(SyntheticRealtimeClient {
-                state: Arc::new(SyntheticRealtimeState::default()),
-            })));
-        let (runtime_stop_tx, mut runtime_stop_rx) = mpsc::unbounded_channel();
-
-        run_audio_pump(
-            mic_rx,
-            client,
-            100,
-            Arc::new(|_| {}),
-            Arc::new(AtomicBool::new(false)),
-            runtime_stop_tx,
-        )
-        .await;
-
-        assert!(matches!(
-            runtime_stop_rx.try_recv(),
-            Ok(RuntimeStop::Error(LiveTranslationError::Connection(message)))
-                if message.contains("microphone capture stopped unexpectedly")
-        ));
-    }
-
-    #[tokio::test]
-    async fn audio_pump_does_not_report_planned_microphone_channel_close() {
-        let (mic_tx, mic_rx) = mpsc::channel::<AudioChunk>(1);
-        drop(mic_tx);
-        let client: Arc<Mutex<Box<dyn RealtimeTranslationSession>>> =
-            Arc::new(Mutex::new(Box::new(SyntheticRealtimeClient {
-                state: Arc::new(SyntheticRealtimeState::default()),
-            })));
-        let (runtime_stop_tx, mut runtime_stop_rx) = mpsc::unbounded_channel();
-
-        run_audio_pump(
-            mic_rx,
-            client,
-            100,
-            Arc::new(|_| {}),
-            Arc::new(AtomicBool::new(true)),
-            runtime_stop_tx,
-        )
-        .await;
-
-        assert!(runtime_stop_rx.try_recv().is_err());
+        assert!(status_called.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -1748,319 +1045,6 @@ mod tests {
         async fn abort(&mut self) {
             self.state.abort_calls.fetch_add(1, Ordering::SeqCst);
         }
-    }
-
-    #[derive(Default)]
-    struct BlockingOutputState {
-        enqueue_entered: AtomicBool,
-        closed: AtomicBool,
-    }
-
-    struct BlockingTranslationOutput {
-        state: Arc<BlockingOutputState>,
-    }
-
-    #[async_trait::async_trait]
-    impl TranslationAudioOutput for BlockingTranslationOutput {
-        async fn open(
-            &mut self,
-            _config: TranslationAudioOutputConfig,
-        ) -> crate::domain::TranslationAudioOutputResult<()> {
-            Ok(())
-        }
-
-        async fn enqueue_pcm16(
-            &self,
-            _samples: &[i16],
-        ) -> crate::domain::TranslationAudioOutputResult<()> {
-            self.state.enqueue_entered.store(true, Ordering::SeqCst);
-            std::future::pending::<()>().await;
-            Ok(())
-        }
-
-        async fn close(&mut self) -> crate::domain::TranslationAudioOutputResult<()> {
-            self.state.closed.store(true, Ordering::SeqCst);
-            Ok(())
-        }
-
-        fn is_open(&self) -> bool {
-            !self.state.closed.load(Ordering::SeqCst)
-        }
-
-        fn device_name(&self) -> Option<String> {
-            Some("blocking-output".to_string())
-        }
-
-        fn begin_drain_mode(&self) {}
-
-        fn prepare_for_drain(&self) -> crate::domain::TranslationAudioOutputResult<Duration> {
-            Ok(Duration::ZERO)
-        }
-
-        fn pending_playback_duration(&self) -> Duration {
-            Duration::ZERO
-        }
-    }
-
-    #[tokio::test]
-    async fn event_forwarder_detects_output_health_failure_without_openai_events() {
-        let output_state = Arc::new(SyntheticOutputState::default());
-        output_state.opened.store(true, Ordering::SeqCst);
-        let output: Arc<RwLock<Box<dyn TranslationAudioOutput>>> =
-            Arc::new(RwLock::new(Box::new(SyntheticTranslationOutput {
-                state: output_state.clone(),
-            })));
-        let (openai_tx, openai_rx) = mpsc::channel::<RealtimeTranslationEvent>(1);
-        let (runtime_stop_tx, mut runtime_stop_rx) = mpsc::unbounded_channel::<RuntimeStop>();
-
-        let forwarder_task = tokio::spawn(run_event_forwarder(
-            openai_rx,
-            output,
-            Arc::new(|_| {}),
-            runtime_stop_tx,
-        ));
-        output_state.closed.store(true, Ordering::SeqCst);
-
-        let stop = tokio::time::timeout(Duration::from_secs(1), runtime_stop_rx.recv())
-            .await
-            .expect("output health failure must be detected promptly")
-            .expect("forwarder must report output health failure");
-
-        assert!(matches!(
-            stop,
-            RuntimeStop::Error(LiveTranslationError::Processing(message))
-                if message.contains("virtual microphone output stream stopped unexpectedly")
-        ));
-        forwarder_task.await.expect("forwarder must exit cleanly");
-        assert!(openai_tx.is_closed());
-    }
-
-    #[tokio::test]
-    async fn event_forwarder_reports_unexpected_openai_channel_close() {
-        let output_state = Arc::new(SyntheticOutputState::default());
-        output_state.opened.store(true, Ordering::SeqCst);
-        let output: Arc<RwLock<Box<dyn TranslationAudioOutput>>> =
-            Arc::new(RwLock::new(Box::new(SyntheticTranslationOutput {
-                state: output_state,
-            })));
-        let (openai_tx, openai_rx) = mpsc::channel::<RealtimeTranslationEvent>(1);
-        let (runtime_stop_tx, mut runtime_stop_rx) = mpsc::unbounded_channel::<RuntimeStop>();
-        drop(openai_tx);
-
-        run_event_forwarder(openai_rx, output, Arc::new(|_| {}), runtime_stop_tx).await;
-
-        assert!(matches!(
-            runtime_stop_rx.try_recv(),
-            Ok(RuntimeStop::Closed)
-        ));
-    }
-
-    #[tokio::test]
-    async fn runtime_failure_aborts_forwarder_before_closing_output() {
-        let output_state = Arc::new(BlockingOutputState::default());
-        let output: Arc<RwLock<Box<dyn TranslationAudioOutput>>> =
-            Arc::new(RwLock::new(Box::new(BlockingTranslationOutput {
-                state: output_state.clone(),
-            })));
-        let capture_stopped = Arc::new(AtomicBool::new(false));
-        let capture: Arc<RwLock<Box<dyn AudioCapture>>> =
-            Arc::new(RwLock::new(Box::new(SyntheticMicCapture {
-                chunks: Vec::new(),
-                config: AudioConfig::default(),
-                started: Arc::new(AtomicBool::new(true)),
-                stopped: capture_stopped.clone(),
-                callback: None,
-            })));
-        let realtime_state = Arc::new(SyntheticRealtimeState::default());
-        let client: Arc<Mutex<Box<dyn RealtimeTranslationSession>>> =
-            Arc::new(Mutex::new(Box::new(SyntheticRealtimeClient {
-                state: realtime_state.clone(),
-            })));
-
-        let (_runtime_stop_tx, runtime_stop_rx) = mpsc::unbounded_channel::<RuntimeStop>();
-        drop(runtime_stop_rx);
-        let (openai_tx, openai_rx) = mpsc::channel::<RealtimeTranslationEvent>(1);
-        let (forwarder_stop_tx, _forwarder_stop_rx) = mpsc::unbounded_channel::<RuntimeStop>();
-        let forwarder_task = tokio::spawn(run_event_forwarder(
-            openai_rx,
-            output.clone(),
-            Arc::new(|_| {}),
-            forwarder_stop_tx,
-        ));
-        openai_tx
-            .send(RealtimeTranslationEvent::TranslatedAudio {
-                pcm16: vec![1_000; 480],
-                sample_rate: 24_000,
-                channels: 1,
-            })
-            .await
-            .unwrap();
-
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !output_state.enqueue_entered.load(Ordering::SeqCst) {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("forwarder must enter blocking enqueue");
-
-        let audio_pump_task = tokio::spawn(async {
-            std::future::pending::<()>().await;
-        });
-        let session = RunningSession {
-            capture,
-            output,
-            client,
-            forwarder_task,
-            audio_pump_task,
-            stop_requested: Arc::new(AtomicBool::new(false)),
-            session_id: 95,
-        };
-
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            cleanup_session(session, CleanupMode::RuntimeFailure),
-        )
-        .await
-        .expect("runtime cleanup must not block on output write lock");
-
-        assert!(capture_stopped.load(Ordering::SeqCst));
-        assert!(output_state.closed.load(Ordering::SeqCst));
-        assert_eq!(realtime_state.abort_calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn runtime_failure_aborts_audio_pump_before_locking_client() {
-        let output_state = Arc::new(SyntheticOutputState::default());
-        output_state.opened.store(true, Ordering::SeqCst);
-        let output: Arc<RwLock<Box<dyn TranslationAudioOutput>>> =
-            Arc::new(RwLock::new(Box::new(SyntheticTranslationOutput {
-                state: output_state,
-            })));
-        let capture_stopped = Arc::new(AtomicBool::new(false));
-        let capture: Arc<RwLock<Box<dyn AudioCapture>>> =
-            Arc::new(RwLock::new(Box::new(SyntheticMicCapture {
-                chunks: Vec::new(),
-                config: AudioConfig::default(),
-                started: Arc::new(AtomicBool::new(true)),
-                stopped: capture_stopped.clone(),
-                callback: None,
-            })));
-        let realtime_state = Arc::new(SyntheticRealtimeState::default());
-        let client: Arc<Mutex<Box<dyn RealtimeTranslationSession>>> =
-            Arc::new(Mutex::new(Box::new(SyntheticRealtimeClient {
-                state: realtime_state.clone(),
-            })));
-
-        let client_for_pump = client.clone();
-        let client_lock_acquired = Arc::new(AtomicBool::new(false));
-        let client_lock_acquired_for_pump = client_lock_acquired.clone();
-        let audio_pump_task = tokio::spawn(async move {
-            let _client_guard = client_for_pump.lock().await;
-            client_lock_acquired_for_pump.store(true, Ordering::SeqCst);
-            std::future::pending::<()>().await;
-        });
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !client_lock_acquired.load(Ordering::SeqCst) {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("audio pump must acquire the client lock");
-
-        let forwarder_task = tokio::spawn(async {
-            std::future::pending::<()>().await;
-        });
-        let session = RunningSession {
-            capture,
-            output,
-            client,
-            forwarder_task,
-            audio_pump_task,
-            stop_requested: Arc::new(AtomicBool::new(false)),
-            session_id: 97,
-        };
-
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            cleanup_session(session, CleanupMode::RuntimeFailure),
-        )
-        .await
-        .expect("runtime cleanup must not wait forever for the client lock");
-
-        assert!(capture_stopped.load(Ordering::SeqCst));
-        assert_eq!(realtime_state.abort_calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn graceful_stop_aborts_stuck_forwarder_before_closing_output() {
-        let output_state = Arc::new(BlockingOutputState::default());
-        let output: Arc<RwLock<Box<dyn TranslationAudioOutput>>> =
-            Arc::new(RwLock::new(Box::new(BlockingTranslationOutput {
-                state: output_state.clone(),
-            })));
-        let capture_stopped = Arc::new(AtomicBool::new(false));
-        let capture: Arc<RwLock<Box<dyn AudioCapture>>> =
-            Arc::new(RwLock::new(Box::new(SyntheticMicCapture {
-                chunks: Vec::new(),
-                config: AudioConfig::default(),
-                started: Arc::new(AtomicBool::new(true)),
-                stopped: capture_stopped.clone(),
-                callback: None,
-            })));
-        let realtime_state = Arc::new(SyntheticRealtimeState::default());
-        let client: Arc<Mutex<Box<dyn RealtimeTranslationSession>>> =
-            Arc::new(Mutex::new(Box::new(SyntheticRealtimeClient {
-                state: realtime_state.clone(),
-            })));
-
-        let (openai_tx, openai_rx) = mpsc::channel::<RealtimeTranslationEvent>(1);
-        let (forwarder_stop_tx, _forwarder_stop_rx) = mpsc::unbounded_channel::<RuntimeStop>();
-        let forwarder_task = tokio::spawn(run_event_forwarder(
-            openai_rx,
-            output.clone(),
-            Arc::new(|_| {}),
-            forwarder_stop_tx,
-        ));
-        openai_tx
-            .send(RealtimeTranslationEvent::TranslatedAudio {
-                pcm16: vec![1_000; 480],
-                sample_rate: 24_000,
-                channels: 1,
-            })
-            .await
-            .unwrap();
-
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !output_state.enqueue_entered.load(Ordering::SeqCst) {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("forwarder must enter blocking enqueue");
-
-        let audio_pump_task = tokio::spawn(async {});
-        let session = RunningSession {
-            capture,
-            output,
-            client,
-            forwarder_task,
-            audio_pump_task,
-            stop_requested: Arc::new(AtomicBool::new(false)),
-            session_id: 96,
-        };
-
-        tokio::time::timeout(
-            Duration::from_secs(4),
-            cleanup_session(session, CleanupMode::GracefulStop),
-        )
-        .await
-        .expect("graceful cleanup must not block on output write lock");
-
-        assert!(capture_stopped.load(Ordering::SeqCst));
-        assert!(output_state.closed.load(Ordering::SeqCst));
-        assert_eq!(realtime_state.close_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(realtime_state.abort_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
