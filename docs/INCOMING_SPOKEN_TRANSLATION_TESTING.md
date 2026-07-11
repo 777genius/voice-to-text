@@ -114,7 +114,8 @@ This test performs the paid chain:
 generated macOS speech
   -> ScreenCaptureKit 24 kHz mono capture
   -> OpenAI realtime translation
-  -> translated text callback + translated PCM collector
+  -> translated text callback + translated PCM tee
+  -> real system default playback + artifact collector
   -> graceful final tail and shutdown
 ```
 

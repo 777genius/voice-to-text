@@ -212,12 +212,15 @@ impl LocalPlaybackOutputFactory for PaidSpokenOutputFactory {
         assert_eq!(route, LocalPlaybackRoute::SystemDefault);
         Ok(Box::new(PaidSpokenOutput {
             state: self.state.clone(),
+            delegate: DefaultLocalPlaybackOutputFactory::new()
+                .create_local_playback_output(route)?,
         }))
     }
 }
 
 struct PaidSpokenOutput {
     state: Arc<PaidSpokenOutputState>,
+    delegate: Box<dyn TranslationAudioOutput>,
 }
 
 #[async_trait]
@@ -226,6 +229,7 @@ impl TranslationAudioOutput for PaidSpokenOutput {
         &mut self,
         config: TranslationAudioOutputConfig,
     ) -> TranslationAudioOutputResult<()> {
+        self.delegate.open(config).await?;
         self.state.opened.store(true, Ordering::SeqCst);
         *self.state.gain.lock().unwrap() = Some(config.gain);
         Ok(())
@@ -235,6 +239,7 @@ impl TranslationAudioOutput for PaidSpokenOutput {
         &self,
         samples: &[i16],
     ) -> TranslationAudioOutputResult<AudioEnqueueOutcome> {
+        let outcome = self.delegate.enqueue_pcm16(samples).await?;
         let mut first_audio_ms = self.state.first_audio_ms.lock().unwrap();
         if first_audio_ms.is_none() {
             *first_audio_ms = self
@@ -250,37 +255,39 @@ impl TranslationAudioOutput for PaidSpokenOutput {
             .lock()
             .unwrap()
             .extend_from_slice(samples);
-        Ok(AudioEnqueueOutcome::Queued {
-            pending: Duration::ZERO,
-        })
+        Ok(outcome)
     }
 
     async fn close(&mut self) -> TranslationAudioOutputResult<()> {
+        self.delegate.close().await?;
         self.state.closed.store(true, Ordering::SeqCst);
         Ok(())
     }
 
     fn set_gain(&mut self, gain: f32) -> TranslationAudioOutputResult<()> {
+        self.delegate.set_gain(gain)?;
         *self.state.gain.lock().unwrap() = Some(gain);
         Ok(())
     }
 
     fn is_open(&self) -> bool {
-        self.state.opened.load(Ordering::SeqCst) && !self.state.closed.load(Ordering::SeqCst)
+        self.delegate.is_open()
     }
 
     fn device_name(&self) -> Option<String> {
-        Some("paid-e2e-collector".into())
+        self.delegate.device_name()
     }
 
-    fn begin_drain_mode(&self) {}
+    fn begin_drain_mode(&self) {
+        self.delegate.begin_drain_mode();
+    }
 
     fn prepare_for_drain(&self) -> TranslationAudioOutputResult<Duration> {
-        Ok(Duration::ZERO)
+        self.delegate.prepare_for_drain()
     }
 
     fn pending_playback_duration(&self) -> Duration {
-        Duration::ZERO
+        self.delegate.pending_playback_duration()
     }
 }
 
