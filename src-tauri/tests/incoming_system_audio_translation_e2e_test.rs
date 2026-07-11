@@ -11,12 +11,12 @@ use app_lib::application::{
     IncomingTranslationCallbacks, IncomingTranslationConfig, IncomingTranslationFacade,
 };
 use app_lib::domain::{
-    AudioCaptureTarget, AudioChunk, AudioConfig, AudioEnqueueOutcome, ConnectionQualityCallback,
-    ErrorCallback, LocalPlaybackOutputFactory, LocalPlaybackRoute, RecordingStatus,
-    SpokenIncomingCapability, SpokenTranslationCapability, SttConfig, SttError, SttProvider,
-    SttProviderFactory, SttResult, SystemAudioCaptureFactory, SystemAudioCaptureRequest,
-    Transcription, TranscriptionCallback, TranslationAudioOutput, TranslationAudioOutputConfig,
-    TranslationAudioOutputResult,
+    AudioCapture, AudioCaptureErrorCallback, AudioCaptureTarget, AudioChunk, AudioChunkCallback,
+    AudioConfig, AudioEnqueueOutcome, ConnectionQualityCallback, ErrorCallback,
+    LocalPlaybackOutputFactory, LocalPlaybackRoute, RecordingStatus, SpokenIncomingCapability,
+    SpokenTranslationCapability, SttConfig, SttError, SttProvider, SttProviderFactory, SttResult,
+    SystemAudioCaptureFactory, SystemAudioCaptureRequest, Transcription, TranscriptionCallback,
+    TranslationAudioOutput, TranslationAudioOutputConfig, TranslationAudioOutputResult,
 };
 use app_lib::infrastructure::audio::{
     DefaultLocalPlaybackOutputFactory, DefaultPlatformAudioFactory,
@@ -289,6 +289,78 @@ struct PaidSpokenReadyCapability;
 impl SpokenTranslationCapability for PaidSpokenReadyCapability {
     fn check(&self, _target_language: &str) -> SpokenIncomingCapability {
         SpokenIncomingCapability::Ready
+    }
+}
+
+struct ObservedSystemAudioCaptureFactory {
+    inner: DefaultPlatformAudioFactory,
+    started_at: Instant,
+    first_input_ms: Arc<Mutex<Option<u128>>>,
+}
+
+impl SystemAudioCaptureFactory for ObservedSystemAudioCaptureFactory {
+    fn preflight_system_audio_capture(
+        &self,
+        request: SystemAudioCaptureRequest,
+    ) -> app_lib::domain::AudioResult<()> {
+        self.inner.preflight_system_audio_capture(request)
+    }
+
+    fn create_system_audio_capture(
+        &self,
+        request: SystemAudioCaptureRequest,
+    ) -> app_lib::domain::AudioResult<Box<dyn AudioCapture>> {
+        Ok(Box::new(ObservedSystemAudioCapture {
+            inner: self.inner.create_system_audio_capture(request)?,
+            started_at: self.started_at,
+            first_input_ms: self.first_input_ms.clone(),
+        }))
+    }
+}
+
+struct ObservedSystemAudioCapture {
+    inner: Box<dyn AudioCapture>,
+    started_at: Instant,
+    first_input_ms: Arc<Mutex<Option<u128>>>,
+}
+
+#[async_trait]
+impl AudioCapture for ObservedSystemAudioCapture {
+    async fn initialize(&mut self, config: AudioConfig) -> app_lib::domain::AudioResult<()> {
+        self.inner.initialize(config).await
+    }
+
+    async fn start_capture(
+        &mut self,
+        callback: AudioChunkCallback,
+    ) -> app_lib::domain::AudioResult<()> {
+        let started_at = self.started_at;
+        let first_input_ms = self.first_input_ms.clone();
+        self.inner
+            .start_capture(Arc::new(move |chunk| {
+                first_input_ms
+                    .lock()
+                    .unwrap()
+                    .get_or_insert_with(|| started_at.elapsed().as_millis());
+                callback(chunk);
+            }))
+            .await
+    }
+
+    async fn stop_capture(&mut self) -> app_lib::domain::AudioResult<()> {
+        self.inner.stop_capture().await
+    }
+
+    fn set_terminal_error_callback(&mut self, callback: Option<AudioCaptureErrorCallback>) {
+        self.inner.set_terminal_error_callback(callback);
+    }
+
+    fn is_capturing(&self) -> bool {
+        self.inner.is_capturing()
+    }
+
+    fn config(&self) -> AudioConfig {
+        self.inner.config()
     }
 }
 
@@ -581,21 +653,26 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
         }
 
         let output_state = Arc::new(PaidSpokenOutputState::default());
+        let source_text = Arc::new(Mutex::new(String::new()));
+        let translated_text = Arc::new(Mutex::new(String::new()));
+        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        let first_input_ms = Arc::new(Mutex::new(None::<u128>));
+        let first_source_text_ms = Arc::new(Mutex::new(None::<u128>));
+        let first_translated_text_ms = Arc::new(Mutex::new(None::<u128>));
+        let started_at = Instant::now();
+        *output_state.started_at.lock().unwrap() = Some(started_at);
         let service = IncomingTranslationFacade::new_spoken_with_factories(
-            Arc::new(DefaultPlatformAudioFactory::new()),
+            Arc::new(ObservedSystemAudioCaptureFactory {
+                inner: DefaultPlatformAudioFactory::new(),
+                started_at,
+                first_input_ms: first_input_ms.clone(),
+            }),
             Arc::new(PaidSpokenOutputFactory {
                 state: output_state.clone(),
             }),
             Arc::new(OpenAIRealtimeTranslationFactory),
             Arc::new(PaidSpokenReadyCapability),
         );
-        let source_text = Arc::new(Mutex::new(String::new()));
-        let translated_text = Arc::new(Mutex::new(String::new()));
-        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
-        let first_source_text_ms = Arc::new(Mutex::new(None::<u128>));
-        let first_translated_text_ms = Arc::new(Mutex::new(None::<u128>));
-        let started_at = Instant::now();
-        *output_state.started_at.lock().unwrap() = Some(started_at);
         let callbacks = IncomingTranslationCallbacks {
             on_source_final: {
                 let source_text = source_text.clone();
@@ -637,7 +714,7 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             .start(config, callbacks)
             .await
             .unwrap_or_else(|error| panic!("paid scenario {} must start: {error}", scenario.id));
-        let first_input_ms = started_at.elapsed().as_millis();
+        let source_playback_started_ms = started_at.elapsed().as_millis();
         play_paid_scenario(
             fixture.path(),
             secondary_fixture.as_ref().map(TempAudioFixture::path),
@@ -678,8 +755,11 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
         .expect("must write translated audio");
         let metrics = serde_json::json!({
             "scenario": scenario.id,
+            "expected_source": scenario.source,
+            "expected_secondary_source": scenario.secondary_source,
             "human_reference": scenario.human_reference,
-            "first_input_ms": first_input_ms,
+            "source_playback_started_ms": source_playback_started_ms,
+            "first_input_ms": *first_input_ms.lock().unwrap(),
             "first_source_text_ms": *first_source_text_ms.lock().unwrap(),
             "first_translated_text_ms": *first_translated_text_ms.lock().unwrap(),
             "first_translated_audio_ms": *output_state.first_audio_ms.lock().unwrap(),
