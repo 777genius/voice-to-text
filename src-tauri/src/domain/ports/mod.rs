@@ -1,4 +1,5 @@
 mod audio_capture;
+mod local_playback_output_factory;
 mod realtime_translation;
 /// Domain ports - interfaces (traits) that define contracts for external dependencies
 /// These abstractions allow the domain layer to remain independent of infrastructure
@@ -7,6 +8,7 @@ mod system_audio_capture_factory;
 mod translation_audio_output;
 
 pub use audio_capture::*;
+pub use local_playback_output_factory::*;
 pub use realtime_translation::*;
 pub use stt_provider::*;
 pub use system_audio_capture_factory::*;

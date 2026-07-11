@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::domain::TranslationAudioOutput;
+use crate::domain::{AudioDeviceId, AudioEnqueueOutcome, TranslationAudioOutput};
 
 pub use crate::domain::{
     TranslationAudioOutput as AudioOutput, TranslationAudioOutputConfig as AudioOutputConfig,
@@ -30,16 +30,20 @@ pub const MACOS_BLACKHOLE_DEVICE_NAMES: &[&str] = &["BlackHole 2ch", "BlackHole"
 pub const WINDOWS_VB_CABLE_OUTPUT_DEVICE_NAMES: &[&str] =
     &["CABLE Input", "VB-Audio Virtual Cable", "VB-CABLE"];
 
-#[derive(Debug, Clone, Copy)]
-pub struct CpalOutputDeviceSelector {
-    pub env_var: &'static str,
-    pub candidates: &'static [&'static str],
-    pub not_found_message: &'static str,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutputDeviceSelector {
+    SystemDefault,
+    Explicit(AudioDeviceId),
+    CandidateNames {
+        env_var: &'static str,
+        candidates: &'static [&'static str],
+        not_found_message: &'static str,
+    },
 }
 
-impl CpalOutputDeviceSelector {
+impl OutputDeviceSelector {
     pub fn macos_blackhole() -> Self {
-        Self {
+        Self::CandidateNames {
             env_var: ENV_TRANSLATION_OUTPUT_DEVICE,
             candidates: MACOS_BLACKHOLE_DEVICE_NAMES,
             not_found_message:
@@ -50,7 +54,7 @@ impl CpalOutputDeviceSelector {
     }
 
     pub fn windows_vb_cable() -> Self {
-        Self {
+        Self::CandidateNames {
             env_var: ENV_TRANSLATION_OUTPUT_DEVICE,
             candidates: WINDOWS_VB_CABLE_OUTPUT_DEVICE_NAMES,
             not_found_message:
@@ -80,7 +84,7 @@ impl Default for OutputPlaybackState {
 /// (BlackHole/VB-CABLE или иное устройство из env override).
 /// Не использует async внутри audio callback — только sync Mutex с короткими lock-окнами.
 pub struct CpalAudioOutput {
-    selector: CpalOutputDeviceSelector,
+    selector: OutputDeviceSelector,
     device: Option<Device>,
     device_name: Option<String>,
     stream: Option<Stream>,
@@ -118,7 +122,7 @@ impl CpalAudioOutput {
 
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
-            Self::with_selector(CpalOutputDeviceSelector {
+            Self::with_selector(OutputDeviceSelector::CandidateNames {
                 env_var: ENV_TRANSLATION_OUTPUT_DEVICE,
                 candidates: &[],
                 not_found_message:
@@ -128,14 +132,22 @@ impl CpalAudioOutput {
     }
 
     pub fn macos_blackhole() -> Self {
-        Self::with_selector(CpalOutputDeviceSelector::macos_blackhole())
+        Self::with_selector(OutputDeviceSelector::macos_blackhole())
     }
 
     pub fn windows_vb_cable() -> Self {
-        Self::with_selector(CpalOutputDeviceSelector::windows_vb_cable())
+        Self::with_selector(OutputDeviceSelector::windows_vb_cable())
     }
 
-    pub fn with_selector(selector: CpalOutputDeviceSelector) -> Self {
+    pub fn system_default() -> Self {
+        Self::with_selector(OutputDeviceSelector::SystemDefault)
+    }
+
+    pub fn explicit_device(device_id: AudioDeviceId) -> Self {
+        Self::with_selector(OutputDeviceSelector::Explicit(device_id))
+    }
+
+    pub fn with_selector(selector: OutputDeviceSelector) -> Self {
         Self {
             selector,
             device: None,
@@ -154,9 +166,50 @@ impl CpalAudioOutput {
 
     fn select_output_device(
         host: &Host,
-        selector: CpalOutputDeviceSelector,
+        selector: &OutputDeviceSelector,
     ) -> AudioOutputResult<(Device, String)> {
-        if let Ok(override_name) = std::env::var(selector.env_var) {
+        if matches!(selector, OutputDeviceSelector::SystemDefault) {
+            let device = host.default_output_device().ok_or_else(|| {
+                AudioOutputError::Device("No system default output device is available".into())
+            })?;
+            let name = device
+                .name()
+                .map_err(|error| AudioOutputError::Device(error.to_string()))?;
+            return Ok((device, name));
+        }
+
+        if let OutputDeviceSelector::Explicit(device_id) = selector {
+            let device = host
+                .output_devices()
+                .map_err(|error| AudioOutputError::Device(error.to_string()))?
+                .find(|device| {
+                    device
+                        .name()
+                        .map(|name| name == device_id.as_str())
+                        .unwrap_or(false)
+                })
+                .ok_or_else(|| {
+                    AudioOutputError::Device(format!(
+                        "Requested output device '{}' is unavailable",
+                        device_id.as_str()
+                    ))
+                })?;
+            let name = device
+                .name()
+                .unwrap_or_else(|_| device_id.as_str().to_string());
+            return Ok((device, name));
+        }
+
+        let OutputDeviceSelector::CandidateNames {
+            env_var,
+            candidates,
+            not_found_message,
+        } = selector
+        else {
+            unreachable!("all output selectors handled")
+        };
+
+        if let Ok(override_name) = std::env::var(env_var) {
             let trimmed = override_name.trim();
             if !trimmed.is_empty() {
                 let device = host
@@ -170,12 +223,12 @@ impl CpalAudioOutput {
                 return match device {
                     Some(d) => {
                         let name = d.name().unwrap_or_else(|_| trimmed.to_string());
-                        log::info!("Output device picked via {}: {}", selector.env_var, name);
+                        log::info!("Output device picked via {}: {}", env_var, name);
                         Ok((d, name))
                     }
                     None => Err(AudioOutputError::Configuration(format!(
                         "Output устройство '{}' (из {}) не найдено в системе.",
-                        trimmed, selector.env_var
+                        trimmed, env_var
                     ))),
                 };
             }
@@ -186,7 +239,7 @@ impl CpalAudioOutput {
             .map_err(|e| AudioOutputError::Device(e.to_string()))?
             .collect();
 
-        for candidate in selector.candidates {
+        for candidate in *candidates {
             for dev in &outputs {
                 if let Ok(name) = dev.name() {
                     if output_device_name_matches(&name, candidate) {
@@ -198,7 +251,7 @@ impl CpalAudioOutput {
         }
 
         Err(AudioOutputError::Configuration(
-            selector.not_found_message.to_string(),
+            not_found_message.to_string(),
         ))
     }
 
@@ -224,6 +277,24 @@ impl CpalAudioOutput {
         .map_err(|e| AudioOutputError::Resample(e.to_string()))
     }
 
+    fn enqueue_bounded_source_samples(
+        queue: &Arc<Mutex<VecDeque<i16>>>,
+        samples: &[i16],
+        max_source_samples: usize,
+    ) -> AudioOutputResult<usize> {
+        let max_source_samples = max_source_samples.max(RESAMPLER_CHUNK_SIZE);
+        let mut queue = queue
+            .lock()
+            .map_err(|_| AudioOutputError::Stream("source_queue poisoned".into()))?;
+        let total = queue.len().saturating_add(samples.len());
+        let dropped = total.saturating_sub(max_source_samples);
+        let drop_from_queue = dropped.min(queue.len());
+        queue.drain(..drop_from_queue);
+        let drop_from_input = dropped.saturating_sub(drop_from_queue).min(samples.len());
+        queue.extend(samples[drop_from_input..].iter().copied());
+        Ok(dropped)
+    }
+
     /// Берёт source_queue, прогоняет через resampler фиксированными чанками и
     /// раскладывает mono-результат на native_ch (дублируем каждый сэмпл).
     fn drain_source_and_push(
@@ -232,8 +303,9 @@ impl CpalAudioOutput {
         resampler: &Option<Arc<Mutex<SincFixedIn<f32>>>>,
         native_channels: usize,
         max_buffered_frames: usize,
+        gain: f32,
         flush_partial: bool,
-    ) -> AudioOutputResult<()> {
+    ) -> AudioOutputResult<usize> {
         // Берём всё что есть, но обрабатываем фиксированными чанками RESAMPLER_CHUNK_SIZE.
         let mut local_chunks: Vec<Vec<i16>> = Vec::new();
         {
@@ -255,12 +327,15 @@ impl CpalAudioOutput {
         }
 
         if local_chunks.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
 
         let mut expanded_samples = Vec::new();
         for chunk in local_chunks {
-            let mono_f32: Vec<f32> = chunk.iter().map(|&s| s as f32 / 32_768.0).collect();
+            let mono_f32: Vec<f32> = chunk
+                .iter()
+                .map(|&sample| ((sample as f32 / 32_768.0) * gain).clamp(-1.0, 1.0))
+                .collect();
             let native_mono: Vec<f32> = if let Some(rs) = resampler {
                 let mut r = rs
                     .lock()
@@ -282,7 +357,7 @@ impl CpalAudioOutput {
         }
 
         if expanded_samples.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
 
         let mut out = output_ready
@@ -292,19 +367,19 @@ impl CpalAudioOutput {
 
         // Bounded queue: если выросло выше потолка (frames * channels) — дропаем старые сэмплы.
         let cap_samples = max_buffered_frames.saturating_mul(native_channels.max(1));
-        if out.len() > cap_samples {
-            let drop = out.len() - cap_samples;
-            for _ in 0..drop {
+        let dropped_samples = out.len().saturating_sub(cap_samples);
+        if dropped_samples > 0 {
+            for _ in 0..dropped_samples {
                 out.pop_front();
             }
             log::warn!(
                 "CpalAudioOutput overflow: dropped {} samples (queue cap {} frames * {} ch)",
-                drop,
+                dropped_samples,
                 max_buffered_frames,
                 native_channels
             );
         }
-        Ok(())
+        Ok(dropped_samples / native_channels.max(1))
     }
 
     fn build_stream(
@@ -402,6 +477,7 @@ impl CpalAudioOutput {
             &self.resampler,
             native.channels() as usize,
             cfg.drain_max_buffered_frames,
+            cfg.gain,
             true,
         )?;
 
@@ -421,11 +497,38 @@ impl CpalAudioOutput {
             .map_err(|_| AudioOutputError::Stream("stream_error state poisoned".into()))?;
         match stored_error.as_ref() {
             Some(message) => Err(AudioOutputError::Stream(format!(
-                "virtual microphone output stream failed: {}",
+                "audio output stream failed: {}",
                 message
             ))),
-            None => Ok(()),
+            None => self.ensure_default_route_unchanged(),
         }
+    }
+
+    fn ensure_default_route_unchanged(&self) -> AudioOutputResult<()> {
+        if !self.is_open || !matches!(self.selector, OutputDeviceSelector::SystemDefault) {
+            return Ok(());
+        }
+        let opened_name = self
+            .device_name
+            .as_deref()
+            .ok_or(AudioOutputError::Closed)?;
+        let current_device = cpal::default_host()
+            .default_output_device()
+            .ok_or_else(|| {
+                AudioOutputError::Device(
+                    "System default output device is no longer available".into(),
+                )
+            })?;
+        let current_name = current_device
+            .name()
+            .map_err(|error| AudioOutputError::Device(error.to_string()))?;
+        if current_name != opened_name {
+            return Err(AudioOutputError::Device(format!(
+                "System default output changed from '{}' to '{}'; restart translated playback",
+                opened_name, current_name
+            )));
+        }
+        Ok(())
     }
 
     /// Estimated amount of audio still queued for playback.
@@ -472,8 +575,22 @@ impl TranslationAudioOutput for CpalAudioOutput {
                 "CpalAudioOutput уже открыт".to_string(),
             ));
         }
+        let config = config.normalized();
+        if config.source_sample_rate == 0
+            || config.source_channels != 1
+            || config.max_buffered_frames == 0
+            || config.drain_max_buffered_frames < config.max_buffered_frames
+        {
+            return Err(AudioOutputError::Configuration(format!(
+                "Invalid translation output config: {} Hz {} ch, buffer={} drain_buffer={}",
+                config.source_sample_rate,
+                config.source_channels,
+                config.max_buffered_frames,
+                config.drain_max_buffered_frames
+            )));
+        }
         let host = cpal::default_host();
-        let (device, name) = Self::select_output_device(&host, self.selector)?;
+        let (device, name) = Self::select_output_device(&host, &self.selector)?;
         let native = device
             .default_output_config()
             .map_err(|e| AudioOutputError::Configuration(e.to_string()))?;
@@ -548,13 +665,15 @@ impl TranslationAudioOutput for CpalAudioOutput {
         Ok(())
     }
 
-    async fn enqueue_pcm16(&self, samples: &[i16]) -> AudioOutputResult<()> {
+    async fn enqueue_pcm16(&self, samples: &[i16]) -> AudioOutputResult<AudioEnqueueOutcome> {
         if !self.is_open {
             return Err(AudioOutputError::Closed);
         }
         self.ensure_stream_healthy()?;
         if samples.is_empty() {
-            return Ok(());
+            return Ok(AudioEnqueueOutcome::Queued {
+                pending: self.pending_playback_duration(),
+            });
         }
         let Some(native) = self.native_config.as_ref() else {
             return Err(AudioOutputError::Closed);
@@ -574,24 +693,38 @@ impl TranslationAudioOutput for CpalAudioOutput {
             cfg.max_buffered_frames
         };
 
-        {
-            let mut q = self
-                .source_queue
-                .lock()
-                .map_err(|_| AudioOutputError::Stream("source_queue poisoned".into()))?;
-            q.extend(samples.iter().copied());
-        }
+        let max_source_samples = ((max_buffered_frames as u128)
+            .saturating_mul(cfg.source_sample_rate as u128)
+            / native.sample_rate().0.max(1) as u128)
+            .max(RESAMPLER_CHUNK_SIZE as u128)
+            .min(usize::MAX as u128) as usize;
+        let dropped_source_samples =
+            Self::enqueue_bounded_source_samples(&self.source_queue, samples, max_source_samples)?;
 
-        Self::drain_source_and_push(
+        let dropped_frames = Self::drain_source_and_push(
             &self.source_queue,
             &self.output_ready,
             &self.resampler,
             native_channels,
             max_buffered_frames,
+            cfg.gain,
             false,
         )?;
-
-        Ok(())
+        let pending = self.pending_playback_duration();
+        if dropped_frames == 0 && dropped_source_samples == 0 {
+            Ok(AudioEnqueueOutcome::Queued { pending })
+        } else {
+            let native_sample_rate = native.sample_rate().0.max(1) as u64;
+            let dropped_source_duration = Duration::from_secs_f64(
+                dropped_source_samples as f64 / cfg.source_sample_rate.max(1) as f64,
+            );
+            let dropped_output_duration =
+                Duration::from_secs_f64(dropped_frames as f64 / native_sample_rate as f64);
+            Ok(AudioEnqueueOutcome::DroppedOldest {
+                duration: dropped_source_duration.saturating_add(dropped_output_duration),
+                pending,
+            })
+        }
     }
 
     async fn close(&mut self) -> AudioOutputResult<()> {
@@ -730,6 +863,7 @@ mod tests {
         assert_eq!(cfg.prebuffer_ms, 200);
         assert!(cfg.max_buffered_frames >= 288_000); // headroom хотя бы 6 сек на 48 kHz
         assert!(cfg.drain_max_buffered_frames > cfg.max_buffered_frames);
+        assert_eq!(cfg.gain, 1.0);
     }
 
     #[test]
@@ -737,6 +871,23 @@ mod tests {
         let out = CpalAudioOutput::new();
         assert!(!out.is_open());
         assert!(out.device_name().is_none());
+    }
+
+    #[test]
+    fn local_and_virtual_routes_share_one_output_implementation() {
+        assert_eq!(
+            CpalAudioOutput::system_default().selector,
+            OutputDeviceSelector::SystemDefault
+        );
+        assert!(matches!(
+            CpalAudioOutput::macos_blackhole().selector,
+            OutputDeviceSelector::CandidateNames { .. }
+        ));
+        let id = AudioDeviceId::new("Named Output");
+        assert_eq!(
+            CpalAudioOutput::explicit_device(id.clone()).selector,
+            OutputDeviceSelector::Explicit(id)
+        );
     }
 
     #[test]
@@ -757,6 +908,51 @@ mod tests {
         let out = CpalAudioOutput::new();
         let err = out.enqueue_pcm16(&[1, 2, 3]).await;
         assert!(matches!(err, Err(AudioOutputError::Closed)));
+    }
+
+    #[tokio::test]
+    async fn invalid_source_format_fails_before_opening_a_device() {
+        let mut out = CpalAudioOutput::system_default();
+        let invalid = AudioOutputConfig {
+            source_channels: 2,
+            ..AudioOutputConfig::openai_translation()
+        };
+
+        let error = out.open(invalid).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            AudioOutputError::Configuration(message) if message.contains("2 ch")
+        ));
+        assert!(!out.is_open());
+    }
+
+    #[test]
+    fn source_queue_discards_oldest_audio_without_exceeding_bound() {
+        let queue = Arc::new(Mutex::new(VecDeque::from_iter(0i16..200)));
+        let samples: Vec<i16> = (200..300).collect();
+
+        let dropped =
+            CpalAudioOutput::enqueue_bounded_source_samples(&queue, &samples, 256).unwrap();
+
+        assert_eq!(dropped, 44);
+        assert_eq!(queue.lock().unwrap().len(), 256);
+        assert_eq!(queue.lock().unwrap().front().copied(), Some(44));
+        assert_eq!(queue.lock().unwrap().back().copied(), Some(299));
+    }
+
+    #[test]
+    fn oversized_single_delta_keeps_only_bounded_newest_audio() {
+        let queue = Arc::new(Mutex::new(VecDeque::new()));
+        let samples: Vec<i16> = (0..600).map(|sample| sample as i16).collect();
+
+        let dropped =
+            CpalAudioOutput::enqueue_bounded_source_samples(&queue, &samples, 256).unwrap();
+
+        assert_eq!(dropped, 344);
+        assert_eq!(queue.lock().unwrap().len(), 256);
+        assert_eq!(queue.lock().unwrap().front().copied(), Some(344));
+        assert_eq!(queue.lock().unwrap().back().copied(), Some(599));
     }
 
     #[test]
@@ -849,15 +1045,45 @@ mod tests {
         ])));
         let ready = Arc::new(Mutex::new(VecDeque::new()));
 
-        CpalAudioOutput::drain_source_and_push(&source, &ready, &None, 2, 3, true).unwrap();
+        let dropped_frames =
+            CpalAudioOutput::drain_source_and_push(&source, &ready, &None, 2, 3, 1.0, true)
+                .unwrap();
 
         assert!(source.lock().unwrap().is_empty());
+        assert_eq!(dropped_frames, 2);
         let ready: Vec<f32> = ready.lock().unwrap().iter().copied().collect();
         assert_eq!(ready.len(), 6);
         assert_eq!(ready[0], 3000.0 / 32_768.0);
         assert_eq!(ready[1], 3000.0 / 32_768.0);
         assert_eq!(ready[4], 5000.0 / 32_768.0);
         assert_eq!(ready[5], 5000.0 / 32_768.0);
+    }
+
+    #[test]
+    fn output_gain_scales_and_clamps_pcm_without_clipping() {
+        let source = Arc::new(Mutex::new(VecDeque::from(vec![i16::MAX, i16::MIN])));
+        let ready = Arc::new(Mutex::new(VecDeque::new()));
+
+        CpalAudioOutput::drain_source_and_push(&source, &ready, &None, 1, 4, 0.5, true).unwrap();
+
+        let ready: Vec<f32> = ready.lock().unwrap().iter().copied().collect();
+        assert_eq!(ready.len(), 2);
+        assert!((ready[0] - 0.5).abs() < 0.001);
+        assert!((ready[1] + 0.5).abs() < 0.001);
+        assert!(ready.iter().all(|sample| (-1.0..=1.0).contains(sample)));
+    }
+
+    #[test]
+    fn zero_gain_queues_silence_without_closing_pipeline() {
+        let source = Arc::new(Mutex::new(VecDeque::from(vec![12_000, -12_000])));
+        let ready = Arc::new(Mutex::new(VecDeque::new()));
+
+        CpalAudioOutput::drain_source_and_push(&source, &ready, &None, 1, 4, 0.0, true).unwrap();
+
+        assert_eq!(
+            ready.lock().unwrap().iter().copied().collect::<Vec<_>>(),
+            vec![0.0, 0.0]
+        );
     }
 
     #[test]
@@ -880,6 +1106,7 @@ mod tests {
             &Some(resampler),
             2,
             48_000,
+            1.0,
             false,
         )
         .unwrap_err();

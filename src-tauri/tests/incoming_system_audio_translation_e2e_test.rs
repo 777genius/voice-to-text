@@ -11,11 +11,14 @@ use app_lib::application::{
     IncomingTranslationCallbacks, IncomingTranslationConfig, IncomingTranslationFacade,
 };
 use app_lib::domain::{
-    AudioCaptureTarget, AudioChunk, AudioConfig, ConnectionQualityCallback, ErrorCallback,
-    RecordingStatus, SttConfig, SttError, SttProvider, SttProviderFactory, SttResult,
-    SystemAudioCaptureFactory, SystemAudioCaptureRequest, Transcription, TranscriptionCallback,
+    AudioCaptureTarget, AudioChunk, AudioConfig, AudioEnqueueOutcome, ConnectionQualityCallback,
+    ErrorCallback, LocalPlaybackOutputFactory, LocalPlaybackRoute, RecordingStatus, SttConfig,
+    SttError, SttProvider, SttProviderFactory, SttResult, SystemAudioCaptureFactory,
+    SystemAudioCaptureRequest, Transcription, TranscriptionCallback, TranslationAudioOutputConfig,
 };
-use app_lib::infrastructure::audio::DefaultPlatformAudioFactory;
+use app_lib::infrastructure::audio::{
+    DefaultLocalPlaybackOutputFactory, DefaultPlatformAudioFactory,
+};
 use async_trait::async_trait;
 use reqwest::header::CONTENT_TYPE;
 
@@ -119,6 +122,40 @@ fn play_system_audio(path: &Path) {
     wait_for_child_with_timeout(child, Duration::from_secs(15), "afplay");
 }
 
+fn generate_tone(sample_rate: u32, frequency_hz: f64, duration: Duration) -> Vec<i16> {
+    let sample_count = (sample_rate as f64 * duration.as_secs_f64()).round() as usize;
+    (0..sample_count)
+        .map(|index| {
+            let phase = std::f64::consts::TAU * frequency_hz * index as f64 / sample_rate as f64;
+            (phase.sin() * i16::MAX as f64 * 0.35) as i16
+        })
+        .collect()
+}
+
+fn generate_tone_fixture(frequency_hz: f64, duration: Duration) -> TempAudioFixture {
+    let sample_rate = 24_000;
+    let samples = generate_tone(sample_rate, frequency_hz, duration);
+    let path = unique_temp_audio_path("voicetext_system_audio_tone", "wav");
+    fs::write(&path, wav_pcm16(sample_rate, 1, &samples)).expect("must write tone fixture");
+    TempAudioFixture { path }
+}
+
+fn goertzel_power(samples: &[i16], sample_rate: u32, frequency_hz: f64) -> f64 {
+    if samples.is_empty() || sample_rate == 0 {
+        return 0.0;
+    }
+    let omega = std::f64::consts::TAU * frequency_hz / sample_rate as f64;
+    let coefficient = 2.0 * omega.cos();
+    let mut previous = 0.0f64;
+    let mut previous_two = 0.0f64;
+    for sample in samples {
+        let current = *sample as f64 + coefficient * previous - previous_two;
+        previous_two = previous;
+        previous = current;
+    }
+    previous_two * previous_two + previous * previous - coefficient * previous * previous_two
+}
+
 fn join_named_thread(handle: std::thread::JoinHandle<()>, name: &str) -> Result<(), String> {
     handle.join().map_err(|panic_payload| {
         let reason = panic_payload
@@ -195,6 +232,96 @@ async fn isolated_realtime_capture_emits_24khz_mono_and_stops_callbacks() {
         "capture emitted a callback after stop"
     );
     assert!(!capture.is_capturing());
+}
+
+#[tokio::test]
+#[ignore = "requires macOS Screen & System Audio permission and audible system output"]
+async fn system_default_playback_is_drained_and_excluded_from_system_capture() {
+    const EXTERNAL_TONE_HZ: f64 = 440.0;
+    const SAME_PROCESS_TONE_HZ: f64 = 880.0;
+    let tone_duration = Duration::from_secs(4);
+    let external_fixture = generate_tone_fixture(EXTERNAL_TONE_HZ, tone_duration);
+    let target = AudioCaptureTarget::incoming_realtime_translation();
+
+    let capture_factory = DefaultPlatformAudioFactory::new();
+    let request = SystemAudioCaptureRequest::isolated(target);
+    capture_factory
+        .preflight_system_audio_capture(request)
+        .expect("isolated capture preflight must pass");
+    let mut capture = capture_factory
+        .create_system_audio_capture(request)
+        .expect("isolated capture must be created");
+    capture
+        .initialize(AudioConfig {
+            sample_rate: target.sample_rate,
+            channels: target.channels,
+            buffer_size: 720,
+        })
+        .await
+        .expect("isolated capture must initialize");
+    let captured = Arc::new(Mutex::new(Vec::<i16>::new()));
+    capture
+        .start_capture({
+            let captured = captured.clone();
+            Arc::new(move |chunk| {
+                captured.lock().unwrap().extend_from_slice(&chunk.data);
+            })
+        })
+        .await
+        .expect("isolated capture must start");
+
+    let playback_factory = DefaultLocalPlaybackOutputFactory::new();
+    let mut output = playback_factory
+        .create_local_playback_output(LocalPlaybackRoute::SystemDefault)
+        .expect("system default local playback must be available on macOS");
+    output
+        .open(TranslationAudioOutputConfig::openai_translation().with_gain(1.0))
+        .await
+        .expect("system default local playback must open");
+    let same_process_tone = generate_tone(target.sample_rate, SAME_PROCESS_TONE_HZ, tone_duration);
+    let outcome = output
+        .enqueue_pcm16(&same_process_tone)
+        .await
+        .expect("same-process tone must enqueue");
+    assert!(matches!(outcome, AudioEnqueueOutcome::Queued { .. }));
+    let mut external_player = Command::new("afplay")
+        .arg(external_fixture.path())
+        .spawn()
+        .expect("must run external afplay tone");
+    let status = external_player.wait().expect("must wait for afplay tone");
+    assert!(status.success(), "external afplay tone failed");
+
+    output.begin_drain_mode();
+    output
+        .prepare_for_drain()
+        .expect("local playback must prepare for drain");
+    let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    while output.pending_playback_duration() > Duration::from_millis(30)
+        && tokio::time::Instant::now() < drain_deadline
+    {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        output.pending_playback_duration() <= Duration::from_millis(30),
+        "system default playback did not drain"
+    );
+    assert!(output.is_open(), "local playback stream failed during tone");
+    output.close().await.expect("local playback must close");
+    capture.stop_capture().await.expect("capture must stop");
+
+    let captured = captured.lock().unwrap().clone();
+    let skip = (target.sample_rate / 4) as usize;
+    let analyzed = captured.get(skip..).unwrap_or(&captured);
+    let external_power = goertzel_power(analyzed, target.sample_rate, EXTERNAL_TONE_HZ);
+    let same_process_power = goertzel_power(analyzed, target.sample_rate, SAME_PROCESS_TONE_HZ);
+    assert!(
+        external_power > 1.0e12,
+        "external 440 Hz tone was not captured"
+    );
+    assert!(
+        same_process_power < external_power * 0.05,
+        "same-process 880 Hz leaked into capture: external={external_power:e}, self={same_process_power:e}"
+    );
 }
 
 fn wav_pcm16(sample_rate: u32, channels: u16, samples: &[i16]) -> Vec<u8> {

@@ -3,6 +3,7 @@ mod cpal_output;
 #[cfg_attr(all(test, not(target_os = "linux")), allow(dead_code))]
 #[cfg(any(target_os = "linux", test))]
 mod linux_pulse;
+mod local_playback_factory;
 #[cfg(target_os = "macos")]
 mod macos_system_audio_capture;
 mod mock_capture;
@@ -18,6 +19,7 @@ pub use cpal_output::{
     ENV_TRANSLATION_OUTPUT_DEVICE, MACOS_BLACKHOLE_DEVICE_NAMES,
     WINDOWS_VB_CABLE_OUTPUT_DEVICE_NAMES,
 };
+pub use local_playback_factory::DefaultLocalPlaybackOutputFactory;
 #[cfg(target_os = "macos")]
 pub use macos_system_audio_capture::MacosSystemAudioCapture;
 pub use mock_capture::MockAudioCapture;

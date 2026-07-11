@@ -9,8 +9,8 @@ use tokio::task::JoinHandle;
 
 use crate::domain::{
     amplify_i16_samples, AudioCapture, AudioCaptureErrorCallback, AudioChunk, AudioChunkCallback,
-    RealtimeTranslationError, RealtimeTranslationErrorKind, RealtimeTranslationEvent,
-    RealtimeTranslationSession, TranslationAudioOutput,
+    AudioEnqueueOutcome, RealtimeTranslationError, RealtimeTranslationErrorKind,
+    RealtimeTranslationEvent, RealtimeTranslationSession, TranslationAudioOutput,
 };
 
 use super::frame_assembler::Pcm16FrameAssembler;
@@ -89,6 +89,7 @@ pub struct RealtimeInterpretationPolicy {
     input_queue_capacity_chunks: usize,
     input_overload_drop_threshold: u64,
     output_queue_capacity_chunks: usize,
+    output_overload_drop_threshold: u64,
     input_drain_timeout: Duration,
     event_drain_timeout: Duration,
     translation_finish_timeout: Duration,
@@ -109,6 +110,7 @@ impl RealtimeInterpretationPolicy {
             input_queue_capacity_chunks: 160,
             input_overload_drop_threshold: 32,
             output_queue_capacity_chunks: 32,
+            output_overload_drop_threshold: 32,
             input_drain_timeout: Duration::from_millis(1_500),
             event_drain_timeout: Duration::from_millis(1_500),
             translation_finish_timeout: Duration::from_millis(8_000),
@@ -758,6 +760,7 @@ async fn run_output_worker(
     policy: RealtimeInterpretationPolicy,
 ) -> Box<dyn TranslationAudioOutput> {
     let mut health_poll = tokio::time::interval(policy.output_health_poll_interval);
+    let mut consecutive_output_drops = 0u64;
     health_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     health_poll.tick().await;
 
@@ -769,9 +772,31 @@ async fn run_output_worker(
                 };
                 match command {
                     OutputCommand::Audio(samples) => {
-                        if let Err(error) = output.enqueue_pcm16(&samples).await {
-                            reporter.error(RealtimeInterpretationError::Processing(error.to_string()));
-                            return output;
+                        match output.enqueue_pcm16(&samples).await {
+                            Ok(AudioEnqueueOutcome::Queued { .. }) => {
+                                consecutive_output_drops = 0;
+                            }
+                            Ok(AudioEnqueueOutcome::DroppedOldest { duration, pending }) => {
+                                consecutive_output_drops = consecutive_output_drops.saturating_add(1);
+                                log::warn!(
+                                    "RealtimeInterpretationSession: {} output dropped {} ms (pending={} ms, consecutive={})",
+                                    policy.output_route_name,
+                                    duration.as_millis(),
+                                    pending.as_millis(),
+                                    consecutive_output_drops
+                                );
+                                if consecutive_output_drops >= policy.output_overload_drop_threshold {
+                                    reporter.error(RealtimeInterpretationError::Processing(format!(
+                                        "{} output repeatedly overflowed; translation was stopped to avoid incomplete delayed speech",
+                                        policy.output_route_name
+                                    )));
+                                    return output;
+                                }
+                            }
+                            Err(error) => {
+                                reporter.error(RealtimeInterpretationError::Processing(error.to_string()));
+                                return output;
+                            }
                         }
                     }
                     OutputCommand::BeginDrain => output.begin_drain_mode(),
@@ -1001,6 +1026,7 @@ mod tests {
         output_closed: AtomicBool,
         output_enqueue_entered: AtomicBool,
         output_dropped: AtomicBool,
+        output_should_drop_oldest: AtomicBool,
         capture_error_callback: StdMutex<Option<AudioCaptureErrorCallback>>,
         input_samples: StdMutex<Vec<i16>>,
         output_samples: StdMutex<Vec<i16>>,
@@ -1132,12 +1158,17 @@ mod tests {
             Ok(())
         }
 
-        async fn enqueue_pcm16(&self, _samples: &[i16]) -> TranslationAudioOutputResult<()> {
+        async fn enqueue_pcm16(
+            &self,
+            _samples: &[i16],
+        ) -> TranslationAudioOutputResult<AudioEnqueueOutcome> {
             self.state
                 .output_enqueue_entered
                 .store(true, Ordering::SeqCst);
             std::future::pending::<()>().await;
-            Ok(())
+            Ok(AudioEnqueueOutcome::Queued {
+                pending: Duration::ZERO,
+            })
         }
 
         async fn close(&mut self) -> TranslationAudioOutputResult<()> {
@@ -1173,13 +1204,25 @@ mod tests {
             Ok(())
         }
 
-        async fn enqueue_pcm16(&self, samples: &[i16]) -> TranslationAudioOutputResult<()> {
+        async fn enqueue_pcm16(
+            &self,
+            samples: &[i16],
+        ) -> TranslationAudioOutputResult<AudioEnqueueOutcome> {
             self.state
                 .output_samples
                 .lock()
                 .unwrap()
                 .extend_from_slice(samples);
-            Ok(())
+            if self.state.output_should_drop_oldest.load(Ordering::SeqCst) {
+                Ok(AudioEnqueueOutcome::DroppedOldest {
+                    duration: Duration::from_millis(100),
+                    pending: Duration::from_secs(6),
+                })
+            } else {
+                Ok(AudioEnqueueOutcome::Queued {
+                    pending: Duration::ZERO,
+                })
+            }
         }
 
         async fn close(&mut self) -> TranslationAudioOutputResult<()> {
@@ -1230,6 +1273,44 @@ mod tests {
             stop,
             RealtimeInterpretationStop::Error(RealtimeInterpretationError::Processing(message))
                 if message.contains("virtual microphone output stream stopped unexpectedly")
+        ));
+        output_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn repeated_output_drops_are_a_terminal_processing_error() {
+        let state = Arc::new(ContractState::default());
+        state
+            .output_should_drop_oldest
+            .store(true, Ordering::SeqCst);
+        let (command_tx, command_rx) = mpsc::channel(2);
+        let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
+        let mut policy = RealtimeInterpretationPolicy::outgoing();
+        policy.output_overload_drop_threshold = 2;
+
+        let output_task = tokio::spawn(run_output_worker(
+            Box::new(ContractOutput { state }),
+            command_rx,
+            RuntimeStopReporter::new(stop_tx),
+            policy,
+        ));
+        command_tx
+            .send(OutputCommand::Audio(vec![1]))
+            .await
+            .unwrap();
+        command_tx
+            .send(OutputCommand::Audio(vec![2]))
+            .await
+            .unwrap();
+
+        let stop = tokio::time::timeout(Duration::from_secs(1), stop_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            stop,
+            RealtimeInterpretationStop::Error(RealtimeInterpretationError::Processing(message))
+                if message.contains("repeatedly overflowed")
         ));
         output_task.await.unwrap();
     }

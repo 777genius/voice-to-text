@@ -10,9 +10,10 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::domain::{
-    AudioCapture, AudioCaptureTarget, AudioChunk, AudioChunkCallback, AudioConfig, AudioError,
-    AudioResult, PlatformAudioSetupState, PlatformAudioSetupStatus, TranslationAudioOutput,
-    TranslationAudioOutputConfig, TranslationAudioOutputError, TranslationAudioOutputResult,
+    AudioCapture, AudioCaptureTarget, AudioChunk, AudioChunkCallback, AudioConfig,
+    AudioEnqueueOutcome, AudioError, AudioResult, PlatformAudioSetupState,
+    PlatformAudioSetupStatus, TranslationAudioOutput, TranslationAudioOutputConfig,
+    TranslationAudioOutputError, TranslationAudioOutputResult,
 };
 
 pub const LINUX_VIRTUAL_MICROPHONE_DESCRIPTION: &str = "VoicetextAI Virtual Microphone";
@@ -566,19 +567,23 @@ impl TranslationAudioOutput for LinuxPulseAudioOutput {
         Ok(())
     }
 
-    async fn enqueue_pcm16(&self, samples: &[i16]) -> TranslationAudioOutputResult<()> {
+    async fn enqueue_pcm16(
+        &self,
+        samples: &[i16],
+    ) -> TranslationAudioOutputResult<AudioEnqueueOutcome> {
         if !self.is_open.load(Ordering::SeqCst) {
             return Err(TranslationAudioOutputError::Closed);
         }
         if samples.is_empty() {
-            return Ok(());
+            return Ok(AudioEnqueueOutcome::Queued {
+                pending: self.pending_playback_duration(),
+            });
         }
 
         let mut bytes = Vec::with_capacity(samples.len() * 2);
         for sample in samples {
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
-
         let mut state = self.state.lock().await;
         let config = state.config.ok_or(TranslationAudioOutputError::Closed)?;
         let stdin = state
@@ -594,7 +599,9 @@ impl TranslationAudioOutput for LinuxPulseAudioOutput {
         drop(state);
 
         self.extend_pending_estimate(samples.len(), config);
-        Ok(())
+        Ok(AudioEnqueueOutcome::Queued {
+            pending: self.pending_playback_duration(),
+        })
     }
 
     async fn close(&mut self) -> TranslationAudioOutputResult<()> {

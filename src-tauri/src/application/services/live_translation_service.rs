@@ -589,8 +589,11 @@ mod tests {
         async fn enqueue_pcm16(
             &self,
             _samples: &[i16],
-        ) -> crate::domain::TranslationAudioOutputResult<()> {
-            Ok(())
+        ) -> crate::domain::TranslationAudioOutputResult<crate::domain::AudioEnqueueOutcome>
+        {
+            Ok(crate::domain::AudioEnqueueOutcome::Queued {
+                pending: Duration::ZERO,
+            })
         }
 
         async fn close(&mut self) -> crate::domain::TranslationAudioOutputResult<()> {
@@ -788,13 +791,16 @@ mod tests {
         async fn enqueue_pcm16(
             &self,
             samples: &[i16],
-        ) -> crate::domain::TranslationAudioOutputResult<()> {
+        ) -> crate::domain::TranslationAudioOutputResult<crate::domain::AudioEnqueueOutcome>
+        {
             self.state
                 .enqueued
                 .lock()
                 .unwrap()
                 .extend_from_slice(samples);
-            Ok(())
+            Ok(crate::domain::AudioEnqueueOutcome::Queued {
+                pending: Duration::ZERO,
+            })
         }
 
         async fn close(&mut self) -> crate::domain::TranslationAudioOutputResult<()> {

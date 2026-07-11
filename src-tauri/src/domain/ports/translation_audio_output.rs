@@ -24,6 +24,17 @@ pub enum TranslationAudioOutputError {
 
 pub type TranslationAudioOutputResult<T> = Result<T, TranslationAudioOutputError>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioEnqueueOutcome {
+    Queued {
+        pending: Duration,
+    },
+    DroppedOldest {
+        duration: Duration,
+        pending: Duration,
+    },
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct TranslationAudioOutputConfig {
     pub source_sample_rate: u32,
@@ -31,6 +42,7 @@ pub struct TranslationAudioOutputConfig {
     pub prebuffer_ms: u64,
     pub max_buffered_frames: usize,
     pub drain_max_buffered_frames: usize,
+    pub gain: f32,
 }
 
 impl TranslationAudioOutputConfig {
@@ -41,7 +53,26 @@ impl TranslationAudioOutputConfig {
             prebuffer_ms: 200,
             max_buffered_frames: 300_000,
             drain_max_buffered_frames: 720_000,
+            gain: 1.0,
         }
+    }
+
+    pub fn with_gain(mut self, gain: f32) -> Self {
+        self.gain = normalize_output_gain(gain);
+        self
+    }
+
+    pub fn normalized(mut self) -> Self {
+        self.gain = normalize_output_gain(self.gain);
+        self
+    }
+}
+
+pub fn normalize_output_gain(gain: f32) -> f32 {
+    if gain.is_finite() {
+        gain.clamp(0.0, 1.0)
+    } else {
+        1.0
     }
 }
 
@@ -51,13 +82,30 @@ pub trait TranslationAudioOutput: Send + Sync {
         &mut self,
         config: TranslationAudioOutputConfig,
     ) -> TranslationAudioOutputResult<()>;
-    async fn enqueue_pcm16(&self, samples: &[i16]) -> TranslationAudioOutputResult<()>;
+    async fn enqueue_pcm16(
+        &self,
+        samples: &[i16],
+    ) -> TranslationAudioOutputResult<AudioEnqueueOutcome>;
     async fn close(&mut self) -> TranslationAudioOutputResult<()>;
     fn is_open(&self) -> bool;
     fn device_name(&self) -> Option<String>;
     fn begin_drain_mode(&self);
     fn prepare_for_drain(&self) -> TranslationAudioOutputResult<Duration>;
     fn pending_playback_duration(&self) -> Duration;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_gain_is_clamped_and_non_finite_values_use_safe_default() {
+        assert_eq!(normalize_output_gain(-0.5), 0.0);
+        assert_eq!(normalize_output_gain(0.25), 0.25);
+        assert_eq!(normalize_output_gain(1.5), 1.0);
+        assert_eq!(normalize_output_gain(f32::NAN), 1.0);
+        assert_eq!(normalize_output_gain(f32::INFINITY), 1.0);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
