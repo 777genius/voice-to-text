@@ -15,7 +15,9 @@ use app_lib::domain::{
     TranslationAudioOutputResult,
 };
 use app_lib::infrastructure::audio::{AudioOutputConfig, CpalAudioOutput};
-use app_lib::infrastructure::openai::OpenAIRealtimeTranslationClient;
+use app_lib::infrastructure::openai::{
+    OpenAIRealtimeTranslationClient, OpenAIRealtimeTranslationFactory,
+};
 use async_trait::async_trait;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tokio::sync::mpsc;
@@ -521,13 +523,15 @@ async fn live_translation_service_synthetic_voice_reaches_blackhole() {
     let requested_target = Arc::new(Mutex::new(None));
     let mic_started = Arc::new(AtomicBool::new(false));
     let mic_stopped = Arc::new(AtomicBool::new(false));
-    let service =
-        LiveTranslationService::new_with_audio_factory(Arc::new(SyntheticMicToBlackholeFactory {
+    let service = LiveTranslationService::new_with_factories(
+        Arc::new(SyntheticMicToBlackholeFactory {
             pcm: source_pcm,
             requested_target: requested_target.clone(),
             mic_started: mic_started.clone(),
             mic_stopped: mic_stopped.clone(),
-        }));
+        }),
+        Arc::new(OpenAIRealtimeTranslationFactory),
+    );
 
     let translated_text = Arc::new(Mutex::new(String::new()));
     let errors = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -633,14 +637,16 @@ async fn live_translation_service_long_running_synthetic_voice_soak() {
     let mic_started = Arc::new(AtomicBool::new(false));
     let mic_stopped = Arc::new(AtomicBool::new(false));
     let emitted_chunks = Arc::new(AtomicUsize::new(0));
-    let service =
-        LiveTranslationService::new_with_audio_factory(Arc::new(LoopingMicToBlackholeFactory {
+    let service = LiveTranslationService::new_with_factories(
+        Arc::new(LoopingMicToBlackholeFactory {
             pcm: source_pcm,
             requested_target: requested_target.clone(),
             mic_started: mic_started.clone(),
             mic_stopped: mic_stopped.clone(),
             emitted_chunks: emitted_chunks.clone(),
-        }));
+        }),
+        Arc::new(OpenAIRealtimeTranslationFactory),
+    );
 
     let translated_text = Arc::new(Mutex::new(String::new()));
     let errors = Arc::new(Mutex::new(Vec::<String>::new()));

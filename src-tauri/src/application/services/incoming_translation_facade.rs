@@ -33,6 +33,43 @@ pub struct IncomingSpokenTranslationPorts {
     capability: Arc<dyn SpokenTranslationCapability>,
 }
 
+#[derive(Clone)]
+pub struct IncomingTranslationFacadeFactory {
+    captions_stt_factory: Arc<dyn SttProviderFactory>,
+    captions_audio_factory: Arc<dyn PlatformAudioFactory>,
+    spoken_ports: IncomingSpokenTranslationPorts,
+}
+
+impl IncomingTranslationFacadeFactory {
+    pub fn new(
+        captions_stt_factory: Arc<dyn SttProviderFactory>,
+        captions_audio_factory: Arc<dyn PlatformAudioFactory>,
+        spoken_ports: IncomingSpokenTranslationPorts,
+    ) -> Self {
+        Self {
+            captions_stt_factory,
+            captions_audio_factory,
+            spoken_ports,
+        }
+    }
+
+    pub fn create(&self, delivery: IncomingTranslationDelivery) -> IncomingTranslationFacade {
+        match delivery {
+            IncomingTranslationDelivery::CaptionsOnly => {
+                IncomingTranslationFacade::new_with_factories(
+                    self.captions_stt_factory.clone(),
+                    self.captions_audio_factory.clone(),
+                )
+            }
+            IncomingTranslationDelivery::TextAndAudio => self.spoken_ports.create_facade(),
+        }
+    }
+
+    pub fn check_spoken_capability(&self, target_language: &str) -> SpokenIncomingCapability {
+        self.spoken_ports.check_capability(target_language)
+    }
+}
+
 impl IncomingSpokenTranslationPorts {
     pub fn new(
         capture_factory: Arc<dyn SystemAudioCaptureFactory>,

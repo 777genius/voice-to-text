@@ -4,7 +4,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::RwLock;
 
 use crate::application::services::{
-    IncomingSpokenTranslationPorts, IncomingTranslationFacade, LiveTranslationService,
+    IncomingSpokenTranslationPorts, IncomingTranslationFacade, IncomingTranslationFacadeFactory,
+    LiveTranslationPorts, LiveTranslationService,
 };
 use crate::application::TranscriptionService;
 use crate::domain::{
@@ -22,12 +23,24 @@ use crate::infrastructure::{
 
 const RECORDING_WINDOW_POSITION_SAVE_SUPPRESSION_MS: i64 = 800;
 
-fn default_incoming_spoken_translation_ports() -> IncomingSpokenTranslationPorts {
-    IncomingSpokenTranslationPorts::new(
+fn default_incoming_translation_factory() -> IncomingTranslationFacadeFactory {
+    let audio_factory = Arc::new(DefaultPlatformAudioFactory::new());
+    IncomingTranslationFacadeFactory::new(
+        Arc::new(DefaultSttProviderFactory::new()),
+        audio_factory.clone(),
+        IncomingSpokenTranslationPorts::new(
+            audio_factory,
+            Arc::new(DefaultLocalPlaybackOutputFactory::new()),
+            Arc::new(OpenAIRealtimeTranslationFactory),
+            Arc::new(DefaultSpokenTranslationCapability::new()),
+        ),
+    )
+}
+
+fn default_live_translation_ports() -> LiveTranslationPorts {
+    LiveTranslationPorts::new(
         Arc::new(DefaultPlatformAudioFactory::new()),
-        Arc::new(DefaultLocalPlaybackOutputFactory::new()),
         Arc::new(OpenAIRealtimeTranslationFactory),
-        Arc::new(DefaultSpokenTranslationCapability::new()),
     )
 }
 
@@ -264,15 +277,21 @@ pub struct AppState {
     /// потому что connect к OpenAI стоит денег и не должен происходить до явного намерения.
     pub live_translation_service: Arc<RwLock<Option<Arc<LiveTranslationService>>>>,
 
+    /// Outgoing translation dependencies composed outside the application service.
+    pub live_translation_ports: LiveTranslationPorts,
+
     /// Incoming translation facade: system audio -> selected delivery pipeline.
     /// Separate from active_recording_mode so it can run alongside outgoing translation later.
     pub incoming_translation_facade: Arc<RwLock<Option<Arc<IncomingTranslationFacade>>>>,
 
     /// Infrastructure dependencies for the macOS spoken incoming pipeline.
-    pub incoming_spoken_translation_ports: IncomingSpokenTranslationPorts,
+    pub incoming_translation_factory: IncomingTranslationFacadeFactory,
 
     /// Счётчик сессий входящих субтитров. Отдельный от recording session id.
     pub incoming_translation_session_seq: AtomicU64,
+
+    /// Prevents duplicate async cleanup when Tauri emits both ExitRequested and Exit.
+    pub translation_shutdown_started: AtomicBool,
 
     /// До какого момента игнорировать WindowEvent::Moved для main окна.
     /// Нужно, чтобы программные resize/show/fit не перезаписывали пользовательскую mini-позицию.
@@ -349,9 +368,11 @@ impl AppState {
                     active_transcription_session_id: Arc::new(AtomicU64::new(0)),
                     active_recording_mode: Arc::new(RwLock::new(None)),
                     live_translation_service: Arc::new(RwLock::new(None)),
+                    live_translation_ports: default_live_translation_ports(),
                     incoming_translation_facade: Arc::new(RwLock::new(None)),
-                    incoming_spoken_translation_ports: default_incoming_spoken_translation_ports(),
+                    incoming_translation_factory: default_incoming_translation_factory(),
                     incoming_translation_session_seq: AtomicU64::new(0),
+                    translation_shutdown_started: AtomicBool::new(false),
                     recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),
                 };
             }
@@ -425,9 +446,11 @@ impl AppState {
                     active_transcription_session_id: Arc::new(AtomicU64::new(0)),
                     active_recording_mode: Arc::new(RwLock::new(None)),
                     live_translation_service: Arc::new(RwLock::new(None)),
+                    live_translation_ports: default_live_translation_ports(),
                     incoming_translation_facade: Arc::new(RwLock::new(None)),
-                    incoming_spoken_translation_ports: default_incoming_spoken_translation_ports(),
+                    incoming_translation_factory: default_incoming_translation_factory(),
                     incoming_translation_session_seq: AtomicU64::new(0),
+                    translation_shutdown_started: AtomicBool::new(false),
                     recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),
                 };
             }
@@ -521,10 +544,39 @@ impl AppState {
             active_transcription_session_id,
             active_recording_mode: Arc::new(RwLock::new(None)),
             live_translation_service: Arc::new(RwLock::new(None)),
+            live_translation_ports: default_live_translation_ports(),
             incoming_translation_facade: Arc::new(RwLock::new(None)),
-            incoming_spoken_translation_ports: default_incoming_spoken_translation_ports(),
+            incoming_translation_factory: default_incoming_translation_factory(),
             incoming_translation_session_seq: AtomicU64::new(0),
+            translation_shutdown_started: AtomicBool::new(false),
             recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),
+        }
+    }
+
+    pub async fn shutdown_translation_runtimes(&self) {
+        if self
+            .translation_shutdown_started
+            .swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+
+        let _incoming_guard = self.incoming_translation_lifecycle_guard.lock().await;
+        let _recording_guard = self.recording_lifecycle_guard.lock().await;
+        let incoming = self.incoming_translation_facade.read().await.clone();
+        let outgoing = self.live_translation_service.read().await.clone();
+        let result =
+            crate::application::services::shutdown_translation_runtimes(incoming, outgoing).await;
+        let succeeded = result.is_ok();
+        if let Some(error) = result.incoming_error {
+            log::warn!("Incoming translation shutdown failed during app exit: {error}");
+        }
+        if let Some(error) = result.outgoing_error {
+            log::warn!("Outgoing translation shutdown failed during app exit: {error}");
+        }
+        if !succeeded {
+            self.translation_shutdown_started
+                .store(false, Ordering::SeqCst);
         }
     }
 

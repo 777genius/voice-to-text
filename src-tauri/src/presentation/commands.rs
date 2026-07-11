@@ -955,7 +955,7 @@ async fn get_or_create_live_translation_service(
     if let Some(existing) = guard.as_ref() {
         return existing.clone();
     }
-    let service = std::sync::Arc::new(crate::application::services::LiveTranslationService::new());
+    let service = std::sync::Arc::new(state.live_translation_ports.create_service());
     *guard = Some(service.clone());
     service
 }
@@ -1218,6 +1218,34 @@ async fn stop_live_translation_recording(
     Ok("LiveTranslation stopped".to_string())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IncomingDeliveryResolution {
+    Create,
+    Reuse,
+    Replace,
+    RestartActive,
+}
+
+fn resolve_incoming_delivery(
+    current: Option<IncomingTranslationDelivery>,
+    status: RecordingStatus,
+    requested: IncomingTranslationDelivery,
+) -> IncomingDeliveryResolution {
+    let Some(current) = current else {
+        return IncomingDeliveryResolution::Create;
+    };
+    if current == requested {
+        return IncomingDeliveryResolution::Reuse;
+    }
+    match status {
+        RecordingStatus::Idle | RecordingStatus::Error => IncomingDeliveryResolution::Replace,
+        RecordingStatus::Starting | RecordingStatus::Recording => {
+            IncomingDeliveryResolution::RestartActive
+        }
+        RecordingStatus::Processing => IncomingDeliveryResolution::Reuse,
+    }
+}
+
 async fn get_or_create_incoming_translation_facade(
     state: &AppState,
     delivery: IncomingTranslationDelivery,
@@ -1228,15 +1256,17 @@ async fn get_or_create_incoming_translation_facade(
             guard.as_ref().cloned()
         };
         if let Some(existing) = observed.as_ref() {
-            if existing.delivery() == delivery {
-                return existing.clone();
-            }
             let status = existing.get_status().await;
-            if !matches!(status, RecordingStatus::Idle | RecordingStatus::Error) {
-                return existing.clone();
-            }
-            if status == RecordingStatus::Error {
-                let _ = existing.stop().await;
+            match resolve_incoming_delivery(Some(existing.delivery()), status, delivery) {
+                IncomingDeliveryResolution::Reuse | IncomingDeliveryResolution::RestartActive => {
+                    return existing.clone()
+                }
+                IncomingDeliveryResolution::Replace => {
+                    if status == RecordingStatus::Error {
+                        let _ = existing.stop().await;
+                    }
+                }
+                IncomingDeliveryResolution::Create => {}
             }
         }
 
@@ -1250,14 +1280,7 @@ async fn get_or_create_incoming_translation_facade(
             continue;
         }
 
-        let service = std::sync::Arc::new(match delivery {
-            IncomingTranslationDelivery::CaptionsOnly => {
-                crate::application::services::IncomingTranslationFacade::new()
-            }
-            IncomingTranslationDelivery::TextAndAudio => {
-                state.incoming_spoken_translation_ports.create_facade()
-            }
-        });
+        let service = std::sync::Arc::new(state.incoming_translation_factory.create(delivery));
         *guard = Some(service.clone());
         return service;
     }
@@ -1456,10 +1479,13 @@ async fn restart_active_incoming_translation_after_delivery_change(
     let Some(service) = service else {
         return Ok(());
     };
-    if !matches!(
+    let requested_delivery = state.config.read().await.incoming_translation_delivery;
+    let resolution = resolve_incoming_delivery(
+        Some(service.delivery()),
         service.get_status().await,
-        RecordingStatus::Starting | RecordingStatus::Recording
-    ) {
+        requested_delivery,
+    );
+    if resolution != IncomingDeliveryResolution::RestartActive {
         return Ok(());
     }
 
@@ -1593,8 +1619,8 @@ pub async fn get_incoming_spoken_translation_capability(
         .map(|language| normalize_translation_target_language(&language, "ru"))
         .unwrap_or_else(|| resolve_incoming_translation_target_language(&config));
     let capability = state
-        .incoming_spoken_translation_ports
-        .check_capability(&target_language);
+        .incoming_translation_factory
+        .check_spoken_capability(&target_language);
     Ok(IncomingSpokenCapabilityPayload {
         supported: capability == SpokenIncomingCapability::Ready,
         capability,
@@ -2814,9 +2840,9 @@ mod snapshot_contract_tests {
         live_translation_health_check_blocks_service_status, point_inside_rect,
         recording_hotkey_press_intent, recording_hotkey_release_intent, recording_start_is_busy,
         recording_state_after_failed_start_cleanup, recording_window_size_from_config,
-        resolve_incoming_translation_source_language, resolve_incoming_translation_target_language,
-        resolve_outgoing_translation_target_language, resolve_streaming_keyterms_update,
-        should_cancel_hold_to_record_pending_start,
+        resolve_incoming_delivery, resolve_incoming_translation_source_language,
+        resolve_incoming_translation_target_language, resolve_outgoing_translation_target_language,
+        resolve_streaming_keyterms_update, should_cancel_hold_to_record_pending_start,
         should_clear_active_mode_after_dictation_failure,
         should_clear_active_mode_after_session_cleanup,
         should_hide_recording_window_for_auto_paste,
@@ -2830,12 +2856,13 @@ mod snapshot_contract_tests {
         should_start_incoming_translation_on_toggle, validate_auto_paste_target_for_focus,
         virtual_output_open_health_item, AppConfigSnapshotData, AutoPasteWindowSuppression,
         DoubleSpaceHotkeyKey, DoubleSpaceHotkeyState, DoubleSpaceModifierKey,
-        RecordingHotkeyDispatchIntent, RecordingWindowPlacement, SnapshotEnvelope,
-        SttConfigSnapshotData,
+        IncomingDeliveryResolution, RecordingHotkeyDispatchIntent, RecordingWindowPlacement,
+        SnapshotEnvelope, SttConfigSnapshotData,
     };
     use crate::domain::{
-        AppConfig, AudioError, BackendStreamingProvider, RecordingMode, RecordingStatus,
-        RecordingWindowPosition, SttConfig, SttError, SttProviderType,
+        AppConfig, AudioError, BackendStreamingProvider, IncomingTranslationDelivery,
+        RecordingMode, RecordingStatus, RecordingWindowPosition, SttConfig, SttError,
+        SttProviderType,
     };
     use crate::infrastructure::auto_paste::{AutoPasteTarget, VOICETEXT_BUNDLE_ID};
     use tauri::{PhysicalPosition, PhysicalSize};
@@ -3003,6 +3030,45 @@ mod snapshot_contract_tests {
         assert!(!should_start_incoming_translation_on_toggle(
             RecordingStatus::Processing
         ));
+    }
+
+    #[test]
+    fn incoming_delivery_resolver_requires_controlled_restart_only_for_active_mode_change() {
+        use IncomingDeliveryResolution::{Create, Replace, RestartActive, Reuse};
+        use IncomingTranslationDelivery::{CaptionsOnly, TextAndAudio};
+
+        assert_eq!(
+            resolve_incoming_delivery(None, RecordingStatus::Idle, TextAndAudio),
+            Create
+        );
+        assert_eq!(
+            resolve_incoming_delivery(Some(TextAndAudio), RecordingStatus::Recording, TextAndAudio,),
+            Reuse
+        );
+        assert_eq!(
+            resolve_incoming_delivery(Some(CaptionsOnly), RecordingStatus::Idle, TextAndAudio,),
+            Replace
+        );
+        assert_eq!(
+            resolve_incoming_delivery(Some(CaptionsOnly), RecordingStatus::Error, TextAndAudio,),
+            Replace
+        );
+        assert_eq!(
+            resolve_incoming_delivery(Some(CaptionsOnly), RecordingStatus::Starting, TextAndAudio,),
+            RestartActive
+        );
+        assert_eq!(
+            resolve_incoming_delivery(Some(CaptionsOnly), RecordingStatus::Recording, TextAndAudio,),
+            RestartActive
+        );
+        assert_eq!(
+            resolve_incoming_delivery(
+                Some(CaptionsOnly),
+                RecordingStatus::Processing,
+                TextAndAudio,
+            ),
+            Reuse
+        );
     }
 
     #[test]

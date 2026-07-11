@@ -794,6 +794,16 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {
+            if matches!(
+                _event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                if let Some(state) = _app.try_state::<AppState>() {
+                    tauri::async_runtime::block_on(state.shutdown_translation_runtimes());
+                }
+                return;
+            }
+
             // Клик по иконке в Dock (только macOS)
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { has_visible_windows, .. } = _event {

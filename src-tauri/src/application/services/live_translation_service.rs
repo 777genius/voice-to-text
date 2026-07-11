@@ -20,8 +20,6 @@ use crate::domain::{
     RealtimeTranslationConfig, RealtimeTranslationError, RealtimeTranslationErrorKind,
     RealtimeTranslationFactory, RecordingStatus, TranslationAudioOutputConfig,
 };
-use crate::infrastructure::audio::DefaultPlatformAudioFactory;
-use crate::infrastructure::openai::OpenAIRealtimeTranslationFactory;
 
 use super::{
     spawn_realtime_interpretation_supervisor, AudioSpectrumAnalyzer,
@@ -145,6 +143,31 @@ pub struct LiveTranslationService {
     client_factory: Arc<dyn RealtimeTranslationFactory>,
 }
 
+#[derive(Clone)]
+pub struct LiveTranslationPorts {
+    audio_factory: Arc<dyn PlatformAudioFactory>,
+    translation_factory: Arc<dyn RealtimeTranslationFactory>,
+}
+
+impl LiveTranslationPorts {
+    pub fn new(
+        audio_factory: Arc<dyn PlatformAudioFactory>,
+        translation_factory: Arc<dyn RealtimeTranslationFactory>,
+    ) -> Self {
+        Self {
+            audio_factory,
+            translation_factory,
+        }
+    }
+
+    pub fn create_service(&self) -> LiveTranslationService {
+        LiveTranslationService::new_with_factories(
+            self.audio_factory.clone(),
+            self.translation_factory.clone(),
+        )
+    }
+}
+
 fn notify_live_runtime_error(callbacks: &LiveTranslationCallbacks, error: LiveTranslationError) {
     call_live_callback("on_error", || (callbacks.on_error)(error));
     call_live_callback("Error status", || {
@@ -158,22 +181,8 @@ fn call_live_callback(label: &str, callback: impl FnOnce()) {
     }
 }
 
-impl Default for LiveTranslationService {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl LiveTranslationService {
-    pub fn new() -> Self {
-        Self::new_with_audio_factory(Arc::new(DefaultPlatformAudioFactory::new()))
-    }
-
-    pub fn new_with_audio_factory(audio_factory: Arc<dyn PlatformAudioFactory>) -> Self {
-        Self::new_with_factories(audio_factory, Arc::new(OpenAIRealtimeTranslationFactory))
-    }
-
-    fn new_with_factories(
+    pub fn new_with_factories(
         audio_factory: Arc<dyn PlatformAudioFactory>,
         client_factory: Arc<dyn RealtimeTranslationFactory>,
     ) -> Self {
@@ -464,9 +473,15 @@ fn spawn_live_runtime_cleanup_monitor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::services::{
+        shutdown_translation_runtimes, IncomingTranslationCallbacks, IncomingTranslationConfig,
+        IncomingTranslationFacade,
+    };
     use crate::domain::{
-        AudioCapture, AudioChunk, AudioChunkCallback, RealtimeTranslationEvent,
-        RealtimeTranslationSession, TranslationAudioOutput,
+        AudioCapture, AudioChunk, AudioChunkCallback, LocalPlaybackOutputFactory,
+        LocalPlaybackRoute, RealtimeTranslationEvent, RealtimeTranslationSession,
+        SpokenIncomingCapability, SpokenTranslationCapability, SttConfig,
+        SystemAudioCaptureFactory, SystemAudioCaptureRequest, TranslationAudioOutput,
     };
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
@@ -569,7 +584,7 @@ mod tests {
 
     #[tokio::test]
     async fn service_starts_in_idle() {
-        let svc = LiveTranslationService::new();
+        let svc = synthetic_live_service();
         assert_eq!(svc.get_status().await, RecordingStatus::Idle);
         assert!(svc.active_session_id().await.is_none());
     }
@@ -784,6 +799,26 @@ mod tests {
         }
     }
 
+    fn synthetic_live_service() -> LiveTranslationService {
+        test_service_with_audio_factory(Arc::new(SyntheticPlatformAudioFactory {
+            output_state: Arc::new(SyntheticOutputState::default()),
+            capture_started: Arc::new(AtomicBool::new(false)),
+            capture_stopped: Arc::new(AtomicBool::new(false)),
+            mic_target: Arc::new(StdMutex::new(None)),
+        }))
+    }
+
+    fn test_service_with_audio_factory(
+        audio_factory: Arc<dyn PlatformAudioFactory>,
+    ) -> LiveTranslationService {
+        LiveTranslationService::new_with_factories(
+            audio_factory,
+            Arc::new(SyntheticRealtimeClientFactory {
+                state: Arc::new(SyntheticRealtimeState::default()),
+            }),
+        )
+    }
+
     #[derive(Default)]
     struct SyntheticOutputState {
         opened: AtomicBool,
@@ -870,6 +905,7 @@ mod tests {
             on_chunk: AudioChunkCallback,
         ) -> crate::domain::AudioResult<()> {
             self.started.store(true, Ordering::SeqCst);
+            self.stopped.store(false, Ordering::SeqCst);
             for chunk in self.chunks.clone() {
                 on_chunk(chunk);
             }
@@ -950,6 +986,61 @@ mod tests {
 
         fn is_virtual_microphone_input(&self, _name: &str) -> bool {
             false
+        }
+    }
+
+    struct SyntheticIncomingCaptureFactory {
+        capture_started: Arc<AtomicBool>,
+        capture_stopped: Arc<AtomicBool>,
+    }
+
+    impl SystemAudioCaptureFactory for SyntheticIncomingCaptureFactory {
+        fn preflight_system_audio_capture(
+            &self,
+            _request: SystemAudioCaptureRequest,
+        ) -> crate::domain::AudioResult<()> {
+            Ok(())
+        }
+
+        fn create_system_audio_capture(
+            &self,
+            request: SystemAudioCaptureRequest,
+        ) -> crate::domain::AudioResult<Box<dyn AudioCapture>> {
+            Ok(Box::new(SyntheticMicCapture {
+                chunks: vec![AudioChunk::new(
+                    vec![900; OPENAI_INPUT_FRAME_SAMPLES],
+                    request.target.sample_rate,
+                    request.target.channels,
+                )],
+                config: crate::domain::AudioConfig::default(),
+                started: self.capture_started.clone(),
+                stopped: self.capture_stopped.clone(),
+                callback: None,
+            }))
+        }
+    }
+
+    struct SyntheticIncomingOutputFactory {
+        state: Arc<SyntheticOutputState>,
+    }
+
+    impl LocalPlaybackOutputFactory for SyntheticIncomingOutputFactory {
+        fn create_local_playback_output(
+            &self,
+            route: LocalPlaybackRoute,
+        ) -> crate::domain::TranslationAudioOutputResult<Box<dyn TranslationAudioOutput>> {
+            assert_eq!(route, LocalPlaybackRoute::SystemDefault);
+            Ok(Box::new(SyntheticTranslationOutput {
+                state: self.state.clone(),
+            }))
+        }
+    }
+
+    struct ReadyIncomingCapability;
+
+    impl SpokenTranslationCapability for ReadyIncomingCapability {
+        fn check(&self, _target_language: &str) -> SpokenIncomingCapability {
+            SpokenIncomingCapability::Ready
         }
     }
 
@@ -1193,6 +1284,95 @@ mod tests {
             statuses.lock().unwrap().as_slice(),
             &[RecordingStatus::Starting, RecordingStatus::Recording]
         );
+    }
+
+    #[tokio::test]
+    async fn simultaneous_directions_stop_independently_and_app_shutdown_closes_both() {
+        let incoming_output = Arc::new(SyntheticOutputState::default());
+        let incoming_capture_started = Arc::new(AtomicBool::new(false));
+        let incoming_capture_stopped = Arc::new(AtomicBool::new(false));
+        let incoming_realtime = Arc::new(SyntheticRealtimeState::default());
+        let incoming = Arc::new(IncomingTranslationFacade::new_spoken_with_factories(
+            Arc::new(SyntheticIncomingCaptureFactory {
+                capture_started: incoming_capture_started.clone(),
+                capture_stopped: incoming_capture_stopped.clone(),
+            }),
+            Arc::new(SyntheticIncomingOutputFactory {
+                state: incoming_output.clone(),
+            }),
+            Arc::new(SyntheticRealtimeClientFactory {
+                state: incoming_realtime.clone(),
+            }),
+            Arc::new(ReadyIncomingCapability),
+        ));
+
+        let outgoing_output = Arc::new(SyntheticOutputState::default());
+        let outgoing_capture_stopped = Arc::new(AtomicBool::new(false));
+        let outgoing = Arc::new(LiveTranslationService::new_with_factories(
+            Arc::new(SyntheticPlatformAudioFactory {
+                output_state: outgoing_output.clone(),
+                capture_started: Arc::new(AtomicBool::new(false)),
+                capture_stopped: outgoing_capture_stopped.clone(),
+                mic_target: Arc::new(StdMutex::new(None)),
+            }),
+            Arc::new(SyntheticRealtimeClientFactory {
+                state: Arc::new(SyntheticRealtimeState::default()),
+            }),
+        ));
+
+        let incoming_callbacks = || IncomingTranslationCallbacks {
+            on_source_final: Arc::new(|_| {}),
+            on_translation_delta: Arc::new(|_| {}),
+            on_error: Arc::new(|error| panic!("unexpected incoming error: {error}")),
+            on_status: Arc::new(|_| {}),
+        };
+        let incoming_config = |session_id| {
+            let mut config =
+                IncomingTranslationConfig::new_with_defaults(SttConfig::default(), session_id);
+            config.openai_api_key = "test-credential".into();
+            config.target_language = "ru".into();
+            config
+        };
+
+        incoming
+            .start(incoming_config(201), incoming_callbacks())
+            .await
+            .unwrap();
+        outgoing
+            .start_translation(valid_config(301), test_callbacks())
+            .await
+            .unwrap();
+        assert_eq!(incoming.get_status().await, RecordingStatus::Recording);
+        assert_eq!(outgoing.get_status().await, RecordingStatus::Recording);
+
+        incoming.stop().await.unwrap();
+        assert_eq!(incoming.get_status().await, RecordingStatus::Idle);
+        assert_eq!(outgoing.get_status().await, RecordingStatus::Recording);
+
+        incoming
+            .start(incoming_config(202), incoming_callbacks())
+            .await
+            .unwrap();
+        outgoing.stop_translation().await.unwrap();
+        assert_eq!(incoming.get_status().await, RecordingStatus::Recording);
+        assert_eq!(outgoing.get_status().await, RecordingStatus::Idle);
+
+        outgoing
+            .start_translation(valid_config(302), test_callbacks())
+            .await
+            .unwrap();
+        let shutdown =
+            shutdown_translation_runtimes(Some(incoming.clone()), Some(outgoing.clone())).await;
+
+        assert!(shutdown.is_ok(), "app shutdown errors: {shutdown:?}");
+        assert_eq!(incoming.get_status().await, RecordingStatus::Idle);
+        assert_eq!(outgoing.get_status().await, RecordingStatus::Idle);
+        assert!(incoming_capture_started.load(Ordering::SeqCst));
+        assert!(incoming_capture_stopped.load(Ordering::SeqCst));
+        assert!(outgoing_capture_stopped.load(Ordering::SeqCst));
+        assert!(incoming_output.closed.load(Ordering::SeqCst));
+        assert!(outgoing_output.closed.load(Ordering::SeqCst));
+        assert_eq!(incoming_realtime.close_calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -1460,11 +1640,10 @@ mod tests {
     #[tokio::test]
     async fn output_create_failure_stops_before_microphone_preflight() {
         let state = Arc::new(TestFactoryState::default());
-        let svc =
-            LiveTranslationService::new_with_audio_factory(Arc::new(TestPlatformAudioFactory {
-                mode: TestFactoryMode::OutputCreateFails,
-                state: state.clone(),
-            }));
+        let svc = test_service_with_audio_factory(Arc::new(TestPlatformAudioFactory {
+            mode: TestFactoryMode::OutputCreateFails,
+            state: state.clone(),
+        }));
 
         let err = svc
             .start_translation(valid_config(11), test_callbacks())
@@ -1489,11 +1668,10 @@ mod tests {
     #[tokio::test]
     async fn microphone_preflight_failure_closes_opened_output() {
         let state = Arc::new(TestFactoryState::default());
-        let svc =
-            LiveTranslationService::new_with_audio_factory(Arc::new(TestPlatformAudioFactory {
-                mode: TestFactoryMode::MicPreflightFails,
-                state: state.clone(),
-            }));
+        let svc = test_service_with_audio_factory(Arc::new(TestPlatformAudioFactory {
+            mode: TestFactoryMode::MicPreflightFails,
+            state: state.clone(),
+        }));
 
         let err = svc
             .start_translation(valid_config(12), test_callbacks())
@@ -1518,11 +1696,10 @@ mod tests {
     #[tokio::test]
     async fn microphone_initialize_failure_closes_opened_output() {
         let state = Arc::new(TestFactoryState::default());
-        let svc =
-            LiveTranslationService::new_with_audio_factory(Arc::new(TestPlatformAudioFactory {
-                mode: TestFactoryMode::MicInitializeFails,
-                state: state.clone(),
-            }));
+        let svc = test_service_with_audio_factory(Arc::new(TestPlatformAudioFactory {
+            mode: TestFactoryMode::MicInitializeFails,
+            state: state.clone(),
+        }));
 
         let err = svc
             .start_translation(valid_config(13), test_callbacks())
@@ -1547,11 +1724,10 @@ mod tests {
     #[tokio::test]
     async fn microphone_create_failure_closes_opened_output() {
         let state = Arc::new(TestFactoryState::default());
-        let svc =
-            LiveTranslationService::new_with_audio_factory(Arc::new(TestPlatformAudioFactory {
-                mode: TestFactoryMode::MicCreateFails,
-                state: state.clone(),
-            }));
+        let svc = test_service_with_audio_factory(Arc::new(TestPlatformAudioFactory {
+            mode: TestFactoryMode::MicCreateFails,
+            state: state.clone(),
+        }));
 
         let err = svc
             .start_translation(valid_config(14), test_callbacks())
@@ -1575,7 +1751,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_api_key_fails_preflight_with_configuration_error() {
-        let svc = LiveTranslationService::new();
+        let svc = synthetic_live_service();
         let cfg = LiveTranslationConfig {
             openai_api_key: String::new(),
             target_language: "en".into(),
