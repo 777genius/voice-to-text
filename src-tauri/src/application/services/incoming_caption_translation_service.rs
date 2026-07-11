@@ -185,6 +185,24 @@ pub enum IncomingTranslationError {
     Connection(String),
     #[error("processing: {0}")]
     Processing(String),
+    #[error("unsupported_target_language: {0}")]
+    UnsupportedTargetLanguage(String),
+    #[error("permission_denied: {0}")]
+    PermissionDenied(String),
+    #[error("unsafe_audio_route: {0}")]
+    UnsafeAudioRoute(String),
+    #[error("input_device_lost: {0}")]
+    InputDeviceLost(String),
+    #[error("output_device_lost: {0}")]
+    OutputDeviceLost(String),
+    #[error("input_overload: {0}")]
+    InputOverload(String),
+    #[error("output_overload: {0}")]
+    OutputOverload(String),
+    #[error("protocol: {0}")]
+    Protocol(String),
+    #[error("timeout: {0}")]
+    Timeout(String),
     #[error("{0}")]
     ReportedDuringStartup(Box<IncomingTranslationError>),
 }
@@ -198,6 +216,15 @@ impl IncomingTranslationError {
             Self::RateLimited(_) => "rate_limited",
             Self::Connection(_) => "connection",
             Self::Processing(_) => "processing",
+            Self::UnsupportedTargetLanguage(_) => "unsupported_target_language",
+            Self::PermissionDenied(_) => "permission_denied",
+            Self::UnsafeAudioRoute(_) => "unsafe_audio_route",
+            Self::InputDeviceLost(_) => "input_device_lost",
+            Self::OutputDeviceLost(_) => "output_device_lost",
+            Self::InputOverload(_) => "input_overload",
+            Self::OutputOverload(_) => "output_overload",
+            Self::Protocol(_) => "protocol",
+            Self::Timeout(_) => "timeout",
             Self::ReportedDuringStartup(error) => error.error_type(),
         }
     }

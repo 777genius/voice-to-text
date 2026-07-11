@@ -1,4 +1,30 @@
 /// Provider-neutral configuration for one realtime translation session.
+pub const REALTIME_TRANSLATION_LANGUAGES: &[&str] = &[
+    "en", "es", "pt", "fr", "ja", "ru", "zh", "de", "ko", "hi", "id", "vi", "it",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TranslationLanguage(String);
+
+impl TranslationLanguage {
+    pub fn parse(value: &str) -> Result<Self, UnsupportedTranslationLanguage> {
+        let normalized = value.trim().to_ascii_lowercase();
+        if REALTIME_TRANSLATION_LANGUAGES.contains(&normalized.as_str()) {
+            Ok(Self(normalized))
+        } else {
+            Err(UnsupportedTranslationLanguage(value.trim().to_string()))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unsupported realtime translation target language: {0}")]
+pub struct UnsupportedTranslationLanguage(pub String);
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct RealtimeTranslationConfig {
     pub credential: String,
@@ -124,5 +150,20 @@ mod tests {
         assert!(!debug.contains("sk-secret-value"));
         assert!(debug.contains("<redacted>"));
         assert!(debug.contains("en"));
+    }
+
+    #[test]
+    fn translation_language_normalizes_only_officially_supported_targets() {
+        for language in REALTIME_TRANSLATION_LANGUAGES {
+            assert_eq!(
+                TranslationLanguage::parse(&language.to_ascii_uppercase())
+                    .unwrap()
+                    .as_str(),
+                *language
+            );
+        }
+        for unsupported in ["", "auto", "multi", "uk", "pl"] {
+            assert!(TranslationLanguage::parse(unsupported).is_err());
+        }
     }
 }

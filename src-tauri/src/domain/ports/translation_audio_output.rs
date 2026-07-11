@@ -88,6 +88,13 @@ pub trait TranslationAudioOutput: Send + Sync {
     ) -> TranslationAudioOutputResult<AudioEnqueueOutcome>;
     async fn close(&mut self) -> TranslationAudioOutputResult<()>;
     fn is_open(&self) -> bool;
+    fn health_check(&self) -> TranslationAudioOutputResult<()> {
+        if self.is_open() {
+            Ok(())
+        } else {
+            Err(TranslationAudioOutputError::Closed)
+        }
+    }
     fn device_name(&self) -> Option<String>;
     fn begin_drain_mode(&self);
     fn prepare_for_drain(&self) -> TranslationAudioOutputResult<Duration>;

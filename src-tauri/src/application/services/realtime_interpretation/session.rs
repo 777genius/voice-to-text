@@ -2,6 +2,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use futures_util::FutureExt;
 use tokio::sync::{mpsc, oneshot};
@@ -9,8 +10,9 @@ use tokio::task::JoinHandle;
 
 use crate::domain::{
     amplify_i16_samples, AudioCapture, AudioCaptureErrorCallback, AudioChunk, AudioChunkCallback,
-    AudioEnqueueOutcome, RealtimeTranslationError, RealtimeTranslationErrorKind,
+    AudioEnqueueOutcome, AudioError, RealtimeTranslationError, RealtimeTranslationErrorKind,
     RealtimeTranslationEvent, RealtimeTranslationSession, TranslationAudioOutput,
+    TranslationAudioOutputError,
 };
 
 use super::frame_assembler::Pcm16FrameAssembler;
@@ -27,6 +29,16 @@ pub enum RealtimeInterpretationError {
     Timeout(String),
     #[error("processing: {0}")]
     Processing(String),
+    #[error("protocol: {0}")]
+    Protocol(String),
+    #[error("input_device_lost: {0}")]
+    InputDeviceLost(String),
+    #[error("output_device_lost: {0}")]
+    OutputDeviceLost(String),
+    #[error("input_overload: {0}")]
+    InputOverload(String),
+    #[error("output_overload: {0}")]
+    OutputOverload(String),
 }
 
 impl From<RealtimeTranslationError> for RealtimeInterpretationError {
@@ -37,9 +49,8 @@ impl From<RealtimeTranslationError> for RealtimeInterpretationError {
             RealtimeTranslationErrorKind::RateLimited => Self::RateLimited(message),
             RealtimeTranslationErrorKind::Connection => Self::Connection(message),
             RealtimeTranslationErrorKind::Timeout => Self::Timeout(message),
-            RealtimeTranslationErrorKind::Protocol | RealtimeTranslationErrorKind::Internal => {
-                Self::Processing(message)
-            }
+            RealtimeTranslationErrorKind::Protocol => Self::Protocol(message),
+            RealtimeTranslationErrorKind::Internal => Self::Processing(message),
         }
     }
 }
@@ -59,7 +70,7 @@ pub enum RealtimeInterpretationShutdown {
 #[derive(Debug, thiserror::Error)]
 pub enum RealtimeInterpretationStartError {
     #[error("capture start: {0}")]
-    Capture(String),
+    Capture(AudioError),
 }
 
 pub type RealtimeTextCallback = Arc<dyn Fn(String) + Send + Sync>;
@@ -101,6 +112,15 @@ pub struct RealtimeInterpretationPolicy {
     worker_stop_timeout: Duration,
     input_source_name: &'static str,
     output_route_name: &'static str,
+    silence_cadence: Option<SilenceCadencePolicy>,
+}
+
+#[derive(Debug, Clone)]
+struct SilenceCadencePolicy {
+    gap_threshold: Duration,
+    interval: Duration,
+    sample_rate: u32,
+    channels: u16,
 }
 
 impl RealtimeInterpretationPolicy {
@@ -122,6 +142,34 @@ impl RealtimeInterpretationPolicy {
             worker_stop_timeout: Duration::from_millis(1_500),
             input_source_name: "Microphone",
             output_route_name: "virtual microphone",
+            silence_cadence: None,
+        }
+    }
+
+    pub fn incoming_spoken() -> Self {
+        Self {
+            input_frame_samples: 4_800,
+            input_queue_capacity_chunks: 160,
+            input_overload_drop_threshold: 32,
+            output_queue_capacity_chunks: 32,
+            output_overload_drop_threshold: 8,
+            input_drain_timeout: Duration::from_millis(1_500),
+            event_drain_timeout: Duration::from_millis(1_500),
+            translation_finish_timeout: Duration::from_millis(5_000),
+            output_health_poll_interval: Duration::from_millis(250),
+            output_drain_safety: Duration::from_millis(250),
+            output_drain_max: Duration::from_millis(5_000),
+            output_drain_poll: Duration::from_millis(50),
+            output_drain_empty_threshold: Duration::from_millis(30),
+            worker_stop_timeout: Duration::from_millis(1_000),
+            input_source_name: "System audio",
+            output_route_name: "local playback",
+            silence_cadence: Some(SilenceCadencePolicy {
+                gap_threshold: Duration::from_millis(400),
+                interval: Duration::from_millis(200),
+                sample_rate: 24_000,
+                channels: 1,
+            }),
         }
     }
 }
@@ -139,6 +187,14 @@ impl RealtimeInterpretationConfig {
             session_id,
             input_gain,
             policy: RealtimeInterpretationPolicy::outgoing(),
+        }
+    }
+
+    pub fn incoming_spoken(session_id: u64) -> Self {
+        Self {
+            session_id,
+            input_gain: 1.0,
+            policy: RealtimeInterpretationPolicy::incoming_spoken(),
         }
     }
 }
@@ -223,6 +279,7 @@ pub struct RealtimeInterpretationSession {
     event_forwarder_task: Option<JoinHandle<()>>,
     output_tx: mpsc::Sender<OutputCommand>,
     output_worker_task: Option<OutputWorkerTask>,
+    silence_cadence_task: Option<JoinHandle<()>>,
     stop_requested: Arc<AtomicBool>,
     session_id: u64,
     policy: RealtimeInterpretationPolicy,
@@ -269,11 +326,20 @@ impl RealtimeInterpretationSession {
                 policy: config.policy.clone(),
             },
         );
+        let capture_activity = Arc::new(CaptureActivity::new());
+        let silence_cadence_task = spawn_silence_cadence_task(
+            input_tx.clone(),
+            reporter.clone(),
+            stop_requested.clone(),
+            capture_activity.clone(),
+            config.policy.clone(),
+        );
         let capture_callback = build_capture_callback(
             input_tx,
             reporter.clone(),
             stop_requested.clone(),
             config.policy.clone(),
+            capture_activity,
         );
 
         let mut capture = ports.capture;
@@ -282,10 +348,14 @@ impl RealtimeInterpretationSession {
         let input_source_name = config.policy.input_source_name;
         let capture_error_callback: AudioCaptureErrorCallback = Arc::new(move |error| {
             if !capture_stop_requested.load(Ordering::SeqCst) {
-                capture_reporter.error(RealtimeInterpretationError::Processing(format!(
-                    "{} capture failed: {}",
-                    input_source_name, error
-                )));
+                let message = format!("{} capture failed: {}", input_source_name, error);
+                let error = match error {
+                    AudioError::DeviceNotFound(_) | AudioError::Capture(_) => {
+                        RealtimeInterpretationError::InputDeviceLost(message)
+                    }
+                    _ => RealtimeInterpretationError::Processing(message),
+                };
+                capture_reporter.error(error);
             }
         });
         capture.set_terminal_error_callback(Some(capture_error_callback));
@@ -297,6 +367,7 @@ impl RealtimeInterpretationSession {
             event_forwarder_task: Some(event_forwarder_task),
             output_tx,
             output_worker_task: Some(output_worker_task),
+            silence_cadence_task,
             stop_requested,
             session_id: config.session_id,
             policy: config.policy,
@@ -309,11 +380,10 @@ impl RealtimeInterpretationSession {
             .start_capture(capture_callback)
             .await
         {
-            let message = error.to_string();
             session
                 .shutdown(RealtimeInterpretationShutdown::Abort)
                 .await;
-            return Err(RealtimeInterpretationStartError::Capture(message));
+            return Err(RealtimeInterpretationStartError::Capture(error));
         }
 
         Ok((session, stop_rx))
@@ -325,6 +395,10 @@ impl RealtimeInterpretationSession {
 
     pub async fn shutdown(mut self, mode: RealtimeInterpretationShutdown) {
         self.stop_requested.store(true, Ordering::SeqCst);
+        if let Some(task) = self.silence_cadence_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
         if let Some(capture) = self.capture.as_mut() {
             if let Err(error) = capture.stop_capture().await {
                 log::warn!(
@@ -536,6 +610,9 @@ impl Drop for RealtimeInterpretationSession {
             task.abort();
         }
         if let Some(task) = self.output_worker_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.silence_cadence_task.take() {
             task.abort();
         }
     }
@@ -786,7 +863,7 @@ async fn run_output_worker(
                                     consecutive_output_drops
                                 );
                                 if consecutive_output_drops >= policy.output_overload_drop_threshold {
-                                    reporter.error(RealtimeInterpretationError::Processing(format!(
+                                    reporter.error(RealtimeInterpretationError::OutputOverload(format!(
                                         "{} output repeatedly overflowed; translation was stopped to avoid incomplete delayed speech",
                                         policy.output_route_name
                                     )));
@@ -794,7 +871,7 @@ async fn run_output_worker(
                                 }
                             }
                             Err(error) => {
-                                reporter.error(RealtimeInterpretationError::Processing(error.to_string()));
+                                reporter.error(map_output_error(error, policy.output_route_name));
                                 return output;
                             }
                         }
@@ -812,14 +889,29 @@ async fn run_output_worker(
                 }
             }
             _ = health_poll.tick() => {
-                if !output.is_open() {
-                    reporter.error(RealtimeInterpretationError::Processing(format!(
-                        "{} output stream stopped unexpectedly",
-                        policy.output_route_name
-                    )));
+                if let Err(error) = output.health_check() {
+                    reporter.error(map_output_error(error, policy.output_route_name));
                     return output;
                 }
             }
+        }
+    }
+}
+
+fn map_output_error(
+    error: TranslationAudioOutputError,
+    route_name: &str,
+) -> RealtimeInterpretationError {
+    let message = format!("{} output failed: {}", route_name, error);
+    match error {
+        TranslationAudioOutputError::Device(_)
+        | TranslationAudioOutputError::Stream(_)
+        | TranslationAudioOutputError::Closed => {
+            RealtimeInterpretationError::OutputDeviceLost(message)
+        }
+        TranslationAudioOutputError::Configuration(_)
+        | TranslationAudioOutputError::Resample(_) => {
+            RealtimeInterpretationError::Processing(message)
         }
     }
 }
@@ -874,15 +966,17 @@ fn build_capture_callback(
     reporter: RuntimeStopReporter,
     stop_requested: Arc<AtomicBool>,
     policy: RealtimeInterpretationPolicy,
+    capture_activity: Arc<CaptureActivity>,
 ) -> AudioChunkCallback {
     let consecutive_drops = AtomicU64::new(0);
-    Arc::new(
-        move |chunk| match try_enqueue_audio_chunk(&input_tx, chunk, &consecutive_drops) {
+    Arc::new(move |chunk| {
+        capture_activity.touch();
+        match try_enqueue_audio_chunk(&input_tx, chunk, &consecutive_drops) {
             Ok(()) => {}
             Err(AudioQueueEnqueueError::Full(drops))
                 if drops == policy.input_overload_drop_threshold =>
             {
-                reporter.error(RealtimeInterpretationError::Processing(format!(
+                reporter.error(RealtimeInterpretationError::InputOverload(format!(
                     "{} audio processing cannot keep up; translation was stopped to avoid silently losing speech",
                     policy.input_source_name
                 )));
@@ -894,8 +988,79 @@ fn build_capture_callback(
                 )));
             }
             Err(_) => {}
-        },
-    )
+        }
+    })
+}
+
+struct CaptureActivity {
+    epoch: Instant,
+    last_audio_ms: AtomicU64,
+}
+
+impl CaptureActivity {
+    fn new() -> Self {
+        Self {
+            epoch: Instant::now(),
+            last_audio_ms: AtomicU64::new(0),
+        }
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.epoch.elapsed().as_millis().min(u64::MAX as u128) as u64
+    }
+
+    fn touch(&self) {
+        self.last_audio_ms.store(self.now_ms(), Ordering::Relaxed);
+    }
+
+    fn gap(&self) -> Duration {
+        Duration::from_millis(
+            self.now_ms()
+                .saturating_sub(self.last_audio_ms.load(Ordering::Relaxed)),
+        )
+    }
+}
+
+fn spawn_silence_cadence_task(
+    input_tx: mpsc::Sender<AudioChunk>,
+    reporter: RuntimeStopReporter,
+    stop_requested: Arc<AtomicBool>,
+    capture_activity: Arc<CaptureActivity>,
+    policy: RealtimeInterpretationPolicy,
+) -> Option<JoinHandle<()>> {
+    let cadence = policy.silence_cadence.clone()?;
+    Some(tokio::spawn(async move {
+        let mut interval = tokio::time::interval(cadence.interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if stop_requested.load(Ordering::SeqCst) {
+                return;
+            }
+            if capture_activity.gap() < cadence.gap_threshold {
+                continue;
+            }
+            let silence = AudioChunk::new(
+                vec![0; policy.input_frame_samples],
+                cadence.sample_rate,
+                cadence.channels,
+            );
+            match input_tx.try_send(silence) {
+                Ok(()) => capture_activity.touch(),
+                Err(mpsc::error::TrySendError::Full(_)) => {}
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    if !stop_requested.load(Ordering::SeqCst) {
+                        reporter.error(RealtimeInterpretationError::Processing(format!(
+                            "{} silence cadence stopped unexpectedly",
+                            policy.input_source_name
+                        )));
+                    }
+                    return;
+                }
+            }
+        }
+    }))
 }
 
 pub(crate) fn try_enqueue_audio_chunk(
@@ -964,6 +1129,39 @@ mod tests {
         assert!(rx.try_recv().is_ok());
         assert_eq!(try_enqueue_audio_chunk(&tx, second, &drops), Ok(()));
         assert_eq!(drops.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn incoming_silence_cadence_injects_one_bounded_frame_after_gap() {
+        let (input_tx, mut input_rx) = mpsc::channel(1);
+        let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let activity = Arc::new(CaptureActivity::new());
+        let mut policy = RealtimeInterpretationPolicy::incoming_spoken();
+        let cadence = policy.silence_cadence.as_mut().unwrap();
+        cadence.gap_threshold = Duration::from_millis(5);
+        cadence.interval = Duration::from_millis(5);
+        let task = spawn_silence_cadence_task(
+            input_tx,
+            RuntimeStopReporter::new(stop_tx),
+            stop_requested.clone(),
+            activity,
+            policy,
+        )
+        .unwrap();
+
+        let chunk = tokio::time::timeout(Duration::from_secs(1), input_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(chunk.sample_rate, 24_000);
+        assert_eq!(chunk.channels, 1);
+        assert_eq!(chunk.data.len(), 4_800);
+        assert!(chunk.data.iter().all(|sample| *sample == 0));
+        assert!(stop_rx.try_recv().is_err());
+        stop_requested.store(true, Ordering::SeqCst);
+        task.await.unwrap();
     }
 
     #[test]
@@ -1250,7 +1448,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn output_health_failure_is_a_terminal_processing_error() {
+    async fn output_health_failure_is_a_terminal_device_error() {
         let state = Arc::new(ContractState::default());
         state.output_closed.store(true, Ordering::SeqCst);
         let (_command_tx, command_rx) = mpsc::channel(1);
@@ -1271,14 +1469,14 @@ mod tests {
 
         assert!(matches!(
             stop,
-            RealtimeInterpretationStop::Error(RealtimeInterpretationError::Processing(message))
-                if message.contains("virtual microphone output stream stopped unexpectedly")
+            RealtimeInterpretationStop::Error(RealtimeInterpretationError::OutputDeviceLost(message))
+                if message.contains("virtual microphone output failed")
         ));
         output_task.await.unwrap();
     }
 
     #[tokio::test]
-    async fn repeated_output_drops_are_a_terminal_processing_error() {
+    async fn repeated_output_drops_are_a_terminal_overload_error() {
         let state = Arc::new(ContractState::default());
         state
             .output_should_drop_oldest
@@ -1309,7 +1507,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             stop,
-            RealtimeInterpretationStop::Error(RealtimeInterpretationError::Processing(message))
+            RealtimeInterpretationStop::Error(RealtimeInterpretationError::OutputOverload(message))
                 if message.contains("repeatedly overflowed")
         ));
         output_task.await.unwrap();
@@ -1355,7 +1553,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             stop,
-            RealtimeInterpretationStop::Error(RealtimeInterpretationError::Processing(message))
+            RealtimeInterpretationStop::Error(RealtimeInterpretationError::InputDeviceLost(message))
                 if message.contains("Microphone capture failed") && message.contains("device lost")
         ));
         assert!(stop_rx.try_recv().is_err());

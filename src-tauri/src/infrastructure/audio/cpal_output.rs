@@ -758,6 +758,13 @@ impl TranslationAudioOutput for CpalAudioOutput {
         self.is_open && self.ensure_stream_healthy().is_ok()
     }
 
+    fn health_check(&self) -> AudioOutputResult<()> {
+        if !self.is_open {
+            return Err(AudioOutputError::Closed);
+        }
+        self.ensure_stream_healthy()
+    }
+
     fn device_name(&self) -> Option<String> {
         self.device_name.clone()
     }

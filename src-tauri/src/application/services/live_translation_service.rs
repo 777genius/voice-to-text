@@ -128,6 +128,11 @@ impl From<RealtimeInterpretationError> for LiveTranslationError {
             RealtimeInterpretationError::Connection(message) => Self::Connection(message),
             RealtimeInterpretationError::Timeout(message) => Self::Timeout(message),
             RealtimeInterpretationError::Processing(message) => Self::Processing(message),
+            RealtimeInterpretationError::Protocol(message) => Self::Processing(message),
+            RealtimeInterpretationError::InputDeviceLost(message)
+            | RealtimeInterpretationError::OutputDeviceLost(message)
+            | RealtimeInterpretationError::InputOverload(message)
+            | RealtimeInterpretationError::OutputOverload(message) => Self::Processing(message),
         }
     }
 }

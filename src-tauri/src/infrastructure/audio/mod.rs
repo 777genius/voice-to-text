@@ -4,6 +4,7 @@ mod cpal_output;
 #[cfg(any(target_os = "linux", test))]
 mod linux_pulse;
 mod local_playback_factory;
+mod macos_spoken_translation_capability;
 #[cfg(target_os = "macos")]
 mod macos_system_audio_capture;
 mod mock_capture;
@@ -20,6 +21,7 @@ pub use cpal_output::{
     WINDOWS_VB_CABLE_OUTPUT_DEVICE_NAMES,
 };
 pub use local_playback_factory::DefaultLocalPlaybackOutputFactory;
+pub use macos_spoken_translation_capability::DefaultSpokenTranslationCapability;
 #[cfg(target_os = "macos")]
 pub use macos_system_audio_capture::MacosSystemAudioCapture;
 pub use mock_capture::MockAudioCapture;
