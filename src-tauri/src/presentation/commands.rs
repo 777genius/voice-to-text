@@ -1,6 +1,6 @@
 use serde::Serialize;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
@@ -52,11 +52,18 @@ fn error_details_from_stt(err: &SttError) -> Option<TranscriptionErrorDetailsPay
 }
 
 const TRANSCRIPT_EVENT_QUEUE_CAPACITY: usize = 128;
+const MAX_TRANSCRIPT_EVENT_TEXT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug)]
 enum TranscriptEvent {
     Partial(Transcription),
     Final(Transcription),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinalTranscriptEnqueueError {
+    QueueFull,
+    TextTooLarge { bytes: usize },
 }
 
 #[derive(Debug)]
@@ -74,6 +81,9 @@ impl TranscriptEventQueue {
     }
 
     fn push_partial(&mut self, transcription: Transcription) -> bool {
+        if transcription.text.len() > MAX_TRANSCRIPT_EVENT_TEXT_BYTES {
+            return false;
+        }
         if self.items.len() < self.capacity {
             self.items
                 .push_back(TranscriptEvent::Partial(transcription));
@@ -90,7 +100,15 @@ impl TranscriptEventQueue {
         false
     }
 
-    fn push_final(&mut self, transcription: Transcription) {
+    fn push_final(
+        &mut self,
+        transcription: Transcription,
+    ) -> Result<(), FinalTranscriptEnqueueError> {
+        if transcription.text.len() > MAX_TRANSCRIPT_EVENT_TEXT_BYTES {
+            return Err(FinalTranscriptEnqueueError::TextTooLarge {
+                bytes: transcription.text.len(),
+            });
+        }
         if self.items.len() >= self.capacity {
             if let Some(index) = self
                 .items
@@ -98,10 +116,13 @@ impl TranscriptEventQueue {
                 .position(|event| matches!(event, TranscriptEvent::Partial(_)))
             {
                 self.items.remove(index);
+            } else {
+                return Err(FinalTranscriptEnqueueError::QueueFull);
             }
         }
 
         self.items.push_back(TranscriptEvent::Final(transcription));
+        Ok(())
     }
 
     fn pop_front(&mut self) -> Option<TranscriptEvent> {
@@ -184,12 +205,15 @@ impl TranscriptEventSender {
         accepted
     }
 
-    fn send_final(&self, transcription: Transcription) {
-        {
+    fn send_final(&self, transcription: Transcription) -> Result<(), FinalTranscriptEnqueueError> {
+        let result = {
             let mut queue = lock_transcript_event_queue(&self.inner);
-            queue.push_final(transcription);
+            queue.push_final(transcription)
+        };
+        if result.is_ok() {
+            self.inner.notify.notify_one();
         }
-        self.inner.notify.notify_one();
+        result
     }
 }
 
@@ -273,6 +297,39 @@ async fn clear_dictation_failure_state_if_current(state: &AppState, session_id: 
             *active_mode = None;
         }
     }
+}
+
+fn dispatch_transcription_error(app_handle: AppHandle, session_id: u64, err: SttError) {
+    tokio::spawn(async move {
+        let error_type = classify_transcription_error_type_from_stt(&err);
+        let error_details = error_details_from_stt(&err);
+        let error = err.to_string();
+
+        log::error!("STT error occurred: {} (type: {})", error, error_type);
+        let payload = TranscriptionErrorPayload {
+            session_id,
+            error,
+            error_type,
+            error_details,
+        };
+        if let Err(e) = app_handle.emit(EVENT_TRANSCRIPTION_ERROR, payload) {
+            log::error!("Failed to emit transcription error event: {}", e);
+        }
+
+        let _ = app_handle.emit(
+            EVENT_RECORDING_STATUS,
+            RecordingStatusPayload {
+                session_id,
+                status: RecordingStatus::Error,
+                stopped_via_hotkey: false,
+                mode: None,
+            },
+        );
+
+        if let Some(state) = app_handle.try_state::<AppState>() {
+            clear_dictation_failure_state_if_current(state.inner(), session_id).await;
+        }
+    });
 }
 
 async fn clear_live_translation_failure_state_if_current(state: &AppState, session_id: u64) {
@@ -1883,6 +1940,7 @@ pub async fn start_recording(
     // раньше сегмента и собирал текст с перестановкой/дублированием. Поэтому все
     // события идут через один канал и обрабатываются одной задачей последовательно.
     let (transcript_tx, transcript_rx) = transcript_event_channel(TRANSCRIPT_EVENT_QUEUE_CAPACITY);
+    let transcript_overflow_reported = Arc::new(AtomicBool::new(false));
 
     let app_handle_transcripts = app_handle.clone();
     let state_partial = state.partial_transcription.clone();
@@ -1939,8 +1997,29 @@ pub async fn start_recording(
 
     // Callback for final transcription
     let final_tx = transcript_tx;
+    let final_overflow_reported = transcript_overflow_reported.clone();
+    let final_overflow_app_handle = app_handle.clone();
     let on_final = Arc::new(move |transcription: crate::domain::Transcription| {
-        final_tx.send_final(transcription);
+        let error_message = match final_tx.send_final(transcription) {
+            Ok(()) => return,
+            Err(FinalTranscriptEnqueueError::QueueFull) => {
+                "Transcription event queue is overloaded; recording was stopped to avoid losing final text".to_string()
+            }
+            Err(FinalTranscriptEnqueueError::TextTooLarge { bytes }) => format!(
+                "Transcription segment is too large to process safely ({} bytes, limit {} bytes)",
+                bytes, MAX_TRANSCRIPT_EVENT_TEXT_BYTES
+            ),
+        };
+        if final_overflow_reported
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            dispatch_transcription_error(
+                final_overflow_app_handle.clone(),
+                session_id,
+                SttError::Processing(error_message),
+            );
+        }
     });
 
     let app_handle_level = app_handle.clone();
@@ -1969,41 +2048,7 @@ pub async fn start_recording(
 
     // Callback for error handling
     let on_error = Arc::new(move |err: SttError| {
-        let app_handle = app_handle_error.clone();
-
-        tokio::spawn(async move {
-            let error_type = classify_transcription_error_type_from_stt(&err);
-            let error_details = error_details_from_stt(&err);
-            let error = err.to_string();
-
-            log::error!("STT error occurred: {} (type: {})", error, error_type);
-
-            // Emit error event to frontend
-            let payload = TranscriptionErrorPayload {
-                session_id,
-                error,
-                error_type,
-                error_details,
-            };
-            if let Err(e) = app_handle.emit(EVENT_TRANSCRIPTION_ERROR, payload) {
-                log::error!("Failed to emit transcription error event: {}", e);
-            }
-
-            // Emit Error status
-            let _ = app_handle.emit(
-                EVENT_RECORDING_STATUS,
-                RecordingStatusPayload {
-                    session_id,
-                    status: RecordingStatus::Error,
-                    stopped_via_hotkey: false,
-                    mode: None,
-                },
-            );
-
-            if let Some(state) = app_handle.try_state::<AppState>() {
-                clear_dictation_failure_state_if_current(state.inner(), session_id).await;
-            }
-        });
+        dispatch_transcription_error(app_handle_error.clone(), session_id, err);
     });
 
     let app_handle_quality = app_handle.clone();
@@ -7703,7 +7748,7 @@ mod tests {
 
         assert!(tx.send_partial(partial_text("p1")));
         assert!(tx.send_partial(partial_text("p2")));
-        tx.send_final(final_text("f1"));
+        tx.send_final(final_text("f1")).unwrap();
         drop(tx);
 
         assert_eq!(
@@ -7717,7 +7762,7 @@ mod tests {
         let (tx, rx) = transcript_event_channel(2);
 
         assert!(tx.send_partial(partial_text("p1")));
-        tx.send_final(final_text("f1"));
+        tx.send_final(final_text("f1")).unwrap();
         assert!(!tx.send_partial(partial_text("p2")));
         drop(tx);
 
@@ -7728,16 +7773,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transcript_event_queue_preserves_all_final_events_even_when_capacity_full() {
+    async fn transcript_event_queue_rejects_final_when_only_finals_fill_capacity() {
         let (tx, rx) = transcript_event_channel(1);
 
-        tx.send_final(final_text("f1"));
-        tx.send_final(final_text("f2"));
+        assert_eq!(tx.send_final(final_text("f1")), Ok(()));
+        assert_eq!(
+            tx.send_final(final_text("f2")),
+            Err(FinalTranscriptEnqueueError::QueueFull)
+        );
         drop(tx);
 
         assert_eq!(
             drain_transcript_events(&rx).await,
-            vec![(true, "f1".to_string()), (true, "f2".to_string())]
+            vec![(true, "f1".to_string())]
         );
+    }
+
+    #[tokio::test]
+    async fn transcript_event_queue_rejects_oversized_text_before_storage() {
+        let (tx, rx) = transcript_event_channel(2);
+        let oversized = "x".repeat(MAX_TRANSCRIPT_EVENT_TEXT_BYTES + 1);
+
+        assert!(!tx.send_partial(partial_text(&oversized)));
+        assert_eq!(
+            tx.send_final(final_text(&oversized)),
+            Err(FinalTranscriptEnqueueError::TextTooLarge {
+                bytes: oversized.len()
+            })
+        );
+        drop(tx);
+
+        assert!(drain_transcript_events(&rx).await.is_empty());
     }
 }
