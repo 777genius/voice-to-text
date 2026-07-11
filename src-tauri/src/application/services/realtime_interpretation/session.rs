@@ -417,6 +417,19 @@ pub struct RealtimeInterpretationSession {
     diagnostics: Arc<RuntimeDiagnostics>,
 }
 
+#[derive(Clone)]
+pub struct RealtimeInterpretationOutputControl {
+    output_tx: mpsc::Sender<OutputCommand>,
+    timeout: Duration,
+    output_route_name: &'static str,
+}
+
+impl RealtimeInterpretationOutputControl {
+    pub async fn set_gain(&self, gain: f32) -> Result<(), RealtimeInterpretationError> {
+        set_output_gain(&self.output_tx, self.timeout, self.output_route_name, gain).await
+    }
+}
+
 impl RealtimeInterpretationSession {
     pub async fn start(
         config: RealtimeInterpretationConfig,
@@ -530,40 +543,12 @@ impl RealtimeInterpretationSession {
         self.session_id
     }
 
-    pub async fn set_output_gain(&self, gain: f32) -> Result<(), RealtimeInterpretationError> {
-        let (done_tx, done_rx) = oneshot::channel();
-        tokio::time::timeout(
-            self.policy.worker_stop_timeout,
-            self.output_tx.send(OutputCommand::SetGain {
-                gain,
-                done: done_tx,
-            }),
-        )
-        .await
-        .map_err(|_| {
-            RealtimeInterpretationError::Timeout(
-                "timed out while updating translated playback volume".into(),
-            )
-        })?
-        .map_err(|_| {
-            RealtimeInterpretationError::OutputDeviceLost(
-                "local playback worker is no longer available".into(),
-            )
-        })?;
-
-        tokio::time::timeout(self.policy.worker_stop_timeout, done_rx)
-            .await
-            .map_err(|_| {
-                RealtimeInterpretationError::Timeout(
-                    "timed out while applying translated playback volume".into(),
-                )
-            })?
-            .map_err(|_| {
-                RealtimeInterpretationError::OutputDeviceLost(
-                    "local playback worker stopped while applying volume".into(),
-                )
-            })?
-            .map_err(|error| map_output_error(error, self.policy.output_route_name))
+    pub fn output_control(&self) -> RealtimeInterpretationOutputControl {
+        RealtimeInterpretationOutputControl {
+            output_tx: self.output_tx.clone(),
+            timeout: self.policy.worker_stop_timeout,
+            output_route_name: self.policy.output_route_name,
+        }
     }
 
     pub async fn shutdown(mut self, mode: RealtimeInterpretationShutdown) {
@@ -798,6 +783,47 @@ impl Drop for RealtimeInterpretationSession {
         }
         self.diagnostics.report("drop", 0);
     }
+}
+
+async fn set_output_gain(
+    output_tx: &mpsc::Sender<OutputCommand>,
+    timeout: Duration,
+    output_route_name: &'static str,
+    gain: f32,
+) -> Result<(), RealtimeInterpretationError> {
+    let (done_tx, done_rx) = oneshot::channel();
+    tokio::time::timeout(
+        timeout,
+        output_tx.send(OutputCommand::SetGain {
+            gain,
+            done: done_tx,
+        }),
+    )
+    .await
+    .map_err(|_| {
+        RealtimeInterpretationError::Timeout(
+            "timed out while updating translated playback volume".into(),
+        )
+    })?
+    .map_err(|_| {
+        RealtimeInterpretationError::OutputDeviceLost(
+            "local playback worker is no longer available".into(),
+        )
+    })?;
+
+    tokio::time::timeout(timeout, done_rx)
+        .await
+        .map_err(|_| {
+            RealtimeInterpretationError::Timeout(
+                "timed out while applying translated playback volume".into(),
+            )
+        })?
+        .map_err(|_| {
+            RealtimeInterpretationError::OutputDeviceLost(
+                "local playback worker stopped while applying volume".into(),
+            )
+        })?
+        .map_err(|error| map_output_error(error, output_route_name))
 }
 
 fn spawn_input_worker(

@@ -1255,7 +1255,7 @@ async fn get_or_create_incoming_translation_facade(
                 crate::application::services::IncomingTranslationFacade::new()
             }
             IncomingTranslationDelivery::TextAndAudio => {
-                crate::application::services::IncomingTranslationFacade::new_spoken()
+                state.incoming_spoken_translation_ports.create_facade()
             }
         });
         *guard = Some(service.clone());
@@ -1268,6 +1268,15 @@ pub async fn start_incoming_translation(
     state: State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<String, String> {
+    let _lifecycle_guard = state.incoming_translation_lifecycle_guard.lock().await;
+    let _audio_start_guard = state.audio_start_guard.lock().await;
+    start_incoming_translation_inner(state.inner(), &app_handle).await
+}
+
+async fn start_incoming_translation_inner(
+    state: &AppState,
+    app_handle: &AppHandle,
+) -> Result<String, String> {
     use crate::application::services::{
         IncomingTranslationCallbacks, IncomingTranslationConfig, IncomingTranslationError,
     };
@@ -1276,15 +1285,10 @@ pub async fn start_incoming_translation(
         EVENT_INCOMING_TRANSLATION_SOURCE_FINAL, EVENT_INCOMING_TRANSLATION_STATUS,
     };
 
-    let _lifecycle_guard = state.incoming_translation_lifecycle_guard.lock().await;
-    let _audio_start_guard = state.audio_start_guard.lock().await;
-
     let app_config = state.config.read().await.clone();
-    let service = get_or_create_incoming_translation_facade(
-        state.inner(),
-        app_config.incoming_translation_delivery,
-    )
-    .await;
+    let service =
+        get_or_create_incoming_translation_facade(state, app_config.incoming_translation_delivery)
+            .await;
     match service.get_status().await {
         RecordingStatus::Idle => {}
         RecordingStatus::Error => {
@@ -1393,9 +1397,15 @@ pub async fn stop_incoming_translation(
     state: State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<String, String> {
-    use crate::presentation::events::EVENT_INCOMING_TRANSLATION_STATUS;
-
     let _lifecycle_guard = state.incoming_translation_lifecycle_guard.lock().await;
+    stop_incoming_translation_inner(state.inner(), &app_handle).await
+}
+
+async fn stop_incoming_translation_inner(
+    state: &AppState,
+    app_handle: &AppHandle,
+) -> Result<String, String> {
+    use crate::presentation::events::EVENT_INCOMING_TRANSLATION_STATUS;
 
     let service = {
         let guard = state.incoming_translation_facade.read().await;
@@ -1432,6 +1442,31 @@ pub async fn stop_incoming_translation(
         },
     );
     Ok("Incoming translation stopped".to_string())
+}
+
+async fn restart_active_incoming_translation_after_delivery_change(
+    state: &AppState,
+    app_handle: &AppHandle,
+) -> Result<(), String> {
+    let _lifecycle_guard = state.incoming_translation_lifecycle_guard.lock().await;
+    let service = {
+        let guard = state.incoming_translation_facade.read().await;
+        guard.as_ref().cloned()
+    };
+    let Some(service) = service else {
+        return Ok(());
+    };
+    if !matches!(
+        service.get_status().await,
+        RecordingStatus::Starting | RecordingStatus::Recording
+    ) {
+        return Ok(());
+    }
+
+    let _audio_start_guard = state.audio_start_guard.lock().await;
+    stop_incoming_translation_inner(state, app_handle).await?;
+    start_incoming_translation_inner(state, app_handle).await?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -1551,35 +1586,15 @@ pub async fn get_incoming_spoken_translation_capability(
     state: State<'_, AppState>,
     target_language: Option<String>,
 ) -> Result<IncomingSpokenCapabilityPayload, String> {
-    use crate::domain::{
-        SpokenIncomingCapability, SpokenTranslationCapability, SystemAudioCaptureFactory,
-        SystemAudioCaptureRequest,
-    };
-    use crate::infrastructure::audio::{
-        DefaultPlatformAudioFactory, DefaultSpokenTranslationCapability,
-    };
+    use crate::domain::SpokenIncomingCapability;
 
     let config = state.config.read().await;
     let target_language = target_language
         .map(|language| normalize_translation_target_language(&language, "ru"))
         .unwrap_or_else(|| resolve_incoming_translation_target_language(&config));
-    let mut capability = DefaultSpokenTranslationCapability::new().check(&target_language);
-    if capability == SpokenIncomingCapability::Ready {
-        let request = SystemAudioCaptureRequest::isolated(
-            AudioCaptureTarget::incoming_realtime_translation(),
-        );
-        if let Err(error) =
-            DefaultPlatformAudioFactory::new().preflight_system_audio_capture(request)
-        {
-            capability = match error {
-                AudioError::AccessDenied(_) => SpokenIncomingCapability::PermissionRequired,
-                AudioError::Configuration(_) => SpokenIncomingCapability::UnsafeSelfCapture,
-                AudioError::DeviceNotFound(_)
-                | AudioError::Capture(_)
-                | AudioError::Internal(_) => SpokenIncomingCapability::UnsupportedPlatform,
-            };
-        }
-    }
+    let capability = state
+        .incoming_spoken_translation_ports
+        .check_capability(&target_language);
     Ok(IncomingSpokenCapabilityPayload {
         supported: capability == SpokenIncomingCapability::Ready,
         capability,
@@ -4620,6 +4635,7 @@ pub async fn update_app_config(
     let mut config = state.config.write().await;
     let mut hotkey_changed = false;
     let mut any_changed = false;
+    let mut incoming_delivery_changed = false;
 
     if let Some(sensitivity) = microphone_sensitivity {
         let clamped = sensitivity.min(200); // Ensure 0-200 range
@@ -4783,6 +4799,7 @@ pub async fn update_app_config(
     if let Some(delivery) = incoming_translation_delivery {
         if config.incoming_translation_delivery != delivery {
             config.incoming_translation_delivery = delivery;
+            incoming_delivery_changed = true;
             any_changed = true;
         }
     }
@@ -4884,6 +4901,14 @@ pub async fn update_app_config(
         log::info!("Audio device changed and applied successfully");
     }
 
+    let incoming_restart_error = if incoming_delivery_changed {
+        restart_active_incoming_translation_after_delivery_change(state.inner(), &app_handle)
+            .await
+            .err()
+    } else {
+        None
+    };
+
     // Синхронизация между окнами через state-sync
     let revision = AppState::bump_revision(&state.app_config_revision).await;
     let _ = app_handle.emit(
@@ -4895,6 +4920,12 @@ pub async fn update_app_config(
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
         },
     );
+
+    if let Some(error) = incoming_restart_error {
+        return Err(format!(
+            "Настройки сохранены, но входящий перевод не удалось перезапустить: {error}"
+        ));
+    }
 
     log::info!("App configuration updated and saved successfully");
     Ok(())

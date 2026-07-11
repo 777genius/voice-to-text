@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use crate::domain::{
-    IncomingTranslationDelivery, LocalPlaybackOutputFactory, PlatformAudioFactory,
-    RealtimeTranslationFactory, RecordingStatus, SpokenTranslationCapability, SttProviderFactory,
-    SystemAudioCaptureFactory, TranslationLanguage,
+    AudioCaptureTarget, AudioError, IncomingTranslationDelivery, LocalPlaybackOutputFactory,
+    PlatformAudioFactory, RealtimeTranslationFactory, RecordingStatus, SpokenIncomingCapability,
+    SpokenTranslationCapability, SttProviderFactory, SystemAudioCaptureFactory,
+    SystemAudioCaptureRequest, TranslationLanguage,
 };
 
 use super::{
@@ -22,6 +23,58 @@ enum IncomingRuntime {
 /// Stable application boundary for incoming translation delivery modes.
 pub struct IncomingTranslationFacade {
     runtime: IncomingRuntime,
+}
+
+#[derive(Clone)]
+pub struct IncomingSpokenTranslationPorts {
+    capture_factory: Arc<dyn SystemAudioCaptureFactory>,
+    output_factory: Arc<dyn LocalPlaybackOutputFactory>,
+    translation_factory: Arc<dyn RealtimeTranslationFactory>,
+    capability: Arc<dyn SpokenTranslationCapability>,
+}
+
+impl IncomingSpokenTranslationPorts {
+    pub fn new(
+        capture_factory: Arc<dyn SystemAudioCaptureFactory>,
+        output_factory: Arc<dyn LocalPlaybackOutputFactory>,
+        translation_factory: Arc<dyn RealtimeTranslationFactory>,
+        capability: Arc<dyn SpokenTranslationCapability>,
+    ) -> Self {
+        Self {
+            capture_factory,
+            output_factory,
+            translation_factory,
+            capability,
+        }
+    }
+
+    pub fn create_facade(&self) -> IncomingTranslationFacade {
+        IncomingTranslationFacade::new_spoken_with_factories(
+            self.capture_factory.clone(),
+            self.output_factory.clone(),
+            self.translation_factory.clone(),
+            self.capability.clone(),
+        )
+    }
+
+    pub fn check_capability(&self, target_language: &str) -> SpokenIncomingCapability {
+        let capability = self.capability.check(target_language);
+        if capability != SpokenIncomingCapability::Ready {
+            return capability;
+        }
+
+        let request = SystemAudioCaptureRequest::isolated(
+            AudioCaptureTarget::incoming_realtime_translation(),
+        );
+        match self.capture_factory.preflight_system_audio_capture(request) {
+            Ok(()) => SpokenIncomingCapability::Ready,
+            Err(AudioError::AccessDenied(_)) => SpokenIncomingCapability::PermissionRequired,
+            Err(AudioError::Configuration(_)) => SpokenIncomingCapability::UnsafeSelfCapture,
+            Err(
+                AudioError::DeviceNotFound(_) | AudioError::Capture(_) | AudioError::Internal(_),
+            ) => SpokenIncomingCapability::UnsupportedPlatform,
+        }
+    }
 }
 
 impl Default for IncomingTranslationFacade {
@@ -45,12 +98,6 @@ impl IncomingTranslationFacade {
             runtime: IncomingRuntime::Captions(
                 IncomingCaptionTranslationService::new_with_factories(stt_factory, audio_factory),
             ),
-        }
-    }
-
-    pub fn new_spoken() -> Self {
-        Self {
-            runtime: IncomingRuntime::Spoken(IncomingSpokenTranslationService::new()),
         }
     }
 
@@ -211,7 +258,6 @@ fn map_spoken_error(error: IncomingSpokenTranslationError) -> IncomingTranslatio
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::SttConfig;
 
     #[tokio::test]
     async fn captions_runtime_starts_idle_without_active_session() {
@@ -222,34 +268,11 @@ mod tests {
         assert_eq!(facade.state_snapshot().await, (None, RecordingStatus::Idle));
     }
 
-    #[tokio::test]
-    async fn spoken_runtime_rejects_unsupported_language_before_platform_preflight() {
-        let facade = IncomingTranslationFacade::new_spoken();
-        let mut config = IncomingTranslationConfig::new_with_defaults(SttConfig::default(), 91);
-        config.openai_api_key = "test-key".into();
-        config.target_language = "uk".into();
-        let callbacks = IncomingTranslationCallbacks {
-            on_source_final: Arc::new(|_| {}),
-            on_translation_delta: Arc::new(|_| {}),
-            on_error: Arc::new(|_| {}),
-            on_status: Arc::new(|_| {}),
-        };
-
-        let error = facade.start(config, callbacks).await.unwrap_err();
-
-        assert_eq!(error.error_type(), "unsupported_target_language");
-        assert_eq!(facade.get_status().await, RecordingStatus::Idle);
-    }
-
     #[test]
     fn facade_reports_its_delivery_mode_without_exposing_runtime_details() {
         assert_eq!(
             IncomingTranslationFacade::new().delivery(),
             IncomingTranslationDelivery::CaptionsOnly
-        );
-        assert_eq!(
-            IncomingTranslationFacade::new_spoken().delivery(),
-            IncomingTranslationDelivery::TextAndAudio
         );
     }
 }

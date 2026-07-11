@@ -10,16 +10,11 @@ use crate::domain::{
     SpokenTranslationCapability, SystemAudioCaptureFactory, SystemAudioCaptureRequest,
     TranslationAudioOutputConfig, TranslationAudioOutputError, TranslationLanguage,
 };
-use crate::infrastructure::audio::{
-    DefaultLocalPlaybackOutputFactory, DefaultPlatformAudioFactory,
-    DefaultSpokenTranslationCapability,
-};
-use crate::infrastructure::openai::OpenAIRealtimeTranslationFactory;
 
 use super::{
     spawn_realtime_interpretation_supervisor, RealtimeInterpretationCallbacks,
-    RealtimeInterpretationConfig, RealtimeInterpretationError, RealtimeInterpretationPorts,
-    RealtimeInterpretationSession, RealtimeInterpretationShutdown,
+    RealtimeInterpretationConfig, RealtimeInterpretationError, RealtimeInterpretationOutputControl,
+    RealtimeInterpretationPorts, RealtimeInterpretationSession, RealtimeInterpretationShutdown,
     RealtimeInterpretationStartError, RealtimeInterpretationStop,
 };
 
@@ -159,21 +154,13 @@ pub(super) struct IncomingSpokenTranslationService {
 
 struct RunningIncomingSpokenSession {
     session: RealtimeInterpretationSession,
+    output_control: RealtimeInterpretationOutputControl,
     callbacks: IncomingSpokenTranslationCallbacks,
     playback_gain: f32,
     muted: bool,
 }
 
 impl IncomingSpokenTranslationService {
-    pub(super) fn new() -> Self {
-        Self::new_with_factories(
-            Arc::new(DefaultPlatformAudioFactory::new()),
-            Arc::new(DefaultLocalPlaybackOutputFactory::new()),
-            Arc::new(OpenAIRealtimeTranslationFactory),
-            Arc::new(DefaultSpokenTranslationCapability::new()),
-        )
-    }
-
     pub(super) fn new_with_factories(
         capture_factory: Arc<dyn SystemAudioCaptureFactory>,
         output_factory: Arc<dyn LocalPlaybackOutputFactory>,
@@ -230,20 +217,27 @@ impl IncomingSpokenTranslationService {
         muted: bool,
     ) -> Result<(), IncomingSpokenTranslationError> {
         let _lifecycle_guard = self.lifecycle.lock().await;
-        let mut inner = self.inner.lock().await;
-        let Some(running) = inner.as_mut() else {
-            return Err(IncomingSpokenTranslationError::Configuration(
-                "incoming spoken translation is not active".into(),
-            ));
+        let (output_control, gain) = {
+            let inner = self.inner.lock().await;
+            let Some(running) = inner.as_ref() else {
+                return Err(IncomingSpokenTranslationError::Configuration(
+                    "incoming spoken translation is not active".into(),
+                ));
+            };
+            if !muted && running.playback_gain == 0.0 {
+                return Err(IncomingSpokenTranslationError::Configuration(
+                    "translated playback volume is set to zero".into(),
+                ));
+            }
+            (
+                running.output_control.clone(),
+                if muted { 0.0 } else { running.playback_gain },
+            )
         };
-        if !muted && running.playback_gain == 0.0 {
-            return Err(IncomingSpokenTranslationError::Configuration(
-                "translated playback volume is set to zero".into(),
-            ));
+        output_control.set_gain(gain).await?;
+        if let Some(running) = self.inner.lock().await.as_mut() {
+            running.muted = muted;
         }
-        let gain = if muted { 0.0 } else { running.playback_gain };
-        running.session.set_output_gain(gain).await?;
-        running.muted = muted;
         Ok(())
     }
 
@@ -388,9 +382,11 @@ impl IncomingSpokenTranslationService {
             return Err(map_runtime_stop(stop));
         }
 
+        let output_control = session.output_control();
         let playback_gain = crate::domain::normalize_output_gain(config.playback_gain);
         *self.inner.lock().await = Some(RunningIncomingSpokenSession {
             session,
+            output_control,
             callbacks: callbacks.clone(),
             playback_gain,
             muted: playback_gain == 0.0,

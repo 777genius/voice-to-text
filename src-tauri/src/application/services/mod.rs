@@ -14,7 +14,7 @@ pub use incoming_spoken_translation_service::{
     IncomingPlaybackState, IncomingSpokenTranslationCallbacks, IncomingSpokenTranslationConfig,
     IncomingSpokenTranslationError,
 };
-pub use incoming_translation_facade::IncomingTranslationFacade;
+pub use incoming_translation_facade::{IncomingSpokenTranslationPorts, IncomingTranslationFacade};
 pub use live_translation_service::{
     LiveTranslationCallbacks, LiveTranslationConfig, LiveTranslationError, LiveTranslationService,
 };

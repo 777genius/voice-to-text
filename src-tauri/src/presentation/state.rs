@@ -3,18 +3,33 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::RwLock;
 
-use crate::application::services::{IncomingTranslationFacade, LiveTranslationService};
+use crate::application::services::{
+    IncomingSpokenTranslationPorts, IncomingTranslationFacade, LiveTranslationService,
+};
 use crate::application::TranscriptionService;
 use crate::domain::{
     AppConfig, AudioCapture, AudioError, RecordingMode, Transcription, UiPreferences,
 };
 use crate::infrastructure::{
-    audio::{SystemAudioCapture, VadCaptureWrapper, VadProcessor},
+    audio::{
+        DefaultLocalPlaybackOutputFactory, DefaultPlatformAudioFactory,
+        DefaultSpokenTranslationCapability, SystemAudioCapture, VadCaptureWrapper, VadProcessor,
+    },
     auto_paste::AutoPasteTarget,
+    openai::OpenAIRealtimeTranslationFactory,
     AuthSession, AuthStore, AuthStoreData, AuthUser, ConfigStore, DefaultSttProviderFactory,
 };
 
 const RECORDING_WINDOW_POSITION_SAVE_SUPPRESSION_MS: i64 = 800;
+
+fn default_incoming_spoken_translation_ports() -> IncomingSpokenTranslationPorts {
+    IncomingSpokenTranslationPorts::new(
+        Arc::new(DefaultPlatformAudioFactory::new()),
+        Arc::new(DefaultLocalPlaybackOutputFactory::new()),
+        Arc::new(OpenAIRealtimeTranslationFactory),
+        Arc::new(DefaultSpokenTranslationCapability::new()),
+    )
+}
 
 /// State for microphone testing
 pub struct MicrophoneTestState {
@@ -253,6 +268,9 @@ pub struct AppState {
     /// Separate from active_recording_mode so it can run alongside outgoing translation later.
     pub incoming_translation_facade: Arc<RwLock<Option<Arc<IncomingTranslationFacade>>>>,
 
+    /// Infrastructure dependencies for the macOS spoken incoming pipeline.
+    pub incoming_spoken_translation_ports: IncomingSpokenTranslationPorts,
+
     /// Счётчик сессий входящих субтитров. Отдельный от recording session id.
     pub incoming_translation_session_seq: AtomicU64,
 
@@ -332,6 +350,7 @@ impl AppState {
                     active_recording_mode: Arc::new(RwLock::new(None)),
                     live_translation_service: Arc::new(RwLock::new(None)),
                     incoming_translation_facade: Arc::new(RwLock::new(None)),
+                    incoming_spoken_translation_ports: default_incoming_spoken_translation_ports(),
                     incoming_translation_session_seq: AtomicU64::new(0),
                     recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),
                 };
@@ -407,6 +426,7 @@ impl AppState {
                     active_recording_mode: Arc::new(RwLock::new(None)),
                     live_translation_service: Arc::new(RwLock::new(None)),
                     incoming_translation_facade: Arc::new(RwLock::new(None)),
+                    incoming_spoken_translation_ports: default_incoming_spoken_translation_ports(),
                     incoming_translation_session_seq: AtomicU64::new(0),
                     recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),
                 };
@@ -502,6 +522,7 @@ impl AppState {
             active_recording_mode: Arc::new(RwLock::new(None)),
             live_translation_service: Arc::new(RwLock::new(None)),
             incoming_translation_facade: Arc::new(RwLock::new(None)),
+            incoming_spoken_translation_ports: default_incoming_spoken_translation_ports(),
             incoming_translation_session_seq: AtomicU64::new(0),
             recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),
         }
