@@ -22,20 +22,19 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use futures_util::FutureExt;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 use crate::domain::{
     amplify_i16_samples, microphone_sensitivity_gain, AudioCapture, AudioCaptureTarget, AudioChunk,
-    AudioChunkCallback, AudioConfig, PlatformAudioFactory, RecordingStatus, TranslationAudioOutput,
-    TranslationAudioOutputConfig,
+    AudioChunkCallback, AudioConfig, PlatformAudioFactory, RealtimeTranslationConfig,
+    RealtimeTranslationError, RealtimeTranslationErrorKind, RealtimeTranslationEvent,
+    RealtimeTranslationFactory, RealtimeTranslationSession, RecordingStatus,
+    TranslationAudioOutput, TranslationAudioOutputConfig,
 };
 use crate::infrastructure::audio::DefaultPlatformAudioFactory;
-use crate::infrastructure::openai::{
-    OpenAIErrorKind, OpenAIRealtimeEvent, OpenAIRealtimeTranslationClient, OpenAITranslationError,
-};
+use crate::infrastructure::openai::OpenAIRealtimeTranslationFactory;
 
 use super::audio_spectrum::AudioSpectrumAnalyzer;
 
@@ -124,15 +123,18 @@ impl LiveTranslationError {
     }
 }
 
-impl From<OpenAITranslationError> for LiveTranslationError {
-    fn from(err: OpenAITranslationError) -> Self {
+impl From<RealtimeTranslationError> for LiveTranslationError {
+    fn from(err: RealtimeTranslationError) -> Self {
         let msg = err.to_string();
         match err.kind() {
-            OpenAIErrorKind::Authentication => LiveTranslationError::Authentication(msg),
-            OpenAIErrorKind::RateLimited => LiveTranslationError::RateLimited(msg),
-            OpenAIErrorKind::Connection => LiveTranslationError::Connection(msg),
-            OpenAIErrorKind::Protocol => LiveTranslationError::Processing(msg),
-            OpenAIErrorKind::Internal => LiveTranslationError::Processing(msg),
+            RealtimeTranslationErrorKind::Authentication => {
+                LiveTranslationError::Authentication(msg)
+            }
+            RealtimeTranslationErrorKind::RateLimited => LiveTranslationError::RateLimited(msg),
+            RealtimeTranslationErrorKind::Connection => LiveTranslationError::Connection(msg),
+            RealtimeTranslationErrorKind::Timeout => LiveTranslationError::Timeout(msg),
+            RealtimeTranslationErrorKind::Protocol => LiveTranslationError::Processing(msg),
+            RealtimeTranslationErrorKind::Internal => LiveTranslationError::Processing(msg),
         }
     }
 }
@@ -141,13 +143,13 @@ pub struct LiveTranslationService {
     status: Arc<RwLock<RecordingStatus>>,
     inner: Arc<Mutex<Option<RunningSession>>>,
     audio_factory: Arc<dyn PlatformAudioFactory>,
-    client_factory: Arc<dyn RealtimeTranslationClientFactory>,
+    client_factory: Arc<dyn RealtimeTranslationFactory>,
 }
 
 struct RunningSession {
     capture: Arc<RwLock<Box<dyn AudioCapture>>>,
     output: Arc<RwLock<Box<dyn TranslationAudioOutput>>>,
-    client: Arc<Mutex<Box<dyn RealtimeTranslationClientPort>>>,
+    client: Arc<Mutex<Box<dyn RealtimeTranslationSession>>>,
     forwarder_task: JoinHandle<()>,
     audio_pump_task: JoinHandle<()>,
     stop_requested: Arc<AtomicBool>,
@@ -202,60 +204,6 @@ enum CleanupMode {
     RuntimeFailure,
 }
 
-#[async_trait]
-trait RealtimeTranslationClientPort: Send + Sync {
-    async fn connect(
-        &mut self,
-    ) -> Result<mpsc::Receiver<OpenAIRealtimeEvent>, OpenAITranslationError>;
-    async fn append_input_audio(&self, pcm16: &[i16]) -> Result<(), OpenAITranslationError>;
-    async fn close(&mut self, drain_timeout: Duration) -> Result<(), OpenAITranslationError>;
-    async fn abort(&mut self);
-}
-
-trait RealtimeTranslationClientFactory: Send + Sync {
-    fn create(
-        &self,
-        api_key: String,
-        target_language: String,
-    ) -> Box<dyn RealtimeTranslationClientPort>;
-}
-
-struct OpenAIRealtimeTranslationClientFactory;
-
-impl RealtimeTranslationClientFactory for OpenAIRealtimeTranslationClientFactory {
-    fn create(
-        &self,
-        api_key: String,
-        target_language: String,
-    ) -> Box<dyn RealtimeTranslationClientPort> {
-        Box::new(OpenAIRealtimeTranslationClient::new(
-            api_key,
-            target_language,
-        ))
-    }
-}
-
-#[async_trait]
-impl RealtimeTranslationClientPort for OpenAIRealtimeTranslationClient {
-    async fn connect(
-        &mut self,
-    ) -> Result<mpsc::Receiver<OpenAIRealtimeEvent>, OpenAITranslationError> {
-        OpenAIRealtimeTranslationClient::connect(self).await
-    }
-
-    async fn append_input_audio(&self, pcm16: &[i16]) -> Result<(), OpenAITranslationError> {
-        OpenAIRealtimeTranslationClient::append_input_audio(self, pcm16).await
-    }
-
-    async fn close(&mut self, drain_timeout: Duration) -> Result<(), OpenAITranslationError> {
-        OpenAIRealtimeTranslationClient::close(self, drain_timeout).await
-    }
-
-    async fn abort(&mut self) {
-        OpenAIRealtimeTranslationClient::abort(self).await
-    }
-}
-
 impl Default for LiveTranslationService {
     fn default() -> Self {
         Self::new()
@@ -268,15 +216,12 @@ impl LiveTranslationService {
     }
 
     pub fn new_with_audio_factory(audio_factory: Arc<dyn PlatformAudioFactory>) -> Self {
-        Self::new_with_factories(
-            audio_factory,
-            Arc::new(OpenAIRealtimeTranslationClientFactory),
-        )
+        Self::new_with_factories(audio_factory, Arc::new(OpenAIRealtimeTranslationFactory))
     }
 
     fn new_with_factories(
         audio_factory: Arc<dyn PlatformAudioFactory>,
-        client_factory: Arc<dyn RealtimeTranslationClientFactory>,
+        client_factory: Arc<dyn RealtimeTranslationFactory>,
     ) -> Self {
         Self {
             status: Arc::new(RwLock::new(RecordingStatus::Idle)),
@@ -388,10 +333,10 @@ impl LiveTranslationService {
         }
 
         // 4. OpenAI client connect
-        let mut client = self
-            .client_factory
-            .create(config.openai_api_key.clone(), target_language.clone());
-        let openai_rx = match client.connect().await {
+        let mut client = self.client_factory.create();
+        let translation_config =
+            RealtimeTranslationConfig::new(config.openai_api_key.clone(), target_language.clone());
+        let openai_rx = match client.connect(translation_config).await {
             Ok(rx) => rx,
             Err(e) => {
                 // откатываем output
@@ -601,16 +546,16 @@ fn take_padded_final_openai_input_frame(buffer: &mut Vec<i16>) -> Option<Vec<i16
 }
 
 async fn send_openai_input_frame(
-    client: &Arc<Mutex<Box<dyn RealtimeTranslationClientPort>>>,
+    client: &Arc<Mutex<Box<dyn RealtimeTranslationSession>>>,
     frame: &[i16],
 ) -> Result<(), LiveTranslationError> {
-    let client = client.lock().await;
-    client.append_input_audio(frame).await.map_err(Into::into)
+    let mut client = client.lock().await;
+    client.append_pcm16(frame).await.map_err(Into::into)
 }
 
 async fn run_audio_pump(
     mut mic_rx: mpsc::Receiver<AudioChunk>,
-    client: Arc<Mutex<Box<dyn RealtimeTranslationClientPort>>>,
+    client: Arc<Mutex<Box<dyn RealtimeTranslationSession>>>,
     sensitivity: u8,
     on_spectrum: Arc<dyn Fn([f32; 48]) + Send + Sync>,
     stop_requested: Arc<AtomicBool>,
@@ -696,7 +641,7 @@ fn try_enqueue_mic_chunk(
 }
 
 async fn run_event_forwarder(
-    mut openai_rx: mpsc::Receiver<OpenAIRealtimeEvent>,
+    mut openai_rx: mpsc::Receiver<RealtimeTranslationEvent>,
     output: Arc<RwLock<Box<dyn TranslationAudioOutput>>>,
     on_transcript: Arc<dyn Fn(String) + Send + Sync>,
     runtime_stop_tx: mpsc::UnboundedSender<RuntimeStop>,
@@ -729,10 +674,20 @@ async fn run_event_forwarder(
         };
 
         match ev {
-            OpenAIRealtimeEvent::SessionCreated | OpenAIRealtimeEvent::SessionUpdated => {
-                // лог уже сделан внутри клиента
-            }
-            OpenAIRealtimeEvent::AudioDelta(pcm16) => {
+            RealtimeTranslationEvent::TranslatedAudio {
+                pcm16,
+                sample_rate,
+                channels,
+            } => {
+                if sample_rate != 24_000 || channels != 1 {
+                    let _ = runtime_stop_tx.send(RuntimeStop::Error(
+                        LiveTranslationError::Processing(format!(
+                            "unsupported translated audio format: {} Hz, {} channels",
+                            sample_rate, channels
+                        )),
+                    ));
+                    break;
+                }
                 let out = output.read().await;
                 if let Err(e) = out.enqueue_pcm16(&pcm16).await {
                     log::warn!("LiveTranslationService: output enqueue failed: {}", e);
@@ -742,35 +697,22 @@ async fn run_event_forwarder(
                     break;
                 }
             }
-            OpenAIRealtimeEvent::TranscriptDelta(text) => {
+            RealtimeTranslationEvent::TranslatedTextDelta(text) => {
                 call_live_callback("transcript delta", || on_transcript(text));
             }
-            OpenAIRealtimeEvent::InputTranscriptDelta(text) => {
-                log::debug!("translation source delta: {}", text);
+            RealtimeTranslationEvent::SourceTextDelta(text) => {
+                log::debug!("translation source delta received ({} bytes)", text.len());
             }
-            OpenAIRealtimeEvent::Error {
-                code,
-                message,
-                kind,
-            } => {
-                let kind_err = match kind {
-                    OpenAIErrorKind::Authentication => {
-                        LiveTranslationError::Authentication(message)
-                    }
-                    OpenAIErrorKind::RateLimited => LiveTranslationError::RateLimited(message),
-                    OpenAIErrorKind::Connection => LiveTranslationError::Connection(message),
-                    OpenAIErrorKind::Protocol => LiveTranslationError::Processing(message),
-                    OpenAIErrorKind::Internal => LiveTranslationError::Processing(message),
-                };
+            RealtimeTranslationEvent::Failed(error) => {
+                let kind_err = LiveTranslationError::from(error);
                 log::error!(
-                    "LiveTranslationService: server error (code={:?}): {}",
-                    code,
+                    "LiveTranslationService: realtime translation error: {}",
                     kind_err
                 );
                 let _ = runtime_stop_tx.send(RuntimeStop::Error(kind_err));
                 break;
             }
-            OpenAIRealtimeEvent::Closed => {
+            RealtimeTranslationEvent::Closed => {
                 log::info!("LiveTranslationService: openai session closed");
                 let _ = runtime_stop_tx.send(RuntimeStop::Closed);
                 break;
@@ -858,7 +800,7 @@ async fn cleanup_session(mut session: RunningSession, mode: CleanupMode) {
             let close_res = {
                 let mut client = session.client.lock().await;
                 client
-                    .close(Duration::from_millis(GRACEFUL_CLOSE_TIMEOUT_MS))
+                    .finish(Duration::from_millis(GRACEFUL_CLOSE_TIMEOUT_MS))
                     .await
             };
             if let Err(e) = close_res {
@@ -1242,7 +1184,7 @@ mod tests {
     async fn audio_pump_reports_unexpected_microphone_channel_close() {
         let (mic_tx, mic_rx) = mpsc::channel::<AudioChunk>(1);
         drop(mic_tx);
-        let client: Arc<Mutex<Box<dyn RealtimeTranslationClientPort>>> =
+        let client: Arc<Mutex<Box<dyn RealtimeTranslationSession>>> =
             Arc::new(Mutex::new(Box::new(SyntheticRealtimeClient {
                 state: Arc::new(SyntheticRealtimeState::default()),
             })));
@@ -1269,7 +1211,7 @@ mod tests {
     async fn audio_pump_does_not_report_planned_microphone_channel_close() {
         let (mic_tx, mic_rx) = mpsc::channel::<AudioChunk>(1);
         drop(mic_tx);
-        let client: Arc<Mutex<Box<dyn RealtimeTranslationClientPort>>> =
+        let client: Arc<Mutex<Box<dyn RealtimeTranslationSession>>> =
             Arc::new(Mutex::new(Box::new(SyntheticRealtimeClient {
                 state: Arc::new(SyntheticRealtimeState::default()),
             })));
@@ -1698,21 +1640,16 @@ mod tests {
         fail_append_call: AtomicUsize,
         target_language: StdMutex<Option<String>>,
         received_samples: StdMutex<Vec<i16>>,
-        event_tx: StdMutex<Option<mpsc::Sender<OpenAIRealtimeEvent>>>,
-        runtime_event_after_first_append: StdMutex<Option<OpenAIRealtimeEvent>>,
+        event_tx: StdMutex<Option<mpsc::Sender<RealtimeTranslationEvent>>>,
+        runtime_event_after_first_append: StdMutex<Option<RealtimeTranslationEvent>>,
     }
 
     struct SyntheticRealtimeClientFactory {
         state: Arc<SyntheticRealtimeState>,
     }
 
-    impl RealtimeTranslationClientFactory for SyntheticRealtimeClientFactory {
-        fn create(
-            &self,
-            _api_key: String,
-            target_language: String,
-        ) -> Box<dyn RealtimeTranslationClientPort> {
-            *self.state.target_language.lock().unwrap() = Some(target_language);
+    impl RealtimeTranslationFactory for SyntheticRealtimeClientFactory {
+        fn create(&self) -> Box<dyn RealtimeTranslationSession> {
             Box::new(SyntheticRealtimeClient {
                 state: self.state.clone(),
             })
@@ -1724,19 +1661,19 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl RealtimeTranslationClientPort for SyntheticRealtimeClient {
+    impl RealtimeTranslationSession for SyntheticRealtimeClient {
         async fn connect(
             &mut self,
-        ) -> Result<mpsc::Receiver<OpenAIRealtimeEvent>, OpenAITranslationError> {
+            config: RealtimeTranslationConfig,
+        ) -> Result<mpsc::Receiver<RealtimeTranslationEvent>, RealtimeTranslationError> {
             self.state.connect_calls.fetch_add(1, Ordering::SeqCst);
+            *self.state.target_language.lock().unwrap() = Some(config.target_language);
             let (tx, rx) = mpsc::channel(16);
             *self.state.event_tx.lock().unwrap() = Some(tx.clone());
-            let _ = tx.try_send(OpenAIRealtimeEvent::SessionCreated);
-            let _ = tx.try_send(OpenAIRealtimeEvent::SessionUpdated);
             Ok(rx)
         }
 
-        async fn append_input_audio(&self, pcm16: &[i16]) -> Result<(), OpenAITranslationError> {
+        async fn append_pcm16(&mut self, pcm16: &[i16]) -> Result<(), RealtimeTranslationError> {
             let call = self.state.append_calls.fetch_add(1, Ordering::SeqCst) + 1;
             self.state
                 .received_samples
@@ -1744,7 +1681,7 @@ mod tests {
                 .unwrap()
                 .extend_from_slice(pcm16);
             if self.state.fail_append_call.load(Ordering::SeqCst) == call {
-                return Err(OpenAITranslationError::Connection(
+                return Err(RealtimeTranslationError::Connection(
                     "simulated append failure".to_string(),
                 ));
             }
@@ -1753,10 +1690,16 @@ mod tests {
                 let tx = self.state.event_tx.lock().unwrap().clone();
                 if let Some(tx) = tx {
                     let _ = tx
-                        .send(OpenAIRealtimeEvent::TranscriptDelta("hello ".to_string()))
+                        .send(RealtimeTranslationEvent::TranslatedTextDelta(
+                            "hello ".to_string(),
+                        ))
                         .await;
                     let _ = tx
-                        .send(OpenAIRealtimeEvent::AudioDelta(vec![9_000; 2_400]))
+                        .send(RealtimeTranslationEvent::TranslatedAudio {
+                            pcm16: vec![9_000; 2_400],
+                            sample_rate: 24_000,
+                            channels: 1,
+                        })
                         .await;
                     let runtime_event = {
                         self.state
@@ -1773,22 +1716,31 @@ mod tests {
             Ok(())
         }
 
-        async fn close(&mut self, _drain_timeout: Duration) -> Result<(), OpenAITranslationError> {
+        async fn finish(
+            &mut self,
+            _drain_timeout: Duration,
+        ) -> Result<(), RealtimeTranslationError> {
             self.state.close_calls.fetch_add(1, Ordering::SeqCst);
             if self.state.fail_close.load(Ordering::SeqCst) {
-                return Err(OpenAITranslationError::Connection(
+                return Err(RealtimeTranslationError::Connection(
                     "simulated close failure".to_string(),
                 ));
             }
             let tx = self.state.event_tx.lock().unwrap().clone();
             if let Some(tx) = tx {
                 let _ = tx
-                    .send(OpenAIRealtimeEvent::TranscriptDelta("world".to_string()))
+                    .send(RealtimeTranslationEvent::TranslatedTextDelta(
+                        "world".to_string(),
+                    ))
                     .await;
                 let _ = tx
-                    .send(OpenAIRealtimeEvent::AudioDelta(vec![-9_000; 1_200]))
+                    .send(RealtimeTranslationEvent::TranslatedAudio {
+                        pcm16: vec![-9_000; 1_200],
+                        sample_rate: 24_000,
+                        channels: 1,
+                    })
                     .await;
-                let _ = tx.send(OpenAIRealtimeEvent::Closed).await;
+                let _ = tx.send(RealtimeTranslationEvent::Closed).await;
             }
             Ok(())
         }
@@ -1858,7 +1810,7 @@ mod tests {
             Arc::new(RwLock::new(Box::new(SyntheticTranslationOutput {
                 state: output_state.clone(),
             })));
-        let (openai_tx, openai_rx) = mpsc::channel::<OpenAIRealtimeEvent>(1);
+        let (openai_tx, openai_rx) = mpsc::channel::<RealtimeTranslationEvent>(1);
         let (runtime_stop_tx, mut runtime_stop_rx) = mpsc::unbounded_channel::<RuntimeStop>();
 
         let forwarder_task = tokio::spawn(run_event_forwarder(
@@ -1891,7 +1843,7 @@ mod tests {
             Arc::new(RwLock::new(Box::new(SyntheticTranslationOutput {
                 state: output_state,
             })));
-        let (openai_tx, openai_rx) = mpsc::channel::<OpenAIRealtimeEvent>(1);
+        let (openai_tx, openai_rx) = mpsc::channel::<RealtimeTranslationEvent>(1);
         let (runtime_stop_tx, mut runtime_stop_rx) = mpsc::unbounded_channel::<RuntimeStop>();
         drop(openai_tx);
 
@@ -1920,14 +1872,14 @@ mod tests {
                 callback: None,
             })));
         let realtime_state = Arc::new(SyntheticRealtimeState::default());
-        let client: Arc<Mutex<Box<dyn RealtimeTranslationClientPort>>> =
+        let client: Arc<Mutex<Box<dyn RealtimeTranslationSession>>> =
             Arc::new(Mutex::new(Box::new(SyntheticRealtimeClient {
                 state: realtime_state.clone(),
             })));
 
         let (_runtime_stop_tx, runtime_stop_rx) = mpsc::unbounded_channel::<RuntimeStop>();
         drop(runtime_stop_rx);
-        let (openai_tx, openai_rx) = mpsc::channel::<OpenAIRealtimeEvent>(1);
+        let (openai_tx, openai_rx) = mpsc::channel::<RealtimeTranslationEvent>(1);
         let (forwarder_stop_tx, _forwarder_stop_rx) = mpsc::unbounded_channel::<RuntimeStop>();
         let forwarder_task = tokio::spawn(run_event_forwarder(
             openai_rx,
@@ -1936,7 +1888,11 @@ mod tests {
             forwarder_stop_tx,
         ));
         openai_tx
-            .send(OpenAIRealtimeEvent::AudioDelta(vec![1_000; 480]))
+            .send(RealtimeTranslationEvent::TranslatedAudio {
+                pcm16: vec![1_000; 480],
+                sample_rate: 24_000,
+                channels: 1,
+            })
             .await
             .unwrap();
 
@@ -1991,7 +1947,7 @@ mod tests {
                 callback: None,
             })));
         let realtime_state = Arc::new(SyntheticRealtimeState::default());
-        let client: Arc<Mutex<Box<dyn RealtimeTranslationClientPort>>> =
+        let client: Arc<Mutex<Box<dyn RealtimeTranslationSession>>> =
             Arc::new(Mutex::new(Box::new(SyntheticRealtimeClient {
                 state: realtime_state.clone(),
             })));
@@ -2053,12 +2009,12 @@ mod tests {
                 callback: None,
             })));
         let realtime_state = Arc::new(SyntheticRealtimeState::default());
-        let client: Arc<Mutex<Box<dyn RealtimeTranslationClientPort>>> =
+        let client: Arc<Mutex<Box<dyn RealtimeTranslationSession>>> =
             Arc::new(Mutex::new(Box::new(SyntheticRealtimeClient {
                 state: realtime_state.clone(),
             })));
 
-        let (openai_tx, openai_rx) = mpsc::channel::<OpenAIRealtimeEvent>(1);
+        let (openai_tx, openai_rx) = mpsc::channel::<RealtimeTranslationEvent>(1);
         let (forwarder_stop_tx, _forwarder_stop_rx) = mpsc::unbounded_channel::<RuntimeStop>();
         let forwarder_task = tokio::spawn(run_event_forwarder(
             openai_rx,
@@ -2067,7 +2023,11 @@ mod tests {
             forwarder_stop_tx,
         ));
         openai_tx
-            .send(OpenAIRealtimeEvent::AudioDelta(vec![1_000; 480]))
+            .send(RealtimeTranslationEvent::TranslatedAudio {
+                pcm16: vec![1_000; 480],
+                sample_rate: 24_000,
+                channels: 1,
+            })
             .await
             .unwrap();
 
@@ -2300,7 +2260,7 @@ mod tests {
         *realtime_state
             .runtime_event_after_first_append
             .lock()
-            .unwrap() = Some(OpenAIRealtimeEvent::Closed);
+            .unwrap() = Some(RealtimeTranslationEvent::Closed);
         let capture_started = Arc::new(AtomicBool::new(false));
         let capture_stopped = Arc::new(AtomicBool::new(false));
         let mic_target = Arc::new(StdMutex::new(None));

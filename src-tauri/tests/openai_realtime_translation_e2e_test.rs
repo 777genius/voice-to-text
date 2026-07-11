@@ -11,10 +11,11 @@ use app_lib::application::{
 use app_lib::domain::{
     AudioCapture, AudioCaptureTarget, AudioChunk, AudioChunkCallback, AudioConfig, AudioError,
     AudioResult, PlatformAudioFactory, PlatformAudioSetupState, PlatformAudioSetupStatus,
-    RecordingStatus, TranslationAudioOutput, TranslationAudioOutputResult,
+    RealtimeTranslationConfig, RealtimeTranslationEvent, RecordingStatus, TranslationAudioOutput,
+    TranslationAudioOutputResult,
 };
 use app_lib::infrastructure::audio::{AudioOutputConfig, CpalAudioOutput};
-use app_lib::infrastructure::openai::{OpenAIRealtimeEvent, OpenAIRealtimeTranslationClient};
+use app_lib::infrastructure::openai::OpenAIRealtimeTranslationClient;
 use async_trait::async_trait;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tokio::sync::mpsc;
@@ -481,33 +482,25 @@ impl PlatformAudioFactory for SyntheticMicToBlackholeFactory {
 }
 
 fn drain_openai_events(
-    rx: &mut mpsc::Receiver<OpenAIRealtimeEvent>,
+    rx: &mut mpsc::Receiver<RealtimeTranslationEvent>,
     translated_text: &mut String,
     pending_audio: &mut Vec<Vec<i16>>,
 ) -> Option<String> {
     let mut failure = None;
     while let Ok(event) = rx.try_recv() {
         match event {
-            OpenAIRealtimeEvent::SessionCreated => println!("openai_event=session.created"),
-            OpenAIRealtimeEvent::SessionUpdated => println!("openai_event=session.updated"),
-            OpenAIRealtimeEvent::TranscriptDelta(text) => {
+            RealtimeTranslationEvent::TranslatedTextDelta(text) => {
                 print!("{text}");
                 translated_text.push_str(&text);
             }
-            OpenAIRealtimeEvent::AudioDelta(samples) => pending_audio.push(samples),
-            OpenAIRealtimeEvent::InputTranscriptDelta(text) => {
+            RealtimeTranslationEvent::TranslatedAudio { pcm16, .. } => pending_audio.push(pcm16),
+            RealtimeTranslationEvent::SourceTextDelta(text) => {
                 println!("openai_input_delta={text}");
             }
-            OpenAIRealtimeEvent::Error {
-                message,
-                kind,
-                code,
-            } => {
-                failure = Some(format!(
-                    "OpenAI realtime error ({kind:?}, code={code:?}): {message}"
-                ));
+            RealtimeTranslationEvent::Failed(error) => {
+                failure = Some(format!("OpenAI realtime error: {error}"));
             }
-            OpenAIRealtimeEvent::Closed => {
+            RealtimeTranslationEvent::Closed => {
                 failure = Some("OpenAI realtime session closed while streaming".to_string());
             }
         }
@@ -743,9 +736,9 @@ async fn openai_translation_audio_is_written_to_blackhole() {
     let api_key = load_openai_api_key();
     let source_pcm = generate_russian_pcm24();
 
-    let mut client = OpenAIRealtimeTranslationClient::new(api_key, "en".to_string());
+    let mut client = OpenAIRealtimeTranslationClient::new();
     let mut rx = client
-        .connect()
+        .connect(RealtimeTranslationConfig::new(api_key, "en".to_string()))
         .await
         .expect("must connect OpenAI realtime");
     let mut translated_text = String::new();
@@ -763,14 +756,14 @@ async fn openai_translation_audio_is_written_to_blackhole() {
             panic!("{failure}");
         }
         client
-            .append_input_audio(chunk)
+            .append_pcm16(chunk)
             .await
             .expect("must append input audio");
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
     client
-        .close(Duration::from_secs(6))
+        .finish(Duration::from_secs(6))
         .await
         .expect("must close OpenAI realtime session");
     let _ = drain_openai_events(&mut rx, &mut translated_text, &mut pending_audio);
@@ -805,8 +798,8 @@ async fn openai_translation_audio_is_written_to_blackhole() {
     }
     while let Ok(Some(event)) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
         match event {
-            OpenAIRealtimeEvent::TranscriptDelta(text) => translated_text.push_str(&text),
-            OpenAIRealtimeEvent::AudioDelta(samples) => {
+            RealtimeTranslationEvent::TranslatedTextDelta(text) => translated_text.push_str(&text),
+            RealtimeTranslationEvent::TranslatedAudio { pcm16: samples, .. } => {
                 audio_samples += samples.len();
                 translated_audio_for_stats.extend(
                     samples
@@ -818,8 +811,8 @@ async fn openai_translation_audio_is_written_to_blackhole() {
                     .await
                     .expect("must enqueue translated audio");
             }
-            OpenAIRealtimeEvent::Error { message, kind, .. } => {
-                panic!("OpenAI realtime error ({kind:?}): {message}");
+            RealtimeTranslationEvent::Failed(error) => {
+                panic!("OpenAI realtime error: {error}");
             }
             _ => {}
         }

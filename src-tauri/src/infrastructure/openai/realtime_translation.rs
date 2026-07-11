@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
+use async_trait::async_trait;
 use base64::Engine;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
@@ -32,17 +33,23 @@ use http::HeaderValue;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, Message};
 use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
 
+use crate::domain::{
+    RealtimeTranslationConfig, RealtimeTranslationError, RealtimeTranslationErrorKind,
+    RealtimeTranslationEvent, RealtimeTranslationFactory, RealtimeTranslationSession,
+};
+
 const OPENAI_REALTIME_TRANSLATION_URL: &str =
     "wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate";
 const OPENAI_EVENT_QUEUE_CAPACITY: usize = 128;
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const SESSION_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const WS_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const WS_FORCE_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 const WS_MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
@@ -55,61 +62,6 @@ fn realtime_websocket_config() -> WebSocketConfig {
         max_frame_size: Some(WS_MAX_MESSAGE_BYTES),
         ..WebSocketConfig::default()
     }
-}
-
-/// Категории ошибок OpenAI, на которые UI/Service реагируют по-разному.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpenAIErrorKind {
-    Authentication,
-    RateLimited,
-    Connection,
-    Protocol,
-    Internal,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum OpenAITranslationError {
-    #[error("Authentication: {0}")]
-    Authentication(String),
-    #[error("Rate limited: {0}")]
-    RateLimited(String),
-    #[error("Connection: {0}")]
-    Connection(String),
-    #[error("Protocol: {0}")]
-    Protocol(String),
-    #[error("Internal: {0}")]
-    Internal(String),
-}
-
-impl OpenAITranslationError {
-    pub fn kind(&self) -> OpenAIErrorKind {
-        match self {
-            Self::Authentication(_) => OpenAIErrorKind::Authentication,
-            Self::RateLimited(_) => OpenAIErrorKind::RateLimited,
-            Self::Connection(_) => OpenAIErrorKind::Connection,
-            Self::Protocol(_) => OpenAIErrorKind::Protocol,
-            Self::Internal(_) => OpenAIErrorKind::Internal,
-        }
-    }
-}
-
-/// События, которые клиент кидает выше (LiveTranslationService).
-#[derive(Debug, Clone)]
-pub enum OpenAIRealtimeEvent {
-    SessionCreated,
-    SessionUpdated,
-    /// 24 kHz mono PCM16 переведённое аудио (декодированное из base64).
-    AudioDelta(Vec<i16>),
-    /// Target-language transcript delta.
-    TranscriptDelta(String),
-    /// Source-language transcript delta (для дебага/логов).
-    InputTranscriptDelta(String),
-    Error {
-        code: Option<String>,
-        message: String,
-        kind: OpenAIErrorKind,
-    },
-    Closed,
 }
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -166,57 +118,59 @@ struct ServerErrorBody {
 /// OpenAI realtime translation client.
 ///
 /// Жизненный цикл:
-/// 1. `new(api_key, target_language)`
-/// 2. `connect()` — открывает WS, отправляет `session.update`, запускает reader task,
-///    возвращает receiver событий.
-/// 3. `append_input_audio()` — отправка mic chunk'ов.
-/// 4. `close(drain_timeout)` — отправляет `session.close`, ждёт `session.closed` или таймаут.
+/// 1. `new()`
+/// 2. `connect(config)` — открывает WS, отправляет `session.update` и ждёт подтверждение.
+/// 3. `append_pcm16()` — отправка input chunk'ов.
+/// 4. `finish(drain_timeout)` — отправляет `session.close`, ждёт `session.closed` или таймаут.
 /// 5. `abort()` — hard cleanup (если connect не успел или мы хотим без drain).
 pub struct OpenAIRealtimeTranslationClient {
-    api_key: String,
-    target_language: String,
+    target_language: Option<String>,
     sink: Arc<Mutex<Option<WsSink>>>,
     reader_task: Option<JoinHandle<()>>,
     /// Канал из reader_task в верхний слой. Receiver отдаётся через connect(); Sender хранится здесь
     /// чтобы close() мог послать synthetic Closed для случая когда WS оборвался без `session.closed`.
-    event_tx: Option<mpsc::Sender<OpenAIRealtimeEvent>>,
+    event_tx: Option<mpsc::Sender<RealtimeTranslationEvent>>,
 }
 
 impl OpenAIRealtimeTranslationClient {
-    pub fn new(api_key: String, target_language: String) -> Self {
+    pub fn new() -> Self {
         Self {
-            api_key,
-            target_language,
+            target_language: None,
             sink: Arc::new(Mutex::new(None)),
             reader_task: None,
             event_tx: None,
         }
     }
 
-    pub fn target_language(&self) -> &str {
-        &self.target_language
+    pub fn target_language(&self) -> Option<&str> {
+        self.target_language.as_deref()
     }
 
-    /// Открывает WebSocket, отправляет `session.update`, запускает reader task.
-    /// Возвращает receiver событий — caller должен читать его в цикле.
+    /// Returns only after OpenAI confirms the configuration with `session.updated`.
     pub async fn connect(
         &mut self,
-    ) -> Result<mpsc::Receiver<OpenAIRealtimeEvent>, OpenAITranslationError> {
-        if self.api_key.trim().is_empty() {
-            return Err(OpenAITranslationError::Authentication(
+        config: RealtimeTranslationConfig,
+    ) -> Result<mpsc::Receiver<RealtimeTranslationEvent>, RealtimeTranslationError> {
+        if config.credential.trim().is_empty() {
+            return Err(RealtimeTranslationError::Authentication(
                 "OPENAI_API_KEY не задан".to_string(),
+            ));
+        }
+        if config.target_language.trim().is_empty() {
+            return Err(RealtimeTranslationError::Protocol(
+                "target language must not be empty".to_string(),
             ));
         }
 
         let mut req = OPENAI_REALTIME_TRANSLATION_URL
             .into_client_request()
-            .map_err(|e| OpenAITranslationError::Internal(format!("invalid url: {}", e)))?;
-        let auth_value = build_authorization_header_value(&self.api_key)?;
+            .map_err(|e| RealtimeTranslationError::Internal(format!("invalid url: {}", e)))?;
+        let auth_value = build_authorization_header_value(&config.credential)?;
         req.headers_mut().insert(AUTHORIZATION, auth_value);
 
         log::info!(
             "Connecting to OpenAI realtime translation: target_language={}",
-            self.target_language
+            config.target_language
         );
 
         let connect = connect_async_with_config(req, Some(realtime_websocket_config()), false);
@@ -227,7 +181,7 @@ impl OpenAIRealtimeTranslationClient {
                 return Err(mapped);
             }
             Err(_) => {
-                return Err(OpenAITranslationError::Connection(format!(
+                return Err(RealtimeTranslationError::Timeout(format!(
                     "WebSocket connect timed out after {} ms",
                     WS_CONNECT_TIMEOUT.as_millis()
                 )));
@@ -236,7 +190,13 @@ impl OpenAIRealtimeTranslationClient {
 
         let (mut sink, source) = ws.split();
 
-        // Отправляем session.update сразу
+        let (tx, rx) = mpsc::channel::<RealtimeTranslationEvent>(OPENAI_EVENT_QUEUE_CAPACITY);
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let reader_tx = tx.clone();
+        let reader_task = tokio::spawn(async move {
+            run_reader(source, reader_tx, ready_tx).await;
+        });
+
         let session_update = json!({
             "type": "session.update",
             "session": {
@@ -246,24 +206,47 @@ impl OpenAIRealtimeTranslationClient {
                         "noise_reduction": { "type": "near_field" }
                     },
                     "output": {
-                        "language": self.target_language
+                        "language": config.target_language
                     }
                 }
             }
         });
-        await_ws_operation(
+        if let Err(error) = await_ws_operation(
             sink.send(Message::Text(session_update.to_string())),
             WS_SEND_TIMEOUT,
             "session.update send",
         )
-        .await?;
+        .await
+        {
+            reader_task.abort();
+            let _ = reader_task.await;
+            return Err(error);
+        }
 
-        // Запускаем reader task
-        let (tx, rx) = mpsc::channel::<OpenAIRealtimeEvent>(OPENAI_EVENT_QUEUE_CAPACITY);
-        let reader_tx = tx.clone();
-        let reader_task = tokio::spawn(async move {
-            run_reader(source, reader_tx).await;
-        });
+        let ready_result = timeout(SESSION_READY_TIMEOUT, ready_rx).await;
+        match ready_result {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(error))) => {
+                reader_task.abort();
+                let _ = reader_task.await;
+                return Err(error);
+            }
+            Ok(Err(_)) => {
+                reader_task.abort();
+                let _ = reader_task.await;
+                return Err(RealtimeTranslationError::Connection(
+                    "OpenAI reader stopped before session.updated".to_string(),
+                ));
+            }
+            Err(_) => {
+                reader_task.abort();
+                let _ = reader_task.await;
+                return Err(RealtimeTranslationError::Timeout(format!(
+                    "session.updated was not received within {} ms",
+                    SESSION_READY_TIMEOUT.as_millis()
+                )));
+            }
+        }
 
         {
             let mut guard = self.sink.lock().await;
@@ -271,12 +254,13 @@ impl OpenAIRealtimeTranslationClient {
         }
         self.event_tx = Some(tx);
         self.reader_task = Some(reader_task);
-        log::info!("OpenAI realtime translation: WebSocket connected, session.update sent");
+        self.target_language = Some(config.target_language);
+        log::info!("OpenAI realtime translation: session.updated confirmed");
         Ok(rx)
     }
 
     /// Отправка чанка PCM16 24 kHz mono. base64 кодирование внутри.
-    pub async fn append_input_audio(&self, pcm16: &[i16]) -> Result<(), OpenAITranslationError> {
+    pub async fn append_pcm16(&mut self, pcm16: &[i16]) -> Result<(), RealtimeTranslationError> {
         if pcm16.is_empty() {
             return Ok(());
         }
@@ -289,7 +273,7 @@ impl OpenAIRealtimeTranslationClient {
 
         let mut guard = self.sink.lock().await;
         let Some(sink) = guard.as_mut() else {
-            return Err(OpenAITranslationError::Connection(
+            return Err(RealtimeTranslationError::Connection(
                 "WebSocket sink не инициализирован".to_string(),
             ));
         };
@@ -303,7 +287,10 @@ impl OpenAIRealtimeTranslationClient {
 
     /// Graceful close: посылаем `session.close`, ждём `session.closed` от сервера до таймаута.
     /// Если таймаут — закрываем WS принудительно и эмитим synthetic Closed event.
-    pub async fn close(&mut self, drain_timeout: Duration) -> Result<(), OpenAITranslationError> {
+    pub async fn finish(
+        &mut self,
+        drain_timeout: Duration,
+    ) -> Result<(), RealtimeTranslationError> {
         // 1. Translation session close. WS Close frame alone can skip the API-level
         // shutdown path and cut the final translated tail.
         {
@@ -356,7 +343,7 @@ impl OpenAIRealtimeTranslationClient {
                     task.abort();
                     let _ = task.await;
                     if let Some(tx) = self.event_tx.as_ref() {
-                        let _ = tx.try_send(OpenAIRealtimeEvent::Closed);
+                        let _ = tx.try_send(RealtimeTranslationEvent::Closed);
                     }
                 }
             }
@@ -368,6 +355,7 @@ impl OpenAIRealtimeTranslationClient {
             *guard = None;
         }
         self.event_tx = None;
+        self.target_language = None;
         log::info!("OpenAI realtime translation: closed");
         Ok(())
     }
@@ -381,8 +369,45 @@ impl OpenAIRealtimeTranslationClient {
         let mut guard = self.sink.lock().await;
         *guard = None;
         if let Some(tx) = self.event_tx.take() {
-            let _ = tx.try_send(OpenAIRealtimeEvent::Closed);
+            let _ = tx.try_send(RealtimeTranslationEvent::Closed);
         }
+        self.target_language = None;
+    }
+}
+
+impl Default for OpenAIRealtimeTranslationClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl RealtimeTranslationSession for OpenAIRealtimeTranslationClient {
+    async fn connect(
+        &mut self,
+        config: RealtimeTranslationConfig,
+    ) -> Result<mpsc::Receiver<RealtimeTranslationEvent>, RealtimeTranslationError> {
+        OpenAIRealtimeTranslationClient::connect(self, config).await
+    }
+
+    async fn append_pcm16(&mut self, samples: &[i16]) -> Result<(), RealtimeTranslationError> {
+        OpenAIRealtimeTranslationClient::append_pcm16(self, samples).await
+    }
+
+    async fn finish(&mut self, timeout: Duration) -> Result<(), RealtimeTranslationError> {
+        OpenAIRealtimeTranslationClient::finish(self, timeout).await
+    }
+
+    async fn abort(&mut self) {
+        OpenAIRealtimeTranslationClient::abort(self).await
+    }
+}
+
+pub struct OpenAIRealtimeTranslationFactory;
+
+impl RealtimeTranslationFactory for OpenAIRealtimeTranslationFactory {
+    fn create(&self) -> Box<dyn RealtimeTranslationSession> {
+        Box::new(OpenAIRealtimeTranslationClient::new())
     }
 }
 
@@ -399,18 +424,18 @@ async fn await_ws_operation<T, E, F>(
     operation: F,
     operation_timeout: Duration,
     label: &str,
-) -> Result<T, OpenAITranslationError>
+) -> Result<T, RealtimeTranslationError>
 where
     F: Future<Output = Result<T, E>>,
     E: std::fmt::Display,
 {
     match timeout(operation_timeout, operation).await {
         Ok(Ok(value)) => Ok(value),
-        Ok(Err(err)) => Err(OpenAITranslationError::Connection(format!(
+        Ok(Err(err)) => Err(RealtimeTranslationError::Connection(format!(
             "{} failed: {}",
             label, err
         ))),
-        Err(_) => Err(OpenAITranslationError::Connection(format!(
+        Err(_) => Err(RealtimeTranslationError::Timeout(format!(
             "{} timed out after {} ms",
             label,
             operation_timeout.as_millis()
@@ -418,38 +443,76 @@ where
     }
 }
 
-fn map_connect_error(err: &tokio_tungstenite::tungstenite::Error) -> OpenAITranslationError {
+fn map_connect_error(err: &tokio_tungstenite::tungstenite::Error) -> RealtimeTranslationError {
     use tokio_tungstenite::tungstenite::Error as E;
     match err {
         E::Http(resp) => {
             let status = resp.status();
             let msg = format!("HTTP {} during WS handshake", status);
             if status.as_u16() == 401 || status.as_u16() == 403 {
-                OpenAITranslationError::Authentication(msg)
+                RealtimeTranslationError::Authentication(msg)
             } else if status.as_u16() == 429 {
-                OpenAITranslationError::RateLimited(msg)
+                RealtimeTranslationError::RateLimited(msg)
             } else {
-                OpenAITranslationError::Connection(msg)
+                RealtimeTranslationError::Connection(msg)
             }
         }
-        E::Io(io) => OpenAITranslationError::Connection(io.to_string()),
-        E::Tls(t) => OpenAITranslationError::Connection(t.to_string()),
-        E::Url(u) => OpenAITranslationError::Internal(u.to_string()),
-        E::HttpFormat(hf) => OpenAITranslationError::Internal(hf.to_string()),
-        other => OpenAITranslationError::Connection(other.to_string()),
+        E::Io(io) => RealtimeTranslationError::Connection(io.to_string()),
+        E::Tls(t) => RealtimeTranslationError::Connection(t.to_string()),
+        E::Url(u) => RealtimeTranslationError::Internal(u.to_string()),
+        E::HttpFormat(hf) => RealtimeTranslationError::Internal(hf.to_string()),
+        other => RealtimeTranslationError::Connection(other.to_string()),
     }
 }
 
-fn build_authorization_header_value(api_key: &str) -> Result<HeaderValue, OpenAITranslationError> {
+fn build_authorization_header_value(
+    api_key: &str,
+) -> Result<HeaderValue, RealtimeTranslationError> {
     HeaderValue::from_str(&format!("Bearer {}", api_key.trim()))
-        .map_err(|e| OpenAITranslationError::Internal(format!("invalid auth header: {}", e)))
+        .map_err(|e| RealtimeTranslationError::Internal(format!("invalid auth header: {}", e)))
 }
 
-async fn run_reader(mut source: WsSource, tx: mpsc::Sender<OpenAIRealtimeEvent>) {
+struct ReaderHandshake {
+    sender: Option<oneshot::Sender<Result<(), RealtimeTranslationError>>>,
+    confirmed: bool,
+}
+
+impl ReaderHandshake {
+    fn new(sender: oneshot::Sender<Result<(), RealtimeTranslationError>>) -> Self {
+        Self {
+            sender: Some(sender),
+            confirmed: false,
+        }
+    }
+
+    fn confirm(&mut self) -> bool {
+        if self.confirmed {
+            return true;
+        }
+        self.confirmed = true;
+        self.sender
+            .take()
+            .map(|sender| sender.send(Ok(())).is_ok())
+            .unwrap_or(false)
+    }
+
+    fn fail_startup(&mut self, error: RealtimeTranslationError) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(Err(error));
+        }
+    }
+}
+
+async fn run_reader(
+    mut source: WsSource,
+    tx: mpsc::Sender<RealtimeTranslationEvent>,
+    ready_tx: oneshot::Sender<Result<(), RealtimeTranslationError>>,
+) {
+    let mut handshake = ReaderHandshake::new(ready_tx);
     while let Some(next) = source.next().await {
         match next {
             Ok(Message::Text(text)) => {
-                if handle_server_text(&text, &tx).await {
+                if handle_server_text(&text, &tx, &mut handshake).await {
                     return;
                 }
             }
@@ -464,38 +527,80 @@ async fn run_reader(mut source: WsSource, tx: mpsc::Sender<OpenAIRealtimeEvent>)
             }
             Ok(Message::Frame(_)) => {}
             Ok(Message::Close(_)) => {
-                let _ = tx.send(OpenAIRealtimeEvent::Closed).await;
+                close_reader(
+                    &tx,
+                    &mut handshake,
+                    "websocket closed before session.updated",
+                )
+                .await;
                 return;
             }
             Err(e) => {
-                let _ = tx
-                    .send(OpenAIRealtimeEvent::Error {
-                        code: None,
-                        message: format!("ws stream error: {}", e),
-                        kind: OpenAIErrorKind::Connection,
-                    })
-                    .await;
+                fail_reader(
+                    &tx,
+                    &mut handshake,
+                    RealtimeTranslationError::Connection(format!("ws stream error: {}", e)),
+                )
+                .await;
                 return;
             }
         }
     }
-    let _ = tx.send(OpenAIRealtimeEvent::Closed).await;
+    close_reader(
+        &tx,
+        &mut handshake,
+        "websocket ended before session.updated",
+    )
+    .await;
 }
 
 async fn send_reader_event(
-    tx: &mpsc::Sender<OpenAIRealtimeEvent>,
-    event: OpenAIRealtimeEvent,
+    tx: &mpsc::Sender<RealtimeTranslationEvent>,
+    event: RealtimeTranslationEvent,
 ) -> bool {
     tx.send(event).await.is_err()
 }
 
-async fn handle_server_text(text: &str, tx: &mpsc::Sender<OpenAIRealtimeEvent>) -> bool {
+async fn close_reader(
+    tx: &mpsc::Sender<RealtimeTranslationEvent>,
+    handshake: &mut ReaderHandshake,
+    startup_message: &str,
+) {
+    if handshake.confirmed {
+        let _ = tx.send(RealtimeTranslationEvent::Closed).await;
+    } else {
+        handshake.fail_startup(RealtimeTranslationError::Connection(
+            startup_message.to_string(),
+        ));
+    }
+}
+
+async fn fail_reader(
+    tx: &mpsc::Sender<RealtimeTranslationEvent>,
+    handshake: &mut ReaderHandshake,
+    error: RealtimeTranslationError,
+) {
+    if handshake.confirmed {
+        let _ = tx.send(RealtimeTranslationEvent::Failed(error)).await;
+    } else {
+        handshake.fail_startup(error);
+    }
+}
+
+async fn handle_server_text(
+    text: &str,
+    tx: &mpsc::Sender<RealtimeTranslationEvent>,
+    handshake: &mut ReaderHandshake,
+) -> bool {
     match serde_json::from_str::<ServerEvent>(text) {
-        Ok(ServerEvent::SessionCreated { .. }) => {
-            send_reader_event(tx, OpenAIRealtimeEvent::SessionCreated).await
-        }
+        Ok(ServerEvent::SessionCreated { .. }) => false,
         Ok(ServerEvent::SessionUpdated { .. }) => {
-            send_reader_event(tx, OpenAIRealtimeEvent::SessionUpdated).await
+            if handshake.confirm() {
+                false
+            } else {
+                log::debug!("OpenAI realtime translation: readiness receiver was dropped");
+                true
+            }
         }
         Ok(ServerEvent::OutputAudioDelta { delta, audio }) => {
             // Cookbook использует `delta`, но некоторые сборки могут отдавать `audio` —
@@ -505,53 +610,60 @@ async fn handle_server_text(text: &str, tx: &mpsc::Sender<OpenAIRealtimeEvent>) 
                 return false;
             }
             match decode_pcm16_base64_payload(payload) {
-                Ok(pcm16) => send_reader_event(tx, OpenAIRealtimeEvent::AudioDelta(pcm16)).await,
-                Err(message) => {
-                    let _ = send_reader_event(
+                Ok(pcm16) => {
+                    send_reader_event(
                         tx,
-                        OpenAIRealtimeEvent::Error {
-                            code: None,
-                            message,
-                            kind: OpenAIErrorKind::Protocol,
+                        RealtimeTranslationEvent::TranslatedAudio {
+                            pcm16,
+                            sample_rate: 24_000,
+                            channels: 1,
                         },
                     )
-                    .await;
+                    .await
+                }
+                Err(message) => {
+                    fail_reader(tx, handshake, RealtimeTranslationError::Protocol(message)).await;
                     true
                 }
             }
         }
         Ok(ServerEvent::OutputTranscriptDelta { delta }) => {
             if !delta.is_empty() {
-                return send_reader_event(tx, OpenAIRealtimeEvent::TranscriptDelta(delta)).await;
+                return send_reader_event(tx, RealtimeTranslationEvent::TranslatedTextDelta(delta))
+                    .await;
             }
             false
         }
         Ok(ServerEvent::InputTranscriptDelta { delta }) => {
             if !delta.is_empty() {
-                return send_reader_event(tx, OpenAIRealtimeEvent::InputTranscriptDelta(delta))
+                return send_reader_event(tx, RealtimeTranslationEvent::SourceTextDelta(delta))
                     .await;
             }
             false
         }
         Ok(ServerEvent::SessionClosed { .. }) => {
-            let _ = send_reader_event(tx, OpenAIRealtimeEvent::Closed).await;
+            close_reader(
+                tx,
+                handshake,
+                "OpenAI session closed before session.updated",
+            )
+            .await;
             true
         }
         Ok(ServerEvent::Error { error }) => {
             let kind = classify_server_error(&error);
-            let _ = send_reader_event(
-                tx,
-                OpenAIRealtimeEvent::Error {
-                    code: error.code,
-                    message: if error.message.is_empty() {
-                        error.err_type.unwrap_or_else(|| "unknown".to_string())
-                    } else {
-                        error.message
-                    },
-                    kind,
-                },
-            )
-            .await;
+            let message = if error.message.is_empty() {
+                error.err_type.unwrap_or_else(|| "unknown".to_string())
+            } else {
+                error.message
+            };
+            if let Some(code) = error.code.as_deref() {
+                log::warn!(
+                    "OpenAI realtime translation error: code={}",
+                    truncate_for_log(code, 128)
+                );
+            }
+            fail_reader(tx, handshake, error_from_kind(kind, message)).await;
             true
         }
         Ok(ServerEvent::Unknown) => {
@@ -568,15 +680,7 @@ async fn handle_server_text(text: &str, tx: &mpsc::Sender<OpenAIRealtimeEvent>) 
                 e,
                 truncate_for_log(text, 256)
             );
-            let _ = send_reader_event(
-                tx,
-                OpenAIRealtimeEvent::Error {
-                    code: None,
-                    message,
-                    kind: OpenAIErrorKind::Protocol,
-                },
-            )
-            .await;
+            fail_reader(tx, handshake, RealtimeTranslationError::Protocol(message)).await;
             true
         }
     }
@@ -600,7 +704,7 @@ fn decode_pcm16_base64_payload(payload: &str) -> Result<Vec<i16>, String> {
         .collect())
 }
 
-fn classify_server_error(err: &ServerErrorBody) -> OpenAIErrorKind {
+fn classify_server_error(err: &ServerErrorBody) -> RealtimeTranslationErrorKind {
     let code = err.code.as_deref().unwrap_or("");
     let msg = err.message.to_lowercase();
     let ty = err.err_type.as_deref().unwrap_or("");
@@ -611,7 +715,7 @@ fn classify_server_error(err: &ServerErrorBody) -> OpenAIErrorKind {
         || msg.contains("unauthorized")
         || ty.contains("auth")
     {
-        OpenAIErrorKind::Authentication
+        RealtimeTranslationErrorKind::Authentication
     } else if code.contains("rate")
         || msg.contains("rate limit")
         || code.contains("429")
@@ -622,9 +726,25 @@ fn classify_server_error(err: &ServerErrorBody) -> OpenAIErrorKind {
         || ty.contains("rate")
         || ty.contains("quota")
     {
-        OpenAIErrorKind::RateLimited
+        RealtimeTranslationErrorKind::RateLimited
     } else {
-        OpenAIErrorKind::Protocol
+        RealtimeTranslationErrorKind::Protocol
+    }
+}
+
+fn error_from_kind(
+    kind: RealtimeTranslationErrorKind,
+    message: String,
+) -> RealtimeTranslationError {
+    match kind {
+        RealtimeTranslationErrorKind::Authentication => {
+            RealtimeTranslationError::Authentication(message)
+        }
+        RealtimeTranslationErrorKind::RateLimited => RealtimeTranslationError::RateLimited(message),
+        RealtimeTranslationErrorKind::Connection => RealtimeTranslationError::Connection(message),
+        RealtimeTranslationErrorKind::Timeout => RealtimeTranslationError::Timeout(message),
+        RealtimeTranslationErrorKind::Protocol => RealtimeTranslationError::Protocol(message),
+        RealtimeTranslationErrorKind::Internal => RealtimeTranslationError::Internal(message),
     }
 }
 
@@ -754,7 +874,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn websocket_operation_timeout_returns_connection_error() {
+    async fn websocket_operation_timeout_returns_timeout_error() {
         let err = await_ws_operation(
             pending::<Result<(), std::io::Error>>(),
             Duration::from_millis(10),
@@ -765,7 +885,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            OpenAITranslationError::Connection(message)
+            RealtimeTranslationError::Timeout(message)
                 if message.contains("test send timed out after 10 ms")
         ));
     }
@@ -774,7 +894,7 @@ mod tests {
     async fn client_drop_aborts_pending_reader_task() {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
-        let mut client = OpenAIRealtimeTranslationClient::new("test-key".into(), "en".into());
+        let mut client = OpenAIRealtimeTranslationClient::new();
         client.reader_task = Some(tokio::spawn(async move {
             let _drop_signal = ReaderDropSignal(Some(dropped_tx));
             let _ = started_tx.send(());
@@ -792,15 +912,21 @@ mod tests {
 
     #[tokio::test]
     async fn server_event_send_backpressures_when_event_queue_is_full() {
-        let (tx, mut rx) = mpsc::channel::<OpenAIRealtimeEvent>(1);
-        tx.send(OpenAIRealtimeEvent::SessionCreated).await.unwrap();
+        let (tx, mut rx) = mpsc::channel::<RealtimeTranslationEvent>(1);
+        tx.send(RealtimeTranslationEvent::SourceTextDelta("held".into()))
+            .await
+            .unwrap();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let mut handshake = ReaderHandshake::new(ready_tx);
+        assert!(handshake.confirm());
+        ready_rx.await.unwrap().unwrap();
 
         let audio = base64::engine::general_purpose::STANDARD.encode(1_i16.to_le_bytes());
         let raw = format!(
             r#"{{"type":"session.output_audio.delta","delta":"{}"}}"#,
             audio
         );
-        let task = tokio::spawn(async move { handle_server_text(&raw, &tx).await });
+        let task = tokio::spawn(async move { handle_server_text(&raw, &tx, &mut handshake).await });
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
@@ -810,7 +936,7 @@ mod tests {
 
         assert!(matches!(
             rx.recv().await,
-            Some(OpenAIRealtimeEvent::SessionCreated)
+            Some(RealtimeTranslationEvent::SourceTextDelta(text)) if text == "held"
         ));
         let should_stop = tokio::time::timeout(Duration::from_secs(1), task)
             .await
@@ -820,65 +946,207 @@ mod tests {
 
         assert!(matches!(
             rx.recv().await,
-            Some(OpenAIRealtimeEvent::AudioDelta(samples)) if samples == vec![1]
+            Some(RealtimeTranslationEvent::TranslatedAudio {
+                pcm16,
+                sample_rate: 24_000,
+                channels: 1,
+            }) if pcm16 == vec![1]
         ));
     }
 
     #[tokio::test]
     async fn server_audio_delta_with_odd_pcm_byte_count_emits_protocol_error() {
-        let (tx, mut rx) = mpsc::channel::<OpenAIRealtimeEvent>(1);
+        let (tx, mut rx) = mpsc::channel::<RealtimeTranslationEvent>(1);
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let mut handshake = ReaderHandshake::new(ready_tx);
+        assert!(handshake.confirm());
+        ready_rx.await.unwrap().unwrap();
         let audio = base64::engine::general_purpose::STANDARD.encode([1_u8, 2, 3]);
         let raw = format!(
             r#"{{"type":"session.output_audio.delta","delta":"{}"}}"#,
             audio
         );
 
-        let should_stop = handle_server_text(&raw, &tx).await;
+        let should_stop = handle_server_text(&raw, &tx, &mut handshake).await;
 
         assert!(should_stop);
         assert!(matches!(
             rx.recv().await,
-            Some(OpenAIRealtimeEvent::Error {
-                kind: OpenAIErrorKind::Protocol,
-                message,
-                ..
-            }) if message.contains("odd byte length: 3")
+            Some(RealtimeTranslationEvent::Failed(
+                RealtimeTranslationError::Protocol(message)
+            )) if message.contains("odd byte length: 3")
         ));
     }
 
     #[tokio::test]
     async fn malformed_server_event_emits_protocol_error() {
-        let (tx, mut rx) = mpsc::channel::<OpenAIRealtimeEvent>(1);
+        let (tx, mut rx) = mpsc::channel::<RealtimeTranslationEvent>(1);
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let mut handshake = ReaderHandshake::new(ready_tx);
+        assert!(handshake.confirm());
+        ready_rx.await.unwrap().unwrap();
 
-        let should_stop = handle_server_text(r#"{"event":"missing type"}"#, &tx).await;
+        let should_stop =
+            handle_server_text(r#"{"event":"missing type"}"#, &tx, &mut handshake).await;
 
         assert!(should_stop);
         assert!(matches!(
             rx.recv().await,
-            Some(OpenAIRealtimeEvent::Error {
-                kind: OpenAIErrorKind::Protocol,
-                message,
-                ..
-            }) if message.contains("invalid OpenAI realtime server event")
+            Some(RealtimeTranslationEvent::Failed(
+                RealtimeTranslationError::Protocol(message)
+            )) if message.contains("invalid OpenAI realtime server event")
         ));
     }
 
     #[tokio::test]
     async fn server_error_event_stops_reader_after_emitting_error() {
-        let (tx, mut rx) = mpsc::channel::<OpenAIRealtimeEvent>(1);
+        let (tx, mut rx) = mpsc::channel::<RealtimeTranslationEvent>(1);
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let mut handshake = ReaderHandshake::new(ready_tx);
+        assert!(handshake.confirm());
+        ready_rx.await.unwrap().unwrap();
         let raw = r#"{"type":"error","error":{"code":"invalid_api_key","message":"bad key","type":"auth"}}"#;
 
-        let should_stop = handle_server_text(raw, &tx).await;
+        let should_stop = handle_server_text(raw, &tx, &mut handshake).await;
 
         assert!(should_stop);
         assert!(matches!(
             rx.recv().await,
-            Some(OpenAIRealtimeEvent::Error {
-                kind: OpenAIErrorKind::Authentication,
-                code,
-                message,
-            }) if code.as_deref() == Some("invalid_api_key") && message == "bad key"
+            Some(RealtimeTranslationEvent::Failed(
+                RealtimeTranslationError::Authentication(message)
+            )) if message == "bad key"
         ));
+    }
+
+    #[tokio::test]
+    async fn session_created_does_not_confirm_readiness_or_emit_public_event() {
+        let (tx, mut rx) = mpsc::channel::<RealtimeTranslationEvent>(1);
+        let (ready_tx, mut ready_rx) = oneshot::channel();
+        let mut handshake = ReaderHandshake::new(ready_tx);
+
+        let should_stop =
+            handle_server_text(r#"{"type":"session.created"}"#, &tx, &mut handshake).await;
+
+        assert!(!should_stop);
+        assert!(matches!(
+            ready_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn session_updated_confirms_readiness_without_public_handshake_event() {
+        let (tx, mut rx) = mpsc::channel::<RealtimeTranslationEvent>(1);
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let mut handshake = ReaderHandshake::new(ready_tx);
+
+        let should_stop =
+            handle_server_text(r#"{"type":"session.updated"}"#, &tx, &mut handshake).await;
+
+        assert!(!should_stop);
+        ready_rx.await.unwrap().unwrap();
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn confirmed_server_events_map_to_neutral_runtime_contract() {
+        let (tx, mut rx) = mpsc::channel::<RealtimeTranslationEvent>(4);
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let mut handshake = ReaderHandshake::new(ready_tx);
+        assert!(handshake.confirm());
+        ready_rx.await.unwrap().unwrap();
+        let audio = base64::engine::general_purpose::STANDARD.encode(42_i16.to_le_bytes());
+
+        assert!(
+            !handle_server_text(
+                r#"{"type":"session.output_transcript.delta","delta":"hello"}"#,
+                &tx,
+                &mut handshake,
+            )
+            .await
+        );
+        assert!(
+            !handle_server_text(
+                r#"{"type":"session.input_transcript.delta","delta":"hola"}"#,
+                &tx,
+                &mut handshake,
+            )
+            .await
+        );
+        assert!(
+            !handle_server_text(
+                &format!(
+                    r#"{{"type":"session.output_audio.delta","delta":"{}"}}"#,
+                    audio
+                ),
+                &tx,
+                &mut handshake,
+            )
+            .await
+        );
+        assert!(
+            !handle_server_text(
+                r#"{"type":"future.event","value":"ignored"}"#,
+                &tx,
+                &mut handshake,
+            )
+            .await
+        );
+
+        assert_eq!(
+            rx.recv().await,
+            Some(RealtimeTranslationEvent::TranslatedTextDelta(
+                "hello".into()
+            ))
+        );
+        assert_eq!(
+            rx.recv().await,
+            Some(RealtimeTranslationEvent::SourceTextDelta("hola".into()))
+        );
+        assert_eq!(
+            rx.recv().await,
+            Some(RealtimeTranslationEvent::TranslatedAudio {
+                pcm16: vec![42],
+                sample_rate: 24_000,
+                channels: 1,
+            })
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn close_before_session_updated_is_startup_failure_not_runtime_event() {
+        let (tx, mut rx) = mpsc::channel::<RealtimeTranslationEvent>(1);
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let mut handshake = ReaderHandshake::new(ready_tx);
+
+        close_reader(&tx, &mut handshake, "closed during startup").await;
+
+        assert!(matches!(
+            ready_rx.await.unwrap(),
+            Err(RealtimeTranslationError::Connection(message))
+                if message == "closed during startup"
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn server_error_before_session_updated_is_typed_startup_failure() {
+        let (tx, mut rx) = mpsc::channel::<RealtimeTranslationEvent>(1);
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let mut handshake = ReaderHandshake::new(ready_tx);
+        let raw =
+            r#"{"type":"error","error":{"code":"rate_limit_exceeded","message":"quota exceeded"}}"#;
+
+        let should_stop = handle_server_text(raw, &tx, &mut handshake).await;
+
+        assert!(should_stop);
+        assert!(matches!(
+            ready_rx.await.unwrap(),
+            Err(RealtimeTranslationError::RateLimited(message)) if message == "quota exceeded"
+        ));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
@@ -888,7 +1156,10 @@ mod tests {
             message: "Invalid API key".to_string(),
             err_type: Some("auth".to_string()),
         };
-        assert_eq!(classify_server_error(&err), OpenAIErrorKind::Authentication);
+        assert_eq!(
+            classify_server_error(&err),
+            RealtimeTranslationErrorKind::Authentication
+        );
     }
 
     #[test]
@@ -898,7 +1169,10 @@ mod tests {
             message: "Rate limit exceeded".to_string(),
             err_type: Some("rate_limit".to_string()),
         };
-        assert_eq!(classify_server_error(&err), OpenAIErrorKind::RateLimited);
+        assert_eq!(
+            classify_server_error(&err),
+            RealtimeTranslationErrorKind::RateLimited
+        );
     }
 
     #[test]
@@ -909,15 +1183,24 @@ mod tests {
                 .to_string(),
             err_type: Some("insufficient_quota".to_string()),
         };
-        assert_eq!(classify_server_error(&err), OpenAIErrorKind::RateLimited);
+        assert_eq!(
+            classify_server_error(&err),
+            RealtimeTranslationErrorKind::RateLimited
+        );
     }
 
     #[test]
     fn empty_api_key_returns_authentication_error() {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            let mut client = OpenAIRealtimeTranslationClient::new(String::new(), "en".to_string());
-            let err = client.connect().await.unwrap_err();
-            assert_eq!(err.kind(), OpenAIErrorKind::Authentication);
+            let mut client = OpenAIRealtimeTranslationClient::new();
+            let err = client
+                .connect(RealtimeTranslationConfig::new(
+                    String::new(),
+                    "en".to_string(),
+                ))
+                .await
+                .unwrap_err();
+            assert_eq!(err.kind(), RealtimeTranslationErrorKind::Authentication);
         });
     }
 }
