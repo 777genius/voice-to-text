@@ -13,7 +13,9 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{
+    connect_async_with_config, tungstenite::Message, MaybeTlsStream, WebSocketStream,
+};
 
 use crate::domain::{
     AudioChunk, ConnectionQualityCallback, ErrorCallback, SttConfig, SttConnectionCategory,
@@ -154,6 +156,14 @@ struct FinalizeDrainComplete {
     status: String,
     saw_result: bool,
     text_results_seen: usize,
+}
+
+impl Drop for BackendProvider {
+    fn drop(&mut self) {
+        self.is_closed.store(true, Ordering::SeqCst);
+        super::abort_background_task(&mut self.keepalive_task);
+        super::abort_background_task(&mut self.receiver_task);
+    }
 }
 
 impl CallbackState {
@@ -593,7 +603,11 @@ impl SttProvider for BackendProvider {
 
         let (ws_stream, _response) = tokio::time::timeout(
             Duration::from_secs(WS_CONNECT_TIMEOUT_SECS),
-            connect_async(request),
+            connect_async_with_config(
+                request,
+                Some(super::streaming_websocket_config()),
+                false,
+            ),
         )
         .await
         .map_err(|_| {

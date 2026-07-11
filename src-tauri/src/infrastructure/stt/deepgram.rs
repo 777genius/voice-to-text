@@ -11,7 +11,9 @@ use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{
+    connect_async_with_config, tungstenite::Message, MaybeTlsStream, WebSocketStream,
+};
 
 use crate::domain::{
     AudioChunk, ConnectionQualityCallback, ErrorCallback, SttConfig, SttConnectionCategory,
@@ -36,6 +38,7 @@ const DEEPGRAM_WS_URL: &str = "wss://api.deepgram.com/v1/listen";
 // Keep this aligned with the backend stream config.
 const DEEPGRAM_ENDPOINTING_MS: u32 = 300;
 const DEEPGRAM_FINALIZE_SETTLE_TIMEOUT_MS: u64 = 900;
+const DEEPGRAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const DEEPGRAM_KEEPALIVE_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const DEEPGRAM_STREAM_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const DEEPGRAM_CLOSE_STREAM_TIMEOUT: Duration = Duration::from_secs(5);
@@ -266,16 +269,23 @@ impl DeepgramProvider {
 
     #[cfg(test)]
     fn with_ws_base_url(ws_base_url: String) -> Self {
-        Self {
-            ws_base_url,
-            ..Self::new()
-        }
+        let mut provider = Self::new();
+        provider.ws_base_url = ws_base_url;
+        provider
     }
 }
 
 impl Default for DeepgramProvider {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for DeepgramProvider {
+    fn drop(&mut self) {
+        self.receiver_stop_requested.store(true, Ordering::SeqCst);
+        super::abort_background_task(&mut self.keepalive_task);
+        super::abort_background_task(&mut self.receiver_task);
     }
 }
 
@@ -389,12 +399,12 @@ impl SttProvider for DeepgramProvider {
                 )))
             })?;
 
-        let (ws_stream, _response) = connect_async(request).await.map_err(|e| {
-            SttError::Connection(SttConnectionError::simple(format!(
-                "WS connection failed: {}",
-                e
-            )))
-        })?;
+        let (ws_stream, _response) = super::await_streaming_websocket_connect(
+            connect_async_with_config(request, Some(super::streaming_websocket_config()), false),
+            DEEPGRAM_CONNECT_TIMEOUT,
+            "Deepgram",
+        )
+        .await?;
 
         log::info!("Deepgram WebSocket connected");
 
@@ -1454,7 +1464,17 @@ impl DeepgramProvider {
                 }
             };
 
-            let ws_stream = match connect_async(request).await {
+            let ws_stream = match super::await_streaming_websocket_connect(
+                connect_async_with_config(
+                    request,
+                    Some(super::streaming_websocket_config()),
+                    false,
+                ),
+                DEEPGRAM_CONNECT_TIMEOUT,
+                "Deepgram reconnect",
+            )
+            .await
+            {
                 Ok((stream, _)) => stream,
                 Err(e) => {
                     log::warn!(

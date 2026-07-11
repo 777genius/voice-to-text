@@ -10,7 +10,9 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{
+    connect_async_with_config, tungstenite::Message, MaybeTlsStream, WebSocketStream,
+};
 
 use crate::domain::{
     AudioChunk, ErrorCallback, SttConfig, SttConnectionCategory, SttConnectionError, SttError,
@@ -31,6 +33,7 @@ use crate::infrastructure::embedded_keys;
 /// 4. Receive Begin/Turn events, then send Terminate and drain through Termination.
 const ASSEMBLYAI_WS_URL: &str = "wss://streaming.assemblyai.com/v3/ws";
 const ASSEMBLYAI_SESSION_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const ASSEMBLYAI_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const ASSEMBLYAI_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const ASSEMBLYAI_TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
 const ASSEMBLYAI_MIN_AUDIO_SAMPLES: usize = 800; // 50 ms @ 16 kHz
@@ -192,16 +195,22 @@ impl AssemblyAIProvider {
 
     #[cfg(test)]
     fn with_ws_base_url(ws_base_url: String) -> Self {
-        Self {
-            ws_base_url,
-            ..Self::new()
-        }
+        let mut provider = Self::new();
+        provider.ws_base_url = ws_base_url;
+        provider
     }
 }
 
 impl Default for AssemblyAIProvider {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for AssemblyAIProvider {
+    fn drop(&mut self) {
+        self.stop_requested.store(true, Ordering::SeqCst);
+        super::abort_background_task(&mut self.receiver_task);
     }
 }
 
@@ -293,12 +302,12 @@ impl SttProvider for AssemblyAIProvider {
                 )))
             })?;
 
-        let (ws_stream, _response) = connect_async(request).await.map_err(|e| {
-            SttError::Connection(SttConnectionError::simple(format!(
-                "WS connection failed: {}",
-                e
-            )))
-        })?;
+        let (ws_stream, _response) = super::await_streaming_websocket_connect(
+            connect_async_with_config(request, Some(super::streaming_websocket_config()), false),
+            ASSEMBLYAI_CONNECT_TIMEOUT,
+            "AssemblyAI",
+        )
+        .await?;
 
         log::info!("AssemblyAI WebSocket connected");
 
