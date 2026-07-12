@@ -5,7 +5,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use futures_util::FutureExt;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::domain::{
@@ -110,6 +110,8 @@ pub struct RealtimeInterpretationPolicy {
     output_drain_poll: Duration,
     output_drain_empty_threshold: Duration,
     worker_stop_timeout: Duration,
+    graceful_shutdown_timeout: Duration,
+    forced_shutdown_timeout: Duration,
     input_source_name: &'static str,
     output_route_name: &'static str,
     silence_cadence: Option<SilenceCadencePolicy>,
@@ -140,6 +142,8 @@ impl RealtimeInterpretationPolicy {
             output_drain_poll: Duration::from_millis(50),
             output_drain_empty_threshold: Duration::from_millis(30),
             worker_stop_timeout: Duration::from_millis(1_500),
+            graceful_shutdown_timeout: Duration::from_secs(18),
+            forced_shutdown_timeout: Duration::from_secs(2),
             input_source_name: "Microphone",
             output_route_name: "virtual microphone",
             silence_cadence: None,
@@ -162,6 +166,8 @@ impl RealtimeInterpretationPolicy {
             output_drain_poll: Duration::from_millis(50),
             output_drain_empty_threshold: Duration::from_millis(30),
             worker_stop_timeout: Duration::from_millis(1_000),
+            graceful_shutdown_timeout: Duration::from_secs(6),
+            forced_shutdown_timeout: Duration::from_secs(1),
             input_source_name: "System audio",
             output_route_name: "local playback",
             silence_cadence: Some(SilenceCadencePolicy {
@@ -409,6 +415,7 @@ pub struct RealtimeInterpretationSession {
     input_worker_task: Option<InputWorkerTask>,
     event_forwarder_task: Option<JoinHandle<()>>,
     output_tx: mpsc::Sender<OutputCommand>,
+    output_abort_tx: watch::Sender<bool>,
     output_worker_task: Option<OutputWorkerTask>,
     silence_cadence_task: Option<JoinHandle<()>>,
     stop_requested: Arc<AtomicBool>,
@@ -445,9 +452,11 @@ impl RealtimeInterpretationSession {
         let diagnostics = Arc::new(RuntimeDiagnostics::new(config.session_id, &config.policy));
 
         let (output_tx, output_rx) = mpsc::channel(config.policy.output_queue_capacity_chunks);
+        let (output_abort_tx, output_abort_rx) = watch::channel(false);
         let output_worker_task = spawn_output_worker(
             ports.output,
             output_rx,
+            output_abort_rx,
             reporter.clone(),
             config.policy.clone(),
             diagnostics.clone(),
@@ -515,6 +524,7 @@ impl RealtimeInterpretationSession {
             input_worker_task: Some(input_worker_task),
             event_forwarder_task: Some(event_forwarder_task),
             output_tx,
+            output_abort_tx,
             output_worker_task: Some(output_worker_task),
             silence_cadence_task,
             stop_requested,
@@ -569,17 +579,63 @@ impl RealtimeInterpretationSession {
             capture.set_terminal_error_callback(None);
         }
 
-        match mode {
-            RealtimeInterpretationShutdown::Graceful => self.shutdown_gracefully().await,
-            RealtimeInterpretationShutdown::Abort => self.shutdown_immediately().await,
-        }
+        let stop_reason = match mode {
+            RealtimeInterpretationShutdown::Graceful => {
+                if tokio::time::timeout(
+                    self.policy.graceful_shutdown_timeout,
+                    self.shutdown_gracefully(),
+                )
+                .await
+                .is_err()
+                {
+                    log::warn!(
+                        "RealtimeInterpretationSession: graceful shutdown timed out after {} ms for session {}; forcing abort",
+                        self.policy.graceful_shutdown_timeout.as_millis(),
+                        self.session_id
+                    );
+                    if tokio::time::timeout(
+                        self.policy.forced_shutdown_timeout,
+                        self.shutdown_immediately(),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        log::warn!(
+                            "RealtimeInterpretationSession: forced cleanup timed out after {} ms for session {}; dropping remaining workers",
+                            self.policy.forced_shutdown_timeout.as_millis(),
+                            self.session_id
+                        );
+                        "forced_timeout"
+                    } else {
+                        "graceful_timeout"
+                    }
+                } else {
+                    "graceful"
+                }
+            }
+            RealtimeInterpretationShutdown::Abort => {
+                if tokio::time::timeout(
+                    self.policy.forced_shutdown_timeout,
+                    self.shutdown_immediately(),
+                )
+                .await
+                .is_err()
+                {
+                    log::warn!(
+                        "RealtimeInterpretationSession: abort cleanup timed out after {} ms for session {}; dropping remaining workers",
+                        self.policy.forced_shutdown_timeout.as_millis(),
+                        self.session_id
+                    );
+                    "abort_timeout"
+                } else {
+                    "abort"
+                }
+            }
+        };
 
         self.capture = None;
         self.diagnostics.report(
-            match mode {
-                RealtimeInterpretationShutdown::Graceful => "graceful",
-                RealtimeInterpretationShutdown::Abort => "abort",
-            },
+            stop_reason,
             cleanup_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         );
         log::info!(
@@ -625,18 +681,25 @@ impl RealtimeInterpretationSession {
             input.aborted = true;
         }
         self.wait_for_event_forwarder(true).await;
-        self.close_output().await;
+        self.abort_output().await;
     }
 
     async fn recover_input_client(&mut self, abort_immediately: bool) -> Option<InputWorkerResult> {
-        let mut task = self.input_worker_task.take()?;
         if abort_immediately {
             let _ = self.input_abort_tx.send(());
         }
 
-        match tokio::time::timeout(self.policy.input_drain_timeout, &mut task).await {
-            Ok(Ok(client)) => client,
+        let initial_wait = {
+            let task = self.input_worker_task.as_mut()?;
+            tokio::time::timeout(self.policy.input_drain_timeout, task).await
+        };
+        match initial_wait {
+            Ok(Ok(client)) => {
+                self.input_worker_task.take();
+                client
+            }
             Ok(Err(error)) => {
+                self.input_worker_task.take();
                 log::warn!(
                     "RealtimeInterpretationSession: input worker join failed for session {}: {}",
                     self.session_id,
@@ -650,23 +713,30 @@ impl RealtimeInterpretationSession {
                     self.session_id
                 );
                 let _ = self.input_abort_tx.send(());
-                self.wait_for_aborted_input_worker(task).await
+                self.wait_for_aborted_input_worker().await
             }
             Err(_) => {
-                task.abort();
-                let _ = task.await;
+                if let Some(task) = self.input_worker_task.take() {
+                    task.abort();
+                    let _ = task.await;
+                }
                 None
             }
         }
     }
 
-    async fn wait_for_aborted_input_worker(
-        &self,
-        mut task: InputWorkerTask,
-    ) -> Option<InputWorkerResult> {
-        match tokio::time::timeout(self.policy.worker_stop_timeout, &mut task).await {
-            Ok(Ok(client)) => client,
+    async fn wait_for_aborted_input_worker(&mut self) -> Option<InputWorkerResult> {
+        let wait = {
+            let task = self.input_worker_task.as_mut()?;
+            tokio::time::timeout(self.policy.worker_stop_timeout, task).await
+        };
+        match wait {
+            Ok(Ok(client)) => {
+                self.input_worker_task.take();
+                client
+            }
             Ok(Err(error)) => {
+                self.input_worker_task.take();
                 log::warn!(
                     "RealtimeInterpretationSession: aborted input worker join failed for session {}: {}",
                     self.session_id,
@@ -675,27 +745,31 @@ impl RealtimeInterpretationSession {
                 None
             }
             Err(_) => {
-                task.abort();
-                let _ = task.await;
+                if let Some(task) = self.input_worker_task.take() {
+                    task.abort();
+                    let _ = task.await;
+                }
                 None
             }
         }
     }
 
     async fn wait_for_event_forwarder(&mut self, abort_immediately: bool) {
-        let Some(mut task) = self.event_forwarder_task.take() else {
+        let Some(task) = self.event_forwarder_task.as_mut() else {
             return;
         };
         if abort_immediately {
             task.abort();
         }
 
-        if tokio::time::timeout(self.policy.event_drain_timeout, &mut task)
-            .await
-            .is_err()
-        {
-            task.abort();
-            let _ = task.await;
+        let wait = tokio::time::timeout(self.policy.event_drain_timeout, task).await;
+        if wait.is_err() {
+            if let Some(task) = self.event_forwarder_task.take() {
+                task.abort();
+                let _ = task.await;
+            }
+        } else {
+            self.event_forwarder_task.take();
         }
     }
 
@@ -738,11 +812,13 @@ impl RealtimeInterpretationSession {
             }
         }
 
-        let Some(mut task) = self.output_worker_task.take() else {
+        let Some(task) = self.output_worker_task.as_mut() else {
             return;
         };
-        match tokio::time::timeout(self.policy.worker_stop_timeout, &mut task).await {
+        let wait = tokio::time::timeout(self.policy.worker_stop_timeout, task).await;
+        match wait {
             Ok(Ok(Some(mut output))) if !close_sent => {
+                self.output_worker_task.take();
                 if let Err(error) = output.close().await {
                     log::warn!(
                         "RealtimeInterpretationSession: recovered output close failed for session {}: {}",
@@ -751,15 +827,64 @@ impl RealtimeInterpretationSession {
                     );
                 }
             }
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => log::warn!(
-                "RealtimeInterpretationSession: output worker join failed for session {}: {}",
-                self.session_id,
-                error
-            ),
+            Ok(Ok(_)) => {
+                self.output_worker_task.take();
+            }
+            Ok(Err(error)) => {
+                self.output_worker_task.take();
+                log::warn!(
+                    "RealtimeInterpretationSession: output worker join failed for session {}: {}",
+                    self.session_id,
+                    error
+                );
+            }
             Err(_) => {
-                task.abort();
-                let _ = task.await;
+                if let Some(task) = self.output_worker_task.take() {
+                    task.abort();
+                    let _ = task.await;
+                }
+            }
+        }
+    }
+
+    async fn abort_output(&mut self) {
+        let _ = self.output_abort_tx.send(true);
+        let wait = {
+            let Some(task) = self.output_worker_task.as_mut() else {
+                return;
+            };
+            tokio::time::timeout(self.policy.worker_stop_timeout, task).await
+        };
+
+        match wait {
+            Ok(Ok(Some(mut output))) => {
+                self.output_worker_task.take();
+                if let Ok(Err(error)) =
+                    tokio::time::timeout(self.policy.worker_stop_timeout, output.close()).await
+                {
+                    log::warn!(
+                        "RealtimeInterpretationSession: aborted output close failed for session {}: {}",
+                        self.session_id,
+                        error
+                    );
+                }
+            }
+            Ok(Ok(None)) => {
+                self.output_worker_task.take();
+            }
+            Ok(Err(error)) => {
+                self.output_worker_task.take();
+                log::warn!(
+                    "RealtimeInterpretationSession: aborted output worker join failed for session {}: {}",
+                    self.session_id,
+                    error
+                );
+            }
+            Err(_) => {
+                if let Some(task) = self.output_worker_task.take() {
+                    task.abort();
+                    let _ = task.await;
+                }
             }
         }
     }
@@ -1027,6 +1152,7 @@ async fn run_event_forwarder(
 fn spawn_output_worker(
     output: Box<dyn TranslationAudioOutput>,
     output_rx: mpsc::Receiver<OutputCommand>,
+    output_abort_rx: watch::Receiver<bool>,
     reporter: RuntimeStopReporter,
     policy: RealtimeInterpretationPolicy,
     diagnostics: Arc<RuntimeDiagnostics>,
@@ -1036,6 +1162,7 @@ fn spawn_output_worker(
         match AssertUnwindSafe(run_output_worker(
             output,
             output_rx,
+            output_abort_rx,
             reporter,
             policy,
             diagnostics,
@@ -1057,6 +1184,7 @@ fn spawn_output_worker(
 async fn run_output_worker(
     mut output: Box<dyn TranslationAudioOutput>,
     mut output_rx: mpsc::Receiver<OutputCommand>,
+    mut output_abort_rx: watch::Receiver<bool>,
     reporter: RuntimeStopReporter,
     policy: RealtimeInterpretationPolicy,
     diagnostics: Arc<RuntimeDiagnostics>,
@@ -1068,13 +1196,22 @@ async fn run_output_worker(
 
     loop {
         tokio::select! {
+            biased;
+            _ = wait_for_output_abort(&mut output_abort_rx) => {
+                return output;
+            }
             command = output_rx.recv() => {
                 let Some(command) = command else {
                     return output;
                 };
                 match command {
                     OutputCommand::Audio(samples) => {
-                        match output.enqueue_pcm16(&samples).await {
+                        let enqueue_result = tokio::select! {
+                            biased;
+                            _ = wait_for_output_abort(&mut output_abort_rx) => return output,
+                            result = output.enqueue_pcm16(&samples) => result,
+                        };
+                        match enqueue_result {
                             Ok(AudioEnqueueOutcome::Queued { pending }) => {
                                 consecutive_output_drops = 0;
                                 diagnostics.observe_output_pending(pending);
@@ -1108,11 +1245,17 @@ async fn run_output_worker(
                     }
                     OutputCommand::BeginDrain => output.begin_drain_mode(),
                     OutputCommand::Drain { done } => {
-                        drain_output_tail(output.as_ref(), &policy).await;
+                        if drain_output_tail(output.as_ref(), &policy, &mut output_abort_rx).await {
+                            return output;
+                        }
                         let _ = done.send(());
                     }
                     OutputCommand::Close { done } => {
-                        let result = output.close().await.map_err(|error| error.to_string());
+                        let result = tokio::select! {
+                            biased;
+                            _ = wait_for_output_abort(&mut output_abort_rx) => return output,
+                            result = output.close() => result.map_err(|error| error.to_string()),
+                        };
                         let _ = done.send(result);
                         return output;
                     }
@@ -1149,7 +1292,11 @@ fn map_output_error(
 async fn drain_output_tail(
     output: &dyn TranslationAudioOutput,
     policy: &RealtimeInterpretationPolicy,
-) {
+    output_abort_rx: &mut watch::Receiver<bool>,
+) -> bool {
+    if *output_abort_rx.borrow() {
+        return true;
+    }
     let initial_pending = match output.prepare_for_drain() {
         Ok(pending) => pending,
         Err(error) => {
@@ -1157,11 +1304,11 @@ async fn drain_output_tail(
                 "RealtimeInterpretationSession: output drain prepare failed: {}",
                 error
             );
-            return;
+            return false;
         }
     };
     if initial_pending <= policy.output_drain_empty_threshold {
-        return;
+        return false;
     }
 
     let wait_budget = initial_pending
@@ -1171,7 +1318,7 @@ async fn drain_output_tail(
     loop {
         let pending = output.pending_playback_duration();
         if pending <= policy.output_drain_empty_threshold {
-            return;
+            return false;
         }
         let now = tokio::time::Instant::now();
         if now >= deadline {
@@ -1179,15 +1326,29 @@ async fn drain_output_tail(
                 "RealtimeInterpretationSession: output tail drain timed out (pending={} ms)",
                 pending.as_millis()
             );
+            return false;
+        }
+        tokio::select! {
+            biased;
+            _ = wait_for_output_abort(output_abort_rx) => return true,
+            _ = tokio::time::sleep(
+                policy
+                    .output_drain_poll
+                    .min(pending)
+                    .min(deadline.saturating_duration_since(now)),
+            ) => {}
+        }
+    }
+}
+
+async fn wait_for_output_abort(output_abort_rx: &mut watch::Receiver<bool>) {
+    loop {
+        if *output_abort_rx.borrow() {
             return;
         }
-        tokio::time::sleep(
-            policy
-                .output_drain_poll
-                .min(pending)
-                .min(deadline.saturating_duration_since(now)),
-        )
-        .await;
+        if output_abort_rx.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
     }
 }
 
@@ -1774,6 +1935,7 @@ mod tests {
         let state = Arc::new(ContractState::default());
         state.output_closed.store(true, Ordering::SeqCst);
         let (_command_tx, command_rx) = mpsc::channel(1);
+        let (_abort_tx, abort_rx) = watch::channel(false);
         let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
         let mut policy = RealtimeInterpretationPolicy::outgoing();
         policy.output_health_poll_interval = Duration::from_millis(5);
@@ -1782,6 +1944,7 @@ mod tests {
         let output_task = tokio::spawn(run_output_worker(
             Box::new(ContractOutput { state }),
             command_rx,
+            abort_rx,
             RuntimeStopReporter::new(stop_tx),
             policy,
             diagnostics,
@@ -1806,6 +1969,7 @@ mod tests {
             .output_should_drop_oldest
             .store(true, Ordering::SeqCst);
         let (command_tx, command_rx) = mpsc::channel(2);
+        let (_abort_tx, abort_rx) = watch::channel(false);
         let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
         let mut policy = RealtimeInterpretationPolicy::outgoing();
         policy.output_overload_drop_threshold = 2;
@@ -1814,6 +1978,7 @@ mod tests {
         let output_task = tokio::spawn(run_output_worker(
             Box::new(ContractOutput { state }),
             command_rx,
+            abort_rx,
             RuntimeStopReporter::new(stop_tx),
             policy,
             diagnostics,
@@ -2000,5 +2165,57 @@ mod tests {
         assert!(state.capture_stopped.load(Ordering::SeqCst));
         assert!(state.output_dropped.load(Ordering::SeqCst));
         assert_eq!(state.abort_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_has_one_global_deadline_and_forces_cleanup() {
+        let state = Arc::new(ContractState::default());
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let mut config = RealtimeInterpretationConfig::incoming_spoken(79);
+        config.policy.input_drain_timeout = Duration::from_millis(30);
+        config.policy.event_drain_timeout = Duration::from_millis(30);
+        config.policy.worker_stop_timeout = Duration::from_millis(30);
+        config.policy.graceful_shutdown_timeout = Duration::from_millis(80);
+        config.policy.forced_shutdown_timeout = Duration::from_millis(80);
+
+        let (session, _stop_rx) = RealtimeInterpretationSession::start(
+            config,
+            RealtimeInterpretationPorts {
+                capture: Box::new(ContractCapture {
+                    state: state.clone(),
+                    callback: None,
+                }),
+                output: Box::new(BlockingContractOutput {
+                    state: state.clone(),
+                }),
+                translation: Box::new(ContractTranslationSession {
+                    state: state.clone(),
+                    events: event_tx,
+                }),
+                translation_events: event_rx,
+            },
+            RealtimeInterpretationCallbacks::no_op(),
+        )
+        .await
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !state.output_enqueue_entered.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("output worker must enter enqueue");
+        let started = Instant::now();
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            session.shutdown(RealtimeInterpretationShutdown::Graceful),
+        )
+        .await
+        .expect("global graceful deadline must force bounded cleanup");
+
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(state.capture_stopped.load(Ordering::SeqCst));
+        assert!(state.output_dropped.load(Ordering::SeqCst));
     }
 }
