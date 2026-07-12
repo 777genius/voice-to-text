@@ -29,6 +29,18 @@ pub struct UnsupportedTranslationLanguage(pub String);
 pub struct RealtimeTranslationConfig {
     pub credential: String,
     pub target_language: String,
+    pub input_noise_reduction: RealtimeInputNoiseReduction,
+}
+
+/// Input conditioning selected by the capture use case, not by the provider adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RealtimeInputNoiseReduction {
+    /// Clean digital audio such as an isolated system-output capture.
+    Disabled,
+    /// A close-talking microphone such as a headset or external speech microphone.
+    NearField,
+    /// A laptop or conference-room microphone at a distance from the speaker.
+    FarField,
 }
 
 impl std::fmt::Debug for RealtimeTranslationConfig {
@@ -37,15 +49,21 @@ impl std::fmt::Debug for RealtimeTranslationConfig {
             .debug_struct("RealtimeTranslationConfig")
             .field("credential", &"<redacted>")
             .field("target_language", &self.target_language)
+            .field("input_noise_reduction", &self.input_noise_reduction)
             .finish()
     }
 }
 
 impl RealtimeTranslationConfig {
-    pub fn new(credential: String, target_language: String) -> Self {
+    pub fn new(
+        credential: String,
+        target_language: String,
+        input_noise_reduction: RealtimeInputNoiseReduction,
+    ) -> Self {
         Self {
             credential,
             target_language,
+            input_noise_reduction,
         }
     }
 }
@@ -143,13 +161,32 @@ mod tests {
 
     #[test]
     fn config_debug_never_exposes_credential() {
-        let config = RealtimeTranslationConfig::new("sk-secret-value".into(), "en".into());
+        let config = RealtimeTranslationConfig::new(
+            "sk-secret-value".into(),
+            "en".into(),
+            RealtimeInputNoiseReduction::NearField,
+        );
 
         let debug = format!("{config:?}");
 
         assert!(!debug.contains("sk-secret-value"));
         assert!(debug.contains("<redacted>"));
         assert!(debug.contains("en"));
+        assert!(debug.contains("NearField"));
+    }
+
+    #[test]
+    fn config_can_disable_noise_reduction_for_clean_digital_audio() {
+        let config = RealtimeTranslationConfig::new(
+            "credential".into(),
+            "ru".into(),
+            RealtimeInputNoiseReduction::Disabled,
+        );
+
+        assert_eq!(
+            config.input_noise_reduction,
+            RealtimeInputNoiseReduction::Disabled
+        );
     }
 
     #[test]

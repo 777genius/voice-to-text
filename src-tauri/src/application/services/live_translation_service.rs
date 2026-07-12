@@ -17,8 +17,9 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::domain::{
     microphone_sensitivity_gain, AudioCaptureTarget, AudioConfig, PlatformAudioFactory,
-    RealtimeTranslationConfig, RealtimeTranslationError, RealtimeTranslationErrorKind,
-    RealtimeTranslationFactory, RecordingStatus, TranslationAudioOutputConfig,
+    RealtimeInputNoiseReduction, RealtimeTranslationConfig, RealtimeTranslationError,
+    RealtimeTranslationErrorKind, RealtimeTranslationFactory, RecordingStatus,
+    TranslationAudioOutputConfig,
 };
 
 use super::{
@@ -303,8 +304,11 @@ impl LiveTranslationService {
 
         // 4. OpenAI client connect
         let mut client = self.client_factory.create();
-        let translation_config =
-            RealtimeTranslationConfig::new(config.openai_api_key.clone(), target_language.clone());
+        let translation_config = RealtimeTranslationConfig::new(
+            config.openai_api_key.clone(),
+            target_language.clone(),
+            RealtimeInputNoiseReduction::NearField,
+        );
         let openai_rx = match client.connect(translation_config).await {
             Ok(rx) => rx,
             Err(e) => {
@@ -1053,6 +1057,7 @@ mod tests {
         fail_close: AtomicBool,
         fail_append_call: AtomicUsize,
         target_language: StdMutex<Option<String>>,
+        input_noise_reduction: StdMutex<Option<RealtimeInputNoiseReduction>>,
         received_samples: StdMutex<Vec<i16>>,
         event_tx: StdMutex<Option<mpsc::Sender<RealtimeTranslationEvent>>>,
         runtime_event_after_first_append: StdMutex<Option<RealtimeTranslationEvent>>,
@@ -1082,6 +1087,7 @@ mod tests {
         ) -> Result<mpsc::Receiver<RealtimeTranslationEvent>, RealtimeTranslationError> {
             self.state.connect_calls.fetch_add(1, Ordering::SeqCst);
             *self.state.target_language.lock().unwrap() = Some(config.target_language);
+            *self.state.input_noise_reduction.lock().unwrap() = Some(config.input_noise_reduction);
             let (tx, rx) = mpsc::channel(16);
             *self.state.event_tx.lock().unwrap() = Some(tx.clone());
             Ok(rx)
@@ -1265,6 +1271,10 @@ mod tests {
         assert_eq!(
             realtime_state.target_language.lock().unwrap().as_deref(),
             Some("es")
+        );
+        assert_eq!(
+            *realtime_state.input_noise_reduction.lock().unwrap(),
+            Some(RealtimeInputNoiseReduction::NearField)
         );
         assert!(
             realtime_state.received_samples.lock().unwrap().len() >= OPENAI_INPUT_FRAME_SAMPLES

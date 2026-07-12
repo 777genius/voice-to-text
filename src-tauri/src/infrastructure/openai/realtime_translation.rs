@@ -42,8 +42,9 @@ use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, Message};
 use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
 
 use crate::domain::{
-    RealtimeTranslationConfig, RealtimeTranslationError, RealtimeTranslationErrorKind,
-    RealtimeTranslationEvent, RealtimeTranslationFactory, RealtimeTranslationSession,
+    RealtimeInputNoiseReduction, RealtimeTranslationConfig, RealtimeTranslationError,
+    RealtimeTranslationErrorKind, RealtimeTranslationEvent, RealtimeTranslationFactory,
+    RealtimeTranslationSession,
 };
 
 const OPENAI_REALTIME_TRANSLATION_URL: &str =
@@ -232,13 +233,18 @@ impl OpenAIRealtimeTranslationClient {
             run_reader(source, reader_tx, ready_tx).await;
         });
 
+        let noise_reduction = match config.input_noise_reduction {
+            RealtimeInputNoiseReduction::Disabled => serde_json::Value::Null,
+            RealtimeInputNoiseReduction::NearField => json!({ "type": "near_field" }),
+            RealtimeInputNoiseReduction::FarField => json!({ "type": "far_field" }),
+        };
         let session_update = json!({
             "type": "session.update",
             "session": {
                 "audio": {
                     "input": {
                         "transcription": { "model": "gpt-realtime-whisper" },
-                        "noise_reduction": { "type": "near_field" }
+                        "noise_reduction": noise_reduction
                     },
                     "output": {
                         "language": config.target_language
@@ -1237,6 +1243,7 @@ mod tests {
                 .connect(RealtimeTranslationConfig::new(
                     String::new(),
                     "en".to_string(),
+                    RealtimeInputNoiseReduction::NearField,
                 ))
                 .await
                 .unwrap_err();

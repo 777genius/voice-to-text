@@ -5,10 +5,11 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::domain::{
     AudioCaptureTarget, AudioConfig, AudioError, LocalPlaybackOutputFactory, LocalPlaybackRoute,
-    RealtimeTranslationConfig, RealtimeTranslationError, RealtimeTranslationErrorKind,
-    RealtimeTranslationFactory, RecordingStatus, SpokenIncomingCapability,
-    SpokenTranslationCapability, SystemAudioCaptureFactory, SystemAudioCaptureRequest,
-    TranslationAudioOutputConfig, TranslationAudioOutputError, TranslationLanguage,
+    RealtimeInputNoiseReduction, RealtimeTranslationConfig, RealtimeTranslationError,
+    RealtimeTranslationErrorKind, RealtimeTranslationFactory, RecordingStatus,
+    SpokenIncomingCapability, SpokenTranslationCapability, SystemAudioCaptureFactory,
+    SystemAudioCaptureRequest, TranslationAudioOutputConfig, TranslationAudioOutputError,
+    TranslationLanguage,
 };
 
 use super::{
@@ -336,6 +337,7 @@ impl IncomingSpokenTranslationService {
             .connect(RealtimeTranslationConfig::new(
                 config.openai_api_key.clone(),
                 config.target_language.as_str().to_string(),
+                RealtimeInputNoiseReduction::Disabled,
             ))
             .await
         {
@@ -639,6 +641,8 @@ mod tests {
         requested_language: StdMutex<Option<String>>,
         output_samples: StdMutex<Vec<i16>>,
         output_gains: StdMutex<Vec<f32>>,
+        output_health_fail: AtomicBool,
+        capture_error_callbacks: StdMutex<Vec<AudioCaptureErrorCallback>>,
     }
 
     struct FakeCapability(SpokenIncomingCapability);
@@ -731,6 +735,13 @@ mod tests {
         }
 
         fn set_terminal_error_callback(&mut self, callback: Option<AudioCaptureErrorCallback>) {
+            if let Some(callback) = callback.as_ref() {
+                self.state
+                    .capture_error_callbacks
+                    .lock()
+                    .unwrap()
+                    .push(callback.clone());
+            }
             self.error_callback = callback;
         }
 
@@ -820,6 +831,18 @@ mod tests {
 
         fn is_open(&self) -> bool {
             self.open
+        }
+
+        fn health_check(&self) -> TranslationAudioOutputResult<()> {
+            if self.state.output_health_fail.load(Ordering::SeqCst) {
+                Err(TranslationAudioOutputError::Device(
+                    "output device disconnected".into(),
+                ))
+            } else if self.open {
+                Ok(())
+            } else {
+                Err(TranslationAudioOutputError::Closed)
+            }
         }
 
         fn device_name(&self) -> Option<String> {
@@ -1251,5 +1274,131 @@ mod tests {
         assert_eq!(state.capture_drop_calls.load(Ordering::SeqCst), 1);
         assert_eq!(state.output_drop_calls.load(Ordering::SeqCst), 1);
         assert_eq!(state.translation_drop_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_capture_failure_cleans_runtime_and_allows_restart() {
+        let state = Arc::new(FakeState::default());
+        let service = service_with_fakes(
+            state.clone(),
+            SpokenIncomingCapability::Ready,
+            false,
+            false,
+            false,
+        );
+        let runtime_errors = Arc::new(StdMutex::new(Vec::new()));
+        let statuses = Arc::new(StdMutex::new(Vec::new()));
+        let first_callbacks = IncomingSpokenTranslationCallbacks {
+            on_source_delta: Arc::new(|_| {}),
+            on_translation_delta: Arc::new(|_| {}),
+            on_playback_state: Arc::new(|_| {}),
+            on_error: {
+                let runtime_errors = runtime_errors.clone();
+                Arc::new(move |error| runtime_errors.lock().unwrap().push(error))
+            },
+            on_status: {
+                let statuses = statuses.clone();
+                Arc::new(move |status| statuses.lock().unwrap().push(status))
+            },
+        };
+
+        service.start(config(505), first_callbacks).await.unwrap();
+        let stale_error_callback = state
+            .capture_error_callbacks
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("capture must install a terminal error callback");
+        stale_error_callback(AudioError::Capture("system stopped stream".into()));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while service.active_session_id().await.is_some()
+                || service.get_status().await != RecordingStatus::Error
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal capture failure must clean the active runtime");
+
+        assert!(matches!(
+            runtime_errors.lock().unwrap().as_slice(),
+            [IncomingSpokenTranslationError::InputDeviceLost(message)]
+                if message.contains("system stopped stream")
+        ));
+        assert_eq!(state.capture_stop_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.translation_abort_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.output_close_calls.load(Ordering::SeqCst), 1);
+        assert!(statuses.lock().unwrap().contains(&RecordingStatus::Error));
+
+        service.start(config(506), no_op_callbacks()).await.unwrap();
+        assert_eq!(service.active_session_id().await, Some(506));
+        assert_eq!(service.get_status().await, RecordingStatus::Recording);
+
+        stale_error_callback(AudioError::Capture("late stale failure".into()));
+        tokio::task::yield_now().await;
+        assert_eq!(service.active_session_id().await, Some(506));
+        assert_eq!(runtime_errors.lock().unwrap().len(), 1);
+
+        service.stop().await.unwrap();
+        assert_eq!(service.get_status().await, RecordingStatus::Idle);
+        assert_eq!(state.capture_start_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(state.output_close_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn terminal_output_failure_cleans_runtime_and_allows_restart() {
+        let state = Arc::new(FakeState::default());
+        let service = service_with_fakes(
+            state.clone(),
+            SpokenIncomingCapability::Ready,
+            false,
+            false,
+            false,
+        );
+        let runtime_errors = Arc::new(StdMutex::new(Vec::new()));
+        let callbacks = IncomingSpokenTranslationCallbacks {
+            on_source_delta: Arc::new(|_| {}),
+            on_translation_delta: Arc::new(|_| {}),
+            on_playback_state: Arc::new(|_| {}),
+            on_error: {
+                let runtime_errors = runtime_errors.clone();
+                Arc::new(move |error| runtime_errors.lock().unwrap().push(error))
+            },
+            on_status: Arc::new(|_| {}),
+        };
+
+        service.start(config(507), callbacks).await.unwrap();
+        state.output_health_fail.store(true, Ordering::SeqCst);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while service.active_session_id().await.is_some()
+                || service.get_status().await != RecordingStatus::Error
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal output failure must clean the active runtime");
+
+        assert!(matches!(
+            runtime_errors.lock().unwrap().as_slice(),
+            [IncomingSpokenTranslationError::OutputDeviceLost(message)]
+                if message.contains("output device disconnected")
+        ));
+        assert_eq!(state.capture_stop_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.translation_abort_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.output_close_calls.load(Ordering::SeqCst), 1);
+
+        state.output_health_fail.store(false, Ordering::SeqCst);
+        service.start(config(508), no_op_callbacks()).await.unwrap();
+        assert_eq!(service.active_session_id().await, Some(508));
+        assert_eq!(service.get_status().await, RecordingStatus::Recording);
+        service.stop().await.unwrap();
+
+        assert_eq!(state.capture_start_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(state.output_close_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(service.get_status().await, RecordingStatus::Idle);
     }
 }
