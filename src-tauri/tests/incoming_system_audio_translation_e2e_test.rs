@@ -29,7 +29,17 @@ const OPENAI_TRANSCRIPTIONS_URL: &str = "https://api.openai.com/v1/audio/transcr
 const OPENAI_TRANSCRIPTION_MODEL: &str = "gpt-4o-transcribe";
 const TRANSCRIBE_AFTER_SAMPLES: usize = 16_000 * 2;
 const MAX_TRANSLATED_FINALS_PER_SOAK: usize = 3;
+const AUDIBLE_SAMPLE_ABS_THRESHOLD: u16 = 128;
+const MIN_AUDIBLE_TRANSLATED_SAMPLES: usize = 1_200;
+const PAID_SOURCE_PREROLL: Duration = Duration::from_secs(1);
 static NEXT_TEMP_AUDIO_ID: AtomicUsize = AtomicUsize::new(0);
+
+fn audible_sample_count(samples: &[i16]) -> usize {
+    samples
+        .iter()
+        .filter(|sample| sample.unsigned_abs() >= AUDIBLE_SAMPLE_ABS_THRESHOLD)
+        .count()
+}
 
 fn load_openai_api_key() -> String {
     let _ = dotenv::dotenv();
@@ -115,7 +125,7 @@ fn wait_for_child_with_timeout(mut child: Child, timeout: Duration, process_name
 fn generate_system_audio_fixture() -> TempAudioFixture {
     generate_spoken_audio_fixture(
         "voicetext_incoming_system_audio_source",
-        "Alex",
+        "Samantha",
         "Hello from the call. This checks incoming subtitles.",
     )
 }
@@ -123,10 +133,25 @@ fn generate_system_audio_fixture() -> TempAudioFixture {
 fn generate_spoken_audio_fixture(prefix: &str, voice: &str, text: &str) -> TempAudioFixture {
     let aiff_path = unique_temp_audio_path(prefix, "aiff");
 
+    let voices = Command::new("say")
+        .args(["-v", "?"])
+        .output()
+        .expect("must list installed macOS voices");
+    assert!(voices.status.success(), "macOS voice listing failed");
+    let voice_is_installed = String::from_utf8_lossy(&voices.stdout)
+        .lines()
+        .any(|line| line.split_whitespace().next() == Some(voice));
+    assert!(
+        voice_is_installed,
+        "required macOS voice {voice} is not installed"
+    );
+
     let status = Command::new("say")
         .args([
             "-v",
             voice,
+            "-r",
+            "145",
             "-o",
             aiff_path.to_str().expect("valid aiff path"),
             text,
@@ -198,6 +223,7 @@ struct PaidSpokenOutputState {
     gain: Mutex<Option<f32>>,
     started_at: Mutex<Option<Instant>>,
     first_audio_ms: Mutex<Option<u128>>,
+    audible_samples: AtomicUsize,
 }
 
 struct PaidSpokenOutputFactory {
@@ -255,6 +281,9 @@ impl TranslationAudioOutput for PaidSpokenOutput {
             .lock()
             .unwrap()
             .extend_from_slice(samples);
+        self.state
+            .audible_samples
+            .fetch_add(audible_sample_count(samples), Ordering::Relaxed);
         Ok(outcome)
     }
 
@@ -303,6 +332,7 @@ struct ObservedSystemAudioCaptureFactory {
     inner: DefaultPlatformAudioFactory,
     started_at: Instant,
     first_input_ms: Arc<Mutex<Option<u128>>>,
+    captured_samples: Arc<Mutex<Vec<i16>>>,
 }
 
 impl SystemAudioCaptureFactory for ObservedSystemAudioCaptureFactory {
@@ -321,6 +351,7 @@ impl SystemAudioCaptureFactory for ObservedSystemAudioCaptureFactory {
             inner: self.inner.create_system_audio_capture(request)?,
             started_at: self.started_at,
             first_input_ms: self.first_input_ms.clone(),
+            captured_samples: self.captured_samples.clone(),
         }))
     }
 }
@@ -329,6 +360,7 @@ struct ObservedSystemAudioCapture {
     inner: Box<dyn AudioCapture>,
     started_at: Instant,
     first_input_ms: Arc<Mutex<Option<u128>>>,
+    captured_samples: Arc<Mutex<Vec<i16>>>,
 }
 
 #[async_trait]
@@ -343,12 +375,17 @@ impl AudioCapture for ObservedSystemAudioCapture {
     ) -> app_lib::domain::AudioResult<()> {
         let started_at = self.started_at;
         let first_input_ms = self.first_input_ms.clone();
+        let captured_samples = self.captured_samples.clone();
         self.inner
             .start_capture(Arc::new(move |chunk| {
                 first_input_ms
                     .lock()
                     .unwrap()
                     .get_or_insert_with(|| started_at.elapsed().as_millis());
+                captured_samples
+                    .lock()
+                    .unwrap()
+                    .extend_from_slice(&chunk.data);
                 callback(chunk);
             }))
             .await
@@ -374,60 +411,128 @@ impl AudioCapture for ObservedSystemAudioCapture {
 #[derive(Clone, Copy)]
 struct PaidSpokenScenario {
     id: &'static str,
+    primary_voice: &'static str,
     source: &'static str,
     secondary_source: Option<&'static str>,
     human_reference: &'static str,
+    required_translation_markers: &'static [&'static [&'static str]],
+    translation_output_required: bool,
+}
+
+fn missing_translation_marker_groups(translated: &str, required_groups: &[&[&str]]) -> Vec<String> {
+    let normalized = translated.to_lowercase();
+    required_groups
+        .iter()
+        .filter(|group| !group.iter().any(|marker| normalized.contains(marker)))
+        .map(|group| group.join(" | "))
+        .collect()
 }
 
 fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
     vec![
         PaidSpokenScenario {
             id: "english_to_russian",
+            primary_voice: "Samantha",
             source: "Hello from the call. Please translate this sentence into Russian.",
             secondary_source: None,
             human_reference: "Natural Russian translation preserving the request.",
+            required_translation_markers: &[&["перевед", "перевод"]],
+            translation_output_required: true,
         },
         PaidSpokenScenario {
             id: "names_and_numbers",
-            source: "Anna Petrova will meet Michael Chen on October twenty first at three forty five, room two hundred seven.",
+            primary_voice: "Samantha",
+            source: "My name is Robert Brown. This is a business meeting. The meeting date is October 21st. The meeting time is 3:45 PM. The room number is 207.",
             secondary_source: None,
-            human_reference: "Preserve both names, date, time, and room 207.",
+            human_reference: "Preserve the name, meeting context, date, time, and room 207.",
+            required_translation_markers: &[
+                &["роберт"],
+                &["встреч", "совещ"],
+                &["октябр"],
+                &["21", "двадцать перв"],
+                &["3:45", "15:45", "три сорок пять", "пятнадцать сорок пять"],
+                &["207", "два ноль семь", "двести семь"],
+            ],
+            translation_output_required: true,
         },
         PaidSpokenScenario {
             id: "technical_terms",
-            source: "The WebSocket reconnect uses exponential backoff, bounded queues, and twenty four kilohertz PCM audio.",
+            primary_voice: "Samantha",
+            source: "The WebSocket reconnect uses exponential backoff. The system uses bounded queues. The audio format is 24 kilohertz PCM.",
             secondary_source: None,
             human_reference: "Preserve WebSocket, exponential backoff, bounded queues, and 24 kHz PCM.",
+            required_translation_markers: &[
+                &["websocket", "веб-сокет", "вебсокет"],
+                &["экспоненц", "exponential"],
+                &["очеред"],
+                &["24", "двадцать четыре"],
+                &["pcm"],
+            ],
+            translation_output_required: true,
         },
         PaidSpokenScenario {
             id: "mixed_english_russian",
+            primary_voice: "Milena",
             source: "Please open настройки and choose режим text and audio for this call.",
             secondary_source: None,
             human_reference: "Produce coherent Russian while preserving the UI mode name.",
+            required_translation_markers: &[
+                &["настрой"],
+                &["режим"],
+                &["текст"],
+                &["аудио", "звук"],
+            ],
+            translation_output_required: true,
         },
         PaidSpokenScenario {
             id: "already_russian",
+            primary_voice: "Milena",
             source: "Добрый день. Проверяем, что русская речь остается понятной и не искажается.",
             secondary_source: None,
             human_reference: "Keep the Russian meaning without inventing content.",
+            required_translation_markers: &[
+                &["добрый день"],
+                &["русск"],
+                &["понят"],
+                &["искаж"],
+            ],
+            translation_output_required: false,
         },
         PaidSpokenScenario {
             id: "long_context",
+            primary_voice: "Samantha",
             source: "During yesterday's incident the first deployment failed because the certificate expired. After the certificate was renewed, the second deployment succeeded, so do not roll back the database migration.",
             secondary_source: None,
             human_reference: "Preserve chronology, causality, and the instruction not to roll back.",
+            required_translation_markers: &[
+                &["сертификат"],
+                &["втор"],
+                &["успеш"],
+                &["не откат", "не делать откат", "не отмен"],
+                &["миграц"],
+            ],
+            translation_output_required: true,
         },
         PaidSpokenScenario {
             id: "pause_and_silence",
-            source: "The first value is twelve. [[slnc 1200]] The second value is forty seven. [[slnc 1800]] Keep both values.",
+            primary_voice: "Samantha",
+            source: "The first value is twelve. [[slnc 700]] The second value is forty seven. [[slnc 900]] Keep both values.",
             secondary_source: None,
             human_reference: "Preserve values 12 and 47 across pauses.",
+            required_translation_markers: &[
+                &["12", "двенадцать"],
+                &["47", "сорок семь"],
+            ],
+            translation_output_required: true,
         },
         PaidSpokenScenario {
             id: "overlapping_speakers",
+            primary_voice: "Samantha",
             source: "Alice says the release is scheduled for Friday morning.",
             secondary_source: Some("Bob says the security review must finish before Thursday evening."),
             human_reference: "Best effort mixed-track translation; note any lost speaker or timing detail.",
+            required_translation_markers: &[&["пятниц", "четверг"]],
+            translation_output_required: true,
         },
     ]
 }
@@ -445,22 +550,28 @@ fn paid_artifact_root() -> PathBuf {
         .join(format!("incoming-spoken-{timestamp}"))
 }
 
-fn play_paid_scenario(primary: &Path, secondary: Option<&Path>) {
-    let primary_child = Command::new("afplay")
-        .arg(primary)
-        .spawn()
-        .expect("must play primary paid fixture");
-    let secondary_child = secondary.map(|path| {
-        std::thread::sleep(Duration::from_millis(180));
-        Command::new("afplay")
-            .arg(path)
+async fn play_paid_scenario(primary: &Path, secondary: Option<&Path>) {
+    let primary = primary.to_path_buf();
+    let secondary = secondary.map(Path::to_path_buf);
+    tokio::task::spawn_blocking(move || {
+        let primary_child = Command::new("afplay")
+            .arg(primary)
             .spawn()
-            .expect("must play overlapping paid fixture")
-    });
-    wait_for_child_with_timeout(primary_child, Duration::from_secs(25), "primary afplay");
-    if let Some(child) = secondary_child {
-        wait_for_child_with_timeout(child, Duration::from_secs(25), "secondary afplay");
-    }
+            .expect("must play primary paid fixture");
+        let secondary_child = secondary.map(|path| {
+            std::thread::sleep(Duration::from_millis(180));
+            Command::new("afplay")
+                .arg(path)
+                .spawn()
+                .expect("must play overlapping paid fixture")
+        });
+        wait_for_child_with_timeout(primary_child, Duration::from_secs(25), "primary afplay");
+        if let Some(child) = secondary_child {
+            wait_for_child_with_timeout(child, Duration::from_secs(25), "secondary afplay");
+        }
+    })
+    .await
+    .expect("paid scenario playback worker must not panic");
 }
 
 #[tokio::test]
@@ -636,17 +747,18 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
         !scenarios.is_empty(),
         "unknown INCOMING_SPOKEN_E2E_SCENARIO={scenario_filter}"
     );
+    let transcription_client = reqwest::Client::new();
 
     for (index, scenario) in scenarios.into_iter().enumerate() {
         let fixture = generate_spoken_audio_fixture(
             &format!("voicetext_paid_{}", scenario.id),
-            "Alex",
+            scenario.primary_voice,
             scenario.source,
         );
         let secondary_fixture = scenario.secondary_source.map(|source| {
             generate_spoken_audio_fixture(
                 &format!("voicetext_paid_{}_secondary", scenario.id),
-                "Samantha",
+                "Daniel",
                 source,
             )
         });
@@ -664,6 +776,7 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
         let translated_text = Arc::new(Mutex::new(String::new()));
         let errors = Arc::new(Mutex::new(Vec::<String>::new()));
         let first_input_ms = Arc::new(Mutex::new(None::<u128>));
+        let captured_samples = Arc::new(Mutex::new(Vec::<i16>::new()));
         let first_source_text_ms = Arc::new(Mutex::new(None::<u128>));
         let first_translated_text_ms = Arc::new(Mutex::new(None::<u128>));
         let started_at = Instant::now();
@@ -673,6 +786,7 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
                 inner: DefaultPlatformAudioFactory::new(),
                 started_at,
                 first_input_ms: first_input_ms.clone(),
+                captured_samples: captured_samples.clone(),
             }),
             Arc::new(PaidSpokenOutputFactory {
                 state: output_state.clone(),
@@ -721,36 +835,64 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             .start(config, callbacks)
             .await
             .unwrap_or_else(|error| panic!("paid scenario {} must start: {error}", scenario.id));
+        tokio::time::sleep(PAID_SOURCE_PREROLL).await;
         let source_playback_started_ms = started_at.elapsed().as_millis();
         play_paid_scenario(
             fixture.path(),
             secondary_fixture.as_ref().map(TempAudioFixture::path),
-        );
-        let result = tokio::time::timeout(Duration::from_secs(30), async {
+        )
+        .await;
+        let output_wait_timeout = if scenario.translation_output_required {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_secs(5)
+        };
+        let result = tokio::time::timeout(output_wait_timeout, async {
             loop {
                 if !translated_text.lock().unwrap().trim().is_empty()
-                    && !output_state.samples.lock().unwrap().is_empty()
+                    && output_state.audible_samples.load(Ordering::Relaxed)
+                        >= MIN_AUDIBLE_TRANSLATED_SAMPLES
                 {
+                    break;
+                }
+                if !errors.lock().unwrap().is_empty() {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
         .await;
-        service
-            .stop()
-            .await
-            .unwrap_or_else(|error| panic!("paid scenario {} must stop: {error}", scenario.id));
-        result.unwrap_or_else(|_| {
-            panic!(
-                "scenario {} returned no text/audio within 30 seconds",
-                scenario.id
-            )
-        });
+        let wait_completed_before_timeout = result.is_ok();
+        let stop_result = service.stop().await;
+        let stop_error = stop_result.as_ref().err().map(ToString::to_string);
 
         let source = source_text.lock().unwrap().clone();
         let translated = translated_text.lock().unwrap().clone();
         let translated_samples = output_state.samples.lock().unwrap().clone();
+        let captured_input_samples = captured_samples.lock().unwrap().clone();
+        let translated_audible_samples = output_state.audible_samples.load(Ordering::Relaxed);
+        let captured_audible_samples = audible_sample_count(&captured_input_samples);
+        let captured_input_transcription = transcribe_with_openai(
+            &transcription_client,
+            &api_key,
+            24_000,
+            1,
+            &captured_input_samples,
+        )
+        .await;
+        let captured_input_transcription_error = captured_input_transcription
+            .as_ref()
+            .err()
+            .map(ToString::to_string);
+        let captured_input_transcript = captured_input_transcription.unwrap_or_default();
+        let terminal_errors = errors.lock().unwrap().clone();
+        let source_transcript_available = !source.trim().is_empty();
+        let missing_marker_groups =
+            missing_translation_marker_groups(&translated, scenario.required_translation_markers);
+        let output_received_within_timeout = wait_completed_before_timeout
+            && terminal_errors.is_empty()
+            && !translated.trim().is_empty()
+            && translated_audible_samples >= MIN_AUDIBLE_TRANSLATED_SAMPLES;
         fs::write(scenario_dir.join("source-transcript.txt"), &source)
             .expect("must write source transcript");
         fs::write(scenario_dir.join("translated-transcript.txt"), &translated)
@@ -760,6 +902,16 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             wav_pcm16(24_000, 1, &translated_samples),
         )
         .expect("must write translated audio");
+        fs::write(
+            scenario_dir.join("captured-input.wav"),
+            wav_pcm16(24_000, 1, &captured_input_samples),
+        )
+        .expect("must write captured input audio");
+        fs::write(
+            scenario_dir.join("captured-input-transcript.txt"),
+            &captured_input_transcript,
+        )
+        .expect("must write captured input transcript");
         let metrics = serde_json::json!({
             "scenario": scenario.id,
             "expected_source": scenario.source,
@@ -770,8 +922,18 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             "first_source_text_ms": *first_source_text_ms.lock().unwrap(),
             "first_translated_text_ms": *first_translated_text_ms.lock().unwrap(),
             "first_translated_audio_ms": *output_state.first_audio_ms.lock().unwrap(),
+            "source_transcript_available": source_transcript_available,
+            "translation_output_required": scenario.translation_output_required,
+            "output_wait_timeout_ms": output_wait_timeout.as_millis(),
+            "output_received_within_timeout": output_received_within_timeout,
+            "captured_input_samples": captured_input_samples.len(),
+            "captured_audible_samples": captured_audible_samples,
+            "captured_input_transcription_error": captured_input_transcription_error.clone(),
             "translated_audio_samples": translated_samples.len(),
-            "errors": errors.lock().unwrap().clone(),
+            "translated_audible_samples": translated_audible_samples,
+            "missing_translation_marker_groups": missing_marker_groups.clone(),
+            "errors": terminal_errors.clone(),
+            "stop_error": stop_error,
         });
         fs::write(
             scenario_dir.join("metrics.json"),
@@ -779,29 +941,62 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
         )
         .expect("must write metrics");
 
+        if !source_transcript_available {
+            println!(
+                "paid scenario {}: optional OpenAI source transcript was not emitted",
+                scenario.id
+            );
+        }
         assert!(
-            !source.trim().is_empty(),
-            "scenario {} source transcript is empty",
+            captured_input_transcription_error.is_none(),
+            "scenario {} captured input transcription failed: {:?}",
+            scenario.id,
+            captured_input_transcription_error
+        );
+        assert!(
+            !captured_input_transcript.trim().is_empty(),
+            "scenario {} captured input transcript is empty",
             scenario.id
         );
         assert!(
-            translated
-                .chars()
-                .any(|character| ('\u{0400}'..='\u{04ff}').contains(&character)),
-            "scenario {} expected Russian text, got: {translated}",
-            scenario.id
-        );
-        assert!(
-            !translated_samples.is_empty(),
-            "scenario {} translated PCM is empty",
-            scenario.id
-        );
-        assert!(
-            errors.lock().unwrap().is_empty(),
+            terminal_errors.is_empty(),
             "scenario {} errors: {:?}",
             scenario.id,
-            errors.lock().unwrap()
+            terminal_errors
         );
+        if scenario.translation_output_required {
+            assert!(
+                output_received_within_timeout,
+                "scenario {} returned no text/audible audio within {} seconds; artifacts: {}",
+                scenario.id,
+                output_wait_timeout.as_secs(),
+                scenario_dir.display()
+            );
+        }
+        if let Err(error) = stop_result {
+            panic!("paid scenario {} must stop: {error}", scenario.id);
+        }
+        if scenario.translation_output_required {
+            assert!(
+                translated
+                    .chars()
+                    .any(|character| ('\u{0400}'..='\u{04ff}').contains(&character)),
+                "scenario {} expected Russian text, got: {translated}",
+                scenario.id
+            );
+            assert!(
+                missing_marker_groups.is_empty(),
+                "scenario {} lost required meaning/entities {:?}; translated: {}",
+                scenario.id,
+                missing_marker_groups,
+                translated
+            );
+            assert!(
+                translated_audible_samples >= MIN_AUDIBLE_TRANSLATED_SAMPLES,
+                "scenario {} translated PCM contains no meaningful audio",
+                scenario.id
+            );
+        }
         assert!(output_state.opened.load(Ordering::SeqCst));
         assert!(output_state.closed.load(Ordering::SeqCst));
         assert_eq!(*output_state.gain.lock().unwrap(), Some(0.8));
@@ -817,7 +1012,7 @@ async fn incoming_spoken_translation_paid_stop_mid_phrase_is_bounded() {
     let api_key = load_paid_spoken_e2e_api_key();
     let fixture = generate_spoken_audio_fixture(
         "voicetext_paid_stop_mid_phrase",
-        "Alex",
+        "Samantha",
         "This is a deliberately long sentence about a production incident, a certificate renewal, a database migration, and a scheduled release, and the translation session will be stopped before the speaker can finish the complete thought.",
     );
     let output_state = Arc::new(PaidSpokenOutputState::default());

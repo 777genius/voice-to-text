@@ -122,18 +122,24 @@ generated macOS speech
 By default it runs the linguistic matrix: English to Russian, names/numbers, technical terms,
 mixed English/Russian, already-Russian input, long context, pauses/silence, and overlapping system
 speakers. Set `INCOMING_SPOKEN_E2E_SCENARIO=technical_terms` to run one case. Reviewable source
-audio, translated PCM, both transcripts, first-input/text/audio timings, errors, and the human
-reference are written under `src-tauri/target/e2e-artifacts`; override the directory with
+audio, actual post-capture PCM with an independent transcription, translated PCM, translated
+transcript, optional provider source transcript, first-input/text/audio timings, errors, and the
+human reference are written under `src-tauri/target/e2e-artifacts`; override the directory with
 `INCOMING_SPOKEN_E2E_ARTIFACTS`.
+OpenAI documents `session.input_transcript.delta` as optional, so its availability is recorded in
+metrics but is not a release assertion.
+The already-target-language case accepts either translated output or silence because Realtime
+Translation may intentionally suppress speech that is already in the selected output language.
 
 Run `incoming_spoken_translation_paid_stop_mid_phrase_is_bounded` with the same paid-key guard to
-verify bounded shutdown against a real OpenAI session. Deterministic network interruption,
+verify the incoming runtime's six-second graceful drain plus one-second forced cleanup budget
+against a real OpenAI session. Deterministic network interruption,
 malformed frames, abrupt close, stalled close, 401/429, and oversized messages are covered by
 `realtime_translation_websocket_e2e_test` without a paid key.
 
-It must report nonempty source text, Russian translated text, nonempty translated PCM, no terminal
-errors, and Idle after stop. The separate native output test proves that the same PCM output adapter
-reaches the system default device without feeding back into ScreenCaptureKit.
+It must report Russian translated text, nonempty translated PCM, no terminal errors, and Idle after
+stop. The separate native output test proves that the same PCM output adapter reaches the system
+default device without feeding back into ScreenCaptureKit.
 
 ## Manual Fault Checks
 
