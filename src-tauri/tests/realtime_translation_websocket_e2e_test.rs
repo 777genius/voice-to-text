@@ -82,6 +82,7 @@ struct SyntheticFlowState {
     output_opened: AtomicBool,
     output_closed: AtomicBool,
     output_samples: Mutex<Vec<i16>>,
+    output_sample_count: AtomicUsize,
     output_gain: Mutex<Option<f32>>,
 }
 
@@ -154,6 +155,7 @@ impl AudioCapture for SyntheticCapture {
 
 struct CollectingOutputFactory {
     state: Arc<SyntheticFlowState>,
+    retain_samples: bool,
 }
 
 impl LocalPlaybackOutputFactory for CollectingOutputFactory {
@@ -164,12 +166,14 @@ impl LocalPlaybackOutputFactory for CollectingOutputFactory {
         assert_eq!(route, LocalPlaybackRoute::SystemDefault);
         Ok(Box::new(CollectingOutput {
             state: self.state.clone(),
+            retain_samples: self.retain_samples,
         }))
     }
 }
 
 struct CollectingOutput {
     state: Arc<SyntheticFlowState>,
+    retain_samples: bool,
 }
 
 #[async_trait]
@@ -188,10 +192,15 @@ impl TranslationAudioOutput for CollectingOutput {
         samples: &[i16],
     ) -> TranslationAudioOutputResult<AudioEnqueueOutcome> {
         self.state
-            .output_samples
-            .lock()
-            .unwrap()
-            .extend_from_slice(samples);
+            .output_sample_count
+            .fetch_add(samples.len(), Ordering::Relaxed);
+        if self.retain_samples {
+            self.state
+                .output_samples
+                .lock()
+                .unwrap()
+                .extend_from_slice(samples);
+        }
         Ok(AudioEnqueueOutcome::Queued {
             pending: Duration::ZERO,
         })
@@ -368,6 +377,7 @@ async fn spoken_facade_runs_synthetic_audio_through_local_websocket_and_playback
         }),
         Arc::new(CollectingOutputFactory {
             state: flow_state.clone(),
+            retain_samples: true,
         }),
         Arc::new(LocalWebSocketTranslationFactory { endpoint }),
         Arc::new(ReadyCapability),
@@ -716,17 +726,20 @@ async fn spoken_runtime_long_soak_keeps_audio_flow_bounded_and_stops_cleanly() {
         }),
         Arc::new(CollectingOutputFactory {
             state: flow_state.clone(),
+            retain_samples: false,
         }),
         Arc::new(LocalWebSocketTranslationFactory { endpoint }),
         Arc::new(ReadyCapability),
     );
-    let translated_text = Arc::new(Mutex::new(String::new()));
+    let translated_text_chars = Arc::new(AtomicUsize::new(0));
     let errors = Arc::new(Mutex::new(Vec::<String>::new()));
     let callbacks = IncomingTranslationCallbacks {
         on_source_final: Arc::new(|_| {}),
         on_translation_delta: {
-            let translated_text = translated_text.clone();
-            Arc::new(move |delta| translated_text.lock().unwrap().push_str(&delta))
+            let translated_text_chars = translated_text_chars.clone();
+            Arc::new(move |delta| {
+                translated_text_chars.fetch_add(delta.len(), Ordering::Relaxed);
+            })
         },
         on_error: {
             let errors = errors.clone();
@@ -753,15 +766,17 @@ async fn spoken_runtime_long_soak_keeps_audio_flow_bounded_and_stops_cleanly() {
         .expect("soak server must not panic");
 
     let events = emitted_audio_events.load(Ordering::SeqCst);
-    let samples = flow_state.output_samples.lock().unwrap().len();
+    let samples = flow_state.output_sample_count.load(Ordering::Relaxed);
+    let text_chars = translated_text_chars.load(Ordering::Relaxed);
     println!(
         "spoken_soak_seconds={}, audio_events={events}, output_samples={samples}, text_chars={}",
         duration.as_secs(),
-        translated_text.lock().unwrap().len()
+        text_chars
     );
     assert!(events > 0);
     assert_eq!(samples, events * 3);
     assert!(samples <= (duration.as_secs() as usize + 2) * 33);
+    assert!(flow_state.output_samples.lock().unwrap().is_empty());
     assert!(flow_state.capture_stopped.load(Ordering::SeqCst));
     assert!(flow_state.output_closed.load(Ordering::SeqCst));
     assert_eq!(service.get_status().await, RecordingStatus::Idle);

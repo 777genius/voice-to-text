@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tokio::sync::mpsc;
 
-use paid_e2e_support::{load_paid_e2e_api_key, transcribe_pcm16};
+use paid_e2e_support::{load_paid_e2e_api_key, transcribe_pcm16, wav_pcm16};
 
 static NEXT_TEMP_AUDIO_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -102,10 +102,12 @@ fn generate_russian_pcm24() -> Vec<i16> {
     assert!(ffmpeg_status.success(), "ffmpeg conversion failed");
 
     let bytes = fs::read(raw_path.path()).expect("must read generated pcm");
-    bytes
+    let mut samples: Vec<i16> = bytes
         .chunks_exact(2)
         .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-        .collect()
+        .collect();
+    samples.extend(std::iter::repeat(0).take(36_000));
+    samples
 }
 
 fn find_blackhole_input() -> cpal::Device {
@@ -254,6 +256,59 @@ fn rms(samples: &[f32]) -> f32 {
     (sum_sq / samples.len() as f32).sqrt()
 }
 
+fn audible_pcm16_window(samples: &[i16], sample_rate: u32, channels: u16) -> &[i16] {
+    const AUDIBLE_THRESHOLD: i16 = 256;
+    let Some(first) = samples
+        .iter()
+        .position(|sample| sample.unsigned_abs() >= AUDIBLE_THRESHOLD as u16)
+    else {
+        return samples;
+    };
+    let last = samples
+        .iter()
+        .rposition(|sample| sample.unsigned_abs() >= AUDIBLE_THRESHOLD as u16)
+        .unwrap_or(first);
+    let channels = usize::from(channels.max(1));
+    let padding = (sample_rate as usize / 2).saturating_mul(channels);
+    let mut start = first.saturating_sub(padding);
+    start -= start % channels;
+    let mut end = last
+        .saturating_add(padding)
+        .saturating_add(1)
+        .min(samples.len());
+    end -= end % channels;
+    if end <= start {
+        return samples;
+    }
+    &samples[start..end]
+}
+
+fn outgoing_artifact_root() -> PathBuf {
+    if let Some(path) = std::env::var_os("OUTGOING_TRANSLATION_E2E_ARTIFACTS") {
+        return PathBuf::from(path);
+    }
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/e2e-artifacts")
+        .join(format!("outgoing-live-{timestamp}"))
+}
+
+#[test]
+fn audible_window_trims_outer_silence_with_channel_aligned_padding() {
+    let mut samples = vec![0i16; 20];
+    samples.extend([400, -400]);
+    samples.extend(vec![0i16; 20]);
+
+    let window = audible_pcm16_window(&samples, 8, 2);
+
+    assert_eq!(window.len() % 2, 0);
+    assert_eq!(window, &samples[12..30]);
+    assert_eq!(audible_pcm16_window(&[0; 8], 8, 1), &[0; 8]);
+}
+
 fn live_audio_soak_duration() -> Duration {
     std::env::var("LIVE_AUDIO_SOAK_SECONDS")
         .ok()
@@ -268,7 +323,9 @@ struct SyntheticPcmMicrophone {
     config: AudioConfig,
     started: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
+    finished: Arc<AtomicBool>,
     callback: Option<AudioChunkCallback>,
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[async_trait]
@@ -280,19 +337,31 @@ impl AudioCapture for SyntheticPcmMicrophone {
 
     async fn start_capture(&mut self, on_chunk: AudioChunkCallback) -> AudioResult<()> {
         self.started.store(true, Ordering::SeqCst);
-        for chunk in self.pcm.chunks(4_800) {
-            on_chunk(AudioChunk::new(
-                chunk.to_vec(),
-                self.config.sample_rate,
-                self.config.channels,
-            ));
-        }
-        self.callback = Some(on_chunk);
+        self.stopped.store(false, Ordering::SeqCst);
+        self.finished.store(false, Ordering::SeqCst);
+        let chunks: Vec<Vec<i16>> = self.pcm.chunks(4_800).map(|chunk| chunk.to_vec()).collect();
+        let config = self.config;
+        let stopped = self.stopped.clone();
+        let finished = self.finished.clone();
+        self.callback = Some(on_chunk.clone());
+        self.task = Some(tokio::spawn(async move {
+            for chunk in chunks {
+                if stopped.load(Ordering::SeqCst) {
+                    break;
+                }
+                on_chunk(AudioChunk::new(chunk, config.sample_rate, config.channels));
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            finished.store(true, Ordering::SeqCst);
+        }));
         Ok(())
     }
 
     async fn stop_capture(&mut self) -> AudioResult<()> {
         self.stopped.store(true, Ordering::SeqCst);
+        if let Some(task) = self.task.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+        }
         self.callback = None;
         Ok(())
     }
@@ -311,6 +380,7 @@ struct SyntheticMicToBlackholeFactory {
     requested_target: Arc<Mutex<Option<AudioCaptureTarget>>>,
     mic_started: Arc<AtomicBool>,
     mic_stopped: Arc<AtomicBool>,
+    mic_finished: Arc<AtomicBool>,
 }
 
 struct LoopingPcmMicrophone {
@@ -443,7 +513,9 @@ impl PlatformAudioFactory for SyntheticMicToBlackholeFactory {
             config: AudioConfig::default(),
             started: self.mic_started.clone(),
             stopped: self.mic_stopped.clone(),
+            finished: self.mic_finished.clone(),
             callback: None,
+            task: None,
         }))
     }
 
@@ -523,12 +595,14 @@ async fn live_translation_service_synthetic_voice_reaches_blackhole() {
     let requested_target = Arc::new(Mutex::new(None));
     let mic_started = Arc::new(AtomicBool::new(false));
     let mic_stopped = Arc::new(AtomicBool::new(false));
+    let mic_finished = Arc::new(AtomicBool::new(false));
     let service = LiveTranslationService::new_with_factories(
         Arc::new(SyntheticMicToBlackholeFactory {
             pcm: source_pcm,
             requested_target: requested_target.clone(),
             mic_started: mic_started.clone(),
             mic_stopped: mic_stopped.clone(),
+            mic_finished: mic_finished.clone(),
         }),
         Arc::new(OpenAIRealtimeTranslationFactory),
     );
@@ -568,7 +642,28 @@ async fn live_translation_service_synthetic_voice_reaches_blackhole() {
         AudioCaptureTarget::outgoing_translation().sample_rate
     );
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    let completion = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if mic_finished.load(Ordering::SeqCst) {
+                break;
+            }
+            let current_errors = errors.lock().unwrap().clone();
+            assert!(
+                current_errors.is_empty(),
+                "outgoing translation failed before source completion: {current_errors:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    assert!(
+        completion.is_ok(),
+        "synthetic microphone timeout: mic_finished={}, text={:?}, errors={:?}",
+        mic_finished.load(Ordering::SeqCst),
+        translated_text.lock().unwrap(),
+        errors.lock().unwrap()
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
     service
         .stop_translation()
         .await
@@ -576,13 +671,14 @@ async fn live_translation_service_synthetic_voice_reaches_blackhole() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     drop(input_stream);
 
-    assert_eq!(service.get_status().await, RecordingStatus::Idle);
-    assert!(mic_stopped.load(Ordering::SeqCst));
+    let final_status = service.get_status().await;
+    let final_errors = errors.lock().unwrap().clone();
     assert!(
-        errors.lock().unwrap().is_empty(),
-        "unexpected service errors: {:?}",
-        errors.lock().unwrap()
+        final_errors.is_empty(),
+        "unexpected service errors with final status {final_status:?}: {final_errors:?}"
     );
+    assert_eq!(final_status, RecordingStatus::Idle);
+    assert!(mic_stopped.load(Ordering::SeqCst));
     assert!(
         statuses
             .lock()
@@ -602,12 +698,14 @@ async fn live_translation_service_synthetic_voice_reaches_blackhole() {
         .iter()
         .map(|sample| (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16)
         .collect();
+    let audible_pcm16 =
+        audible_pcm16_window(&captured_pcm16, capture_sample_rate, capture_channels);
     let virtual_mic_transcript = transcribe_pcm16(
         &reqwest::Client::new(),
         &api_key,
         capture_sample_rate,
         capture_channels,
-        &captured_pcm16,
+        audible_pcm16,
     )
     .await
     .expect("captured virtual microphone audio must be independently transcribable");
@@ -616,23 +714,63 @@ async fn live_translation_service_synthetic_voice_reaches_blackhole() {
         .iter()
         .fold(0.0f32, |acc, sample| acc.max(sample.abs()));
 
+    let artifact_root = outgoing_artifact_root();
+    fs::create_dir_all(&artifact_root).expect("must create outgoing E2E artifact directory");
+    fs::write(
+        artifact_root.join("virtual-mic-full.wav"),
+        wav_pcm16(capture_sample_rate, capture_channels, &captured_pcm16),
+    )
+    .expect("must write full virtual microphone artifact");
+    fs::write(
+        artifact_root.join("virtual-mic-audible.wav"),
+        wav_pcm16(capture_sample_rate, capture_channels, audible_pcm16),
+    )
+    .expect("must write audible virtual microphone artifact");
+    fs::write(
+        artifact_root.join("service-transcript.txt"),
+        &translated_text,
+    )
+    .expect("must write outgoing service transcript");
+    fs::write(
+        artifact_root.join("virtual-mic-transcript.txt"),
+        &virtual_mic_transcript,
+    )
+    .expect("must write virtual microphone transcript");
+    fs::write(
+        artifact_root.join("metrics.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "capture_sample_rate": capture_sample_rate,
+            "capture_channels": capture_channels,
+            "full_samples": captured_pcm16.len(),
+            "audible_samples": audible_pcm16.len(),
+            "rms": measured_rms,
+            "peak": peak,
+            "service_transcript": &translated_text,
+            "virtual_mic_transcript": &virtual_mic_transcript,
+        }))
+        .expect("must serialize outgoing E2E metrics"),
+    )
+    .expect("must write outgoing E2E metrics");
+
     println!("service_translated_text={translated_text}");
     println!("service_virtual_mic_transcript={virtual_mic_transcript}");
     println!(
         "service_blackhole_samples={}, service_blackhole_rms={measured_rms:.6}, service_blackhole_peak={peak:.6}",
         captured_samples.len()
     );
+    println!("service_outgoing_artifacts={}", artifact_root.display());
 
+    let service_transcript = translated_text.to_lowercase();
     assert!(
-        translated_text.to_lowercase().contains("english")
-            || translated_text.to_lowercase().contains("voice")
-            || translated_text.to_lowercase().contains("translation")
-            || translated_text.to_lowercase().contains("alex"),
-        "service translated text looks unexpected/empty: {translated_text}"
+        service_transcript.contains("alex")
+            && service_transcript.contains("english")
+            && (service_transcript.contains("voice") || service_transcript.contains("translation")),
+        "service translated text lost expected meaning: {translated_text}"
     );
     let virtual_mic_transcript = virtual_mic_transcript.to_lowercase();
     assert!(
         virtual_mic_transcript.contains("alex")
+            && virtual_mic_transcript.contains("english")
             && (virtual_mic_transcript.contains("voice")
                 || virtual_mic_transcript.contains("translation")),
         "virtual microphone audio lost translated meaning: {virtual_mic_transcript}"

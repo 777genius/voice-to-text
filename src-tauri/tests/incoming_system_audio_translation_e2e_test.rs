@@ -392,6 +392,7 @@ struct PaidSpokenScenario {
     id: &'static str,
     primary_voice: &'static str,
     source: &'static str,
+    source_playback_gain: f32,
     secondary_source: Option<&'static str>,
     human_reference: &'static str,
     required_translation_markers: &'static [&'static [&'static str]],
@@ -413,6 +414,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             id: "english_to_russian",
             primary_voice: "Samantha",
             source: "Hello from the call. Please translate this sentence into Russian.",
+            source_playback_gain: 1.0,
             secondary_source: None,
             human_reference: "Natural Russian translation preserving the request.",
             required_translation_markers: &[&["перевед", "перевод"]],
@@ -422,6 +424,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             id: "names_and_numbers",
             primary_voice: "Samantha",
             source: "My name is Robert Brown. This is a business meeting. The meeting date is October 21st. The meeting time is 3:45 PM. The room number is 207.",
+            source_playback_gain: 1.0,
             secondary_source: None,
             human_reference: "Preserve the name, meeting context, date, time, and room 207.",
             required_translation_markers: &[
@@ -438,6 +441,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             id: "technical_terms",
             primary_voice: "Samantha",
             source: "The WebSocket reconnect uses exponential backoff. The system uses bounded queues. The audio format is 24 kilohertz PCM.",
+            source_playback_gain: 1.0,
             secondary_source: None,
             human_reference: "Preserve WebSocket, exponential backoff, bounded queues, and 24 kHz PCM.",
             required_translation_markers: &[
@@ -453,6 +457,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             id: "mixed_english_russian",
             primary_voice: "Milena",
             source: "Please open настройки and choose режим text and audio for this call.",
+            source_playback_gain: 1.0,
             secondary_source: None,
             human_reference: "Produce coherent Russian while preserving the UI mode name.",
             required_translation_markers: &[
@@ -467,6 +472,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             id: "already_russian",
             primary_voice: "Milena",
             source: "Добрый день. Проверяем, что русская речь остается понятной и не искажается.",
+            source_playback_gain: 1.0,
             secondary_source: None,
             human_reference: "Keep the Russian meaning without inventing content.",
             required_translation_markers: &[
@@ -481,6 +487,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             id: "long_context",
             primary_voice: "Samantha",
             source: "During yesterday's incident the first deployment failed because the certificate expired. After the certificate was renewed, the second deployment succeeded, so do not roll back the database migration.",
+            source_playback_gain: 1.0,
             secondary_source: None,
             human_reference: "Preserve chronology, causality, and the instruction not to roll back.",
             required_translation_markers: &[
@@ -496,6 +503,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             id: "pause_and_silence",
             primary_voice: "Samantha",
             source: "The first value is twelve. [[slnc 700]] The second value is forty seven. [[slnc 900]] Keep both values.",
+            source_playback_gain: 1.0,
             secondary_source: None,
             human_reference: "Preserve values 12 and 47 across pauses.",
             required_translation_markers: &[
@@ -508,9 +516,23 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             id: "overlapping_speakers",
             primary_voice: "Samantha",
             source: "Alice says the release is scheduled for Friday morning.",
+            source_playback_gain: 1.0,
             secondary_source: Some("Bob says the security review must finish before Thursday evening."),
             human_reference: "Best effort mixed-track translation; note any lost speaker or timing detail.",
             required_translation_markers: &[&["пятниц", "четверг"]],
+            translation_output_required: true,
+        },
+        PaidSpokenScenario {
+            id: "half_volume_source",
+            primary_voice: "Samantha",
+            source: "There are twenty seven open tasks. The meeting starts at nine thirty AM.",
+            source_playback_gain: 0.5,
+            secondary_source: None,
+            human_reference: "Preserve 27 open tasks and meeting time 9:30 without adding context.",
+            required_translation_markers: &[
+                &["27", "twenty seven", "двадцать семь"],
+                &["9:30", "9.30", "nine thirty", "девять тридцать"],
+            ],
             translation_output_required: true,
         },
     ]
@@ -529,17 +551,20 @@ fn paid_artifact_root() -> PathBuf {
         .join(format!("incoming-spoken-{timestamp}"))
 }
 
-async fn play_paid_scenario(primary: &Path, secondary: Option<&Path>) {
+async fn play_paid_scenario(primary: &Path, secondary: Option<&Path>, playback_gain: f32) {
     let primary = primary.to_path_buf();
     let secondary = secondary.map(Path::to_path_buf);
     tokio::task::spawn_blocking(move || {
+        let playback_gain = playback_gain.to_string();
         let primary_child = Command::new("afplay")
+            .args(["--volume", &playback_gain])
             .arg(primary)
             .spawn()
             .expect("must play primary paid fixture");
         let secondary_child = secondary.map(|path| {
             std::thread::sleep(Duration::from_millis(180));
             Command::new("afplay")
+                .args(["--volume", &playback_gain])
                 .arg(path)
                 .spawn()
                 .expect("must play overlapping paid fixture")
@@ -819,6 +844,7 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
         play_paid_scenario(
             fixture.path(),
             secondary_fixture.as_ref().map(TempAudioFixture::path),
+            scenario.source_playback_gain,
         )
         .await;
         let output_wait_timeout = if scenario.translation_output_required {
@@ -895,6 +921,7 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             "scenario": scenario.id,
             "expected_source": scenario.source,
             "expected_secondary_source": scenario.secondary_source,
+            "source_playback_gain": scenario.source_playback_gain,
             "human_reference": scenario.human_reference,
             "source_playback_started_ms": source_playback_started_ms,
             "first_input_ms": *first_input_ms.lock().unwrap(),
