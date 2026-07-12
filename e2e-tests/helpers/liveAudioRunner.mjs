@@ -1,5 +1,4 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
 import process from 'node:process';
 
 export function terminateProcessGroup(pid, { platform = process.platform, kill = process.kill } = {}) {
@@ -36,58 +35,19 @@ export function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function stripDotenvInlineComment(rawValue) {
-  const value = rawValue.trim();
-  const quote = value[0];
-  if (quote === '"' || quote === "'") {
-    const closingQuote = value.indexOf(quote, 1);
-    if (closingQuote > 0) {
-      const suffix = value.slice(closingQuote + 1).trim();
-      if (!suffix || suffix.startsWith('#')) {
-        return value.slice(0, closingQuote + 1);
-      }
-    }
-  }
-
-  return value.split(/\s+#/)[0].trim();
+export function resolvePaidE2eEnvironment({ env = process.env } = {}) {
+  return {
+    acknowledged: env.VOICETEXT_RUN_PAID_E2E === '1',
+    apiKey: env.OPENAI_E2E_API_KEY?.trim() ?? '',
+  };
 }
 
-export function readEnvOpenAiKey({
-  env = process.env,
-  dotenvPath = 'src-tauri/.env',
-  exists = existsSync,
-  readFile = readFileSync,
-} = {}) {
-  if (env.OPENAI_API_KEY?.trim()) {
-    return env.OPENAI_API_KEY.trim();
-  }
-
-  if (!exists(dotenvPath)) {
-    return '';
-  }
-
-  for (const entry of readFile(dotenvPath, 'utf8').split(/\r?\n/)) {
-    const match = entry.trim().match(/^(?:export\s+)?OPENAI_API_KEY\s*=\s*(.*)$/);
-    if (!match) {
-      continue;
-    }
-
-    const rawValue = stripDotenvInlineComment(match[1]);
-    if (!rawValue) {
-      return '';
-    }
-
-    if (
-      (rawValue.startsWith('"') && rawValue.endsWith('"')) ||
-      (rawValue.startsWith("'") && rawValue.endsWith("'"))
-    ) {
-      return rawValue.slice(1, -1).trim();
-    }
-
-    return rawValue.split(/\s+#/)[0].trim();
-  }
-
-  return '';
+export function sanitizedAudioTestEnvironment({ env = process.env } = {}) {
+  const sanitized = { ...env };
+  delete sanitized.OPENAI_API_KEY;
+  delete sanitized.OPENAI_E2E_API_KEY;
+  delete sanitized.VOICETEXT_RUN_PAID_E2E;
+  return sanitized;
 }
 
 export function parsePositiveIntegerEnv(value, fallback) {

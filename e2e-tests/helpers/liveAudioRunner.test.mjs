@@ -5,7 +5,8 @@ import {
   assertCommandSucceeded,
   assertExpectedTestRan,
   parsePositiveIntegerEnv,
-  readEnvOpenAiKey,
+  resolvePaidE2eEnvironment,
+  sanitizedAudioTestEnvironment,
   terminateProcessGroup,
 } from './liveAudioRunner.mjs';
 
@@ -13,46 +14,56 @@ function throwingFail(message) {
   throw new Error(message);
 }
 
-test('readEnvOpenAiKey prefers trimmed environment value', () => {
-  const key = readEnvOpenAiKey({
-    env: { OPENAI_API_KEY: '  sk-env-test  ' },
-    exists: () => false,
+test('resolvePaidE2eEnvironment accepts only the dedicated acknowledged key', () => {
+  const result = resolvePaidE2eEnvironment({
+    env: {
+      VOICETEXT_RUN_PAID_E2E: '1',
+      OPENAI_E2E_API_KEY: '  dedicated-test-key  ',
+      OPENAI_API_KEY: 'general-key-must-be-ignored',
+    },
   });
 
-  assert.equal(key, 'sk-env-test');
+  assert.deepEqual(result, {
+    acknowledged: true,
+    apiKey: 'dedicated-test-key',
+  });
 });
 
-test('readEnvOpenAiKey parses quoted dotenv values', () => {
-  const envName = 'OPENAI' + '_API_KEY';
-  const key = readEnvOpenAiKey({
-    env: {},
-    exists: () => true,
-    readFile: () => `export ${envName} = "  sk-dotenv-test  "\n`,
+test('resolvePaidE2eEnvironment does not treat other acknowledgement values as consent', () => {
+  const result = resolvePaidE2eEnvironment({
+    env: {
+      VOICETEXT_RUN_PAID_E2E: 'true',
+      OPENAI_E2E_API_KEY: 'dedicated-test-key',
+    },
   });
 
-  assert.equal(key, 'sk-dotenv-test');
+  assert.equal(result.acknowledged, false);
+  assert.equal(result.apiKey, 'dedicated-test-key');
 });
 
-test('readEnvOpenAiKey parses quoted dotenv values with trailing comments', () => {
-  const envName = 'OPENAI' + '_API_KEY';
-  const key = readEnvOpenAiKey({
-    env: {},
-    exists: () => true,
-    readFile: () => `${envName} = "  sk-dotenv-test  " # local key\n`,
+test('resolvePaidE2eEnvironment ignores the general OpenAI key', () => {
+  const result = resolvePaidE2eEnvironment({
+    env: {
+      VOICETEXT_RUN_PAID_E2E: '1',
+      OPENAI_API_KEY: 'general-key-must-be-ignored',
+    },
   });
 
-  assert.equal(key, 'sk-dotenv-test');
+  assert.equal(result.acknowledged, true);
+  assert.equal(result.apiKey, '');
 });
 
-test('readEnvOpenAiKey strips inline comments from unquoted dotenv values', () => {
-  const envName = 'OPENAI' + '_API_KEY';
-  const key = readEnvOpenAiKey({
-    env: {},
-    exists: () => true,
-    readFile: () => `${envName}=sk-dotenv-test # local key\n`,
+test('sanitizedAudioTestEnvironment removes all paid credentials from native child processes', () => {
+  const result = sanitizedAudioTestEnvironment({
+    env: {
+      PATH: '/test/bin',
+      OPENAI_API_KEY: 'general-key',
+      OPENAI_E2E_API_KEY: 'dedicated-key',
+      VOICETEXT_RUN_PAID_E2E: '1',
+    },
   });
 
-  assert.equal(key, 'sk-dotenv-test');
+  assert.deepEqual(result, { PATH: '/test/bin' });
 });
 
 test('parsePositiveIntegerEnv accepts only complete positive integer strings', () => {

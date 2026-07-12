@@ -1,8 +1,9 @@
 import process from 'node:process';
 
 import {
-  readEnvOpenAiKey,
+  resolvePaidE2eEnvironment,
   runLiveAudioCommand,
+  sanitizedAudioTestEnvironment,
 } from './helpers/liveAudioRunner.mjs';
 
 const TEST_TIMEOUT_MS = 180_000;
@@ -10,6 +11,7 @@ const TEST_TIMEOUT_MS = 180_000;
 const tests = [
   {
     label: 'blackhole-loopback',
+    paid: false,
     testName: 'cpal_output_reaches_blackhole_input',
     command: [
       'cargo',
@@ -24,7 +26,40 @@ const tests = [
     ],
   },
   {
+    label: 'incoming-native-capture-format',
+    paid: false,
+    testName: 'isolated_realtime_capture_emits_24khz_mono_and_stops_callbacks',
+    command: [
+      'cargo',
+      'test',
+      '--test',
+      'incoming_system_audio_translation_e2e_test',
+      'isolated_realtime_capture_emits_24khz_mono_and_stops_callbacks',
+      '--',
+      '--ignored',
+      '--exact',
+      '--nocapture',
+    ],
+  },
+  {
+    label: 'incoming-native-self-exclusion',
+    paid: false,
+    testName: 'system_default_playback_is_drained_and_excluded_from_system_capture',
+    command: [
+      'cargo',
+      'test',
+      '--test',
+      'incoming_system_audio_translation_e2e_test',
+      'system_default_playback_is_drained_and_excluded_from_system_capture',
+      '--',
+      '--ignored',
+      '--exact',
+      '--nocapture',
+    ],
+  },
+  {
     label: 'outgoing-live-translation-service',
+    paid: true,
     testName: 'live_translation_service_synthetic_voice_reaches_blackhole',
     command: [
       'cargo',
@@ -39,7 +74,8 @@ const tests = [
     ],
   },
   {
-    label: 'incoming-system-audio-translation-service',
+    label: 'incoming-captions-regression',
+    paid: true,
     testName: 'incoming_translation_service_captures_system_audio_and_emits_translated_text',
     command: [
       'cargo',
@@ -53,6 +89,25 @@ const tests = [
       '--nocapture',
     ],
   },
+  {
+    label: 'incoming-spoken-half-volume',
+    paid: true,
+    testName: 'incoming_spoken_translation_returns_realtime_text_and_audio_from_system_capture',
+    command: [
+      'cargo',
+      'test',
+      '--test',
+      'incoming_system_audio_translation_e2e_test',
+      'incoming_spoken_translation_returns_realtime_text_and_audio_from_system_capture',
+      '--',
+      '--ignored',
+      '--exact',
+      '--nocapture',
+    ],
+    env: {
+      INCOMING_SPOKEN_E2E_SCENARIO: 'half_volume_source',
+    },
+  },
 ];
 
 function fail(message) {
@@ -60,21 +115,35 @@ function fail(message) {
   process.exit(1);
 }
 
-const openaiApiKey = readEnvOpenAiKey();
-
-if (!openaiApiKey) {
-  fail('OPENAI_API_KEY is required. Set it in the environment or src-tauri/.env.');
-}
+const paidE2e = resolvePaidE2eEnvironment();
+const childBaseEnv = sanitizedAudioTestEnvironment();
 
 if (process.platform !== 'darwin') {
   fail('This smoke runner currently targets macOS BlackHole and ScreenCaptureKit.');
 }
 
-for (const { label, testName, command } of tests) {
+if (!paidE2e.acknowledged) {
+  fail('VOICETEXT_RUN_PAID_E2E=1 is required to acknowledge paid API usage.');
+}
+
+if (!paidE2e.apiKey) {
+  fail('OPENAI_E2E_API_KEY is required; OPENAI_API_KEY and .env are intentionally ignored.');
+}
+
+for (const { label, paid, testName, command, env = {} } of tests) {
   console.log(`\n[live-audio-smoke] running ${label}`);
   runLiveAudioCommand({
     command,
-    env: { ...process.env, OPENAI_API_KEY: openaiApiKey },
+    env: {
+      ...childBaseEnv,
+      ...env,
+      ...(paid
+        ? {
+            VOICETEXT_RUN_PAID_E2E: '1',
+            OPENAI_E2E_API_KEY: paidE2e.apiKey,
+          }
+        : {}),
+    },
     fail,
     label,
     maxBuffer: 20 * 1024 * 1024,

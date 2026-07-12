@@ -38,7 +38,8 @@ cargo test --test realtime_translation_websocket_e2e_test
 
 The ignored soak defaults to 30 minutes. It continuously sends translated text/audio through the
 real WebSocket adapter and application runtime, checks that the service stays Recording, and proves
-that output accumulation remains bounded by the generated event count.
+that event handling remains bounded by the generated event count. Its output and transcript probes
+use constant-memory counters rather than retaining the full long-session PCM or text.
 
 Short verification:
 
@@ -120,8 +121,9 @@ generated macOS speech
 ```
 
 By default it runs the linguistic matrix: English to Russian, names/numbers, technical terms,
-mixed English/Russian, already-Russian input, long context, pauses/silence, and overlapping system
-speakers. Set `INCOMING_SPOKEN_E2E_SCENARIO=technical_terms` to run one case. Reviewable source
+mixed English/Russian, already-Russian input, long context, pauses/silence, overlapping system
+speakers, and a half-volume source preserving a task count and meeting time. Set
+`INCOMING_SPOKEN_E2E_SCENARIO=technical_terms` to run one case. Reviewable source
 audio, actual post-capture PCM with an independent transcription, translated PCM, translated
 transcript, optional provider source transcript, first-input/text/audio timings, errors, and the
 human reference are written under `src-tauri/target/e2e-artifacts`; override the directory with
@@ -149,7 +151,8 @@ default device without feeding back into ScreenCaptureKit.
 BlackHole 2ch must be installed. The test synthesizes Russian speech, translates it to English,
 writes translated PCM through the production virtual-microphone output, and captures BlackHole's
 input to prove another app can receive audible translated audio. The captured virtual-microphone
-PCM is independently transcribed and must retain the expected English meaning.
+PCM is trimmed to its audible window, independently transcribed, and must retain the expected
+English meaning. The untrimmed capture is still retained for debugging.
 
 ```bash
 cd src-tauri
@@ -172,6 +175,30 @@ VOICETEXT_RUN_PAID_E2E=1 OPENAI_E2E_API_KEY="sk-..." LIVE_AUDIO_SOAK_SECONDS=60 
 Both outgoing tests reject `.env` and `OPENAI_API_KEY`; only the explicitly acknowledged dedicated
 test credential is accepted. The gate requires translated English text, nonzero translated audio
 at BlackHole input, bounded stop, and Idle after cleanup.
+Each short outgoing run writes full/audible virtual-microphone WAV files, both transcripts, and
+metrics under `src-tauri/target/e2e-artifacts/outgoing-live-*`; override the directory with
+`OUTGOING_TRANSLATION_E2E_ARTIFACTS`.
+
+## Reproducible macOS Release Runners
+
+The smoke runner combines BlackHole loopback, native capture format and self-exclusion, outgoing
+virtual-microphone translation, captions regression, and the incoming spoken half-volume scenario:
+
+```bash
+cd frontend
+VOICETEXT_RUN_PAID_E2E=1 OPENAI_E2E_API_KEY="sk-..." npm run e2e:live-audio
+```
+
+The soak runner adds the constant-memory spoken WebSocket runtime soak plus the paid outgoing and
+captions long-session checks. `LIVE_AUDIO_SOAK_SECONDS` applies to each long-running test:
+
+```bash
+cd frontend
+VOICETEXT_RUN_PAID_E2E=1 OPENAI_E2E_API_KEY="sk-..." \
+  LIVE_AUDIO_SOAK_SECONDS=1800 npm run e2e:live-audio-soak
+```
+
+Both runners reject `OPENAI_API_KEY` and do not read `.env`.
 
 ## Manual Fault Checks
 

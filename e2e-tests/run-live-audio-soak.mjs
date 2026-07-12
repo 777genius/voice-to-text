@@ -2,8 +2,9 @@ import process from 'node:process';
 
 import {
   parsePositiveIntegerEnv,
-  readEnvOpenAiKey,
+  resolvePaidE2eEnvironment,
   runLiveAudioCommand,
+  sanitizedAudioTestEnvironment,
 } from './helpers/liveAudioRunner.mjs';
 
 const DEFAULT_SOAK_SECONDS = 600;
@@ -16,6 +17,7 @@ const TEST_TIMEOUT_MS = (soakSeconds + 240) * 1000;
 const tests = [
   {
     label: 'blackhole-loopback-preflight',
+    paid: false,
     testName: 'cpal_output_reaches_blackhole_input',
     command: [
       'cargo',
@@ -30,7 +32,27 @@ const tests = [
     ],
   },
   {
+    label: 'incoming-spoken-runtime-soak',
+    paid: false,
+    testName: 'spoken_runtime_long_soak_keeps_audio_flow_bounded_and_stops_cleanly',
+    command: [
+      'cargo',
+      'test',
+      '--test',
+      'realtime_translation_websocket_e2e_test',
+      'spoken_runtime_long_soak_keeps_audio_flow_bounded_and_stops_cleanly',
+      '--',
+      '--ignored',
+      '--exact',
+      '--nocapture',
+    ],
+    env: {
+      SPOKEN_TRANSLATION_SOAK_SECONDS: String(soakSeconds),
+    },
+  },
+  {
     label: 'outgoing-long-live-translation-soak',
+    paid: true,
     testName: 'live_translation_service_long_running_synthetic_voice_soak',
     command: [
       'cargo',
@@ -46,6 +68,7 @@ const tests = [
   },
   {
     label: 'incoming-long-system-audio-soak',
+    paid: true,
     testName: 'incoming_translation_service_long_running_system_audio_soak',
     command: [
       'cargo',
@@ -66,28 +89,39 @@ function fail(message) {
   process.exit(1);
 }
 
-const openaiApiKey = readEnvOpenAiKey();
-
-if (!openaiApiKey) {
-  fail('OPENAI_API_KEY is required. Set it in the environment or src-tauri/.env.');
-}
+const paidE2e = resolvePaidE2eEnvironment();
+const childBaseEnv = sanitizedAudioTestEnvironment();
 
 if (process.platform !== 'darwin') {
   fail('This soak runner currently targets macOS BlackHole and ScreenCaptureKit.');
+}
+
+if (!paidE2e.acknowledged) {
+  fail('VOICETEXT_RUN_PAID_E2E=1 is required to acknowledge paid API usage.');
+}
+
+if (!paidE2e.apiKey) {
+  fail('OPENAI_E2E_API_KEY is required; OPENAI_API_KEY and .env are intentionally ignored.');
 }
 
 if (soakSeconds < 60) {
   console.warn(`[live-audio-soak] LIVE_AUDIO_SOAK_SECONDS=${soakSeconds}; use 600-1800 for release-grade soak.`);
 }
 
-for (const { label, testName, command } of tests) {
+for (const { label, paid, testName, command, env = {} } of tests) {
   console.log(`\n[live-audio-soak] running ${label} (${soakSeconds}s soak window)`);
   runLiveAudioCommand({
     command,
     env: {
-      ...process.env,
-      OPENAI_API_KEY: openaiApiKey,
+      ...childBaseEnv,
+      ...env,
       LIVE_AUDIO_SOAK_SECONDS: String(soakSeconds),
+      ...(paid
+        ? {
+            VOICETEXT_RUN_PAID_E2E: '1',
+            OPENAI_E2E_API_KEY: paidE2e.apiKey,
+          }
+        : {}),
     },
     fail,
     label,
