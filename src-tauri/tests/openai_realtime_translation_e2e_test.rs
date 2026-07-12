@@ -1,3 +1,5 @@
+mod paid_e2e_support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -11,8 +13,8 @@ use app_lib::application::{
 use app_lib::domain::{
     AudioCapture, AudioCaptureTarget, AudioChunk, AudioChunkCallback, AudioConfig, AudioError,
     AudioResult, PlatformAudioFactory, PlatformAudioSetupState, PlatformAudioSetupStatus,
-    RealtimeTranslationConfig, RealtimeTranslationEvent, RecordingStatus, TranslationAudioOutput,
-    TranslationAudioOutputResult,
+    RealtimeInputNoiseReduction, RealtimeTranslationConfig, RealtimeTranslationEvent,
+    RecordingStatus, TranslationAudioOutput, TranslationAudioOutputResult,
 };
 use app_lib::infrastructure::audio::{AudioOutputConfig, CpalAudioOutput};
 use app_lib::infrastructure::openai::{
@@ -21,6 +23,8 @@ use app_lib::infrastructure::openai::{
 use async_trait::async_trait;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tokio::sync::mpsc;
+
+use paid_e2e_support::{load_paid_e2e_api_key, transcribe_pcm16};
 
 static NEXT_TEMP_AUDIO_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -59,14 +63,6 @@ impl Drop for TempGeneratedFile {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
-}
-
-fn load_openai_api_key() -> String {
-    let _ = dotenv::dotenv();
-    std::env::var("OPENAI_API_KEY")
-        .ok()
-        .filter(|key| !key.trim().is_empty())
-        .expect("OPENAI_API_KEY must be set in src-tauri/.env or environment")
 }
 
 fn generate_russian_pcm24() -> Vec<i16> {
@@ -125,15 +121,17 @@ fn find_blackhole_input() -> cpal::Device {
         .expect("BlackHole input device must exist")
 }
 
-fn start_blackhole_capture(captured: Arc<Mutex<Vec<f32>>>) -> cpal::Stream {
+fn start_blackhole_capture(captured: Arc<Mutex<Vec<f32>>>) -> (cpal::Stream, u32, u16) {
     let input = find_blackhole_input();
     let input_config = input
         .default_input_config()
         .expect("BlackHole input must have default config");
     let stream_config: cpal::StreamConfig = input_config.clone().into();
+    let sample_rate = stream_config.sample_rate.0;
+    let channels = stream_config.channels;
     let err_fn = |err| eprintln!("BlackHole input stream error: {err}");
 
-    match input_config.sample_format() {
+    let stream = match input_config.sample_format() {
         cpal::SampleFormat::F32 => input
             .build_input_stream(
                 &stream_config,
@@ -170,7 +168,8 @@ fn start_blackhole_capture(captured: Arc<Mutex<Vec<f32>>>) -> cpal::Stream {
             )
             .expect("must build u16 input stream"),
         other => panic!("unsupported input sample format: {other:?}"),
-    }
+    };
+    (stream, sample_rate, channels)
 }
 
 #[derive(Default)]
@@ -511,13 +510,14 @@ fn drain_openai_events(
 }
 
 #[tokio::test]
-#[ignore = "calls OpenAI realtime translation API and requires BlackHole/VB-CABLE virtual audio route"]
+#[ignore = "paid/manual: requires BlackHole/VB-CABLE, VOICETEXT_RUN_PAID_E2E=1, and a dedicated OPENAI_E2E_API_KEY"]
 async fn live_translation_service_synthetic_voice_reaches_blackhole() {
-    let api_key = load_openai_api_key();
+    let api_key = load_paid_e2e_api_key();
     let source_pcm = Arc::new(generate_russian_pcm24());
 
     let captured = Arc::new(Mutex::new(Vec::<f32>::new()));
-    let input_stream = start_blackhole_capture(captured.clone());
+    let (input_stream, capture_sample_rate, capture_channels) =
+        start_blackhole_capture(captured.clone());
     input_stream.play().expect("must start BlackHole capture");
 
     let requested_target = Arc::new(Mutex::new(None));
@@ -553,7 +553,7 @@ async fn live_translation_service_synthetic_voice_reaches_blackhole() {
     };
 
     let mut config = LiveTranslationConfig::new_with_defaults(9_001);
-    config.openai_api_key = api_key;
+    config.openai_api_key = api_key.clone();
     config.target_language = "en".to_string();
     config.microphone_sensitivity = 100;
 
@@ -598,12 +598,26 @@ async fn live_translation_service_synthetic_voice_reaches_blackhole() {
 
     let translated_text = translated_text.lock().unwrap().clone();
     let captured_samples = captured.lock().unwrap().clone();
+    let captured_pcm16: Vec<i16> = captured_samples
+        .iter()
+        .map(|sample| (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16)
+        .collect();
+    let virtual_mic_transcript = transcribe_pcm16(
+        &reqwest::Client::new(),
+        &api_key,
+        capture_sample_rate,
+        capture_channels,
+        &captured_pcm16,
+    )
+    .await
+    .expect("captured virtual microphone audio must be independently transcribable");
     let measured_rms = rms(&captured_samples);
     let peak = captured_samples
         .iter()
         .fold(0.0f32, |acc, sample| acc.max(sample.abs()));
 
     println!("service_translated_text={translated_text}");
+    println!("service_virtual_mic_transcript={virtual_mic_transcript}");
     println!(
         "service_blackhole_samples={}, service_blackhole_rms={measured_rms:.6}, service_blackhole_peak={peak:.6}",
         captured_samples.len()
@@ -616,6 +630,13 @@ async fn live_translation_service_synthetic_voice_reaches_blackhole() {
             || translated_text.to_lowercase().contains("alex"),
         "service translated text looks unexpected/empty: {translated_text}"
     );
+    let virtual_mic_transcript = virtual_mic_transcript.to_lowercase();
+    assert!(
+        virtual_mic_transcript.contains("alex")
+            && (virtual_mic_transcript.contains("voice")
+                || virtual_mic_transcript.contains("translation")),
+        "virtual microphone audio lost translated meaning: {virtual_mic_transcript}"
+    );
     assert!(
         measured_rms > 0.005 && peak > 0.03,
         "service translated audio did not reach BlackHole input: rms={measured_rms:.6}, peak={peak:.6}"
@@ -623,9 +644,9 @@ async fn live_translation_service_synthetic_voice_reaches_blackhole() {
 }
 
 #[tokio::test]
-#[ignore = "long soak: calls OpenAI realtime translation API and requires BlackHole 2ch"]
+#[ignore = "paid/manual soak: requires BlackHole 2ch, VOICETEXT_RUN_PAID_E2E=1, and a dedicated OPENAI_E2E_API_KEY"]
 async fn live_translation_service_long_running_synthetic_voice_soak() {
-    let api_key = load_openai_api_key();
+    let api_key = load_paid_e2e_api_key();
     let soak_duration = live_audio_soak_duration();
     let source_pcm = Arc::new(generate_russian_pcm24());
 
@@ -737,14 +758,18 @@ async fn live_translation_service_long_running_synthetic_voice_soak() {
 }
 
 #[tokio::test]
-#[ignore = "calls OpenAI realtime translation API and requires BlackHole 2ch"]
+#[ignore = "paid/manual: requires BlackHole 2ch, VOICETEXT_RUN_PAID_E2E=1, and a dedicated OPENAI_E2E_API_KEY"]
 async fn openai_translation_audio_is_written_to_blackhole() {
-    let api_key = load_openai_api_key();
+    let api_key = load_paid_e2e_api_key();
     let source_pcm = generate_russian_pcm24();
 
     let mut client = OpenAIRealtimeTranslationClient::new();
     let mut rx = client
-        .connect(RealtimeTranslationConfig::new(api_key, "en".to_string()))
+        .connect(RealtimeTranslationConfig::new(
+            api_key,
+            "en".to_string(),
+            RealtimeInputNoiseReduction::NearField,
+        ))
         .await
         .expect("must connect OpenAI realtime");
     let mut translated_text = String::new();
@@ -775,7 +800,7 @@ async fn openai_translation_audio_is_written_to_blackhole() {
     let _ = drain_openai_events(&mut rx, &mut translated_text, &mut pending_audio);
 
     let captured = Arc::new(Mutex::new(Vec::<f32>::new()));
-    let input_stream = start_blackhole_capture(captured.clone());
+    let (input_stream, _, _) = start_blackhole_capture(captured.clone());
     input_stream.play().expect("must start BlackHole capture");
 
     let mut output = CpalAudioOutput::new();

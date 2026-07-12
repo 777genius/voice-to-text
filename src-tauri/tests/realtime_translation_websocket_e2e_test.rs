@@ -9,11 +9,11 @@ use app_lib::application::{
 use app_lib::domain::{
     AudioCapture, AudioCaptureTarget, AudioChunk, AudioChunkCallback, AudioConfig,
     AudioEnqueueOutcome, AudioResult, LocalPlaybackOutputFactory, LocalPlaybackRoute,
-    RealtimeTranslationConfig, RealtimeTranslationErrorKind, RealtimeTranslationEvent,
-    RealtimeTranslationFactory, RealtimeTranslationSession, RecordingStatus,
-    SpokenIncomingCapability, SpokenTranslationCapability, SttConfig, SystemAudioCaptureFactory,
-    SystemAudioCaptureRequest, TranslationAudioOutput, TranslationAudioOutputConfig,
-    TranslationAudioOutputResult,
+    RealtimeInputNoiseReduction, RealtimeTranslationConfig, RealtimeTranslationErrorKind,
+    RealtimeTranslationEvent, RealtimeTranslationFactory, RealtimeTranslationSession,
+    RecordingStatus, SpokenIncomingCapability, SpokenTranslationCapability, SttConfig,
+    SystemAudioCaptureFactory, SystemAudioCaptureRequest, TranslationAudioOutput,
+    TranslationAudioOutputConfig, TranslationAudioOutputResult,
 };
 use app_lib::infrastructure::openai::OpenAIRealtimeTranslationClient;
 use async_trait::async_trait;
@@ -282,6 +282,12 @@ async fn spoken_facade_runs_synthetic_audio_through_local_websocket_and_playback
 
         let update = receive_json(&mut ws).await;
         assert_eq!(update["type"], "session.update");
+        assert!(
+            update
+                .pointer("/session/audio/input/noise_reduction")
+                .is_some_and(Value::is_null),
+            "clean system audio must disable provider noise reduction: {update}"
+        );
         *server_state.target_language.lock().unwrap() = update
             .pointer("/session/audio/output/language")
             .and_then(Value::as_str)
@@ -476,6 +482,14 @@ fn local_client(endpoint: String, ready_timeout: Duration) -> OpenAIRealtimeTran
     )
 }
 
+fn test_translation_config() -> RealtimeTranslationConfig {
+    RealtimeTranslationConfig::new(
+        TEST_CREDENTIAL.into(),
+        "ru".into(),
+        RealtimeInputNoiseReduction::NearField,
+    )
+}
+
 #[tokio::test]
 async fn delayed_ready_succeeds_but_missing_ready_times_out() {
     let (endpoint, server) = spawn_tcp_server(|stream| async move {
@@ -489,10 +503,7 @@ async fn delayed_ready_succeeds_but_missing_ready_times_out() {
     .await;
     let mut client = local_client(endpoint, Duration::from_millis(300));
     client
-        .connect(RealtimeTranslationConfig::new(
-            TEST_CREDENTIAL.into(),
-            "ru".into(),
-        ))
+        .connect(test_translation_config())
         .await
         .expect("delayed readiness inside timeout must succeed");
     client.finish(Duration::from_millis(100)).await.unwrap();
@@ -506,13 +517,7 @@ async fn delayed_ready_succeeds_but_missing_ready_times_out() {
     .await;
     let mut client = local_client(endpoint, Duration::from_millis(30));
     let started = Instant::now();
-    let error = client
-        .connect(RealtimeTranslationConfig::new(
-            TEST_CREDENTIAL.into(),
-            "ru".into(),
-        ))
-        .await
-        .unwrap_err();
+    let error = client.connect(test_translation_config()).await.unwrap_err();
     assert_eq!(error.kind(), RealtimeTranslationErrorKind::Timeout);
     assert!(started.elapsed() < Duration::from_millis(300));
     server.await.unwrap();
@@ -527,13 +532,7 @@ async fn assert_runtime_protocol_failure(server_event: Message) {
     })
     .await;
     let mut client = local_client(endpoint, TEST_TIMEOUT);
-    let mut events = client
-        .connect(RealtimeTranslationConfig::new(
-            TEST_CREDENTIAL.into(),
-            "ru".into(),
-        ))
-        .await
-        .unwrap();
+    let mut events = client.connect(test_translation_config()).await.unwrap();
     let event = tokio::time::timeout(TEST_TIMEOUT, events.recv())
         .await
         .unwrap()
@@ -571,13 +570,7 @@ async fn assert_handshake_status_kind(
     })
     .await;
     let mut client = local_client(endpoint, TEST_TIMEOUT);
-    let error = client
-        .connect(RealtimeTranslationConfig::new(
-            TEST_CREDENTIAL.into(),
-            "ru".into(),
-        ))
-        .await
-        .unwrap_err();
+    let error = client.connect(test_translation_config()).await.unwrap_err();
     assert_eq!(error.kind(), expected);
     server.await.unwrap();
 }
@@ -608,13 +601,7 @@ async fn abrupt_close_emits_closed_and_stalled_close_is_bounded() {
     })
     .await;
     let mut client = local_client(endpoint, TEST_TIMEOUT);
-    let mut events = client
-        .connect(RealtimeTranslationConfig::new(
-            TEST_CREDENTIAL.into(),
-            "ru".into(),
-        ))
-        .await
-        .unwrap();
+    let mut events = client.connect(test_translation_config()).await.unwrap();
     assert_eq!(
         tokio::time::timeout(TEST_TIMEOUT, events.recv())
             .await
@@ -633,13 +620,7 @@ async fn abrupt_close_emits_closed_and_stalled_close_is_bounded() {
     })
     .await;
     let mut client = local_client(endpoint, TEST_TIMEOUT);
-    let _events = client
-        .connect(RealtimeTranslationConfig::new(
-            TEST_CREDENTIAL.into(),
-            "ru".into(),
-        ))
-        .await
-        .unwrap();
+    let _events = client.connect(test_translation_config()).await.unwrap();
     let started = Instant::now();
     client.finish(Duration::from_millis(50)).await.unwrap();
     assert!(started.elapsed() < Duration::from_millis(400));
@@ -658,13 +639,7 @@ async fn oversized_server_message_is_rejected_by_websocket_limit() {
     })
     .await;
     let mut client = local_client(endpoint, TEST_TIMEOUT);
-    let mut events = client
-        .connect(RealtimeTranslationConfig::new(
-            TEST_CREDENTIAL.into(),
-            "ru".into(),
-        ))
-        .await
-        .unwrap();
+    let mut events = client.connect(test_translation_config()).await.unwrap();
     let event = tokio::time::timeout(TEST_TIMEOUT, events.recv())
         .await
         .unwrap()

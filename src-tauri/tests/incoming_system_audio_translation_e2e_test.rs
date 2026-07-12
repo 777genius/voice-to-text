@@ -1,5 +1,7 @@
 #![cfg(target_os = "macos")]
 
+mod paid_e2e_support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -23,10 +25,7 @@ use app_lib::infrastructure::audio::{
 };
 use app_lib::infrastructure::openai::OpenAIRealtimeTranslationFactory;
 use async_trait::async_trait;
-use reqwest::header::CONTENT_TYPE;
-
-const OPENAI_TRANSCRIPTIONS_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
-const OPENAI_TRANSCRIPTION_MODEL: &str = "gpt-4o-transcribe";
+use paid_e2e_support::{load_paid_e2e_api_key, transcribe_pcm16, wav_pcm16};
 const TRANSCRIBE_AFTER_SAMPLES: usize = 16_000 * 2;
 const MAX_TRANSLATED_FINALS_PER_SOAK: usize = 3;
 const AUDIBLE_SAMPLE_ABS_THRESHOLD: u16 = 128;
@@ -39,26 +38,6 @@ fn audible_sample_count(samples: &[i16]) -> usize {
         .iter()
         .filter(|sample| sample.unsigned_abs() >= AUDIBLE_SAMPLE_ABS_THRESHOLD)
         .count()
-}
-
-fn load_openai_api_key() -> String {
-    let _ = dotenv::dotenv();
-    std::env::var("OPENAI_API_KEY")
-        .ok()
-        .filter(|key| !key.trim().is_empty())
-        .expect("OPENAI_API_KEY must be set in src-tauri/.env or environment")
-}
-
-fn load_paid_spoken_e2e_api_key() -> String {
-    assert_eq!(
-        std::env::var("VOICETEXT_RUN_PAID_E2E").as_deref(),
-        Ok("1"),
-        "set VOICETEXT_RUN_PAID_E2E=1 to acknowledge paid realtime API usage"
-    );
-    std::env::var("OPENAI_E2E_API_KEY")
-        .ok()
-        .filter(|key| !key.trim().is_empty())
-        .expect("OPENAI_E2E_API_KEY must contain a new dedicated test key")
 }
 
 fn live_audio_soak_duration() -> Duration {
@@ -734,7 +713,7 @@ async fn system_default_playback_is_drained_and_excluded_from_system_capture() {
 #[tokio::test]
 #[ignore = "paid/manual: requires macOS permission, audible output, VOICETEXT_RUN_PAID_E2E=1, and a dedicated OPENAI_E2E_API_KEY"]
 async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system_capture() {
-    let api_key = load_paid_spoken_e2e_api_key();
+    let api_key = load_paid_e2e_api_key();
     let artifact_root = paid_artifact_root();
     fs::create_dir_all(&artifact_root).expect("must create paid E2E artifact root");
     let scenario_filter =
@@ -872,7 +851,7 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
         let captured_input_samples = captured_samples.lock().unwrap().clone();
         let translated_audible_samples = output_state.audible_samples.load(Ordering::Relaxed);
         let captured_audible_samples = audible_sample_count(&captured_input_samples);
-        let captured_input_transcription = transcribe_with_openai(
+        let captured_input_transcription = transcribe_pcm16(
             &transcription_client,
             &api_key,
             24_000,
@@ -1009,7 +988,7 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
 #[tokio::test]
 #[ignore = "paid/manual: requires macOS permission, audible output, VOICETEXT_RUN_PAID_E2E=1, and a dedicated OPENAI_E2E_API_KEY"]
 async fn incoming_spoken_translation_paid_stop_mid_phrase_is_bounded() {
-    let api_key = load_paid_spoken_e2e_api_key();
+    let api_key = load_paid_e2e_api_key();
     let fixture = generate_spoken_audio_fixture(
         "voicetext_paid_stop_mid_phrase",
         "Samantha",
@@ -1085,105 +1064,6 @@ async fn incoming_spoken_translation_paid_stop_mid_phrase_is_bounded() {
     .expect("must persist stop-mid-phrase metrics");
 }
 
-fn wav_pcm16(sample_rate: u32, channels: u16, samples: &[i16]) -> Vec<u8> {
-    let data_len = samples.len() as u32 * 2;
-    let byte_rate = sample_rate * channels as u32 * 2;
-    let block_align = channels * 2;
-    let mut wav = Vec::with_capacity(44 + data_len as usize);
-
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
-    wav.extend_from_slice(b"WAVE");
-    wav.extend_from_slice(b"fmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&channels.to_le_bytes());
-    wav.extend_from_slice(&sample_rate.to_le_bytes());
-    wav.extend_from_slice(&byte_rate.to_le_bytes());
-    wav.extend_from_slice(&block_align.to_le_bytes());
-    wav.extend_from_slice(&16u16.to_le_bytes());
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&data_len.to_le_bytes());
-    for sample in samples {
-        wav.extend_from_slice(&sample.to_le_bytes());
-    }
-
-    wav
-}
-
-fn multipart_transcription_body(boundary: &str, wav: &[u8]) -> Vec<u8> {
-    let mut body = Vec::new();
-
-    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-    body.extend_from_slice(b"Content-Disposition: form-data; name=\"model\"\r\n\r\n");
-    body.extend_from_slice(OPENAI_TRANSCRIPTION_MODEL.as_bytes());
-    body.extend_from_slice(b"\r\n");
-
-    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-    body.extend_from_slice(b"Content-Disposition: form-data; name=\"response_format\"\r\n\r\n");
-    body.extend_from_slice(b"text\r\n");
-
-    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-    body.extend_from_slice(
-        b"Content-Disposition: form-data; name=\"file\"; filename=\"incoming-loopback.wav\"\r\n",
-    );
-    body.extend_from_slice(b"Content-Type: audio/wav\r\n\r\n");
-    body.extend_from_slice(wav);
-    body.extend_from_slice(b"\r\n");
-    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
-
-    body
-}
-
-async fn transcribe_with_openai(
-    client: &reqwest::Client,
-    api_key: &str,
-    sample_rate: u32,
-    channels: u16,
-    samples: &[i16],
-) -> SttResult<String> {
-    let wav = wav_pcm16(sample_rate, channels, samples);
-    let boundary = format!("voicetext-e2e-{}", std::process::id());
-    let response = client
-        .post(OPENAI_TRANSCRIPTIONS_URL)
-        .bearer_auth(api_key)
-        .header(
-            CONTENT_TYPE,
-            format!("multipart/form-data; boundary={boundary}"),
-        )
-        .body(multipart_transcription_body(&boundary, &wav))
-        .send()
-        .await
-        .map_err(|err| {
-            SttError::Connection(app_lib::domain::SttConnectionError::simple(err.to_string()))
-        })?;
-
-    let status = response.status();
-    let text = response.text().await.map_err(|err| {
-        SttError::Connection(app_lib::domain::SttConnectionError::simple(err.to_string()))
-    })?;
-
-    if !status.is_success() {
-        return Err(match status.as_u16() {
-            401 | 403 => SttError::Authentication(text),
-            _ => SttError::Connection(app_lib::domain::SttConnectionError::simple(format!(
-                "OpenAI transcription HTTP {}: {}",
-                status.as_u16(),
-                text
-            ))),
-        });
-    }
-
-    let transcript = text.trim().to_string();
-    if transcript.is_empty() {
-        return Err(SttError::Processing(
-            "OpenAI transcription returned empty text".to_string(),
-        ));
-    }
-
-    Ok(transcript)
-}
-
 #[derive(Default)]
 struct OpenAiLoopbackSttState {
     initialized: AtomicBool,
@@ -1246,14 +1126,15 @@ impl SttProvider for OpenAiLoopbackSttProvider {
         let transcript = if let Some(transcript) = self.cached_transcript.as_ref() {
             transcript.clone()
         } else {
-            let transcript = transcribe_with_openai(
+            let transcript = transcribe_pcm16(
                 &self.client,
                 &self.api_key,
                 self.sample_rate,
                 self.channels,
                 &samples,
             )
-            .await?;
+            .await
+            .map_err(SttError::Processing)?;
             self.state.transcribed.store(true, Ordering::SeqCst);
             self.cached_transcript = Some(transcript.clone());
             transcript
@@ -1314,9 +1195,9 @@ impl SttProviderFactory for OpenAiLoopbackSttFactory {
 }
 
 #[tokio::test]
-#[ignore = "requires macOS Screen & System Audio permission, system audio output, and OpenAI transcription/translation APIs"]
+#[ignore = "paid/manual: requires macOS system audio permission, VOICETEXT_RUN_PAID_E2E=1, and a dedicated OPENAI_E2E_API_KEY"]
 async fn incoming_translation_service_captures_system_audio_and_emits_translated_text() {
-    let api_key = load_openai_api_key();
+    let api_key = load_paid_e2e_api_key();
     let fixture = generate_system_audio_fixture();
     let stt_state = Arc::new(OpenAiLoopbackSttState::default());
     let service = IncomingTranslationFacade::new_with_factories(
@@ -1413,9 +1294,9 @@ async fn incoming_translation_service_captures_system_audio_and_emits_translated
 }
 
 #[tokio::test]
-#[ignore = "long soak: requires macOS Screen & System Audio permission, system audio output, and OpenAI APIs"]
+#[ignore = "paid/manual soak: requires macOS system audio permission, VOICETEXT_RUN_PAID_E2E=1, and a dedicated OPENAI_E2E_API_KEY"]
 async fn incoming_translation_service_long_running_system_audio_soak() {
-    let api_key = load_openai_api_key();
+    let api_key = load_paid_e2e_api_key();
     let soak_duration = live_audio_soak_duration();
     let fixture = generate_system_audio_fixture();
     let stt_state = Arc::new(OpenAiLoopbackSttState::default());

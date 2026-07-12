@@ -12,9 +12,9 @@ npm run typecheck
 npm run test:run
 npm run build
 cd src-tauri
-cargo fmt --all -- --check
+cargo fmt --all --check
 cargo test
-cargo clippy --lib --tests
+cargo clippy --lib -- -D clippy::await_holding_lock
 ```
 
 The default Rust suite uses no real OpenAI credential. The local WebSocket E2E verifies:
@@ -95,7 +95,7 @@ The second test plays an external 440 Hz fixture and a same-process 880 Hz trans
 fixture. ScreenCaptureKit must contain the external tone while self-tone power stays below 5% of
 the external tone power.
 
-## Paid OpenAI Gate
+## Paid Incoming OpenAI Gate
 
 Use a new, dedicated, revocable test key. The spoken paid test intentionally ignores `.env` and
 `OPENAI_API_KEY`; never add the key to source, logs, screenshots, or test artifacts.
@@ -130,6 +130,9 @@ OpenAI documents `session.input_transcript.delta` as optional, so its availabili
 metrics but is not a release assertion.
 The already-target-language case accepts either translated output or silence because Realtime
 Translation may intentionally suppress speech that is already in the selected output language.
+Incoming system audio disables provider noise reduction because it is already a clean digital
+stream. Outgoing physical-microphone translation keeps the `near_field` policy. The local
+WebSocket E2E asserts this route-specific `session.update` contract.
 
 Run `incoming_spoken_translation_paid_stop_mid_phrase_is_bounded` with the same paid-key guard to
 verify the incoming runtime's six-second graceful drain plus one-second forced cleanup budget
@@ -140,6 +143,35 @@ malformed frames, abrupt close, stalled close, 401/429, and oversized messages a
 It must report Russian translated text, nonempty translated PCM, no terminal errors, and Idle after
 stop. The separate native output test proves that the same PCM output adapter reaches the system
 default device without feeding back into ScreenCaptureKit.
+
+## Paid Outgoing Virtual Microphone Gate
+
+BlackHole 2ch must be installed. The test synthesizes Russian speech, translates it to English,
+writes translated PCM through the production virtual-microphone output, and captures BlackHole's
+input to prove another app can receive audible translated audio. The captured virtual-microphone
+PCM is independently transcribed and must retain the expected English meaning.
+
+```bash
+cd src-tauri
+VOICETEXT_RUN_PAID_E2E=1 OPENAI_E2E_API_KEY="sk-..." \
+  cargo test --test openai_realtime_translation_e2e_test \
+  live_translation_service_synthetic_voice_reaches_blackhole \
+  -- --ignored --exact --nocapture
+```
+
+Short paid soak:
+
+```bash
+cd src-tauri
+VOICETEXT_RUN_PAID_E2E=1 OPENAI_E2E_API_KEY="sk-..." LIVE_AUDIO_SOAK_SECONDS=60 \
+  cargo test --test openai_realtime_translation_e2e_test \
+  live_translation_service_long_running_synthetic_voice_soak \
+  -- --ignored --exact --nocapture
+```
+
+Both outgoing tests reject `.env` and `OPENAI_API_KEY`; only the explicitly acknowledged dedicated
+test credential is accepted. The gate requires translated English text, nonzero translated audio
+at BlackHole input, bounded stop, and Idle after cleanup.
 
 ## Manual Fault Checks
 
@@ -162,5 +194,6 @@ Do not ship macOS spoken incoming translation unless all items are recorded for 
 - native 24 kHz capture/callback stop passes;
 - native 440/880 Hz self-exclusion passes;
 - paid OpenAI text and PCM test passes with a dedicated key;
+- paid outgoing translation reaches the BlackHole virtual microphone;
 - output disconnect and sleep/wake manual checks produce terminal cleanup;
 - captions-only remains the persisted default and works as the rollback path.
