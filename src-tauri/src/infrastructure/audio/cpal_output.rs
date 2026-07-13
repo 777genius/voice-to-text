@@ -20,6 +20,88 @@ pub use crate::domain::{
 const RESAMPLER_CHUNK_SIZE: usize = 256;
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
 
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct AudioObjectPropertyAddress {
+    selector: u32,
+    scope: u32,
+    element: u32,
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreAudio", kind = "framework")]
+extern "C" {
+    fn AudioObjectGetPropertyData(
+        object_id: u32,
+        address: *const AudioObjectPropertyAddress,
+        qualifier_data_size: u32,
+        qualifier_data: *const std::ffi::c_void,
+        data_size: *mut u32,
+        data: *mut std::ffi::c_void,
+    ) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+const fn fourcc(value: &[u8; 4]) -> u32 {
+    ((value[0] as u32) << 24)
+        | ((value[1] as u32) << 16)
+        | ((value[2] as u32) << 8)
+        | value[3] as u32
+}
+
+#[cfg(target_os = "macos")]
+fn system_default_output_device_id() -> AudioOutputResult<Option<u32>> {
+    const AUDIO_OBJECT_SYSTEM: u32 = 1;
+    const DEFAULT_OUTPUT_DEVICE: u32 = fourcc(b"dOut");
+    const GLOBAL_SCOPE: u32 = fourcc(b"glob");
+    let address = AudioObjectPropertyAddress {
+        selector: DEFAULT_OUTPUT_DEVICE,
+        scope: GLOBAL_SCOPE,
+        element: 0,
+    };
+    let mut device_id = 0_u32;
+    let mut data_size = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        AudioObjectGetPropertyData(
+            AUDIO_OBJECT_SYSTEM,
+            &address,
+            0,
+            std::ptr::null(),
+            &mut data_size,
+            (&mut device_id as *mut u32).cast(),
+        )
+    };
+    if status != 0 {
+        return Err(AudioOutputError::Device(format!(
+            "Core Audio default output query failed with OSStatus {status}"
+        )));
+    }
+    if data_size != std::mem::size_of::<u32>() as u32 || device_id == 0 {
+        return Err(AudioOutputError::Device(
+            "Core Audio returned an invalid default output device ID".into(),
+        ));
+    }
+    Ok(Some(device_id))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_default_output_device_id() -> AudioOutputResult<Option<u32>> {
+    Ok(None)
+}
+
+fn default_output_route_changed(
+    opened_name: &str,
+    current_name: &str,
+    opened_native_id: Option<u32>,
+    current_native_id: Option<u32>,
+) -> bool {
+    opened_name != current_name
+        || matches!(
+            (opened_native_id, current_native_id),
+            (Some(opened), Some(current)) if opened != current
+        )
+}
+
 fn apply_output_gain(sample: f32, gain: f32) -> f32 {
     let amplified = sample * gain;
     if gain <= 1.0 {
@@ -112,6 +194,7 @@ pub struct CpalAudioOutput {
     selector: OutputDeviceSelector,
     device: Option<Device>,
     device_name: Option<String>,
+    default_output_device_id: Option<u32>,
     stream: Option<Stream>,
     native_config: Option<SupportedStreamConfig>,
     config: Option<AudioOutputConfig>,
@@ -177,6 +260,7 @@ impl CpalAudioOutput {
             selector,
             device: None,
             device_name: None,
+            default_output_device_id: None,
             stream: None,
             native_config: None,
             config: None,
@@ -569,10 +653,16 @@ impl CpalAudioOutput {
         let current_name = current_device
             .name()
             .map_err(|error| AudioOutputError::Device(error.to_string()))?;
-        if current_name != opened_name {
+        let current_device_id = system_default_output_device_id()?;
+        if default_output_route_changed(
+            opened_name,
+            &current_name,
+            self.default_output_device_id,
+            current_device_id,
+        ) {
             return Err(AudioOutputError::Device(format!(
-                "System default output changed from '{}' to '{}'; restart translated playback",
-                opened_name, current_name
+                "System default output changed from '{}' ({:?}) to '{}' ({:?}); restart translated playback",
+                opened_name, self.default_output_device_id, current_name, current_device_id
             )));
         }
         Ok(())
@@ -636,8 +726,26 @@ impl TranslationAudioOutput for CpalAudioOutput {
                 config.drain_max_buffered_duration.as_millis()
             )));
         }
+        let default_output_device_id_before =
+            if matches!(self.selector, OutputDeviceSelector::SystemDefault) {
+                system_default_output_device_id()?
+            } else {
+                None
+            };
         let host = cpal::default_host();
         let (device, name) = Self::select_output_device(&host, &self.selector)?;
+        let default_output_device_id_after =
+            if matches!(self.selector, OutputDeviceSelector::SystemDefault) {
+                system_default_output_device_id()?
+            } else {
+                None
+            };
+        if default_output_device_id_before != default_output_device_id_after {
+            return Err(AudioOutputError::Device(
+                "System default output changed while translated playback was opening; retry start"
+                    .into(),
+            ));
+        }
         let native = device
             .default_output_config()
             .map_err(|e| AudioOutputError::Configuration(e.to_string()))?;
@@ -702,6 +810,7 @@ impl TranslationAudioOutput for CpalAudioOutput {
 
         self.device = Some(device);
         self.device_name = Some(name);
+        self.default_output_device_id = default_output_device_id_after;
         self.stream = Some(stream);
         self.native_config = Some(native);
         self.config = Some(config);
@@ -789,6 +898,7 @@ impl TranslationAudioOutput for CpalAudioOutput {
         }
         self.device = None;
         self.device_name = None;
+        self.default_output_device_id = None;
         self.native_config = None;
         self.config = None;
         self.resampler = None;
@@ -1029,6 +1139,34 @@ mod tests {
             "MacBook Speakers",
             "CABLE Input"
         ));
+    }
+
+    #[test]
+    fn default_route_identity_detects_same_name_device_switch() {
+        assert!(!default_output_route_changed(
+            "USB Headset",
+            "USB Headset",
+            Some(41),
+            Some(41)
+        ));
+        assert!(default_output_route_changed(
+            "USB Headset",
+            "USB Headset",
+            Some(41),
+            Some(73)
+        ));
+        assert!(default_output_route_changed(
+            "USB Headset",
+            "MacBook Speakers",
+            Some(41),
+            Some(41)
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn core_audio_exposes_default_output_native_id() {
+        assert!(system_default_output_device_id().unwrap().is_some());
     }
 
     #[tokio::test]
