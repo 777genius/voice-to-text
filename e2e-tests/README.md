@@ -83,6 +83,7 @@ Default duration is 30 minutes per long test:
 
 ```bash
 cd frontend
+brew install switchaudio-osx
 VOICETEXT_RUN_PAID_E2E=1 OPENAI_E2E_API_KEY=... npm run e2e:live-audio-soak
 ```
 

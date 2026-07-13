@@ -27,10 +27,22 @@ use app_lib::infrastructure::openai::OpenAIRealtimeTranslationFactory;
 use async_trait::async_trait;
 use paid_e2e_support::{load_paid_e2e_api_key, transcribe_pcm16, wav_pcm16};
 const TRANSCRIBE_AFTER_SAMPLES: usize = 16_000 * 2;
-const MAX_TRANSLATED_FINALS_PER_SOAK: usize = 3;
+const MAX_TRANSLATED_FINALS_PER_SOAK: usize = 7;
+const MIN_TRANSLATED_FINALS_PER_RELEASE_SOAK: usize = 6;
 const AUDIBLE_SAMPLE_ABS_THRESHOLD: u16 = 128;
 const MIN_AUDIBLE_TRANSLATED_SAMPLES: usize = 1_200;
 const PAID_SOURCE_PREROLL: Duration = Duration::from_secs(1);
+const PAID_REQUIRED_SCENARIO_IDS: &[&str] = &[
+    "english_to_russian",
+    "names_and_numbers",
+    "technical_terms",
+    "mixed_english_russian",
+    "already_russian",
+    "long_context",
+    "pause_and_silence",
+    "overlapping_speakers",
+    "half_volume_source",
+];
 static NEXT_TEMP_AUDIO_ID: AtomicUsize = AtomicUsize::new(0);
 
 fn audible_sample_count(samples: &[i16]) -> usize {
@@ -40,6 +52,22 @@ fn audible_sample_count(samples: &[i16]) -> usize {
         .count()
 }
 
+fn longest_internal_activity_gap_ms(
+    activity_ms: &[u128],
+    playback_started_ms: u128,
+    playback_finished_ms: u128,
+) -> Option<u128> {
+    let activity = activity_ms
+        .iter()
+        .copied()
+        .filter(|timestamp| *timestamp >= playback_started_ms && *timestamp <= playback_finished_ms)
+        .collect::<Vec<_>>();
+    activity
+        .windows(2)
+        .map(|window| window[1].saturating_sub(window[0]))
+        .max()
+}
+
 fn live_audio_soak_duration() -> Duration {
     std::env::var("LIVE_AUDIO_SOAK_SECONDS")
         .ok()
@@ -47,6 +75,15 @@ fn live_audio_soak_duration() -> Duration {
         .filter(|seconds| *seconds > 0)
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(30 * 60))
+}
+
+fn soak_activity_near_end_grace(soak_duration: Duration) -> Duration {
+    Duration::from_secs_f64((soak_duration.as_secs_f64() * 0.05).clamp(5.0, 90.0))
+}
+
+fn soak_final_interval(soak_duration: Duration) -> Duration {
+    let active_span = soak_duration.saturating_sub(soak_activity_near_end_grace(soak_duration));
+    active_span.div_f64((MAX_TRANSLATED_FINALS_PER_SOAK - 1) as f64)
 }
 
 struct TempAudioFixture {
@@ -311,6 +348,7 @@ struct ObservedSystemAudioCaptureFactory {
     inner: DefaultPlatformAudioFactory,
     started_at: Instant,
     first_input_ms: Arc<Mutex<Option<u128>>>,
+    audible_activity_ms: Arc<Mutex<Vec<u128>>>,
     captured_samples: Arc<Mutex<Vec<i16>>>,
 }
 
@@ -330,6 +368,7 @@ impl SystemAudioCaptureFactory for ObservedSystemAudioCaptureFactory {
             inner: self.inner.create_system_audio_capture(request)?,
             started_at: self.started_at,
             first_input_ms: self.first_input_ms.clone(),
+            audible_activity_ms: self.audible_activity_ms.clone(),
             captured_samples: self.captured_samples.clone(),
         }))
     }
@@ -339,6 +378,7 @@ struct ObservedSystemAudioCapture {
     inner: Box<dyn AudioCapture>,
     started_at: Instant,
     first_input_ms: Arc<Mutex<Option<u128>>>,
+    audible_activity_ms: Arc<Mutex<Vec<u128>>>,
     captured_samples: Arc<Mutex<Vec<i16>>>,
 }
 
@@ -354,13 +394,15 @@ impl AudioCapture for ObservedSystemAudioCapture {
     ) -> app_lib::domain::AudioResult<()> {
         let started_at = self.started_at;
         let first_input_ms = self.first_input_ms.clone();
+        let audible_activity_ms = self.audible_activity_ms.clone();
         let captured_samples = self.captured_samples.clone();
         self.inner
             .start_capture(Arc::new(move |chunk| {
-                first_input_ms
-                    .lock()
-                    .unwrap()
-                    .get_or_insert_with(|| started_at.elapsed().as_millis());
+                if audible_sample_count(&chunk.data) > 0 {
+                    let elapsed_ms = started_at.elapsed().as_millis();
+                    first_input_ms.lock().unwrap().get_or_insert(elapsed_ms);
+                    audible_activity_ms.lock().unwrap().push(elapsed_ms);
+                }
                 captured_samples
                     .lock()
                     .unwrap()
@@ -395,6 +437,7 @@ struct PaidSpokenScenario {
     source_playback_gain: f32,
     secondary_source: Option<&'static str>,
     human_reference: &'static str,
+    required_source_markers: &'static [&'static [&'static str]],
     required_translation_markers: &'static [&'static [&'static str]],
     translation_output_required: bool,
 }
@@ -417,6 +460,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             source_playback_gain: 1.0,
             secondary_source: None,
             human_reference: "Natural Russian translation preserving the request.",
+            required_source_markers: &[&["hello"], &["call"], &["translate"]],
             required_translation_markers: &[&["перевед", "перевод"]],
             translation_output_required: true,
         },
@@ -427,6 +471,13 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             source_playback_gain: 1.0,
             secondary_source: None,
             human_reference: "Preserve the name, meeting context, date, time, and room 207.",
+            required_source_markers: &[
+                &["robert"],
+                &["october"],
+                &["21", "twenty first"],
+                &["3:45", "three forty five"],
+                &["207", "two hundred seven"],
+            ],
             required_translation_markers: &[
                 &["роберт"],
                 &["встреч", "совещ"],
@@ -444,6 +495,13 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             source_playback_gain: 1.0,
             secondary_source: None,
             human_reference: "Preserve WebSocket, exponential backoff, bounded queues, and 24 kHz PCM.",
+            required_source_markers: &[
+                &["websocket", "web socket"],
+                &["exponential"],
+                &["queue"],
+                &["24", "twenty four"],
+                &["pcm"],
+            ],
             required_translation_markers: &[
                 &["websocket", "веб-сокет", "вебсокет"],
                 &["экспоненц", "exponential"],
@@ -460,6 +518,12 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             source_playback_gain: 1.0,
             secondary_source: None,
             human_reference: "Produce coherent Russian while preserving the UI mode name.",
+            required_source_markers: &[
+                &["настрой"],
+                &["режим"],
+                &["text"],
+                &["audio"],
+            ],
             required_translation_markers: &[
                 &["настрой"],
                 &["режим"],
@@ -475,6 +539,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             source_playback_gain: 1.0,
             secondary_source: None,
             human_reference: "Keep the Russian meaning without inventing content.",
+            required_source_markers: &[&["добрый"], &["русск"], &["понят"]],
             required_translation_markers: &[
                 &["добрый день"],
                 &["русск"],
@@ -490,8 +555,21 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             source_playback_gain: 1.0,
             secondary_source: None,
             human_reference: "Preserve chronology, causality, and the instruction not to roll back.",
+            required_source_markers: &[
+                &["first"],
+                &["deployment"],
+                &["certificate"],
+                &["expired"],
+                &["second"],
+                &["succeeded", "successful"],
+                &["not roll back", "do not roll back"],
+                &["migration"],
+            ],
             required_translation_markers: &[
+                &["перв"],
+                &["развертыв", "развёртыв", "деплой"],
                 &["сертификат"],
+                &["истек", "истёк", "просроч"],
                 &["втор"],
                 &["успеш"],
                 &["не откат", "не делать откат", "не отмен"],
@@ -506,6 +584,10 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             source_playback_gain: 1.0,
             secondary_source: None,
             human_reference: "Preserve values 12 and 47 across pauses.",
+            required_source_markers: &[
+                &["12", "twelve"],
+                &["47", "forty seven"],
+            ],
             required_translation_markers: &[
                 &["12", "двенадцать"],
                 &["47", "сорок семь"],
@@ -519,7 +601,18 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             source_playback_gain: 1.0,
             secondary_source: Some("Bob says the security review must finish before Thursday evening."),
             human_reference: "Best effort mixed-track translation; note any lost speaker or timing detail.",
-            required_translation_markers: &[&["пятниц"], &["четверг"]],
+            required_source_markers: &[
+                &["alice"],
+                &["bob"],
+                &["friday"],
+                &["thursday"],
+            ],
+            required_translation_markers: &[
+                &["алис", "элис"],
+                &["боб"],
+                &["пятниц"],
+                &["четверг"],
+            ],
             translation_output_required: true,
         },
         PaidSpokenScenario {
@@ -529,6 +622,10 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             source_playback_gain: 0.5,
             secondary_source: None,
             human_reference: "Preserve 27 open tasks and meeting time 9:30 without adding context.",
+            required_source_markers: &[
+                &["27", "twenty seven"],
+                &["9:30", "nine thirty"],
+            ],
             required_translation_markers: &[
                 &["27", "twenty seven", "двадцать семь"],
                 &["9:30", "9.30", "nine thirty", "девять тридцать"],
@@ -536,6 +633,58 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             translation_output_required: true,
         },
     ]
+}
+
+#[test]
+fn paid_spoken_matrix_keeps_complete_release_scenarios_and_assertions() {
+    let scenarios = paid_spoken_scenarios();
+    let ids = scenarios
+        .iter()
+        .map(|scenario| scenario.id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(ids, PAID_REQUIRED_SCENARIO_IDS);
+    assert!(scenarios
+        .iter()
+        .all(|scenario| !scenario.required_source_markers.is_empty()));
+    assert!(scenarios
+        .iter()
+        .all(|scenario| !scenario.required_translation_markers.is_empty()));
+    assert_eq!(
+        scenarios
+            .iter()
+            .filter(|scenario| !scenario.translation_output_required)
+            .map(|scenario| scenario.id)
+            .collect::<Vec<_>>(),
+        vec!["already_russian"]
+    );
+}
+
+#[test]
+fn measured_pause_ignores_playback_boundaries_and_finds_internal_gap() {
+    let activity = vec![50, 110, 140, 170, 850, 880, 1_100];
+
+    assert_eq!(
+        longest_internal_activity_gap_ms(&activity, 100, 900),
+        Some(680)
+    );
+}
+
+#[test]
+fn release_soak_schedule_is_bounded_and_reaches_the_final_window() {
+    let soak_duration = Duration::from_secs(30 * 60);
+    let interval = soak_final_interval(soak_duration);
+    let estimated_first_final = Duration::from_secs(2);
+    let estimated_last_final =
+        estimated_first_final + interval.mul_f64((MAX_TRANSLATED_FINALS_PER_SOAK - 1) as f64);
+
+    assert_eq!(MAX_TRANSLATED_FINALS_PER_SOAK, 7);
+    assert_eq!(MIN_TRANSLATED_FINALS_PER_RELEASE_SOAK, 6);
+    assert!(estimated_last_final <= soak_duration);
+    assert!(
+        soak_duration.saturating_sub(estimated_last_final)
+            <= soak_activity_near_end_grace(soak_duration)
+    );
 }
 
 fn paid_artifact_root() -> PathBuf {
@@ -582,6 +731,7 @@ async fn play_paid_scenario(primary: &Path, secondary: Option<&Path>, playback_g
 #[ignore = "requires macOS Screen & System Audio permission and audible system output"]
 async fn isolated_realtime_capture_emits_24khz_mono_and_stops_callbacks() {
     let fixture = generate_system_audio_fixture();
+    let post_stop_fixture = generate_tone_fixture(997.0, Duration::from_secs(1));
     let factory = DefaultPlatformAudioFactory::new();
     let target = AudioCaptureTarget::incoming_realtime_translation();
     let request = SystemAudioCaptureRequest::isolated(target);
@@ -637,10 +787,16 @@ async fn isolated_realtime_capture_emits_24khz_mono_and_stops_callbacks() {
             && chunk.data.len() == 720
     }));
     while chunk_rx.try_recv().is_ok() {}
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    let post_stop_player = Command::new("afplay")
+        .arg(post_stop_fixture.path())
+        .spawn()
+        .expect("must stimulate system audio after capture stop");
+    let post_stop_callback =
+        tokio::time::timeout(Duration::from_millis(750), chunk_rx.recv()).await;
+    wait_for_child_with_timeout(post_stop_player, Duration::from_secs(5), "post-stop afplay");
     assert!(
-        chunk_rx.try_recv().is_err(),
-        "capture emitted a callback after stop"
+        !matches!(post_stop_callback, Ok(Some(_))),
+        "capture emitted a callback after stop while system audio remained active"
     );
     assert!(!capture.is_capturing());
 }
@@ -743,7 +899,18 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
     fs::create_dir_all(&artifact_root).expect("must create paid E2E artifact root");
     let scenario_filter =
         std::env::var("INCOMING_SPOKEN_E2E_SCENARIO").unwrap_or_else(|_| "all".into());
-    let scenarios: Vec<_> = paid_spoken_scenarios()
+    let all_scenarios = paid_spoken_scenarios();
+    if scenario_filter == "all" {
+        let scenario_ids = all_scenarios
+            .iter()
+            .map(|scenario| scenario.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            scenario_ids, PAID_REQUIRED_SCENARIO_IDS,
+            "paid matrix must execute the complete release scenario set"
+        );
+    }
+    let scenarios: Vec<_> = all_scenarios
         .into_iter()
         .filter(|scenario| scenario_filter == "all" || scenario_filter == scenario.id)
         .collect();
@@ -752,6 +919,7 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
         "unknown INCOMING_SPOKEN_E2E_SCENARIO={scenario_filter}"
     );
     let transcription_client = reqwest::Client::new();
+    let mut passed_scenario_ids = Vec::new();
 
     for (index, scenario) in scenarios.into_iter().enumerate() {
         let fixture = generate_spoken_audio_fixture(
@@ -780,6 +948,7 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
         let translated_text = Arc::new(Mutex::new(String::new()));
         let errors = Arc::new(Mutex::new(Vec::<String>::new()));
         let first_input_ms = Arc::new(Mutex::new(None::<u128>));
+        let audible_activity_ms = Arc::new(Mutex::new(Vec::<u128>::new()));
         let captured_samples = Arc::new(Mutex::new(Vec::<i16>::new()));
         let first_source_text_ms = Arc::new(Mutex::new(None::<u128>));
         let first_translated_text_ms = Arc::new(Mutex::new(None::<u128>));
@@ -790,6 +959,7 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
                 inner: DefaultPlatformAudioFactory::new(),
                 started_at,
                 first_input_ms: first_input_ms.clone(),
+                audible_activity_ms: audible_activity_ms.clone(),
                 captured_samples: captured_samples.clone(),
             }),
             Arc::new(PaidSpokenOutputFactory {
@@ -847,6 +1017,7 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             scenario.source_playback_gain,
         )
         .await;
+        let source_playback_finished_ms = started_at.elapsed().as_millis();
         let output_wait_timeout = if scenario.translation_output_required {
             Duration::from_secs(30)
         } else {
@@ -892,6 +1063,15 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
         let captured_input_transcript = captured_input_transcription.unwrap_or_default();
         let terminal_errors = errors.lock().unwrap().clone();
         let source_transcript_available = !source.trim().is_empty();
+        let longest_audible_activity_gap_ms = longest_internal_activity_gap_ms(
+            &audible_activity_ms.lock().unwrap(),
+            source_playback_started_ms,
+            source_playback_finished_ms,
+        );
+        let missing_source_marker_groups = missing_translation_marker_groups(
+            &captured_input_transcript,
+            scenario.required_source_markers,
+        );
         let missing_marker_groups =
             missing_translation_marker_groups(&translated, scenario.required_translation_markers);
         let translation_output_emitted =
@@ -926,6 +1106,7 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             "source_playback_gain": scenario.source_playback_gain,
             "human_reference": scenario.human_reference,
             "source_playback_started_ms": source_playback_started_ms,
+            "source_playback_finished_ms": source_playback_finished_ms,
             "first_input_ms": *first_input_ms.lock().unwrap(),
             "first_source_text_ms": *first_source_text_ms.lock().unwrap(),
             "first_translated_text_ms": *first_translated_text_ms.lock().unwrap(),
@@ -936,7 +1117,9 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             "output_received_within_timeout": output_received_within_timeout,
             "captured_input_samples": captured_input_samples.len(),
             "captured_audible_samples": captured_audible_samples,
+            "longest_audible_activity_gap_ms": longest_audible_activity_gap_ms,
             "captured_input_transcription_error": captured_input_transcription_error.clone(),
+            "missing_source_marker_groups": missing_source_marker_groups.clone(),
             "translated_audio_samples": translated_samples.len(),
             "translated_audible_samples": translated_audible_samples,
             "missing_translation_marker_groups": missing_marker_groups.clone(),
@@ -967,6 +1150,44 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             scenario.id
         );
         assert!(
+            missing_source_marker_groups.is_empty(),
+            "scenario {} did not capture required source entities {:?}; independent transcript: {}",
+            scenario.id,
+            missing_source_marker_groups,
+            captured_input_transcript
+        );
+        let first_input = (*first_input_ms.lock().unwrap())
+            .unwrap_or_else(|| panic!("scenario {} has no audible input timestamp", scenario.id));
+        assert!(
+            first_input >= source_playback_started_ms.saturating_sub(250)
+                && first_input <= source_playback_finished_ms.saturating_add(2_000),
+            "scenario {} first audible input timestamp is outside playback: input={}ms, playback={}..{}ms",
+            scenario.id,
+            first_input,
+            source_playback_started_ms,
+            source_playback_finished_ms
+        );
+        if scenario.id == "pause_and_silence" {
+            assert!(
+                longest_audible_activity_gap_ms.is_some_and(|gap| gap >= 500),
+                "pause scenario did not contain a measured internal silence gap >= 500 ms: {:?}",
+                longest_audible_activity_gap_ms
+            );
+        }
+        if source_transcript_available {
+            let first_source_text = (*first_source_text_ms.lock().unwrap()).unwrap_or_else(|| {
+                panic!(
+                    "scenario {} source transcript has no timestamp",
+                    scenario.id
+                )
+            });
+            assert!(
+                first_source_text >= first_input,
+                "scenario {} source transcript arrived before audible input",
+                scenario.id
+            );
+        }
+        assert!(
             terminal_errors.is_empty(),
             "scenario {} errors: {:?}",
             scenario.id,
@@ -985,6 +1206,32 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             panic!("paid scenario {} must stop: {error}", scenario.id);
         }
         if scenario.translation_output_required || translation_output_emitted {
+            let first_translated_text =
+                (*first_translated_text_ms.lock().unwrap()).unwrap_or_else(|| {
+                    panic!("scenario {} has no translated text timestamp", scenario.id)
+                });
+            let first_translated_audio = (*output_state.first_audio_ms.lock().unwrap())
+                .unwrap_or_else(|| {
+                    panic!("scenario {} has no translated audio timestamp", scenario.id)
+                });
+            let output_deadline_ms =
+                source_playback_finished_ms.saturating_add(output_wait_timeout.as_millis());
+            assert!(
+                first_translated_text >= first_input && first_translated_text <= output_deadline_ms,
+                "scenario {} translated text latency is outside the measured deadline: input={}ms, text={}ms, deadline={}ms",
+                scenario.id,
+                first_input,
+                first_translated_text,
+                output_deadline_ms
+            );
+            assert!(
+                first_translated_audio >= first_input && first_translated_audio <= output_deadline_ms,
+                "scenario {} translated audio latency is outside the measured deadline: input={}ms, audio={}ms, deadline={}ms",
+                scenario.id,
+                first_input,
+                first_translated_audio,
+                output_deadline_ms
+            );
             assert!(
                 translated
                     .chars()
@@ -1009,7 +1256,26 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
         assert!(output_state.closed.load(Ordering::SeqCst));
         assert_eq!(*output_state.gain.lock().unwrap(), Some(0.8));
         assert_eq!(service.get_status().await, RecordingStatus::Idle);
+        passed_scenario_ids.push(scenario.id);
     }
+
+    if scenario_filter == "all" {
+        assert_eq!(passed_scenario_ids, PAID_REQUIRED_SCENARIO_IDS);
+    }
+    let complete_release_matrix =
+        scenario_filter == "all" && passed_scenario_ids == PAID_REQUIRED_SCENARIO_IDS;
+    fs::write(
+        artifact_root.join("matrix-summary.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "scenario_filter": scenario_filter,
+            "required_scenario_ids": PAID_REQUIRED_SCENARIO_IDS,
+            "passed_scenario_ids": passed_scenario_ids,
+            "complete_release_matrix": complete_release_matrix,
+        }))
+        .expect("matrix summary must serialize"),
+    )
+    .expect("must write paid matrix summary");
 
     println!("paid_incoming_artifacts={}", artifact_root.display());
 }
@@ -1026,6 +1292,7 @@ async fn incoming_spoken_translation_paid_stop_mid_phrase_is_bounded() {
     let output_state = Arc::new(PaidSpokenOutputState::default());
     let captured_samples = Arc::new(Mutex::new(Vec::<i16>::new()));
     let first_input_ms = Arc::new(Mutex::new(None::<u128>));
+    let audible_activity_ms = Arc::new(Mutex::new(Vec::<u128>::new()));
     let source_text = Arc::new(Mutex::new(String::new()));
     let translated_text = Arc::new(Mutex::new(String::new()));
     let terminal_errors = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -1038,6 +1305,7 @@ async fn incoming_spoken_translation_paid_stop_mid_phrase_is_bounded() {
             inner: DefaultPlatformAudioFactory::new(),
             started_at,
             first_input_ms: first_input_ms.clone(),
+            audible_activity_ms,
             captured_samples: captured_samples.clone(),
         }),
         Arc::new(PaidSpokenOutputFactory {
@@ -1228,8 +1496,10 @@ struct OpenAiLoopbackSttState {
     started: AtomicBool,
     stopped: AtomicBool,
     transcribed: AtomicBool,
+    transcription_requests: AtomicUsize,
     received_audio_chunks: AtomicUsize,
     emitted_finals: AtomicUsize,
+    final_activity: Mutex<Vec<Instant>>,
 }
 
 struct OpenAiLoopbackSttProvider {
@@ -1241,6 +1511,9 @@ struct OpenAiLoopbackSttProvider {
     channels: u16,
     on_final: Option<TranscriptionCallback>,
     cached_transcript: Option<String>,
+    max_finals: usize,
+    min_final_interval: Duration,
+    last_final_at: Option<Instant>,
 }
 
 #[async_trait]
@@ -1260,6 +1533,7 @@ impl SttProvider for OpenAiLoopbackSttProvider {
         self.state.started.store(true, Ordering::SeqCst);
         self.on_final = Some(on_final);
         self.samples.clear();
+        self.last_final_at = None;
         Ok(())
     }
 
@@ -1275,7 +1549,16 @@ impl SttProvider for OpenAiLoopbackSttProvider {
             return Ok(());
         }
 
-        if self.state.emitted_finals.load(Ordering::SeqCst) >= MAX_TRANSLATED_FINALS_PER_SOAK {
+        if self.state.emitted_finals.load(Ordering::SeqCst) >= self.max_finals {
+            self.samples.clear();
+            return Ok(());
+        }
+
+        let now = Instant::now();
+        if self
+            .last_final_at
+            .is_some_and(|last_final| now.duration_since(last_final) < self.min_final_interval)
+        {
             self.samples.clear();
             return Ok(());
         }
@@ -1284,6 +1567,9 @@ impl SttProvider for OpenAiLoopbackSttProvider {
         let transcript = if let Some(transcript) = self.cached_transcript.as_ref() {
             transcript.clone()
         } else {
+            self.state
+                .transcription_requests
+                .fetch_add(1, Ordering::SeqCst);
             let transcript = transcribe_pcm16(
                 &self.client,
                 &self.api_key,
@@ -1303,6 +1589,8 @@ impl SttProvider for OpenAiLoopbackSttProvider {
             let duration = samples.len() as f64 / self.sample_rate as f64 / self.channels as f64;
             let start = final_index as f64 * (duration + 0.001);
             on_final(Transcription::final_result(transcript).with_timing(start, duration));
+            self.state.final_activity.lock().unwrap().push(now);
+            self.last_final_at = Some(now);
         }
         Ok(())
     }
@@ -1328,6 +1616,8 @@ impl SttProvider for OpenAiLoopbackSttProvider {
 struct OpenAiLoopbackSttFactory {
     state: Arc<OpenAiLoopbackSttState>,
     api_key: String,
+    max_finals: usize,
+    min_final_interval: Duration,
 }
 
 impl SttProviderFactory for OpenAiLoopbackSttFactory {
@@ -1348,6 +1638,9 @@ impl SttProviderFactory for OpenAiLoopbackSttFactory {
             channels: 1,
             on_final: None,
             cached_transcript: None,
+            max_finals: self.max_finals,
+            min_final_interval: self.min_final_interval,
+            last_final_at: None,
         }))
     }
 }
@@ -1362,6 +1655,8 @@ async fn incoming_translation_service_captures_system_audio_and_emits_translated
         Arc::new(OpenAiLoopbackSttFactory {
             state: stt_state.clone(),
             api_key: api_key.clone(),
+            max_finals: 1,
+            min_final_interval: Duration::ZERO,
         }),
         Arc::new(DefaultPlatformAudioFactory::new()),
     );
@@ -1458,10 +1753,13 @@ async fn incoming_translation_service_long_running_system_audio_soak() {
     let soak_duration = live_audio_soak_duration();
     let fixture = generate_system_audio_fixture();
     let stt_state = Arc::new(OpenAiLoopbackSttState::default());
+    let final_interval = soak_final_interval(soak_duration);
     let service = IncomingTranslationFacade::new_with_factories(
         Arc::new(OpenAiLoopbackSttFactory {
             state: stt_state.clone(),
             api_key: api_key.clone(),
+            max_finals: MAX_TRANSLATED_FINALS_PER_SOAK,
+            min_final_interval: final_interval,
         }),
         Arc::new(DefaultPlatformAudioFactory::new()),
     );
@@ -1469,6 +1767,7 @@ async fn incoming_translation_service_long_running_system_audio_soak() {
     let statuses = Arc::new(Mutex::new(Vec::<RecordingStatus>::new()));
     let source_text = Arc::new(Mutex::new(String::new()));
     let translated_text = Arc::new(Mutex::new(String::new()));
+    let translated_activity = Arc::new(Mutex::new(Vec::<Instant>::new()));
     let errors = Arc::new(Mutex::new(Vec::<String>::new()));
     let callbacks = IncomingTranslationCallbacks {
         on_source_final: {
@@ -1477,7 +1776,13 @@ async fn incoming_translation_service_long_running_system_audio_soak() {
         },
         on_translation_delta: {
             let translated_text = translated_text.clone();
-            Arc::new(move |text| translated_text.lock().unwrap().push_str(&text))
+            let translated_activity = translated_activity.clone();
+            Arc::new(move |text| {
+                if !text.trim().is_empty() {
+                    translated_activity.lock().unwrap().push(Instant::now());
+                }
+                translated_text.lock().unwrap().push_str(&text);
+            })
         },
         on_error: {
             let errors = errors.clone();
@@ -1513,9 +1818,9 @@ async fn incoming_translation_service_long_running_system_audio_soak() {
         "incoming_translation_soak_seconds={}",
         soak_duration.as_secs_f32()
     );
-    let deadline = tokio::time::Instant::now() + soak_duration;
+    let deadline = Instant::now() + soak_duration;
     let mut saw_translation = false;
-    while tokio::time::Instant::now() < deadline {
+    while Instant::now() < deadline {
         if !translated_text.lock().unwrap().trim().is_empty() {
             saw_translation = true;
         }
@@ -1537,15 +1842,25 @@ async fn incoming_translation_service_long_running_system_audio_soak() {
         stt_state.received_audio_chunks.load(Ordering::SeqCst) > 1,
         "system loopback did not keep delivering audio during soak"
     );
-    let min_expected_finals = if soak_duration >= Duration::from_secs(15) {
-        2
+    let min_expected_finals = if soak_duration >= Duration::from_secs(30 * 60) {
+        MIN_TRANSLATED_FINALS_PER_RELEASE_SOAK
     } else {
-        1
+        2
     };
+    let emitted_finals = stt_state.emitted_finals.load(Ordering::SeqCst);
     assert!(
-        stt_state.emitted_finals.load(Ordering::SeqCst) >= min_expected_finals,
+        emitted_finals >= min_expected_finals,
         "incoming soak emitted too few translated finals: {}",
-        stt_state.emitted_finals.load(Ordering::SeqCst)
+        emitted_finals
+    );
+    assert!(
+        emitted_finals <= MAX_TRANSLATED_FINALS_PER_SOAK,
+        "incoming soak exceeded its bounded translation trigger budget: {emitted_finals}"
+    );
+    assert_eq!(
+        stt_state.transcription_requests.load(Ordering::SeqCst),
+        1,
+        "incoming soak must reuse one paid source transcription"
     );
     assert!(
         saw_translation,
@@ -1556,12 +1871,43 @@ async fn incoming_translation_service_long_running_system_audio_soak() {
         "unexpected incoming translation errors during soak: {:?}",
         errors.lock().unwrap()
     );
+    let final_activity = stt_state.final_activity.lock().unwrap().clone();
+    assert_eq!(final_activity.len(), emitted_finals);
+    let max_periodic_gap = final_interval + Duration::from_secs(30);
+    assert!(
+        final_activity
+            .windows(2)
+            .all(|window| window[1].duration_since(window[0]) <= max_periodic_gap),
+        "incoming soak stopped producing periodic source finals: interval={final_interval:?}, activity={final_activity:?}"
+    );
+    let near_end_grace = soak_activity_near_end_grace(soak_duration);
+    let last_final = *final_activity
+        .last()
+        .expect("incoming soak must record final activity");
+    assert!(
+        deadline.saturating_duration_since(last_final) <= near_end_grace,
+        "last source final was not near the end of the soak: last_age={:?}, grace={near_end_grace:?}",
+        deadline.saturating_duration_since(last_final)
+    );
+    let last_translation = *translated_activity
+        .lock()
+        .unwrap()
+        .last()
+        .expect("incoming soak must translate the final periodic source text");
+    assert!(
+        deadline.saturating_duration_since(last_translation) <= near_end_grace,
+        "last translated text was not near the end of the soak: last_age={:?}, grace={near_end_grace:?}",
+        deadline.saturating_duration_since(last_translation)
+    );
     println!(
-        "incoming_translation_soak_source_chars={}, translated_chars={}, audio_chunks={}, finals={}",
+        "incoming_translation_soak_source_chars={}, translated_chars={}, audio_chunks={}, finals={}, transcription_requests={}, last_final_age_ms={}, last_translation_age_ms={}",
         source_text.lock().unwrap().len(),
         translated_text.lock().unwrap().len(),
         stt_state.received_audio_chunks.load(Ordering::SeqCst),
-        stt_state.emitted_finals.load(Ordering::SeqCst)
+        emitted_finals,
+        stt_state.transcription_requests.load(Ordering::SeqCst),
+        deadline.saturating_duration_since(last_final).as_millis(),
+        deadline.saturating_duration_since(last_translation).as_millis(),
     );
 }
 

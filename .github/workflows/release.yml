@@ -138,6 +138,7 @@ jobs:
           fi
 
           release_commit="$(git rev-parse HEAD)"
+          required_matrix_ids='["english_to_russian","names_and_numbers","technical_terms","mixed_english_russian","already_russian","long_context","pause_and_silence","overlapping_speakers","half_volume_source"]'
           run_json="$(gh run view "$AUDIO_GATE_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
             --json conclusion,event,workflowName,url)"
@@ -157,16 +158,52 @@ jobs:
             --dir audio-gate-evidence
           jq -e \
             --arg commit "$release_commit" \
+            --argjson required_matrix_ids "$required_matrix_ids" \
             '.commit == $commit and
              .soak_seconds >= 1800 and
              .smoke_passed == true and
              .soak_passed == true and
-             .suspension_cleanup_passed == true and
-             .output_invalidation_passed == true and
+             .tauri_exit_shutdown_callback_bound == true and
+             .shutdown_claim_idempotence_passed == true and
+             .bidirectional_runtime_abort_helper_passed == true and
+             .suspension_signal_and_capture_cleanup_contracts_passed == true and
+             .local_and_runtime_close_contracts_passed == true and
+             .output_signal_and_service_cleanup_contracts_passed == true and
+             .system_default_playback_passed == true and
+             .macos_default_output_switch_detected == true and
+             .paid_matrix_complete == true and
+             .paid_matrix.schema_version == 1 and
+             .paid_matrix.scenario_filter == "all" and
+             .paid_matrix.required_scenario_ids == $required_matrix_ids and
+             .paid_matrix.passed_scenario_ids == $required_matrix_ids and
+             (.smoke_checks | index("tauri-exit-shutdown-callback-binding")) != null and
+             (.smoke_checks | index("translation-shutdown-claim-idempotence")) != null and
+             (.smoke_checks | index("bidirectional-runtime-abort-helper")) != null and
+             (.smoke_checks | index("suspension-watchdog-terminal-signal")) != null and
+             (.smoke_checks | index("incoming-terminal-capture-service-cleanup")) != null and
+             (.smoke_checks | index("local-websocket-abrupt-close")) != null and
+             (.smoke_checks | index("outgoing-unexpected-close-service-cleanup")) != null and
+             (.smoke_checks | index("output-health-terminal-signal")) != null and
+             (.smoke_checks | index("incoming-output-terminal-service-cleanup")) != null and
+             (.smoke_checks | index("incoming-system-default-playback")) != null and
+             (.smoke_checks | index("macos-default-output-switch")) != null and
              (.smoke_checks | index("incoming-native-self-exclusion")) != null and
              (.smoke_checks | index("incoming-spoken-paid-matrix")) != null and
-             (.smoke_checks | index("paid-full-duplex-independent-stop")) != null' \
+             (.smoke_checks | index("paid-full-duplex-independent-stop")) != null and
+             (.soak_checks | index("blackhole-loopback-preflight")) != null and
+             (.soak_checks | index("incoming-spoken-runtime-soak")) != null and
+             (.soak_checks | index("outgoing-long-live-translation-soak")) != null and
+             (.soak_checks | index("incoming-long-system-audio-soak")) != null' \
             audio-gate-evidence/evidence.json >/dev/null
+          jq -e \
+            --argjson required_matrix_ids "$required_matrix_ids" \
+            '
+            .schema_version == 1 and
+            .scenario_filter == "all" and
+            .complete_release_matrix == true and
+            .required_scenario_ids == $required_matrix_ids and
+            .passed_scenario_ids == $required_matrix_ids
+          ' audio-gate-evidence/matrix-summary.json >/dev/null
 
           echo "Verified macOS audio gate $run_url for commit $release_commit"
 

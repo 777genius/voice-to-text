@@ -70,6 +70,9 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install macOS audio route test dependency
+        run: brew install switchaudio-osx
+
       - name: Run native and paid full-duplex smoke gates
         env:
           VOICETEXT_RUN_PAID_E2E: '1'
@@ -92,38 +95,74 @@ jobs:
           set -euo pipefail
           smoke_summary="src-tauri/target/e2e-artifacts/live-audio-smoke-summary.json"
           soak_summary="src-tauri/target/e2e-artifacts/live-audio-soak-summary.json"
+          matrix_summary="src-tauri/target/e2e-artifacts/incoming-spoken-paid-matrix/matrix-summary.json"
+          required_matrix_ids='["english_to_russian","names_and_numbers","technical_terms","mixed_english_russian","already_russian","long_context","pause_and_silence","overlapping_speakers","half_volume_source"]'
           test -s "$smoke_summary"
           test -s "$soak_summary"
+          test -s "$matrix_summary"
           jq -e '
             .schema_version == 1 and
             .platform == "darwin" and
-            (.passed_labels | index("runtime-suspension-cleanup")) != null and
-            (.passed_labels | index("output-device-invalidation-cleanup")) != null and
+            (.passed_labels | index("tauri-exit-shutdown-callback-binding")) != null and
+            (.passed_labels | index("translation-shutdown-claim-idempotence")) != null and
+            (.passed_labels | index("bidirectional-runtime-abort-helper")) != null and
+            (.passed_labels | index("suspension-watchdog-terminal-signal")) != null and
+            (.passed_labels | index("incoming-terminal-capture-service-cleanup")) != null and
+            (.passed_labels | index("local-websocket-abrupt-close")) != null and
+            (.passed_labels | index("outgoing-unexpected-close-service-cleanup")) != null and
+            (.passed_labels | index("output-health-terminal-signal")) != null and
+            (.passed_labels | index("incoming-output-terminal-service-cleanup")) != null and
+            (.passed_labels | index("incoming-system-default-playback")) != null and
+            (.passed_labels | index("macos-default-output-switch")) != null and
             (.passed_labels | index("incoming-native-self-exclusion")) != null and
             (.passed_labels | index("incoming-spoken-paid-matrix")) != null and
             (.passed_labels | index("paid-full-duplex-independent-stop")) != null
           ' "$smoke_summary" >/dev/null
           jq -e \
             --argjson expected_soak_seconds "$SOAK_SECONDS" \
-            '.schema_version == 1 and .platform == "darwin" and .release_grade == true and .soak_seconds == $expected_soak_seconds' \
+            '.schema_version == 1 and
+             .platform == "darwin" and
+             .release_grade == true and
+             .soak_seconds == $expected_soak_seconds and
+             (.passed_labels | index("blackhole-loopback-preflight")) != null and
+             (.passed_labels | index("incoming-spoken-runtime-soak")) != null and
+             (.passed_labels | index("outgoing-long-live-translation-soak")) != null and
+             (.passed_labels | index("incoming-long-system-audio-soak")) != null' \
             "$soak_summary" >/dev/null
+          jq -e \
+            --argjson required_ids "$required_matrix_ids" \
+            '.schema_version == 1 and
+             .scenario_filter == "all" and
+             .complete_release_matrix == true and
+             .required_scenario_ids == $required_ids and
+             .passed_scenario_ids == $required_ids' \
+            "$matrix_summary" >/dev/null
 
           mkdir -p audio-gate-evidence
-          cp "$smoke_summary" "$soak_summary" audio-gate-evidence/
+          cp "$smoke_summary" "$soak_summary" "$matrix_summary" audio-gate-evidence/
           jq -n \
             --arg commit "$(git rev-parse HEAD)" \
             --arg ref "$EVIDENCE_REF" \
             --argjson soak_seconds "$SOAK_SECONDS" \
             --slurpfile smoke "$smoke_summary" \
             --slurpfile soak "$soak_summary" \
+            --slurpfile matrix "$matrix_summary" \
             '{
               commit: $commit,
               ref: $ref,
               soak_seconds: $soak_seconds,
               smoke_passed: true,
               soak_passed: true,
-              suspension_cleanup_passed: ($smoke[0].passed_labels | index("runtime-suspension-cleanup") != null),
-              output_invalidation_passed: ($smoke[0].passed_labels | index("output-device-invalidation-cleanup") != null),
+              tauri_exit_shutdown_callback_bound: ($smoke[0].passed_labels | index("tauri-exit-shutdown-callback-binding") != null),
+              shutdown_claim_idempotence_passed: ($smoke[0].passed_labels | index("translation-shutdown-claim-idempotence") != null),
+              bidirectional_runtime_abort_helper_passed: ($smoke[0].passed_labels | index("bidirectional-runtime-abort-helper") != null),
+              suspension_signal_and_capture_cleanup_contracts_passed: (($smoke[0].passed_labels | index("suspension-watchdog-terminal-signal") != null) and ($smoke[0].passed_labels | index("incoming-terminal-capture-service-cleanup") != null)),
+              local_and_runtime_close_contracts_passed: (($smoke[0].passed_labels | index("local-websocket-abrupt-close") != null) and ($smoke[0].passed_labels | index("outgoing-unexpected-close-service-cleanup") != null)),
+              output_signal_and_service_cleanup_contracts_passed: (($smoke[0].passed_labels | index("output-health-terminal-signal") != null) and ($smoke[0].passed_labels | index("incoming-output-terminal-service-cleanup") != null)),
+              system_default_playback_passed: ($smoke[0].passed_labels | index("incoming-system-default-playback") != null),
+              macos_default_output_switch_detected: ($smoke[0].passed_labels | index("macos-default-output-switch") != null),
+              paid_matrix_complete: $matrix[0].complete_release_matrix,
+              paid_matrix: $matrix[0],
               smoke_checks: $smoke[0].passed_labels,
               soak_checks: $soak[0].passed_labels
             }' > audio-gate-evidence/evidence.json

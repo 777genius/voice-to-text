@@ -31,6 +31,7 @@ use tokio_tungstenite::{accept_hdr_async, WebSocketStream};
 
 const TEST_CREDENTIAL: &str = "integration-placeholder";
 const TEST_TIMEOUT: Duration = Duration::from_secs(2);
+const TRANSLATED_OUTPUT_SAMPLE_RATE: usize = 24_000;
 
 async fn spawn_tcp_server<F, Fut>(script: F) -> (String, JoinHandle<()>)
 where
@@ -84,7 +85,58 @@ struct SyntheticFlowState {
     output_closed: AtomicBool,
     output_samples: Mutex<Vec<i16>>,
     output_sample_count: AtomicUsize,
+    output_pending_high_water_samples: AtomicUsize,
+    simulated_playback: Mutex<SimulatedPlayback>,
     output_gain: Mutex<Option<f32>>,
+}
+
+struct SimulatedPlayback {
+    pending_samples: usize,
+    updated_at: Instant,
+}
+
+impl Default for SimulatedPlayback {
+    fn default() -> Self {
+        Self {
+            pending_samples: 0,
+            updated_at: Instant::now(),
+        }
+    }
+}
+
+impl SyntheticFlowState {
+    fn refresh_pending_samples(&self) -> usize {
+        let mut playback = self.simulated_playback.lock().unwrap();
+        let now = Instant::now();
+        let elapsed_samples = (now.duration_since(playback.updated_at).as_secs_f64()
+            * TRANSLATED_OUTPUT_SAMPLE_RATE as f64) as usize;
+        playback.pending_samples = playback.pending_samples.saturating_sub(elapsed_samples);
+        playback.updated_at = now;
+        playback.pending_samples
+    }
+
+    fn enqueue_simulated_playback(&self, samples: usize) -> Duration {
+        let mut playback = self.simulated_playback.lock().unwrap();
+        let now = Instant::now();
+        let elapsed_samples = (now.duration_since(playback.updated_at).as_secs_f64()
+            * TRANSLATED_OUTPUT_SAMPLE_RATE as f64) as usize;
+        playback.pending_samples = playback
+            .pending_samples
+            .saturating_sub(elapsed_samples)
+            .saturating_add(samples);
+        playback.updated_at = now;
+        self.output_pending_high_water_samples
+            .fetch_max(playback.pending_samples, Ordering::Relaxed);
+        Duration::from_secs_f64(
+            playback.pending_samples as f64 / TRANSLATED_OUTPUT_SAMPLE_RATE as f64,
+        )
+    }
+
+    fn pending_playback_duration(&self) -> Duration {
+        Duration::from_secs_f64(
+            self.refresh_pending_samples() as f64 / TRANSLATED_OUTPUT_SAMPLE_RATE as f64,
+        )
+    }
 }
 
 struct SyntheticCaptureFactory {
@@ -202,9 +254,8 @@ impl TranslationAudioOutput for CollectingOutput {
                 .unwrap()
                 .extend_from_slice(samples);
         }
-        Ok(AudioEnqueueOutcome::Queued {
-            pending: Duration::ZERO,
-        })
+        let pending = self.state.enqueue_simulated_playback(samples.len());
+        Ok(AudioEnqueueOutcome::Queued { pending })
     }
 
     async fn close(&mut self) -> TranslationAudioOutputResult<()> {
@@ -229,11 +280,11 @@ impl TranslationAudioOutput for CollectingOutput {
     fn begin_drain_mode(&self) {}
 
     fn prepare_for_drain(&self) -> TranslationAudioOutputResult<Duration> {
-        Ok(Duration::ZERO)
+        Ok(self.state.pending_playback_duration())
     }
 
     fn pending_playback_duration(&self) -> Duration {
-        Duration::ZERO
+        self.state.pending_playback_duration()
     }
 }
 
@@ -691,12 +742,14 @@ fn current_process_rss_kib() -> Option<u64> {
 #[tokio::test]
 #[ignore = "30-minute synthetic spoken soak; set SPOKEN_TRANSLATION_SOAK_SECONDS for a shorter manual run"]
 async fn spoken_runtime_long_soak_keeps_audio_flow_bounded_and_stops_cleanly() {
+    const SAMPLES_PER_EVENT: usize = TRANSLATED_OUTPUT_SAMPLE_RATE / 10;
     let emitted_audio_events = Arc::new(AtomicUsize::new(0));
     let server_event_count = emitted_audio_events.clone();
     let (endpoint, server) = spawn_tcp_server(move |stream| async move {
         let mut ws = accept_async(stream).await.unwrap();
         assert_eq!(receive_json(&mut ws).await["type"], "session.update");
         send_json(&mut ws, json!({ "type": "session.updated" })).await;
+        let realtime_audio_delta = pcm16_base64(&vec![1_200; SAMPLES_PER_EVENT]);
         let mut ticker = tokio::time::interval(Duration::from_millis(100));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -707,7 +760,7 @@ async fn spoken_runtime_long_soak_keeps_audio_flow_bounded_and_stops_cleanly() {
                         &mut ws,
                         json!({
                             "type": "session.output_audio.delta",
-                            "delta": pcm16_base64(&[index as i16, -(index as i16), 1])
+                            "delta": realtime_audio_delta
                         }),
                     )
                     .await;
@@ -783,7 +836,9 @@ async fn spoken_runtime_long_soak_keeps_audio_flow_bounded_and_stops_cleanly() {
         assert!(errors.lock().unwrap().is_empty());
 
         let emitted = emitted_audio_events.load(Ordering::SeqCst);
-        let consumed = flow_state.output_sample_count.load(Ordering::Relaxed) / 3;
+        let enqueued_samples = flow_state.output_sample_count.load(Ordering::Relaxed);
+        let pending_samples = flow_state.refresh_pending_samples();
+        let consumed = enqueued_samples.saturating_sub(pending_samples) / SAMPLES_PER_EVENT;
         final_backlog_events = emitted.saturating_sub(consumed);
         max_backlog_events = max_backlog_events.max(final_backlog_events);
         assert!(
@@ -809,6 +864,9 @@ async fn spoken_runtime_long_soak_keeps_audio_flow_bounded_and_stops_cleanly() {
     let events = emitted_audio_events.load(Ordering::SeqCst);
     let samples = flow_state.output_sample_count.load(Ordering::Relaxed);
     let text_chars = translated_text_chars.load(Ordering::Relaxed);
+    let pending_high_water_samples = flow_state
+        .output_pending_high_water_samples
+        .load(Ordering::Relaxed);
     assert!(
         rss_samples_kib.len() >= 2,
         "spoken runtime soak requires at least two RSS samples, got {:?}",
@@ -818,17 +876,23 @@ async fn spoken_runtime_long_soak_keeps_audio_flow_bounded_and_stops_cleanly() {
     let max_rss_kib = *rss_samples_kib.iter().max().unwrap();
     let rss_growth_kib = max_rss_kib.saturating_sub(baseline_rss_kib);
     println!(
-        "spoken_soak_seconds={}, audio_events={events}, output_samples={samples}, text_chars={}, max_backlog_events={}, final_backlog_events={}, rss_samples_kib={:?}, rss_growth_kib={}",
+        "spoken_soak_seconds={}, audio_events={events}, output_samples={samples}, text_chars={}, max_backlog_events={}, final_backlog_events={}, pending_high_water_samples={}, rss_samples_kib={:?}, rss_growth_kib={}",
         duration.as_secs(),
         text_chars,
         max_backlog_events,
         final_backlog_events,
+        pending_high_water_samples,
         rss_samples_kib,
         rss_growth_kib
     );
     assert!(events > 0);
-    assert_eq!(samples, events * 3);
-    assert!(samples <= (duration.as_secs() as usize + 2) * 33);
+    assert_eq!(samples, events * SAMPLES_PER_EVENT);
+    assert!(samples <= (duration.as_secs() as usize + 2) * TRANSLATED_OUTPUT_SAMPLE_RATE);
+    assert!(pending_high_water_samples > 0);
+    assert!(
+        pending_high_water_samples <= TRANSLATED_OUTPUT_SAMPLE_RATE * 2,
+        "spoken runtime pending playback exceeded two seconds: {pending_high_water_samples} samples"
+    );
     assert!(
         final_backlog_events <= 5,
         "spoken runtime backlog did not drain near real time: {final_backlog_events} events"
