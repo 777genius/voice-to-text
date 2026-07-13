@@ -350,6 +350,32 @@ fn outgoing_audio_has_expected_meaning(transcript: &str, require_duplex_tail: bo
                 && (normalized.contains('7') || normalized.contains("seven"))))
 }
 
+fn incoming_duplex_initial_has_expected_meaning(transcript: &str) -> bool {
+    let normalized = transcript.to_lowercase();
+    (normalized.contains("42") || normalized.contains("сорок дв"))
+        && (normalized.contains("провер")
+            || normalized.contains("чек")
+            || normalized.contains("контрол"))
+        && normalized.contains("пятниц")
+}
+
+fn incoming_duplex_tail_has_expected_meaning(transcript: &str) -> bool {
+    let normalized = transcript.to_lowercase();
+    (normalized.contains("17") || normalized.contains("семнадцать"))
+        && (normalized.contains("провер") || normalized.contains("задач"))
+        && normalized.contains("понедель")
+}
+
+#[test]
+fn incoming_duplex_semantics_accept_control_as_release_checks() {
+    assert!(incoming_duplex_initial_has_expected_meaning(
+        "Есть 42 контрольных выхода. Финальный обзор - в пятницу утром."
+    ));
+    assert!(!incoming_duplex_initial_has_expected_meaning(
+        "Есть 42 выхода. Финальный обзор - в пятницу утром."
+    ));
+}
+
 async fn transcribe_outgoing_audio(
     client: &reqwest::Client,
     api_key: &str,
@@ -1262,13 +1288,8 @@ async fn simultaneous_incoming_and_outgoing_routes_translate_and_stop_independen
     play_system_fixture(first_incoming_fixture.path(), 0.8).await;
     let initial_evidence = tokio::time::timeout(Duration::from_secs(45), async {
         loop {
-            let translated = incoming_text.lock().unwrap().to_lowercase();
-            let has_count = translated.contains("42") || translated.contains("сорок дв");
-            let has_checks = translated.contains("провер") || translated.contains("чек");
-            let has_friday = translated.contains("пятниц");
-            if has_count
-                && has_checks
-                && has_friday
+            let translated = incoming_text.lock().unwrap().clone();
+            if incoming_duplex_initial_has_expected_meaning(&translated)
                 && playback_probe.audible_accepted_samples() >= 12_000
                 && blackhole_capture
                     .lock()
@@ -1296,8 +1317,9 @@ async fn simultaneous_incoming_and_outgoing_routes_translate_and_stop_independen
         Ok(Ok(())) => None,
         Ok(Err(error)) => Some(error),
         Err(_) => Some(format!(
-            "initial duplex evidence timed out: incoming={:?}, outgoing={:?}, accepted_audible={}, blackhole_audible={}, completed_phrases={}, incoming_errors={:?}, outgoing_errors={:?}",
+            "initial duplex evidence timed out: incoming={:?}, incoming_semantic_ok={}, outgoing={:?}, accepted_audible={}, blackhole_audible={}, completed_phrases={}, incoming_errors={:?}, outgoing_errors={:?}",
             incoming_text.lock().unwrap().clone(),
+            incoming_duplex_initial_has_expected_meaning(&incoming_text.lock().unwrap()),
             outgoing_text.lock().unwrap().clone(),
             playback_probe.audible_accepted_samples(),
             blackhole_capture
@@ -1413,14 +1435,9 @@ async fn simultaneous_incoming_and_outgoing_routes_translate_and_stop_independen
             let fresh_incoming = incoming_guard
                 .get(incoming_text_boundary..)
                 .unwrap_or_default()
-                .to_lowercase();
+                .to_string();
             drop(incoming_guard);
-            let has_count = fresh_incoming.contains("17") || fresh_incoming.contains("семнадцать");
-            let has_checks = fresh_incoming.contains("провер") || fresh_incoming.contains("задач");
-            let has_monday = fresh_incoming.contains("понедель");
-            if has_count
-                && has_checks
-                && has_monday
+            if incoming_duplex_tail_has_expected_meaning(&fresh_incoming)
                 && playback_probe.audible_accepted_samples()
                     >= incoming_audio_boundary.saturating_add(12_000)
             {
@@ -1542,13 +1559,9 @@ async fn simultaneous_incoming_and_outgoing_routes_translate_and_stop_independen
     println!("duplex_artifacts={}", artifact_root.display());
 
     let outgoing_normalized = outgoing_transcript.to_lowercase();
-    let incoming_normalized = incoming_transcript.to_lowercase();
     assert!(
-        (incoming_normalized.contains("42") || incoming_normalized.contains("сорок дв"))
-            && (incoming_normalized.contains("провер") || incoming_normalized.contains("чек"))
-            && incoming_normalized.contains("пятниц")
-            && (incoming_normalized.contains("17") || incoming_normalized.contains("семнадцать"))
-            && incoming_normalized.contains("понедель"),
+        incoming_duplex_initial_has_expected_meaning(&incoming_transcript)
+            && incoming_duplex_tail_has_expected_meaning(&incoming_transcript),
         "duplex incoming text lost meaning: {incoming_transcript}"
     );
     assert!(
