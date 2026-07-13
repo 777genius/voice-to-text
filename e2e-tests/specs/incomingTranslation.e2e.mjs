@@ -1,6 +1,61 @@
-import { emitEvent, ensureE2E, findWindowHandleByLabel, waitFor } from '../helpers/tauriE2e.mjs';
+import {
+  emitEvent,
+  ensureE2E,
+  findWindowHandleByLabel,
+  invoke,
+  waitFor,
+} from '../helpers/tauriE2e.mjs';
 
 describe('incoming translation subtitles (real tauri webdriver)', () => {
+  it('plays translated PCM and closes output through the incoming spoken UI flow', async () => {
+    await ensureE2E();
+    const mainHandle = await findWindowHandleByLabel('main');
+    await browser.switchToWindow(mainHandle);
+
+    const initial = await invoke('get_incoming_translation_state');
+    if (initial.status !== 'Idle' || initial.session_id !== 0) {
+      throw new Error(`incoming translation did not start idle: ${JSON.stringify(initial)}`);
+    }
+
+    const toggle = await $('[data-testid="incoming-translation-toggle"]');
+    await toggle.waitForClickable({ timeout: 15_000 });
+    await toggle.click();
+
+    let firstSessionId = 0;
+    await waitFor(async () => {
+      const state = await invoke('get_incoming_translation_state');
+      if (state.status !== 'Recording' || state.session_id <= 0) return false;
+      firstSessionId = state.session_id;
+      return true;
+    });
+    const text = await $('[data-testid="incoming-translation-text"]');
+    await waitFor(async () => (await text.getText()).includes('привет из e2e звонка'));
+
+    await toggle.waitForClickable({ timeout: 15_000 });
+    await toggle.click();
+    await waitFor(async () => {
+      const state = await invoke('get_incoming_translation_state');
+      return state.status === 'Idle' && state.session_id === 0;
+    });
+
+    // The debug output factory rejects this restart unless the previous session
+    // enqueued the exact translated PCM, drained it, and closed the output.
+    await toggle.waitForClickable({ timeout: 15_000 });
+    await toggle.click();
+    await waitFor(async () => {
+      const state = await invoke('get_incoming_translation_state');
+      return state.status === 'Recording' && state.session_id > firstSessionId;
+    });
+    await waitFor(async () => (await text.getText()).includes('привет из e2e звонка'));
+
+    await toggle.waitForClickable({ timeout: 15_000 });
+    await toggle.click();
+    await waitFor(async () => {
+      const state = await invoke('get_incoming_translation_state');
+      return state.status === 'Idle' && state.session_id === 0;
+    });
+  });
+
   it('renders translated system audio events and ignores late events from a closed session', async () => {
     await ensureE2E();
     const mainHandle = await findWindowHandleByLabel('main');

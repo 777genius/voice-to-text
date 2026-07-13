@@ -26,6 +26,14 @@ const TRANSLATION_APP_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::f
 
 fn default_incoming_translation_factory() -> IncomingTranslationFacadeFactory {
     let audio_factory = Arc::new(DefaultPlatformAudioFactory::new());
+    #[cfg(debug_assertions)]
+    if std::env::var("VOICETEXT_E2E").ok().as_deref() == Some("1") {
+        return IncomingTranslationFacadeFactory::new(
+            Arc::new(DefaultSttProviderFactory::new()),
+            audio_factory,
+            crate::presentation::e2e_translation::spoken_translation_ports(),
+        );
+    }
     IncomingTranslationFacadeFactory::new(
         Arc::new(DefaultSttProviderFactory::new()),
         audio_factory.clone(),
@@ -555,10 +563,7 @@ impl AppState {
     }
 
     pub async fn shutdown_translation_runtimes(&self) {
-        if self
-            .translation_shutdown_started
-            .swap(true, Ordering::SeqCst)
-        {
+        if !claim_translation_shutdown(&self.translation_shutdown_started) {
             return;
         }
 
@@ -1298,6 +1303,10 @@ impl AppState {
     }
 }
 
+fn claim_translation_shutdown(started: &AtomicBool) -> bool {
+    !started.swap(true, Ordering::SeqCst)
+}
+
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
@@ -1307,11 +1316,20 @@ impl Default for AppState {
 #[cfg(test)]
 mod tests {
     use super::{
-        audio_capture_device_cache_matches, claim_vad_timeout_session,
+        audio_capture_device_cache_matches, claim_translation_shutdown, claim_vad_timeout_session,
         is_current_vad_timeout_session, normalize_audio_capture_device_name,
         restore_vad_timeout_session_claim_if_unclaimed,
     };
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    #[test]
+    fn translation_shutdown_claim_is_exactly_once_for_duplicate_exit_events() {
+        let started = AtomicBool::new(false);
+
+        assert!(claim_translation_shutdown(&started));
+        assert!(!claim_translation_shutdown(&started));
+        assert!(started.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn audio_capture_device_cache_recreates_same_explicit_device_after_hotplug() {

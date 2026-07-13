@@ -21,6 +21,17 @@ const DEEP_LINK_SCHEME: &str = "voicetotext-dev";
 #[cfg(not(debug_assertions))]
 const DEEP_LINK_SCHEME: &str = "voicetotext";
 
+fn handle_translation_shutdown_run_event(event: &tauri::RunEvent, shutdown: impl FnOnce()) -> bool {
+    if matches!(
+        event,
+        tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+    ) {
+        shutdown();
+        return true;
+    }
+    false
+}
+
 // Определяем базовый NSPanel класс для macOS (появление поверх fullscreen приложений)
 #[cfg(target_os = "macos")]
 use tauri_nspanel::tauri_panel;
@@ -232,6 +243,10 @@ pub fn run() {
                 let state = app.state::<AppState>();
                 tauri::async_runtime::block_on(async {
                     *state.is_authenticated.write().await = true;
+                    let mut config = state.config.write().await;
+                    config.openai_api_key = Some("e2e-placeholder-credential".into());
+                    config.incoming_translation_delivery =
+                        crate::domain::IncomingTranslationDelivery::TextAndAudio;
                 });
             }
 
@@ -794,13 +809,11 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {
-            if matches!(
-                _event,
-                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
-            ) {
+            if handle_translation_shutdown_run_event(&_event, || {
                 if let Some(state) = _app.try_state::<AppState>() {
                     tauri::async_runtime::block_on(state.shutdown_translation_runtimes());
                 }
+            }) {
                 return;
             }
 
@@ -834,4 +847,22 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::handle_translation_shutdown_run_event;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn tauri_exit_event_invokes_translation_shutdown_callback() {
+        let calls = AtomicUsize::new(0);
+
+        let handled = handle_translation_shutdown_run_event(&tauri::RunEvent::Exit, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+        });
+
+        assert!(handled);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 }
