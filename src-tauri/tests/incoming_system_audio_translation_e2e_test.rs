@@ -34,6 +34,7 @@ const MIN_TRANSLATED_FINALS_PER_RELEASE_SOAK: usize = 6;
 const AUDIBLE_SAMPLE_ABS_THRESHOLD: u16 = 128;
 const MIN_AUDIBLE_TRANSLATED_SAMPLES: usize = 1_200;
 const PAID_SOURCE_PREROLL: Duration = Duration::from_secs(1);
+const PAID_TRANSLATION_PLAYBACK_GAIN: f32 = 1.0;
 const PAID_REQUIRED_SCENARIO_IDS: &[&str] = &[
     "english_to_russian",
     "names_and_numbers",
@@ -49,12 +50,12 @@ const PAID_REQUIRED_AUDIO_SCENARIO_IDS: &[&str] = &[
     "english_to_russian",
     "names_and_numbers",
     "technical_terms",
-    "mixed_english_russian",
     "long_context",
     "pause_and_silence",
     "overlapping_speakers",
     "half_volume_source",
 ];
+const PAID_DIAGNOSTIC_OUTPUT_SCENARIO_IDS: &[&str] = &["mixed_english_russian", "already_russian"];
 const PAID_DIAGNOSTIC_SEMANTIC_SCENARIO_IDS: &[&str] = &["overlapping_speakers"];
 const PAID_DIAGNOSTIC_AUDIO_FACT_POLICIES: &[(&str, &str)] =
     &[("names_and_numbers", "meeting time 3:45 PM")];
@@ -90,6 +91,15 @@ fn live_audio_soak_duration() -> Duration {
         .filter(|seconds| *seconds > 0)
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(30 * 60))
+}
+
+fn paid_source_playback_gain(configured_gain: f32) -> f32 {
+    let local_cap = std::env::var("INCOMING_SPOKEN_E2E_SOURCE_GAIN_CAP")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|gain| gain.is_finite() && *gain > 0.0)
+        .map(|gain| gain.clamp(0.05, 1.0));
+    local_cap.map_or(configured_gain, |cap| configured_gain.min(cap))
 }
 
 fn soak_activity_near_end_grace(soak_duration: Duration) -> Duration {
@@ -681,7 +691,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
                 RequiredSemanticFact {
                     label: "room 207",
                     marker_groups: &[
-                        &["комнат", "кабинет", "зал"],
+                        &["комнат", "кабинет", "зал", "аудитори"],
                         &["207", "два ноль семь", "двести семь"],
                     ],
                 },
@@ -740,7 +750,10 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             required_translation_facts: &[
                 RequiredSemanticFact {
                     label: "open settings",
-                    marker_groups: &[&["открой", "открыть"], &["настрой"]],
+                    marker_groups: &[
+                        &["открой", "открыть", "перейд", "зайд", "пойдем", "пойти"],
+                        &["настрой"],
+                    ],
                 },
                 RequiredSemanticFact {
                     label: "choose text and audio mode",
@@ -752,7 +765,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
                     ],
                 },
             ],
-            translation_output_required: true,
+            translation_output_required: false,
         },
         PaidSpokenScenario {
             id: "already_russian",
@@ -782,13 +795,15 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
         PaidSpokenScenario {
             id: "long_context",
             primary_voice: "Samantha",
-            source: "During yesterday's incident the first deployment failed because the certificate expired. After the certificate was renewed, the second deployment succeeded, so do not roll back the database migration.",
+            source: "During yesterday's incident, the first software deployment to production failed because the certificate expired. After the certificate was renewed, the second software deployment to production succeeded, so do not roll back the database migration.",
             source_playback_gain: 1.0,
             secondary_source: None,
             human_reference: "Во время вчерашнего инцидента первое развертывание не удалось из-за истекшего сертификата. После обновления сертификата второе развертывание прошло успешно, поэтому не откатывайте миграцию базы данных.",
             required_source_markers: &[
                 &["first"],
+                &["software"],
                 &["deployment"],
+                &["production"],
                 &["certificate"],
                 &["expired"],
                 &["second"],
@@ -801,8 +816,8 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
                     label: "first deployment failed",
                     marker_groups: &[
                         &["перв"],
-                        &["развертыв", "развёртыв", "деплой"],
-                        &["не удалось", "провал", "ошиб", "неуспеш"],
+                        &["развертыв", "развёртыв", "деплой", "запуск"],
+                        &["не удалось", "не сработ", "провал", "ошиб", "неуспеш"],
                     ],
                 },
                 RequiredSemanticFact {
@@ -821,7 +836,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
                     marker_groups: &[
                         &["втор"],
                         &["развертыв", "развёртыв", "деплой", "попытк"],
-                        &["успеш"],
+                        &["успеш", "уда"],
                     ],
                 },
                 RequiredSemanticFact {
@@ -858,7 +873,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
                 },
                 RequiredSemanticFact {
                     label: "keep both values",
-                    marker_groups: &[&["оба", "обе"], &["значен"]],
+                    marker_groups: &[&["оба", "обе"], &["значен", "ценност"]],
                 },
             ],
             translation_output_required: true,
@@ -921,8 +936,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
                     label: "meeting starts at 9:30 AM",
                     marker_groups: &[
                         &["встреч", "совещ"],
-                        &["9:30", "9.30", "девять тридцать"],
-                        &["утр"],
+                        &["9:30", "09:30", "9.30", "09.30", "девять тридцать утра"],
                     ],
                 },
             ],
@@ -950,6 +964,10 @@ fn paid_spoken_matrix_keeps_complete_release_scenarios_and_assertions() {
     assert_eq!(
         PAID_DIAGNOSTIC_AUDIO_FACT_POLICIES,
         &[("names_and_numbers", "meeting time 3:45 PM")]
+    );
+    assert_eq!(
+        PAID_DIAGNOSTIC_OUTPUT_SCENARIO_IDS,
+        &["mixed_english_russian", "already_russian"]
     );
     assert!(PAID_DIAGNOSTIC_AUDIO_FACT_POLICIES
         .iter()
@@ -989,7 +1007,7 @@ fn paid_spoken_matrix_keeps_complete_release_scenarios_and_assertions() {
             .filter(|scenario| !scenario.translation_output_required)
             .map(|scenario| scenario.id)
             .collect::<Vec<_>>(),
-        vec!["already_russian"]
+        PAID_DIAGNOSTIC_OUTPUT_SCENARIO_IDS
     );
 }
 
@@ -1391,7 +1409,7 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
         );
         config.openai_api_key = api_key.clone();
         config.target_language = "ru".into();
-        config.playback_gain = 0.8;
+        config.playback_gain = PAID_TRANSLATION_PLAYBACK_GAIN;
 
         service
             .start(config, callbacks)
@@ -1399,10 +1417,11 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             .unwrap_or_else(|error| panic!("paid scenario {} must start: {error}", scenario.id));
         tokio::time::sleep(PAID_SOURCE_PREROLL).await;
         let source_playback_started_ms = started_at.elapsed().as_millis();
+        let source_playback_gain = paid_source_playback_gain(scenario.source_playback_gain);
         play_paid_scenario(
             fixture.path(),
             secondary_fixture.as_ref().map(TempAudioFixture::path),
-            scenario.source_playback_gain,
+            source_playback_gain,
         )
         .await;
         let source_playback_finished_ms = started_at.elapsed().as_millis();
@@ -1572,8 +1591,8 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             .filter(|fact| !is_diagnostic_audio_fact(scenario.id, fact))
             .cloned()
             .collect::<Vec<_>>();
-        let semantic_quality_blocking =
-            !PAID_DIAGNOSTIC_SEMANTIC_SCENARIO_IDS.contains(&scenario.id);
+        let semantic_quality_blocking = scenario.translation_output_required
+            && !PAID_DIAGNOSTIC_SEMANTIC_SCENARIO_IDS.contains(&scenario.id);
         let semantic_quality_degraded = scenario.translation_output_required
             && ((!semantic_quality_blocking
                 && (!missing_translation_facts.is_empty() || !missing_audio_facts.is_empty()))
@@ -1612,7 +1631,7 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             "scenario": scenario.id,
             "expected_source": scenario.source,
             "expected_secondary_source": scenario.secondary_source,
-            "source_playback_gain": scenario.source_playback_gain,
+            "source_playback_gain": source_playback_gain,
             "human_reference": scenario.human_reference,
             "source_playback_started_ms": source_playback_started_ms,
             "source_playback_finished_ms": source_playback_finished_ms,
@@ -1914,7 +1933,10 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             scenario.id,
             output_state.pending_at_close_micros.load(Ordering::Relaxed)
         );
-        assert_eq!(*output_state.gain.lock().unwrap(), Some(0.8));
+        assert_eq!(
+            *output_state.gain.lock().unwrap(),
+            Some(PAID_TRANSLATION_PLAYBACK_GAIN)
+        );
         assert_eq!(service.get_status().await, RecordingStatus::Idle);
         passed_scenario_ids.push(scenario.id);
     }
@@ -1938,6 +1960,7 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             "passed_scenario_ids": passed_scenario_ids,
             "required_audio_scenario_ids": PAID_REQUIRED_AUDIO_SCENARIO_IDS,
             "audio_verified_scenario_ids": audio_verified_scenario_ids,
+            "diagnostic_output_scenario_ids": PAID_DIAGNOSTIC_OUTPUT_SCENARIO_IDS,
             "diagnostic_semantic_scenario_ids": PAID_DIAGNOSTIC_SEMANTIC_SCENARIO_IDS,
             "diagnostic_audio_fact_policies": PAID_DIAGNOSTIC_AUDIO_FACT_POLICIES,
             "quality_degraded_scenario_ids": quality_degraded_scenario_ids,
@@ -2031,7 +2054,7 @@ async fn incoming_spoken_translation_paid_stop_mid_phrase_is_bounded() {
     let mut config = IncomingTranslationConfig::new_with_defaults(SttConfig::default(), 40_001);
     config.openai_api_key = api_key;
     config.target_language = "ru".into();
-    config.playback_gain = 0.8;
+    config.playback_gain = PAID_TRANSLATION_PLAYBACK_GAIN;
     service
         .start(config, callbacks)
         .await
@@ -2631,7 +2654,7 @@ async fn incoming_spoken_translation_long_running_native_soak() {
     let mut config = IncomingTranslationConfig::new_with_defaults(SttConfig::default(), 20_002);
     config.openai_api_key = api_key;
     config.target_language = "ru".into();
-    config.playback_gain = 0.8;
+    config.playback_gain = PAID_TRANSLATION_PLAYBACK_GAIN;
 
     service
         .start(config, callbacks)

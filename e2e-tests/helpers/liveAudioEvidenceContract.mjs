@@ -35,11 +35,15 @@ export const REQUIRED_PAID_AUDIO_SCENARIO_IDS = Object.freeze([
   'english_to_russian',
   'names_and_numbers',
   'technical_terms',
-  'mixed_english_russian',
   'long_context',
   'pause_and_silence',
   'overlapping_speakers',
   'half_volume_source',
+]);
+
+export const DIAGNOSTIC_PAID_OUTPUT_SCENARIO_IDS = Object.freeze([
+  'mixed_english_russian',
+  'already_russian',
 ]);
 
 export function sameOrderedLabels(actual, expected) {

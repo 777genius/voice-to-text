@@ -5,6 +5,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  DIAGNOSTIC_PAID_OUTPUT_SCENARIO_IDS,
   REQUIRED_LIVE_AUDIO_SMOKE_LABELS,
   REQUIRED_LIVE_AUDIO_SOAK_LABELS,
   REQUIRED_PAID_AUDIO_SCENARIO_IDS,
@@ -46,11 +47,14 @@ test('macOS gate and release verifier require semantic verification of paid audi
   const gate = readRepositoryFile('.github/workflows/macos-audio-gate.yml');
   const release = readRepositoryFile('.github/workflows/release.yml');
   const requiredIds = JSON.stringify(REQUIRED_PAID_AUDIO_SCENARIO_IDS);
+  const diagnosticOutputIds = JSON.stringify(DIAGNOSTIC_PAID_OUTPUT_SCENARIO_IDS);
 
   for (const source of [gate, release]) {
     assert.ok(source.includes(`required_audio_ids='${requiredIds}'`));
+    assert.ok(source.includes(`diagnostic_output_ids='${diagnosticOutputIds}'`));
     assert.ok(source.includes('.required_audio_scenario_ids == $required_audio_ids'));
     assert.ok(source.includes('.audio_verified_scenario_ids == $required_audio_ids'));
+    assert.ok(source.includes('.diagnostic_output_scenario_ids == $diagnostic_output_ids'));
   }
 });
 
