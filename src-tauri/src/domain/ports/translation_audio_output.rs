@@ -60,6 +60,7 @@ impl TranslationAudioOutputConfig {
     pub fn incoming_spoken_translation() -> Self {
         Self {
             max_buffered_duration: Duration::from_secs(10),
+            drain_max_buffered_duration: Duration::from_secs(25),
             ..Self::openai_translation()
         }
     }

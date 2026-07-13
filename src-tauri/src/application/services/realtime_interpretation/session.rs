@@ -11,7 +11,7 @@ use crate::domain::{
     amplify_i16_samples, AudioCapture, AudioCaptureErrorCallback, AudioChunk, AudioChunkCallback,
     AudioEnqueueOutcome, AudioError, RealtimeTranslationError, RealtimeTranslationErrorKind,
     RealtimeTranslationEvent, RealtimeTranslationSession, TranslationAudioOutput,
-    TranslationAudioOutputError,
+    TranslationAudioOutputConfig, TranslationAudioOutputError,
 };
 
 use super::frame_assembler::Pcm16FrameAssembler;
@@ -168,6 +168,10 @@ impl RealtimeInterpretationPolicy {
     }
 
     pub fn incoming_spoken() -> Self {
+        let output_drain_safety = Duration::from_millis(250);
+        let output_drain_max = TranslationAudioOutputConfig::incoming_spoken_translation()
+            .drain_max_buffered_duration
+            .saturating_add(output_drain_safety);
         Self {
             input_frame_samples: 4_800,
             input_queue_capacity_chunks: 64,
@@ -184,8 +188,8 @@ impl RealtimeInterpretationPolicy {
             output_health_poll_interval: Duration::from_millis(250),
             suspension_watchdog_poll: Duration::from_secs(1),
             suspension_watchdog_threshold: Duration::from_secs(8),
-            output_drain_safety: Duration::from_millis(250),
-            output_drain_max: Duration::from_millis(5_000),
+            output_drain_safety,
+            output_drain_max,
             output_drain_poll: Duration::from_millis(50),
             output_drain_empty_threshold: Duration::from_millis(30),
             capture_start_timeout: Duration::from_secs(5),
@@ -800,11 +804,17 @@ impl RealtimeInterpretationSession {
     }
 
     async fn shutdown_gracefully(&mut self) {
-        let _ = tokio::time::timeout(
-            self.policy.worker_stop_timeout,
-            self.output_tx.send(OutputCommand::BeginDrain),
-        )
-        .await;
+        if self
+            .output_tx
+            .send(OutputCommand::BeginDrain)
+            .await
+            .is_err()
+        {
+            log::warn!(
+                "RealtimeInterpretationSession: output worker stopped before drain mode for session {}",
+                self.session_id
+            );
+        }
 
         let mut input = self.recover_input_client(false).await;
         if let Some(input) = input.as_mut().filter(|input| !input.aborted) {
@@ -914,34 +924,52 @@ impl RealtimeInterpretationSession {
         };
         if abort_immediately {
             task.abort();
-        }
-
-        let wait = tokio::time::timeout(self.policy.event_drain_timeout, task).await;
-        if wait.is_err() {
-            if let Some(task) = self.event_forwarder_task.take() {
-                task.abort();
-                let _ = task.await;
+            let wait = tokio::time::timeout(self.policy.worker_stop_timeout, task).await;
+            if wait.is_err() {
+                if let Some(task) = self.event_forwarder_task.take() {
+                    task.abort();
+                    let _ = task.await;
+                }
+            } else {
+                self.event_forwarder_task.take();
             }
         } else {
+            if let Err(error) = task.await {
+                log::warn!(
+                    "RealtimeInterpretationSession: event forwarder join failed for session {}: {}",
+                    self.session_id,
+                    error
+                );
+            }
             self.event_forwarder_task.take();
         }
     }
 
     async fn drain_output(&self) {
         let (done_tx, done_rx) = oneshot::channel();
-        let send_result = tokio::time::timeout(
-            self.policy.worker_stop_timeout,
-            self.output_tx.send(OutputCommand::Drain { done: done_tx }),
-        )
-        .await;
-        if !matches!(send_result, Ok(Ok(()))) {
+        if self
+            .output_tx
+            .send(OutputCommand::Drain { done: done_tx })
+            .await
+            .is_err()
+        {
+            log::warn!(
+                "RealtimeInterpretationSession: output worker stopped before final drain for session {}",
+                self.session_id
+            );
             return;
         }
         let wait = self
             .policy
             .output_drain_max
             .saturating_add(self.policy.output_drain_safety);
-        let _ = tokio::time::timeout(wait, done_rx).await;
+        if tokio::time::timeout(wait, done_rx).await.is_err() {
+            log::warn!(
+                "RealtimeInterpretationSession: output drain acknowledgement timed out after {} ms for session {}",
+                wait.as_millis(),
+                self.session_id
+            );
+        }
     }
 
     async fn close_output(&mut self) {
@@ -1349,6 +1377,7 @@ async fn run_output_worker(
     let mut health_poll = tokio::time::interval(policy.output_health_poll_interval);
     let output_drop_pressure = DropPressure::new();
     let mut pending_overload_since = None;
+    let mut graceful_draining = false;
     health_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     health_poll.tick().await;
 
@@ -1373,12 +1402,14 @@ async fn run_output_worker(
                             Ok(AudioEnqueueOutcome::Queued { pending }) => {
                                 output_drop_pressure.record_success();
                                 diagnostics.observe_output_pending(pending);
-                                if output_pending_is_overloaded(
-                                    pending,
-                                    &policy,
-                                    &mut pending_overload_since,
-                                    Instant::now(),
-                                ) {
+                                if !graceful_draining
+                                    && output_pending_is_overloaded(
+                                        pending,
+                                        &policy,
+                                        &mut pending_overload_since,
+                                        Instant::now(),
+                                    )
+                                {
                                     reporter.error(RealtimeInterpretationError::OutputOverload(format!(
                                         "{} output remained above the safe pending-audio limit; translation was stopped to avoid excessive delay",
                                         policy.output_route_name
@@ -1413,7 +1444,11 @@ async fn run_output_worker(
                     OutputCommand::SetGain { gain, done } => {
                         let _ = done.send(output.set_gain(gain));
                     }
-                    OutputCommand::BeginDrain => output.begin_drain_mode(),
+                    OutputCommand::BeginDrain => {
+                        graceful_draining = true;
+                        pending_overload_since = None;
+                        output.begin_drain_mode();
+                    }
                     OutputCommand::Drain { done } => {
                         if drain_output_tail(output.as_ref(), &policy, &mut output_abort_rx).await {
                             return output;
@@ -1438,12 +1473,14 @@ async fn run_output_worker(
                 }
                 let pending = output.pending_playback_duration();
                 diagnostics.observe_output_pending(pending);
-                if output_pending_is_overloaded(
-                    pending,
-                    &policy,
-                    &mut pending_overload_since,
-                    Instant::now(),
-                ) {
+                if !graceful_draining
+                    && output_pending_is_overloaded(
+                        pending,
+                        &policy,
+                        &mut pending_overload_since,
+                        Instant::now(),
+                    )
+                {
                     reporter.error(RealtimeInterpretationError::OutputOverload(format!(
                         "{} output remained above the safe pending-audio limit; translation was stopped to avoid excessive delay",
                         policy.output_route_name
@@ -2049,9 +2086,15 @@ mod tests {
             policy.graceful_shutdown_timeout,
             policy.required_graceful_shutdown_timeout()
         );
-        assert!(policy.graceful_shutdown_timeout >= Duration::from_secs(19));
-        assert!(policy.maximum_shutdown_timeout() >= Duration::from_secs(21));
-        assert!(policy.maximum_shutdown_timeout() < Duration::from_secs(22));
+        assert_eq!(
+            policy.output_drain_max,
+            TranslationAudioOutputConfig::incoming_spoken_translation()
+                .drain_max_buffered_duration
+                .saturating_add(policy.output_drain_safety)
+        );
+        assert!(policy.graceful_shutdown_timeout >= Duration::from_secs(39));
+        assert!(policy.maximum_shutdown_timeout() >= Duration::from_secs(41));
+        assert!(policy.maximum_shutdown_timeout() < Duration::from_secs(42));
     }
 
     #[test]
@@ -2135,8 +2178,14 @@ mod tests {
         append_calls: AtomicUsize,
         finish_calls: AtomicUsize,
         abort_calls: AtomicUsize,
+        finish_audio_chunks: AtomicUsize,
         output_closed: AtomicBool,
         output_enqueue_entered: AtomicBool,
+        output_enqueue_delay_ms: AtomicU64,
+        output_pending_per_chunk_ms: AtomicU64,
+        output_pending_ms: AtomicU64,
+        output_pending_at_close_ms: AtomicU64,
+        output_prepare_calls: AtomicUsize,
         output_dropped: AtomicBool,
         output_should_drop_oldest: AtomicBool,
         capture_error_callback: StdMutex<Option<AudioCaptureErrorCallback>>,
@@ -2310,6 +2359,16 @@ mod tests {
 
         async fn finish(&mut self, _timeout: Duration) -> Result<(), RealtimeTranslationError> {
             self.state.finish_calls.fetch_add(1, Ordering::SeqCst);
+            for chunk in 0..self.state.finish_audio_chunks.load(Ordering::SeqCst) {
+                self.events
+                    .send(RealtimeTranslationEvent::TranslatedAudio {
+                        pcm16: vec![chunk as i16 + 100],
+                        sample_rate: 24_000,
+                        channels: 1,
+                    })
+                    .await
+                    .unwrap();
+            }
             self.events
                 .send(RealtimeTranslationEvent::TranslatedTextDelta(
                     "world".into(),
@@ -2402,10 +2461,26 @@ mod tests {
             samples: &[i16],
         ) -> TranslationAudioOutputResult<AudioEnqueueOutcome> {
             self.state
+                .output_enqueue_entered
+                .store(true, Ordering::SeqCst);
+            let delay_ms = self.state.output_enqueue_delay_ms.load(Ordering::SeqCst);
+            if delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+            self.state
                 .output_samples
                 .lock()
                 .unwrap()
                 .extend_from_slice(samples);
+            let pending_per_chunk = self
+                .state
+                .output_pending_per_chunk_ms
+                .load(Ordering::SeqCst);
+            let pending = self
+                .state
+                .output_pending_ms
+                .fetch_add(pending_per_chunk, Ordering::SeqCst)
+                .saturating_add(pending_per_chunk);
             if self.state.output_should_drop_oldest.load(Ordering::SeqCst) {
                 Ok(AudioEnqueueOutcome::DroppedOldest {
                     duration: Duration::from_millis(100),
@@ -2413,12 +2488,16 @@ mod tests {
                 })
             } else {
                 Ok(AudioEnqueueOutcome::Queued {
-                    pending: Duration::ZERO,
+                    pending: Duration::from_millis(pending),
                 })
             }
         }
 
         async fn close(&mut self) -> TranslationAudioOutputResult<()> {
+            self.state.output_pending_at_close_ms.store(
+                self.state.output_pending_ms.load(Ordering::SeqCst),
+                Ordering::SeqCst,
+            );
             self.state.output_closed.store(true, Ordering::SeqCst);
             Ok(())
         }
@@ -2434,11 +2513,16 @@ mod tests {
         fn begin_drain_mode(&self) {}
 
         fn prepare_for_drain(&self) -> TranslationAudioOutputResult<Duration> {
-            Ok(Duration::ZERO)
+            self.state
+                .output_prepare_calls
+                .fetch_add(1, Ordering::SeqCst);
+            Ok(Duration::from_millis(
+                self.state.output_pending_ms.swap(0, Ordering::SeqCst),
+            ))
         }
 
         fn pending_playback_duration(&self) -> Duration {
-            Duration::ZERO
+            Duration::from_millis(self.state.output_pending_ms.load(Ordering::SeqCst))
         }
     }
 
@@ -2628,6 +2712,71 @@ mod tests {
         assert_eq!(*state.output_samples.lock().unwrap(), vec![10, 20, 30]);
         assert_eq!(&*translated_text.lock().unwrap(), "hello world");
         assert_eq!(observed_input_samples.load(Ordering::SeqCst), 4_800);
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_delivers_drain_behind_a_full_output_queue() {
+        let state = Arc::new(ContractState::default());
+        state.finish_audio_chunks.store(4, Ordering::SeqCst);
+        state.output_enqueue_delay_ms.store(80, Ordering::SeqCst);
+        state
+            .output_pending_per_chunk_ms
+            .store(20, Ordering::SeqCst);
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let mut config = RealtimeInterpretationConfig::incoming_spoken(7_703);
+        config.policy.output_queue_capacity_chunks = 1;
+        config.policy.output_pending_overload = Some(OutputPendingOverloadPolicy {
+            limit: Duration::from_millis(30),
+            grace: Duration::ZERO,
+        });
+        config.policy.output_health_poll_interval = Duration::from_millis(5);
+        config.policy.worker_stop_timeout = Duration::from_millis(20);
+        config.policy.output_drain_max = Duration::from_millis(500);
+        config.policy.output_drain_safety = Duration::from_millis(20);
+        config.policy.graceful_shutdown_timeout = Duration::from_secs(3);
+        config.policy.forced_shutdown_timeout = Duration::from_millis(100);
+
+        let (session, _stop_rx) = RealtimeInterpretationSession::start(
+            config,
+            RealtimeInterpretationPorts {
+                capture: Box::new(ContractCapture {
+                    state: state.clone(),
+                    callback: None,
+                }),
+                output: Box::new(ContractOutput {
+                    state: state.clone(),
+                }),
+                translation: Box::new(ContractTranslationSession {
+                    state: state.clone(),
+                    events: event_tx,
+                }),
+                translation_events: event_rx,
+            },
+            RealtimeInterpretationCallbacks::no_op(),
+        )
+        .await
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while state.append_calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("input must reach the translation session");
+        session
+            .shutdown(RealtimeInterpretationShutdown::Graceful)
+            .await;
+
+        assert_eq!(state.finish_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.abort_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.output_prepare_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.output_pending_at_close_ms.load(Ordering::SeqCst), 0);
+        assert!(state.output_closed.load(Ordering::SeqCst));
+        assert_eq!(
+            *state.output_samples.lock().unwrap(),
+            vec![10, 20, 30, 100, 101, 102, 103]
+        );
     }
 
     #[tokio::test]

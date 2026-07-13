@@ -949,11 +949,12 @@ mod tests {
     }
 
     #[test]
-    fn incoming_spoken_profile_has_device_independent_ten_second_headroom() {
+    fn incoming_spoken_profile_has_bounded_live_and_final_flush_headroom() {
         let cfg = AudioOutputConfig::incoming_spoken_translation();
         let outgoing = AudioOutputConfig::openai_translation();
 
         assert_eq!(cfg.max_buffered_duration, Duration::from_secs(10));
+        assert_eq!(cfg.drain_max_buffered_duration, Duration::from_secs(25));
         assert_eq!(
             frames_for_duration(cfg.max_buffered_duration, 44_100),
             441_000
@@ -962,7 +963,7 @@ mod tests {
             frames_for_duration(cfg.max_buffered_duration, 96_000),
             960_000
         );
-        assert!(cfg.drain_max_buffered_duration >= cfg.max_buffered_duration);
+        assert!(cfg.drain_max_buffered_duration > cfg.max_buffered_duration);
         assert_eq!(
             frames_for_duration(outgoing.max_buffered_duration, 44_100),
             275_625
