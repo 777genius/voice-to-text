@@ -84,6 +84,10 @@ export function installE2eHooks(pinia: Pinia): void {
   const appConfig = useAppConfigStore(pinia);
   const sttConfig = useSttConfigStore(pinia);
 
+  // Pin the full control surface before App mounts. The backend E2E fixture uses
+  // the same value, while the production default intentionally remains mini.
+  appConfig.showMiniRecordingWindow = false;
+
   // В e2e режиме нам важно, чтобы store sync стартовал независимо от того,
   // какой именно компонент успел смонтироваться.
   // Иначе тест может “успеть” сделать update_* до подписки и получить флейк.
