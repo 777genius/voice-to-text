@@ -15,6 +15,7 @@ use crate::domain::{
 const NATIVE_SAMPLE_RATE: u32 = 48_000;
 const NATIVE_CHANNELS: u16 = 2;
 const TARGET_FRAME_MS: usize = 30;
+const MAX_CONSECUTIVE_EMPTY_AUDIO_SAMPLES: usize = 50;
 
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
@@ -221,6 +222,7 @@ struct ResamplePipeline {
     out_i16: Vec<i16>,
     input_frame_samples: usize,
     target_frame_samples: usize,
+    consecutive_empty_samples: usize,
 }
 
 enum PipelineState {
@@ -237,6 +239,16 @@ impl ResamplePipeline {
         is_big_endian: bool,
         bits_per_channel: u32,
     ) -> AudioResult<Self> {
+        if from_sample_rate == 0 {
+            return Err(AudioError::Configuration(
+                "ScreenCaptureKit reported a zero audio sample rate".into(),
+            ));
+        }
+        if !((is_float && bits_per_channel == 32) || (!is_float && bits_per_channel == 16)) {
+            return Err(AudioError::Configuration(format!(
+                "Unsupported ScreenCaptureKit audio format: float={is_float}, bits={bits_per_channel}"
+            )));
+        }
         let input_frame_samples = ((from_sample_rate as usize) * TARGET_FRAME_MS / 1000).max(1);
         let target_frame_samples = ((target.sample_rate as usize) * TARGET_FRAME_MS / 1000).max(1);
         let params = SincInterpolationParameters {
@@ -264,27 +276,49 @@ impl ResamplePipeline {
             out_i16: Vec::with_capacity(target_frame_samples * 6),
             input_frame_samples,
             target_frame_samples,
+            consecutive_empty_samples: 0,
         })
     }
 
-    fn decode_and_push_native_mono(&mut self, sample: &CMSampleBuffer) {
+    fn decode_and_push_native_mono(&mut self, sample: &CMSampleBuffer) -> AudioResult<()> {
         let Some(audio_list) = sample.audio_buffer_list() else {
-            return;
+            return Err(AudioError::Capture(
+                "ScreenCaptureKit audio sample has no audio buffer list".into(),
+            ));
         };
 
         let num_buffers = audio_list.num_buffers();
         if num_buffers == 0 {
-            return;
+            return self.observe_native_audio(false);
         }
 
         if num_buffers == 1 {
             let Some(buf) = audio_list.get(0) else {
-                return;
+                return Err(AudioError::Capture(
+                    "ScreenCaptureKit audio buffer list is inconsistent".into(),
+                ));
             };
             let channels = buf.number_channels as usize;
             let data = buf.data();
-            if channels == 0 || data.is_empty() {
-                return;
+            if channels == 0 {
+                return Err(AudioError::Capture(
+                    "ScreenCaptureKit audio buffer has zero channels".into(),
+                ));
+            }
+            if data.is_empty() {
+                return self.observe_native_audio(false);
+            }
+
+            let bytes_per_frame = if self.is_float && self.bits_per_channel == 32 {
+                4 * channels
+            } else {
+                2 * channels
+            };
+            if data.len() < bytes_per_frame || data.len() % bytes_per_frame != 0 {
+                return Err(AudioError::Capture(format!(
+                    "ScreenCaptureKit interleaved audio buffer has invalid byte length {} for {} channels",
+                    data.len(), channels
+                )));
             }
 
             if self.is_float && self.bits_per_channel == 32 {
@@ -294,7 +328,7 @@ impl ResamplePipeline {
                     self.is_big_endian,
                     &mut self.native_mono,
                 );
-            } else if !self.is_float && self.bits_per_channel == 16 {
+            } else {
                 decode_interleaved_i16_to_mono(
                     data,
                     channels,
@@ -302,26 +336,44 @@ impl ResamplePipeline {
                     &mut self.native_mono,
                 );
             }
-            return;
+            return self.observe_native_audio(true);
         }
 
         let bytes_per_sample = if self.is_float && self.bits_per_channel == 32 {
             4
-        } else if !self.is_float && self.bits_per_channel == 16 {
-            2
         } else {
-            return;
+            2
         };
 
         let mut channel_buffers: Vec<&[u8]> = Vec::with_capacity(num_buffers);
         for i in 0..num_buffers {
             let Some(buf) = audio_list.get(i) else {
-                continue;
+                return Err(AudioError::Capture(format!(
+                    "ScreenCaptureKit audio buffer {i} is missing"
+                )));
             };
             if buf.number_channels != 1 {
-                return;
+                return Err(AudioError::Capture(format!(
+                    "ScreenCaptureKit non-interleaved buffer {i} has {} channels",
+                    buf.number_channels
+                )));
             }
             channel_buffers.push(buf.data());
+        }
+
+        if channel_buffers.iter().all(|buffer| buffer.is_empty()) {
+            return self.observe_native_audio(false);
+        }
+        let expected_len = channel_buffers[0].len();
+        if expected_len == 0
+            || expected_len % bytes_per_sample != 0
+            || channel_buffers
+                .iter()
+                .any(|buffer| buffer.len() != expected_len)
+        {
+            return Err(AudioError::Capture(
+                "ScreenCaptureKit non-interleaved channel buffers have inconsistent lengths".into(),
+            ));
         }
 
         decode_non_interleaved_to_mono(
@@ -330,21 +382,33 @@ impl ResamplePipeline {
             self.is_big_endian,
             &mut self.native_mono,
         );
+        self.observe_native_audio(true)
     }
 
-    fn drain_frames(&mut self) -> Vec<Vec<i16>> {
+    fn observe_native_audio(&mut self, has_audio: bool) -> AudioResult<()> {
+        if has_audio {
+            self.consecutive_empty_samples = 0;
+            return Ok(());
+        }
+        self.consecutive_empty_samples = self.consecutive_empty_samples.saturating_add(1);
+        if self.consecutive_empty_samples >= MAX_CONSECUTIVE_EMPTY_AUDIO_SAMPLES {
+            return Err(AudioError::Capture(format!(
+                "ScreenCaptureKit emitted {} consecutive empty audio samples",
+                self.consecutive_empty_samples
+            )));
+        }
+        Ok(())
+    }
+
+    fn drain_frames(&mut self) -> AudioResult<Vec<Vec<i16>>> {
         let mut frames = Vec::new();
 
         while self.native_mono.len() >= self.input_frame_samples {
             let chunk: Vec<f32> = self.native_mono.drain(..self.input_frame_samples).collect();
             let input = vec![chunk];
-            let out = match self.resampler.process(&input, None) {
-                Ok(out) => out,
-                Err(err) => {
-                    log::error!("ScreenCaptureKit audio resampling error: {}", err);
-                    continue;
-                }
-            };
+            let out = self.resampler.process(&input, None).map_err(|error| {
+                AudioError::Internal(format!("ScreenCaptureKit audio resampling failed: {error}"))
+            })?;
 
             if let Some(out_ch) = out.first() {
                 self.out_i16.extend(out_ch.iter().map(|&s| {
@@ -358,7 +422,7 @@ impl ResamplePipeline {
             frames.push(self.out_i16.drain(..self.target_frame_samples).collect());
         }
 
-        frames
+        Ok(frames)
     }
 }
 
@@ -368,23 +432,8 @@ fn build_resample_pipeline(
     is_float: bool,
     is_big_endian: bool,
     bits: u32,
-) -> Option<ResamplePipeline> {
-    match ResamplePipeline::new(sample_rate, target, is_float, is_big_endian, bits) {
-        Ok(pipe) => Some(pipe),
-        Err(primary_err) => {
-            log::error!("Failed to init ScreenCaptureKit resampler: {}", primary_err);
-            match ResamplePipeline::new(NATIVE_SAMPLE_RATE, target, true, false, 32) {
-                Ok(pipe) => Some(pipe),
-                Err(fallback_err) => {
-                    log::error!(
-                        "Failed to init fallback ScreenCaptureKit resampler: {}",
-                        fallback_err
-                    );
-                    None
-                }
-            }
-        }
-    }
+) -> AudioResult<ResamplePipeline> {
+    ResamplePipeline::new(sample_rate, target, is_float, is_big_endian, bits)
 }
 
 #[async_trait]
@@ -426,10 +475,13 @@ impl AudioCapture for MacosSystemAudioCapture {
         let pipeline_for_cb = pipeline.clone();
         let callback_slot: CaptureCallbackSlot = Arc::new(Mutex::new(Some(on_chunk)));
         let callback_slot_for_audio = callback_slot.clone();
-        let callback_gate = self.callback_gate.clone();
+        let callback_gate_for_audio = self.callback_gate.clone();
+        let callback_gate_for_audio_error = self.callback_gate.clone();
         let callback_gate_for_error = self.callback_gate.clone();
+        let callback_slot_for_audio_error = callback_slot.clone();
         let callback_slot_for_error = callback_slot.clone();
         let error_callback_slot = self.terminal_error_callback.clone();
+        let error_callback_slot_for_audio = self.terminal_error_callback.clone();
         let error_handler = ErrorHandler::new(move |error| {
             let message = error.to_string();
             log::error!("ScreenCaptureKit stream error: {}", message);
@@ -445,22 +497,47 @@ impl AudioCapture for MacosSystemAudioCapture {
         let mut stream = SCStream::new_with_delegate(&filter, &config, error_handler);
         let added = stream.add_output_handler(
             move |sample: CMSampleBuffer, _output: SCStreamOutputType| {
-                if !callback_gate.should_emit(capture_generation) {
+                if !callback_gate_for_audio.should_emit(capture_generation) {
                     return;
                 }
 
                 let Some(fmt) = sample.format_description() else {
+                    deactivate_capture_after_stream_error(
+                        &callback_gate_for_audio_error,
+                        &callback_slot_for_audio_error,
+                        &error_callback_slot_for_audio,
+                        "ScreenCaptureKit audio sample has no format description".into(),
+                    );
                     return;
                 };
                 if !fmt.is_audio() {
+                    deactivate_capture_after_stream_error(
+                        &callback_gate_for_audio_error,
+                        &callback_slot_for_audio_error,
+                        &error_callback_slot_for_audio,
+                        "ScreenCaptureKit audio handler received a non-audio sample".into(),
+                    );
                     return;
                 }
 
-                let sample_rate = fmt
-                    .audio_sample_rate()
-                    .map(|v| v.round() as u32)
-                    .unwrap_or(48_000);
-                let bits = fmt.audio_bits_per_channel().unwrap_or(32);
+                let Some(sample_rate) = fmt.audio_sample_rate().map(|v| v.round() as u32) else {
+                    deactivate_capture_after_stream_error(
+                        &callback_gate_for_audio_error,
+                        &callback_slot_for_audio_error,
+                        &error_callback_slot_for_audio,
+                        "ScreenCaptureKit audio sample has no sample rate".into(),
+                    );
+                    return;
+                };
+                let Some(bits) = fmt.audio_bits_per_channel() else {
+                    deactivate_capture_after_stream_error(
+                        &callback_gate_for_audio_error,
+                        &callback_slot_for_audio_error,
+                        &error_callback_slot_for_audio,
+                        "ScreenCaptureKit audio sample has no bits-per-channel metadata".into(),
+                    );
+                    return;
+                };
                 let is_float = fmt.audio_is_float();
                 let is_big_endian = fmt.audio_is_big_endian();
 
@@ -468,6 +545,12 @@ impl AudioCapture for MacosSystemAudioCapture {
                     Ok(guard) => guard,
                     Err(e) => {
                         log::error!("ScreenCaptureKit audio pipeline poisoned: {}", e);
+                        deactivate_capture_after_stream_error(
+                            &callback_gate_for_audio_error,
+                            &callback_slot_for_audio_error,
+                            &error_callback_slot_for_audio,
+                            "ScreenCaptureKit audio pipeline state was poisoned".into(),
+                        );
                         return;
                     }
                 };
@@ -476,25 +559,53 @@ impl AudioCapture for MacosSystemAudioCapture {
                 }
 
                 if matches!(*guard, PipelineState::Pending) {
-                    let Some(pipe) =
-                        build_resample_pipeline(sample_rate, target, is_float, is_big_endian, bits)
-                    else {
-                        *guard = PipelineState::Failed;
-                        return;
+                    match build_resample_pipeline(
+                        sample_rate,
+                        target,
+                        is_float,
+                        is_big_endian,
+                        bits,
+                    ) {
+                        Ok(pipe) => *guard = PipelineState::Ready(pipe),
+                        Err(error) => {
+                            *guard = PipelineState::Failed;
+                            drop(guard);
+                            deactivate_capture_after_stream_error(
+                                &callback_gate_for_audio_error,
+                                &callback_slot_for_audio_error,
+                                &error_callback_slot_for_audio,
+                                error.to_string(),
+                            );
+                            return;
+                        }
                     };
-                    *guard = PipelineState::Ready(pipe);
                 }
 
                 let PipelineState::Ready(pipe) = &mut *guard else {
                     return;
                 };
 
-                pipe.decode_and_push_native_mono(&sample);
-                let frames = pipe.drain_frames();
+                let frames = match pipe
+                    .decode_and_push_native_mono(&sample)
+                    .and_then(|_| pipe.drain_frames())
+                {
+                    Ok(frames) => frames,
+                    Err(error) => {
+                        *guard = PipelineState::Failed;
+                        drop(guard);
+                        deactivate_capture_after_stream_error(
+                            &callback_gate_for_audio_error,
+                            &callback_slot_for_audio_error,
+                            &error_callback_slot_for_audio,
+                            error.to_string(),
+                        );
+                        return;
+                    }
+                };
                 drop(guard);
 
                 for frame in frames {
-                    if !callback_gate.should_emit(capture_generation) {
+                    if !callback_gate_for_audio.should_emit(capture_generation) {
                         return;
                     }
                     if !frame.is_empty() {
@@ -800,7 +911,7 @@ mod tests {
                 .native_mono
                 .resize(pipeline.input_frame_samples * 4, 0.25);
 
-            let frames = pipeline.drain_frames();
+            let frames = pipeline.drain_frames().unwrap();
 
             assert!(!frames.is_empty());
             assert!(
@@ -810,6 +921,51 @@ mod tests {
                 "unexpected frame size for {target:?}"
             );
         }
+    }
+
+    #[test]
+    fn unsupported_native_audio_format_is_rejected_before_silent_capture() {
+        let error = match ResamplePipeline::new(
+            NATIVE_SAMPLE_RATE,
+            AudioCaptureTarget::incoming_realtime_translation(),
+            false,
+            false,
+            24,
+        ) {
+            Ok(_) => panic!("unsupported native format must fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            AudioError::Configuration(message) if message.contains("Unsupported ScreenCaptureKit audio format")
+        ));
+    }
+
+    #[test]
+    fn repeated_empty_native_audio_becomes_terminal_and_real_audio_resets_streak() {
+        let mut pipeline = ResamplePipeline::new(
+            NATIVE_SAMPLE_RATE,
+            AudioCaptureTarget::incoming_realtime_translation(),
+            true,
+            false,
+            32,
+        )
+        .unwrap();
+
+        for _ in 0..MAX_CONSECUTIVE_EMPTY_AUDIO_SAMPLES - 1 {
+            pipeline.observe_native_audio(false).unwrap();
+        }
+        pipeline.observe_native_audio(true).unwrap();
+        for _ in 0..MAX_CONSECUTIVE_EMPTY_AUDIO_SAMPLES - 1 {
+            pipeline.observe_native_audio(false).unwrap();
+        }
+        let error = pipeline.observe_native_audio(false).unwrap_err();
+
+        assert!(matches!(
+            error,
+            AudioError::Capture(message) if message.contains("consecutive empty audio samples")
+        ));
     }
 
     #[tokio::test]

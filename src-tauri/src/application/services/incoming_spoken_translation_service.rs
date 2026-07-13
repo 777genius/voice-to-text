@@ -13,10 +13,12 @@ use crate::domain::{
 };
 
 use super::{
-    spawn_realtime_interpretation_supervisor, RealtimeInterpretationCallbacks,
+    abort_startup_translation, close_startup_output, initialize_startup_capture,
+    open_startup_output, spawn_realtime_interpretation_supervisor, RealtimeInterpretationCallbacks,
     RealtimeInterpretationConfig, RealtimeInterpretationError, RealtimeInterpretationOutputControl,
     RealtimeInterpretationPorts, RealtimeInterpretationSession, RealtimeInterpretationShutdown,
-    RealtimeInterpretationStartError, RealtimeInterpretationStop,
+    RealtimeInterpretationStartError, RealtimeInterpretationStop, RealtimeStartupPolicy,
+    StartupCaptureError, StartupOutputError,
 };
 
 #[derive(Clone)]
@@ -151,6 +153,7 @@ pub(super) struct IncomingSpokenTranslationService {
     output_factory: Arc<dyn LocalPlaybackOutputFactory>,
     translation_factory: Arc<dyn RealtimeTranslationFactory>,
     capability: Arc<dyn SpokenTranslationCapability>,
+    startup_policy: RealtimeStartupPolicy,
 }
 
 struct RunningIncomingSpokenSession {
@@ -176,6 +179,7 @@ impl IncomingSpokenTranslationService {
             output_factory,
             translation_factory,
             capability,
+            startup_policy: RealtimeStartupPolicy::default(),
         }
     }
 
@@ -281,7 +285,7 @@ impl IncomingSpokenTranslationService {
         call_spoken_callback("playback opening", || {
             (callbacks.on_playback_state)(IncomingPlaybackState::Opening)
         });
-        let mut output = match self
+        let output = match self
             .output_factory
             .create_local_playback_output(LocalPlaybackRoute::SystemDefault)
         {
@@ -292,60 +296,110 @@ impl IncomingSpokenTranslationService {
                 return Err(map_output_start_error(error));
             }
         };
-        if let Err(error) = output
-            .open(
-                TranslationAudioOutputConfig::incoming_spoken_translation()
-                    .with_gain(config.playback_gain),
-            )
-            .await
+        let output = match open_startup_output(
+            output,
+            TranslationAudioOutputConfig::incoming_spoken_translation()
+                .with_gain(config.playback_gain),
+            self.startup_policy.device_start_timeout,
+        )
+        .await
         {
-            let _ = output.close().await;
-            self.transition_to_error().await;
-            notify_playback_stopped(&callbacks);
-            return Err(map_output_start_error(error));
-        }
+            Ok(output) => output,
+            Err(StartupOutputError::Operation(error)) => {
+                self.transition_to_error().await;
+                notify_playback_stopped(&callbacks);
+                return Err(map_output_start_error(error));
+            }
+            Err(StartupOutputError::Timeout) => {
+                self.transition_to_error().await;
+                notify_playback_stopped(&callbacks);
+                return Err(IncomingSpokenTranslationError::Timeout(format!(
+                    "local translated playback did not open within {} ms",
+                    self.startup_policy.device_start_timeout.as_millis()
+                )));
+            }
+            Err(StartupOutputError::Worker(message)) => {
+                self.transition_to_error().await;
+                notify_playback_stopped(&callbacks);
+                return Err(IncomingSpokenTranslationError::Processing(message));
+            }
+        };
 
-        let mut capture = match self
+        let capture = match self
             .capture_factory
             .create_system_audio_capture(capture_request)
         {
             Ok(capture) => capture,
             Err(error) => {
-                let _ = output.close().await;
+                close_startup_output(output).await;
                 self.transition_to_error().await;
                 notify_playback_stopped(&callbacks);
                 return Err(map_capture_start_error(error));
             }
         };
-        if let Err(error) = capture
-            .initialize(AudioConfig {
+        let capture = match initialize_startup_capture(
+            capture,
+            AudioConfig {
                 sample_rate: target.sample_rate,
                 channels: target.channels,
                 buffer_size: 720,
-            })
-            .await
+            },
+            self.startup_policy.device_start_timeout,
+        )
+        .await
         {
-            let _ = output.close().await;
-            self.transition_to_error().await;
-            notify_playback_stopped(&callbacks);
-            return Err(map_capture_start_error(error));
-        }
+            Ok(capture) => capture,
+            Err(StartupCaptureError::Operation(error)) => {
+                close_startup_output(output).await;
+                self.transition_to_error().await;
+                notify_playback_stopped(&callbacks);
+                return Err(map_capture_start_error(error));
+            }
+            Err(StartupCaptureError::Timeout) => {
+                close_startup_output(output).await;
+                self.transition_to_error().await;
+                notify_playback_stopped(&callbacks);
+                return Err(IncomingSpokenTranslationError::Timeout(format!(
+                    "system audio capture did not initialize within {} ms",
+                    self.startup_policy.device_start_timeout.as_millis()
+                )));
+            }
+            Err(StartupCaptureError::Worker(message)) => {
+                close_startup_output(output).await;
+                self.transition_to_error().await;
+                notify_playback_stopped(&callbacks);
+                return Err(IncomingSpokenTranslationError::Processing(message));
+            }
+        };
 
         let mut translation = self.translation_factory.create();
-        let translation_events = match translation
-            .connect(RealtimeTranslationConfig::new(
+        let translation_connect = tokio::time::timeout(
+            self.startup_policy.network_connect_timeout,
+            translation.connect(RealtimeTranslationConfig::new(
                 config.openai_api_key.clone(),
                 config.target_language.as_str().to_string(),
                 RealtimeInputNoiseReduction::Disabled,
-            ))
-            .await
-        {
-            Ok(events) => events,
-            Err(error) => {
-                let _ = output.close().await;
+            )),
+        )
+        .await;
+        let translation_events = match translation_connect {
+            Ok(Ok(events)) => events,
+            Ok(Err(error)) => {
+                abort_startup_translation(translation.as_mut()).await;
+                close_startup_output(output).await;
                 self.transition_to_error().await;
                 notify_playback_stopped(&callbacks);
                 return Err(error.into());
+            }
+            Err(_) => {
+                abort_startup_translation(translation.as_mut()).await;
+                close_startup_output(output).await;
+                self.transition_to_error().await;
+                notify_playback_stopped(&callbacks);
+                return Err(IncomingSpokenTranslationError::Timeout(format!(
+                    "realtime translation connection did not become ready within {} ms",
+                    self.startup_policy.network_connect_timeout.as_millis()
+                )));
             }
         };
 
@@ -355,7 +409,8 @@ impl IncomingSpokenTranslationService {
             on_input_audio: Arc::new(|_| {}),
         };
         let (session, mut runtime_stop_rx) = match RealtimeInterpretationSession::start(
-            RealtimeInterpretationConfig::incoming_spoken(config.session_id),
+            RealtimeInterpretationConfig::incoming_spoken(config.session_id)
+                .with_capture_start_timeout(self.startup_policy.device_start_timeout),
             RealtimeInterpretationPorts {
                 capture,
                 output,
@@ -374,7 +429,11 @@ impl IncomingSpokenTranslationService {
             }
         };
 
-        if let Ok(stop) = runtime_stop_rx.try_recv() {
+        if !session.try_publish_startup() {
+            let stop = runtime_stop_rx
+                .recv()
+                .await
+                .unwrap_or(RealtimeInterpretationStop::Closed);
             session
                 .shutdown(RealtimeInterpretationShutdown::Abort)
                 .await;
@@ -560,6 +619,9 @@ fn map_interpretation_start_error(
 ) -> IncomingSpokenTranslationError {
     match error {
         RealtimeInterpretationStartError::Capture(error) => map_capture_start_error(error),
+        RealtimeInterpretationStartError::Timeout(message) => {
+            IncomingSpokenTranslationError::Timeout(message)
+        }
     }
 }
 
@@ -679,6 +741,9 @@ mod tests {
         output_configs: StdMutex<Vec<TranslationAudioOutputConfig>>,
         output_gains: StdMutex<Vec<f32>>,
         output_health_fail: AtomicBool,
+        block_capture_initialize: AtomicBool,
+        block_output_open: AtomicBool,
+        block_translation_connect: AtomicBool,
         capture_error_callbacks: StdMutex<Vec<AudioCaptureErrorCallback>>,
     }
 
@@ -748,6 +813,9 @@ mod tests {
                 .capture_initialize_calls
                 .fetch_add(1, Ordering::SeqCst);
             self.config = config;
+            if self.state.block_capture_initialize.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(80));
+            }
             Ok(())
         }
 
@@ -833,6 +901,9 @@ mod tests {
         ) -> TranslationAudioOutputResult<()> {
             self.state.output_open_calls.fetch_add(1, Ordering::SeqCst);
             self.state.output_configs.lock().unwrap().push(config);
+            if self.state.block_output_open.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(80));
+            }
             if self.fail_open {
                 return Err(TranslationAudioOutputError::Device(
                     "output unavailable".into(),
@@ -942,6 +1013,9 @@ mod tests {
                 .translation_connect_calls
                 .fetch_add(1, Ordering::SeqCst);
             *self.state.requested_language.lock().unwrap() = Some(config.target_language);
+            if self.state.block_translation_connect.load(Ordering::SeqCst) {
+                return std::future::pending().await;
+            }
             if self.fail_connect {
                 return Err(RealtimeTranslationError::Connection(
                     "connection failed".into(),
@@ -1025,6 +1099,13 @@ mod tests {
             target_language: TranslationLanguage::parse("ru").unwrap(),
             playback_gain: 0.75,
             session_id,
+        }
+    }
+
+    fn test_startup_policy() -> RealtimeStartupPolicy {
+        RealtimeStartupPolicy {
+            device_start_timeout: Duration::from_millis(20),
+            network_connect_timeout: Duration::from_millis(20),
         }
     }
 
@@ -1129,6 +1210,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn output_open_timeout_is_bounded_and_stops_before_paid_session() {
+        let state = Arc::new(FakeState::default());
+        state.block_output_open.store(true, Ordering::SeqCst);
+        let mut service = service_with_fakes(
+            state.clone(),
+            SpokenIncomingCapability::Ready,
+            false,
+            false,
+            false,
+        );
+        service.startup_policy = test_startup_policy();
+
+        let error = tokio::time::timeout(
+            Duration::from_millis(500),
+            service.start(config(4_401), no_op_callbacks()),
+        )
+        .await
+        .expect("output startup must have a global deadline")
+        .unwrap_err();
+
+        assert_eq!(error.error_type(), "timeout");
+        assert_eq!(state.output_close_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.capture_create_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.translation_create_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(service.get_status().await, RecordingStatus::Error);
+    }
+
+    #[tokio::test]
+    async fn capture_initialize_timeout_closes_output_before_paid_session() {
+        let state = Arc::new(FakeState::default());
+        state.block_capture_initialize.store(true, Ordering::SeqCst);
+        let mut service = service_with_fakes(
+            state.clone(),
+            SpokenIncomingCapability::Ready,
+            false,
+            false,
+            false,
+        );
+        service.startup_policy = test_startup_policy();
+
+        let error = service
+            .start(config(4_402), no_op_callbacks())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.error_type(), "timeout");
+        assert_eq!(state.output_close_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.capture_create_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.translation_create_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn network_connect_failure_closes_output_without_starting_capture() {
         let state = Arc::new(FakeState::default());
         let service = service_with_fakes(
@@ -1148,6 +1281,33 @@ mod tests {
         assert_eq!(state.output_close_calls.load(Ordering::SeqCst), 1);
         assert_eq!(state.capture_start_calls.load(Ordering::SeqCst), 0);
         assert_eq!(state.translation_connect_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn network_connect_timeout_aborts_client_and_closes_output() {
+        let state = Arc::new(FakeState::default());
+        state
+            .block_translation_connect
+            .store(true, Ordering::SeqCst);
+        let mut service = service_with_fakes(
+            state.clone(),
+            SpokenIncomingCapability::Ready,
+            false,
+            false,
+            false,
+        );
+        service.startup_policy = test_startup_policy();
+
+        let error = service
+            .start(config(4_503), no_op_callbacks())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.error_type(), "timeout");
+        assert_eq!(state.translation_abort_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.output_close_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.capture_start_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(service.get_status().await, RecordingStatus::Error);
     }
 
     #[tokio::test]

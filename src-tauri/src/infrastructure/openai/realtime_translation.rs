@@ -70,6 +70,56 @@ type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type WsSink = SplitSink<WsStream, Message>;
 type WsSource = SplitStream<WsStream>;
 
+/// Owns transport resources until `connect()` can publish them to the client.
+/// Dropping a pending `connect()` must cancel the reader instead of detaching it.
+struct PendingConnection {
+    sink: Option<WsSink>,
+    reader_task: Option<JoinHandle<()>>,
+}
+
+impl PendingConnection {
+    fn new(sink: WsSink, reader_task: JoinHandle<()>) -> Self {
+        Self {
+            sink: Some(sink),
+            reader_task: Some(reader_task),
+        }
+    }
+
+    fn sink_mut(&mut self) -> &mut WsSink {
+        self.sink
+            .as_mut()
+            .expect("pending connection must own its websocket sink")
+    }
+
+    async fn abort(mut self) {
+        if let Some(task) = self.reader_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        self.sink.take();
+    }
+
+    fn into_parts(mut self) -> (WsSink, JoinHandle<()>) {
+        let sink = self
+            .sink
+            .take()
+            .expect("pending connection must own its websocket sink");
+        let reader_task = self
+            .reader_task
+            .take()
+            .expect("pending connection must own its reader task");
+        (sink, reader_task)
+    }
+}
+
+impl Drop for PendingConnection {
+    fn drop(&mut self) {
+        if let Some(task) = self.reader_task.take() {
+            task.abort();
+        }
+    }
+}
+
 /// Defensive parser для server events.
 /// `#[serde(other)]` ловит любые event.type, которые мы пока не моделируем — без падения.
 #[derive(Deserialize, Debug)]
@@ -224,7 +274,7 @@ impl OpenAIRealtimeTranslationClient {
             }
         };
 
-        let (mut sink, source) = ws.split();
+        let (sink, source) = ws.split();
 
         let (tx, rx) = mpsc::channel::<RealtimeTranslationEvent>(OPENAI_EVENT_QUEUE_CAPACITY);
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -232,6 +282,7 @@ impl OpenAIRealtimeTranslationClient {
         let reader_task = tokio::spawn(async move {
             run_reader(source, reader_tx, ready_tx).await;
         });
+        let mut pending = PendingConnection::new(sink, reader_task);
 
         let noise_reduction = match config.input_noise_reduction {
             RealtimeInputNoiseReduction::Disabled => serde_json::Value::Null,
@@ -253,14 +304,15 @@ impl OpenAIRealtimeTranslationClient {
             }
         });
         if let Err(error) = await_ws_operation(
-            sink.send(Message::Text(session_update.to_string())),
+            pending
+                .sink_mut()
+                .send(Message::Text(session_update.to_string())),
             self.send_timeout,
             "session.update send",
         )
         .await
         {
-            reader_task.abort();
-            let _ = reader_task.await;
+            pending.abort().await;
             return Err(error);
         }
 
@@ -268,20 +320,17 @@ impl OpenAIRealtimeTranslationClient {
         match ready_result {
             Ok(Ok(Ok(()))) => {}
             Ok(Ok(Err(error))) => {
-                reader_task.abort();
-                let _ = reader_task.await;
+                pending.abort().await;
                 return Err(error);
             }
             Ok(Err(_)) => {
-                reader_task.abort();
-                let _ = reader_task.await;
+                pending.abort().await;
                 return Err(RealtimeTranslationError::Connection(
                     "OpenAI reader stopped before session.updated".to_string(),
                 ));
             }
             Err(_) => {
-                reader_task.abort();
-                let _ = reader_task.await;
+                pending.abort().await;
                 return Err(RealtimeTranslationError::Timeout(format!(
                     "session.updated was not received within {} ms",
                     self.session_ready_timeout.as_millis()
@@ -291,10 +340,11 @@ impl OpenAIRealtimeTranslationClient {
 
         {
             let mut guard = self.sink.lock().await;
+            let (sink, reader_task) = pending.into_parts();
             *guard = Some(sink);
+            self.reader_task = Some(reader_task);
         }
         self.event_tx = Some(tx);
-        self.reader_task = Some(reader_task);
         self.target_language = Some(config.target_language);
         log::info!("OpenAI realtime translation: session.updated confirmed");
         log::info!(
@@ -954,6 +1004,74 @@ mod tests {
             .await
             .expect("reader future must be dropped")
             .expect("reader drop signal");
+    }
+
+    #[tokio::test]
+    async fn cancelling_connect_after_reader_spawn_closes_websocket() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local websocket server");
+        let endpoint = format!(
+            "ws://{}",
+            listener.local_addr().expect("local websocket address")
+        );
+        let (session_update_tx, session_update_rx) = oneshot::channel();
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept websocket client");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete websocket handshake");
+            let message = timeout(Duration::from_secs(1), websocket.next())
+                .await
+                .expect("client must send session.update")
+                .expect("websocket must remain open for session.update")
+                .expect("read session.update");
+            let Message::Text(text) = message else {
+                panic!("expected text session.update, got {message:?}");
+            };
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&text).expect("parse session.update")
+                    ["type"],
+                "session.update"
+            );
+            session_update_tx
+                .send(())
+                .expect("signal that reader task was spawned");
+
+            match timeout(Duration::from_secs(1), websocket.next()).await {
+                Ok(None | Some(Err(_)) | Some(Ok(Message::Close(_)))) => {}
+                Ok(Some(Ok(message))) => {
+                    panic!("unexpected websocket message after connect cancellation: {message:?}")
+                }
+                Err(_) => panic!("cancelled connect left its websocket reader detached"),
+            }
+        });
+
+        let mut client = OpenAIRealtimeTranslationClient::with_endpoint(endpoint).with_timeouts(
+            Duration::from_secs(1),
+            Duration::from_secs(30),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        );
+        let config = RealtimeTranslationConfig::new(
+            "test-key".to_string(),
+            "ru".to_string(),
+            RealtimeInputNoiseReduction::NearField,
+        );
+        let mut connect = Box::pin(client.connect(config));
+        tokio::select! {
+            result = &mut connect => panic!("connect completed before cancellation: {result:?}"),
+            signal = session_update_rx => signal.expect("server received session.update"),
+        }
+
+        drop(connect);
+
+        timeout(Duration::from_secs(2), server_task)
+            .await
+            .expect("server must observe websocket cleanup")
+            .expect("local websocket server task must not panic");
+        assert!(client.reader_task.is_none());
+        assert!(client.sink.lock().await.is_none());
     }
 
     #[tokio::test]

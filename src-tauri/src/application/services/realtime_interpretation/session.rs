@@ -15,6 +15,7 @@ use crate::domain::{
 };
 
 use super::frame_assembler::Pcm16FrameAssembler;
+use super::{start_owned_capture, StartupCaptureError};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RealtimeInterpretationError {
@@ -70,6 +71,8 @@ pub enum RealtimeInterpretationShutdown {
 pub enum RealtimeInterpretationStartError {
     #[error("capture start: {0}")]
     Capture(AudioError),
+    #[error("startup timeout: {0}")]
+    Timeout(String),
 }
 
 pub type RealtimeTextCallback = Arc<dyn Fn(String) + Send + Sync>;
@@ -111,6 +114,7 @@ pub struct RealtimeInterpretationPolicy {
     output_drain_max: Duration,
     output_drain_poll: Duration,
     output_drain_empty_threshold: Duration,
+    capture_start_timeout: Duration,
     worker_stop_timeout: Duration,
     graceful_shutdown_timeout: Duration,
     forced_shutdown_timeout: Duration,
@@ -152,6 +156,7 @@ impl RealtimeInterpretationPolicy {
             output_drain_max: Duration::from_millis(12_000),
             output_drain_poll: Duration::from_millis(50),
             output_drain_empty_threshold: Duration::from_millis(30),
+            capture_start_timeout: Duration::from_secs(5),
             worker_stop_timeout: Duration::from_millis(1_500),
             graceful_shutdown_timeout: Duration::ZERO,
             forced_shutdown_timeout: Duration::from_secs(2),
@@ -183,6 +188,7 @@ impl RealtimeInterpretationPolicy {
             output_drain_max: Duration::from_millis(5_000),
             output_drain_poll: Duration::from_millis(50),
             output_drain_empty_threshold: Duration::from_millis(30),
+            capture_start_timeout: Duration::from_secs(5),
             worker_stop_timeout: Duration::from_millis(1_000),
             graceful_shutdown_timeout: Duration::ZERO,
             forced_shutdown_timeout: Duration::from_secs(1),
@@ -243,6 +249,11 @@ impl RealtimeInterpretationConfig {
             policy: RealtimeInterpretationPolicy::incoming_spoken(),
         }
     }
+
+    pub(crate) fn with_capture_start_timeout(mut self, timeout: Duration) -> Self {
+        self.policy.capture_start_timeout = timeout;
+        self
+    }
 }
 
 pub struct RealtimeInterpretationPorts {
@@ -255,14 +266,18 @@ pub struct RealtimeInterpretationPorts {
 #[derive(Clone)]
 struct RuntimeStopReporter {
     tx: mpsc::UnboundedSender<RealtimeInterpretationStop>,
-    sent: Arc<AtomicBool>,
+    startup_state: Arc<AtomicUsize>,
 }
+
+const RUNTIME_STARTING: usize = 0;
+const RUNTIME_PUBLISHED: usize = 1;
+const RUNTIME_TERMINAL: usize = 2;
 
 impl RuntimeStopReporter {
     fn new(tx: mpsc::UnboundedSender<RealtimeInterpretationStop>) -> Self {
         Self {
             tx,
-            sent: Arc::new(AtomicBool::new(false)),
+            startup_state: Arc::new(AtomicUsize::new(RUNTIME_STARTING)),
         }
     }
 
@@ -275,13 +290,13 @@ impl RuntimeStopReporter {
     }
 
     fn send(&self, stop: RealtimeInterpretationStop) {
-        if self
-            .sent
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
+        if self.startup_state.swap(RUNTIME_TERMINAL, Ordering::SeqCst) != RUNTIME_TERMINAL {
             let _ = self.tx.send(stop);
         }
+    }
+
+    fn startup_state(&self) -> Arc<AtomicUsize> {
+        self.startup_state.clone()
     }
 }
 
@@ -499,6 +514,7 @@ pub struct RealtimeInterpretationSession {
     silence_cadence_task: Option<JoinHandle<()>>,
     suspension_watchdog_task: Option<JoinHandle<()>>,
     stop_requested: Arc<AtomicBool>,
+    startup_state: Arc<AtomicUsize>,
     session_id: u64,
     policy: RealtimeInterpretationPolicy,
     diagnostics: Arc<RuntimeDiagnostics>,
@@ -528,6 +544,7 @@ impl RealtimeInterpretationSession {
     > {
         let (stop_tx, stop_rx) = mpsc::unbounded_channel();
         let reporter = RuntimeStopReporter::new(stop_tx);
+        let startup_state = reporter.startup_state();
         let stop_requested = Arc::new(AtomicBool::new(false));
         let diagnostics = Arc::new(RuntimeDiagnostics::new(config.session_id, &config.policy));
 
@@ -609,22 +626,49 @@ impl RealtimeInterpretationSession {
             silence_cadence_task,
             suspension_watchdog_task: None,
             stop_requested,
+            startup_state,
             session_id: config.session_id,
             policy: config.policy,
             diagnostics,
         };
 
-        if let Err(error) = session
+        let capture = session
             .capture
-            .as_mut()
-            .expect("capture must exist during startup")
-            .start_capture(capture_callback)
-            .await
-        {
-            session
-                .shutdown(RealtimeInterpretationShutdown::Abort)
-                .await;
-            return Err(RealtimeInterpretationStartError::Capture(error));
+            .take()
+            .expect("capture must exist during startup");
+        let capture_start = start_owned_capture(
+            capture,
+            capture_callback,
+            session.policy.capture_start_timeout,
+        )
+        .await;
+        match capture_start {
+            Ok(capture) => session.capture = Some(capture),
+            Err(StartupCaptureError::Operation(error)) => {
+                session
+                    .shutdown(RealtimeInterpretationShutdown::Abort)
+                    .await;
+                return Err(RealtimeInterpretationStartError::Capture(error));
+            }
+            Err(StartupCaptureError::Timeout) => {
+                let message = format!(
+                    "{} capture start timed out after {} ms",
+                    session.policy.input_source_name,
+                    session.policy.capture_start_timeout.as_millis()
+                );
+                session
+                    .shutdown(RealtimeInterpretationShutdown::Abort)
+                    .await;
+                return Err(RealtimeInterpretationStartError::Timeout(message));
+            }
+            Err(StartupCaptureError::Worker(message)) => {
+                session
+                    .shutdown(RealtimeInterpretationShutdown::Abort)
+                    .await;
+                return Err(RealtimeInterpretationStartError::Capture(
+                    AudioError::Internal(message),
+                ));
+            }
         }
         session.suspension_watchdog_task = Some(spawn_suspension_watchdog(
             reporter,
@@ -638,6 +682,19 @@ impl RealtimeInterpretationSession {
 
     pub fn session_id(&self) -> u64 {
         self.session_id
+    }
+
+    /// Atomically hands a live runtime from startup to its supervisor. A terminal reporter and
+    /// startup can never both win this transition.
+    pub fn try_publish_startup(&self) -> bool {
+        self.startup_state
+            .compare_exchange(
+                RUNTIME_STARTING,
+                RUNTIME_PUBLISHED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
     }
 
     pub fn output_control(&self) -> RealtimeInterpretationOutputControl {
@@ -1708,6 +1765,25 @@ mod tests {
     }
 
     #[test]
+    fn terminal_signal_atomically_beats_startup_publication() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let reporter = RuntimeStopReporter::new(tx);
+        let startup_state = reporter.startup_state();
+
+        reporter.closed();
+
+        assert!(startup_state
+            .compare_exchange(
+                RUNTIME_STARTING,
+                RUNTIME_PUBLISHED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_err());
+        assert_eq!(rx.try_recv(), Ok(RealtimeInterpretationStop::Closed));
+    }
+
+    #[test]
     fn suspension_gap_checks_monotonic_and_wall_clocks() {
         let threshold = Duration::from_secs(8);
 
@@ -2053,6 +2129,7 @@ mod tests {
 
     #[derive(Default)]
     struct ContractState {
+        capture_start_entered: AtomicBool,
         capture_stopped: AtomicBool,
         capture_stop_entered: AtomicBool,
         append_calls: AtomicUsize,
@@ -2116,6 +2193,45 @@ mod tests {
     struct BlockingStopCapture {
         state: Arc<ContractState>,
         callback: Option<AudioChunkCallback>,
+    }
+
+    struct BlockingStartCapture {
+        state: Arc<ContractState>,
+    }
+
+    #[async_trait::async_trait]
+    impl AudioCapture for BlockingStartCapture {
+        async fn initialize(&mut self, _config: AudioConfig) -> crate::domain::AudioResult<()> {
+            Ok(())
+        }
+
+        async fn start_capture(
+            &mut self,
+            _callback: AudioChunkCallback,
+        ) -> crate::domain::AudioResult<()> {
+            self.state
+                .capture_start_entered
+                .store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(80));
+            Ok(())
+        }
+
+        async fn stop_capture(&mut self) -> crate::domain::AudioResult<()> {
+            self.state.capture_stopped.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_capturing(&self) -> bool {
+            false
+        }
+
+        fn config(&self) -> AudioConfig {
+            AudioConfig {
+                sample_rate: 24_000,
+                channels: 1,
+                buffer_size: 4_800,
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -2600,6 +2716,53 @@ mod tests {
         .expect("abort must bound a stalled capture stop");
 
         assert!(state.capture_stop_entered.load(Ordering::SeqCst));
+        assert_eq!(state.abort_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn capture_start_timeout_aborts_paid_runtime_and_open_output() {
+        let state = Arc::new(ContractState::default());
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let mut config = RealtimeInterpretationConfig::incoming_spoken(7_802);
+        config.policy.capture_start_timeout = Duration::from_millis(20);
+        config.policy.worker_stop_timeout = Duration::from_millis(20);
+        config.policy.forced_shutdown_timeout = Duration::from_millis(100);
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            RealtimeInterpretationSession::start(
+                config,
+                RealtimeInterpretationPorts {
+                    capture: Box::new(BlockingStartCapture {
+                        state: state.clone(),
+                    }),
+                    output: Box::new(ContractOutput {
+                        state: state.clone(),
+                    }),
+                    translation: Box::new(ContractTranslationSession {
+                        state: state.clone(),
+                        events: event_tx,
+                    }),
+                    translation_events: event_rx,
+                },
+                RealtimeInterpretationCallbacks::no_op(),
+            ),
+        )
+        .await
+        .expect("capture startup must have a global deadline");
+        let error = match result {
+            Ok(_) => panic!("stalled capture startup must fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            RealtimeInterpretationStartError::Timeout(message)
+                if message.contains("timed out")
+        ));
+        assert!(state.capture_start_entered.load(Ordering::SeqCst));
+        assert!(state.capture_stopped.load(Ordering::SeqCst));
+        assert!(state.output_closed.load(Ordering::SeqCst));
         assert_eq!(state.abort_calls.load(Ordering::SeqCst), 1);
     }
 
