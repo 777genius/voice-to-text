@@ -59,8 +59,10 @@ const PAID_REQUIRED_AUDIO_SCENARIO_IDS: &[&str] = &[
 const PAID_DIAGNOSTIC_OUTPUT_SCENARIO_IDS: &[&str] = &["mixed_english_russian", "already_russian"];
 const PAID_DIAGNOSTIC_SEMANTIC_SCENARIO_IDS: &[&str] =
     &["pause_and_silence", "overlapping_speakers"];
-const PAID_DIAGNOSTIC_AUDIO_FACT_POLICIES: &[(&str, &str)] =
-    &[("names_and_numbers", "meeting time 3:45 PM")];
+const PAID_DIAGNOSTIC_AUDIO_FACT_POLICIES: &[(&str, &str)] = &[
+    ("names_and_numbers", "meeting time 3:45 PM"),
+    ("half_volume_source", "27 open tasks"),
+];
 const LONG_CONTEXT_DEPLOYMENT_MARKERS: &[&str] = &[
     "развертыв",
     "развёртыв",
@@ -1069,7 +1071,10 @@ fn paid_spoken_matrix_keeps_complete_release_scenarios_and_assertions() {
         .all(|id| PAID_REQUIRED_AUDIO_SCENARIO_IDS.contains(id)));
     assert_eq!(
         PAID_DIAGNOSTIC_AUDIO_FACT_POLICIES,
-        &[("names_and_numbers", "meeting time 3:45 PM")]
+        &[
+            ("names_and_numbers", "meeting time 3:45 PM"),
+            ("half_volume_source", "27 open tasks"),
+        ]
     );
     assert_eq!(
         PAID_DIAGNOSTIC_OUTPUT_SCENARIO_IDS,
