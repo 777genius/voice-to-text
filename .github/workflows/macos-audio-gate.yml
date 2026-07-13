@@ -90,24 +90,49 @@ jobs:
           SOAK_SECONDS: ${{ inputs.soak_seconds }}
         run: |
           set -euo pipefail
+          smoke_summary="src-tauri/target/e2e-artifacts/live-audio-smoke-summary.json"
+          soak_summary="src-tauri/target/e2e-artifacts/live-audio-soak-summary.json"
+          test -s "$smoke_summary"
+          test -s "$soak_summary"
+          jq -e '
+            .schema_version == 1 and
+            .platform == "darwin" and
+            (.passed_labels | index("runtime-suspension-cleanup")) != null and
+            (.passed_labels | index("output-device-invalidation-cleanup")) != null and
+            (.passed_labels | index("incoming-native-self-exclusion")) != null and
+            (.passed_labels | index("incoming-spoken-paid-matrix")) != null and
+            (.passed_labels | index("paid-full-duplex-independent-stop")) != null
+          ' "$smoke_summary" >/dev/null
+          jq -e \
+            --argjson expected_soak_seconds "$SOAK_SECONDS" \
+            '.schema_version == 1 and .platform == "darwin" and .release_grade == true and .soak_seconds == $expected_soak_seconds' \
+            "$soak_summary" >/dev/null
+
           mkdir -p audio-gate-evidence
+          cp "$smoke_summary" "$soak_summary" audio-gate-evidence/
           jq -n \
             --arg commit "$(git rev-parse HEAD)" \
             --arg ref "$EVIDENCE_REF" \
             --argjson soak_seconds "$SOAK_SECONDS" \
+            --slurpfile smoke "$smoke_summary" \
+            --slurpfile soak "$soak_summary" \
             '{
               commit: $commit,
               ref: $ref,
               soak_seconds: $soak_seconds,
               smoke_passed: true,
-              soak_passed: true
+              soak_passed: true,
+              suspension_cleanup_passed: ($smoke[0].passed_labels | index("runtime-suspension-cleanup") != null),
+              output_invalidation_passed: ($smoke[0].passed_labels | index("output-device-invalidation-cleanup") != null),
+              smoke_checks: $smoke[0].passed_labels,
+              soak_checks: $soak[0].passed_labels
             }' > audio-gate-evidence/evidence.json
 
       - name: Upload release evidence
         uses: actions/upload-artifact@v6
         with:
           name: macos-audio-gate-evidence
-          path: audio-gate-evidence/evidence.json
+          path: audio-gate-evidence
           if-no-files-found: error
           retention-days: 30
 

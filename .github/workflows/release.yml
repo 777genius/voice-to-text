@@ -157,7 +157,15 @@ jobs:
             --dir audio-gate-evidence
           jq -e \
             --arg commit "$release_commit" \
-            '.commit == $commit and .soak_seconds >= 1800 and .smoke_passed == true and .soak_passed == true' \
+            '.commit == $commit and
+             .soak_seconds >= 1800 and
+             .smoke_passed == true and
+             .soak_passed == true and
+             .suspension_cleanup_passed == true and
+             .output_invalidation_passed == true and
+             (.smoke_checks | index("incoming-native-self-exclusion")) != null and
+             (.smoke_checks | index("incoming-spoken-paid-matrix")) != null and
+             (.smoke_checks | index("paid-full-duplex-independent-stop")) != null' \
             audio-gate-evidence/evidence.json >/dev/null
 
           echo "Verified macOS audio gate $run_url for commit $release_commit"

@@ -5,6 +5,7 @@ import {
   resolvePaidE2eEnvironment,
   runLiveAudioCommand,
   sanitizedAudioTestEnvironment,
+  writeLiveAudioSummary,
 } from './helpers/liveAudioRunner.mjs';
 
 const DEFAULT_SOAK_SECONDS = 1800;
@@ -112,6 +113,7 @@ if (soakSeconds < 1800) {
   console.warn(`[live-audio-soak] development-only short soak enabled (${soakSeconds}s); this is not release evidence.`);
 }
 
+const passedLabels = [];
 for (const { label, paid, testName, command, env = {} } of tests) {
   console.log(`\n[live-audio-soak] running ${label} (${soakSeconds}s soak window)`);
   runLiveAudioCommand({
@@ -133,10 +135,20 @@ for (const { label, paid, testName, command, env = {} } of tests) {
     testName,
     timeoutMs: TEST_TIMEOUT_MS,
   });
+  passedLabels.push(label);
 }
 
+const releaseGrade = soakSeconds >= DEFAULT_SOAK_SECONDS;
+const summaryPath = writeLiveAudioSummary('live-audio-soak-summary.json', {
+  schema_version: 1,
+  platform: process.platform,
+  soak_seconds: soakSeconds,
+  release_grade: releaseGrade,
+  passed_labels: passedLabels,
+});
+
 console.log(
-  allowShortSoak
-    ? '\n[live-audio-soak] development-only short checks passed'
-    : '\n[live-audio-soak] release-grade long-session checks passed',
+  releaseGrade
+    ? `\n[live-audio-soak] release-grade long-session checks passed; summary=${summaryPath}`
+    : `\n[live-audio-soak] development-only short checks passed; summary=${summaryPath}`,
 );

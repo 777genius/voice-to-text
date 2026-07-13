@@ -1,4 +1,6 @@
 import { spawnSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import process from 'node:process';
 
 export function terminateProcessGroup(pid, { platform = process.platform, kill = process.kill } = {}) {
@@ -58,6 +60,14 @@ export function parsePositiveIntegerEnv(value, fallback) {
 
   const parsed = Number.parseInt(raw, 10);
   return parsed > 0 ? parsed : fallback;
+}
+
+export function writeLiveAudioSummary(fileName, summary, { root = process.cwd() } = {}) {
+  const artifactDirectory = join(root, 'src-tauri', 'target', 'e2e-artifacts');
+  mkdirSync(artifactDirectory, { recursive: true });
+  const artifactPath = join(artifactDirectory, fileName);
+  writeFileSync(artifactPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
+  return artifactPath;
 }
 
 export function assertExpectedTestRan(label, testName, output, fail) {

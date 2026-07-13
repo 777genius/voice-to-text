@@ -4,11 +4,42 @@ import {
   resolvePaidE2eEnvironment,
   runLiveAudioCommand,
   sanitizedAudioTestEnvironment,
+  writeLiveAudioSummary,
 } from './helpers/liveAudioRunner.mjs';
 
 const TEST_TIMEOUT_MS = 180_000;
 
 const tests = [
+  {
+    label: 'runtime-suspension-cleanup',
+    paid: false,
+    testName:
+      'application::services::realtime_interpretation::session::tests::suspension_watchdog_reports_terminal_cleanup_after_runtime_pause',
+    command: [
+      'cargo',
+      'test',
+      '--lib',
+      'application::services::realtime_interpretation::session::tests::suspension_watchdog_reports_terminal_cleanup_after_runtime_pause',
+      '--',
+      '--exact',
+      '--nocapture',
+    ],
+  },
+  {
+    label: 'output-device-invalidation-cleanup',
+    paid: false,
+    testName:
+      'application::services::realtime_interpretation::session::tests::output_health_failure_is_a_terminal_device_error',
+    command: [
+      'cargo',
+      'test',
+      '--lib',
+      'application::services::realtime_interpretation::session::tests::output_health_failure_is_a_terminal_device_error',
+      '--',
+      '--exact',
+      '--nocapture',
+    ],
+  },
   {
     label: 'blackhole-loopback',
     paid: false,
@@ -177,6 +208,7 @@ if (!paidE2e.apiKey) {
   fail('OPENAI_E2E_API_KEY is required; OPENAI_API_KEY and .env are intentionally ignored.');
 }
 
+const passedLabels = [];
 for (const { label, paid, testName, command, env = {}, timeoutMs = TEST_TIMEOUT_MS } of tests) {
   console.log(`\n[live-audio-smoke] running ${label}`);
   runLiveAudioCommand({
@@ -197,6 +229,13 @@ for (const { label, paid, testName, command, env = {}, timeoutMs = TEST_TIMEOUT_
     testName,
     timeoutMs,
   });
+  passedLabels.push(label);
 }
 
-console.log('\n[live-audio-smoke] all live audio smoke tests passed');
+const summaryPath = writeLiveAudioSummary('live-audio-smoke-summary.json', {
+  schema_version: 1,
+  platform: process.platform,
+  passed_labels: passedLabels,
+});
+
+console.log(`\n[live-audio-smoke] all live audio smoke tests passed; summary=${summaryPath}`);

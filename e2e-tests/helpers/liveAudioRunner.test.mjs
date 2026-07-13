@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import {
@@ -8,6 +11,7 @@ import {
   resolvePaidE2eEnvironment,
   sanitizedAudioTestEnvironment,
   terminateProcessGroup,
+  writeLiveAudioSummary,
 } from './liveAudioRunner.mjs';
 
 function throwingFail(message) {
@@ -73,6 +77,22 @@ test('parsePositiveIntegerEnv accepts only complete positive integer strings', (
   assert.equal(parsePositiveIntegerEnv('0', 120), 120);
   assert.equal(parsePositiveIntegerEnv('-5', 120), 120);
   assert.equal(parsePositiveIntegerEnv('', 120), 120);
+});
+
+test('writeLiveAudioSummary creates deterministic machine-readable evidence', () => {
+  const root = mkdtempSync(join(tmpdir(), 'voicetext-live-audio-'));
+  try {
+    const summary = { schema_version: 1, passed_labels: ['suspension-cleanup'] };
+    const path = writeLiveAudioSummary('summary.json', summary, { root });
+
+    assert.equal(
+      path,
+      join(root, 'src-tauri', 'target', 'e2e-artifacts', 'summary.json'),
+    );
+    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), summary);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('assertExpectedTestRan accepts escaped cargo test names', () => {
