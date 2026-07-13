@@ -311,6 +311,7 @@ pub(crate) enum AudioQueueEnqueueError {
 }
 
 const DROP_PRESSURE_RECOVERY_SUCCESSES: u64 = 8;
+const TRANSLATED_AUDIO_AUDIBLE_THRESHOLD: u16 = 128;
 
 struct DropPressure {
     pressure: AtomicU64,
@@ -1300,6 +1301,9 @@ async fn run_event_forwarder(
                     )));
                     return;
                 }
+                if !translated_audio_has_audible_signal(&pcm16) {
+                    continue;
+                }
                 if output_tx.send(OutputCommand::Audio(pcm16)).await.is_err() {
                     reporter.error(RealtimeInterpretationError::Processing(
                         "audio output worker stopped unexpectedly".to_string(),
@@ -1332,6 +1336,12 @@ async fn run_event_forwarder(
         }
     }
     reporter.closed();
+}
+
+fn translated_audio_has_audible_signal(samples: &[i16]) -> bool {
+    samples
+        .iter()
+        .any(|sample| sample.unsigned_abs() >= TRANSLATED_AUDIO_AUDIBLE_THRESHOLD)
 }
 
 fn spawn_output_worker(
@@ -2170,6 +2180,53 @@ mod tests {
         assert_eq!(stop_rx.try_recv(), Ok(RealtimeInterpretationStop::Closed));
     }
 
+    #[tokio::test]
+    async fn silent_provider_audio_is_not_forwarded_to_playback() {
+        let (event_tx, event_rx) = mpsc::channel(3);
+        let (output_tx, mut output_rx) = mpsc::channel(2);
+        let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
+
+        event_tx
+            .send(RealtimeTranslationEvent::TranslatedAudio {
+                pcm16: vec![-11, 0, 27],
+                sample_rate: 24_000,
+                channels: 1,
+            })
+            .await
+            .unwrap();
+        event_tx
+            .send(RealtimeTranslationEvent::TranslatedAudio {
+                pcm16: vec![0, 127, 128],
+                sample_rate: 24_000,
+                channels: 1,
+            })
+            .await
+            .unwrap();
+        event_tx
+            .send(RealtimeTranslationEvent::Closed)
+            .await
+            .unwrap();
+
+        run_event_forwarder(
+            event_rx,
+            output_tx,
+            RealtimeInterpretationCallbacks::no_op(),
+            RuntimeStopReporter::new(stop_tx),
+            Arc::new(RuntimeDiagnostics::new(
+                1,
+                &RealtimeInterpretationPolicy::incoming_spoken(),
+            )),
+        )
+        .await;
+
+        match output_rx.recv().await {
+            Some(OutputCommand::Audio(samples)) => assert_eq!(samples, vec![0, 127, 128]),
+            _ => panic!("audible provider audio must reach playback"),
+        }
+        assert!(output_rx.try_recv().is_err());
+        assert_eq!(stop_rx.try_recv(), Ok(RealtimeInterpretationStop::Closed));
+    }
+
     #[derive(Default)]
     struct ContractState {
         capture_start_entered: AtomicBool,
@@ -2192,6 +2249,9 @@ mod tests {
         input_samples: StdMutex<Vec<i16>>,
         output_samples: StdMutex<Vec<i16>>,
     }
+
+    const CONTRACT_AUDIO_SAMPLES: [i16; 3] = [1_000, 2_000, 3_000];
+    const CONTRACT_DRAIN_AUDIO_BASE: i16 = 4_000;
 
     struct ContractCapture {
         state: Arc<ContractState>,
@@ -2348,7 +2408,7 @@ mod tests {
                 .unwrap();
             self.events
                 .send(RealtimeTranslationEvent::TranslatedAudio {
-                    pcm16: vec![10, 20, 30],
+                    pcm16: CONTRACT_AUDIO_SAMPLES.to_vec(),
                     sample_rate: 24_000,
                     channels: 1,
                 })
@@ -2362,7 +2422,7 @@ mod tests {
             for chunk in 0..self.state.finish_audio_chunks.load(Ordering::SeqCst) {
                 self.events
                     .send(RealtimeTranslationEvent::TranslatedAudio {
-                        pcm16: vec![chunk as i16 + 100],
+                        pcm16: vec![chunk as i16 + CONTRACT_DRAIN_AUDIO_BASE],
                         sample_rate: 24_000,
                         channels: 1,
                     })
@@ -2709,7 +2769,10 @@ mod tests {
         assert_eq!(state.finish_calls.load(Ordering::SeqCst), 1);
         assert_eq!(state.abort_calls.load(Ordering::SeqCst), 0);
         assert_eq!(state.input_samples.lock().unwrap().len(), 4_800);
-        assert_eq!(*state.output_samples.lock().unwrap(), vec![10, 20, 30]);
+        assert_eq!(
+            *state.output_samples.lock().unwrap(),
+            CONTRACT_AUDIO_SAMPLES.to_vec()
+        );
         assert_eq!(&*translated_text.lock().unwrap(), "hello world");
         assert_eq!(observed_input_samples.load(Ordering::SeqCst), 4_800);
     }
@@ -2775,7 +2838,7 @@ mod tests {
         assert!(state.output_closed.load(Ordering::SeqCst));
         assert_eq!(
             *state.output_samples.lock().unwrap(),
-            vec![10, 20, 30, 100, 101, 102, 103]
+            vec![1_000, 2_000, 3_000, 4_000, 4_001, 4_002, 4_003]
         );
     }
 

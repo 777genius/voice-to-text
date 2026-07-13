@@ -1063,7 +1063,7 @@ mod tests {
                         .await;
                     let _ = events
                         .send(RealtimeTranslationEvent::TranslatedAudio {
-                            pcm16: vec![10, 20, 30],
+                            pcm16: vec![1_000, 2_000, 3_000],
                             sample_rate: 24_000,
                             channels: 1,
                         })
