@@ -1,8 +1,7 @@
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use futures_util::FutureExt;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -106,6 +105,8 @@ pub struct RealtimeInterpretationPolicy {
     event_drain_timeout: Duration,
     translation_finish_timeout: Duration,
     output_health_poll_interval: Duration,
+    suspension_watchdog_poll: Duration,
+    suspension_watchdog_threshold: Duration,
     output_drain_safety: Duration,
     output_drain_max: Duration,
     output_drain_poll: Duration,
@@ -145,6 +146,8 @@ impl RealtimeInterpretationPolicy {
             event_drain_timeout: Duration::from_millis(1_500),
             translation_finish_timeout: Duration::from_millis(8_000),
             output_health_poll_interval: Duration::from_millis(250),
+            suspension_watchdog_poll: Duration::from_secs(1),
+            suspension_watchdog_threshold: Duration::from_secs(8),
             output_drain_safety: Duration::from_millis(250),
             output_drain_max: Duration::from_millis(12_000),
             output_drain_poll: Duration::from_millis(50),
@@ -174,6 +177,8 @@ impl RealtimeInterpretationPolicy {
             event_drain_timeout: Duration::from_millis(1_500),
             translation_finish_timeout: Duration::from_millis(5_000),
             output_health_poll_interval: Duration::from_millis(250),
+            suspension_watchdog_poll: Duration::from_secs(1),
+            suspension_watchdog_threshold: Duration::from_secs(8),
             output_drain_safety: Duration::from_millis(250),
             output_drain_max: Duration::from_millis(5_000),
             output_drain_poll: Duration::from_millis(50),
@@ -492,6 +497,7 @@ pub struct RealtimeInterpretationSession {
     output_abort_tx: watch::Sender<bool>,
     output_worker_task: Option<OutputWorkerTask>,
     silence_cadence_task: Option<JoinHandle<()>>,
+    suspension_watchdog_task: Option<JoinHandle<()>>,
     stop_requested: Arc<AtomicBool>,
     session_id: u64,
     policy: RealtimeInterpretationPolicy,
@@ -601,6 +607,7 @@ impl RealtimeInterpretationSession {
             output_abort_tx,
             output_worker_task: Some(output_worker_task),
             silence_cadence_task,
+            suspension_watchdog_task: None,
             stop_requested,
             session_id: config.session_id,
             policy: config.policy,
@@ -619,6 +626,12 @@ impl RealtimeInterpretationSession {
                 .await;
             return Err(RealtimeInterpretationStartError::Capture(error));
         }
+        session.suspension_watchdog_task = Some(spawn_suspension_watchdog(
+            reporter,
+            session.stop_requested.clone(),
+            session.policy.suspension_watchdog_poll,
+            session.policy.suspension_watchdog_threshold,
+        ));
 
         Ok((session, stop_rx))
     }
@@ -639,6 +652,10 @@ impl RealtimeInterpretationSession {
         let cleanup_started = Instant::now();
         self.stop_requested.store(true, Ordering::SeqCst);
         if let Some(task) = self.silence_cadence_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = self.suspension_watchdog_task.take() {
             task.abort();
             let _ = task.await;
         }
@@ -984,6 +1001,9 @@ impl Drop for RealtimeInterpretationSession {
             task.abort();
         }
         if let Some(task) = self.silence_cadence_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.suspension_watchdog_task.take() {
             task.abort();
         }
         self.diagnostics.report("drop", 0);
@@ -1487,6 +1507,9 @@ fn build_capture_callback(
 ) -> AudioChunkCallback {
     let drop_pressure = DropPressure::new();
     Arc::new(move |chunk| {
+        if stop_requested.load(Ordering::SeqCst) {
+            return;
+        }
         capture_activity.touch();
         let queue_capacity = input_tx.max_capacity();
         diagnostics.observe_input(
@@ -1590,6 +1613,49 @@ fn spawn_silence_cadence_task(
     }))
 }
 
+fn suspension_gap_exceeded(
+    monotonic_elapsed: Duration,
+    wall_elapsed: Option<Duration>,
+    threshold: Duration,
+) -> bool {
+    monotonic_elapsed >= threshold || wall_elapsed.is_some_and(|elapsed| elapsed >= threshold)
+}
+
+fn spawn_suspension_watchdog(
+    reporter: RuntimeStopReporter,
+    stop_requested: Arc<AtomicBool>,
+    poll: Duration,
+    threshold: Duration,
+) -> JoinHandle<()> {
+    let mut previous_monotonic = Instant::now();
+    let mut previous_wall = SystemTime::now();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(poll).await;
+            if stop_requested.load(Ordering::SeqCst) {
+                return;
+            }
+
+            let current_monotonic = Instant::now();
+            let current_wall = SystemTime::now();
+            let monotonic_elapsed = current_monotonic.saturating_duration_since(previous_monotonic);
+            let wall_elapsed = current_wall.duration_since(previous_wall).ok();
+
+            if suspension_gap_exceeded(monotonic_elapsed, wall_elapsed, threshold) {
+                let detected_elapsed = wall_elapsed.unwrap_or_default().max(monotonic_elapsed);
+                reporter.error(RealtimeInterpretationError::Processing(format!(
+                    "translation runtime was suspended for {} ms; restart translation after the system wakes",
+                    detected_elapsed.as_millis()
+                )));
+                return;
+            }
+
+            previous_monotonic = current_monotonic;
+            previous_wall = current_wall;
+        }
+    })
+}
+
 fn try_enqueue_audio_chunk(
     input_tx: &mpsc::Sender<AudioChunk>,
     chunk: AudioChunk,
@@ -1639,6 +1705,72 @@ mod tests {
             )) if message == "first"
         ));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn suspension_gap_checks_monotonic_and_wall_clocks() {
+        let threshold = Duration::from_secs(8);
+
+        assert!(!suspension_gap_exceeded(
+            Duration::from_secs(1),
+            Some(Duration::from_secs(1)),
+            threshold
+        ));
+        assert!(suspension_gap_exceeded(
+            threshold,
+            Some(Duration::from_secs(1)),
+            threshold
+        ));
+        assert!(suspension_gap_exceeded(
+            Duration::from_secs(1),
+            Some(threshold),
+            threshold
+        ));
+        assert!(!suspension_gap_exceeded(
+            Duration::from_secs(1),
+            None,
+            threshold
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn suspension_watchdog_reports_terminal_cleanup_after_runtime_pause() {
+        let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let task = spawn_suspension_watchdog(
+            RuntimeStopReporter::new(stop_tx),
+            stop_requested,
+            Duration::from_millis(5),
+            Duration::from_millis(20),
+        );
+
+        std::thread::sleep(Duration::from_millis(40));
+
+        let event = tokio::time::timeout(Duration::from_secs(1), stop_rx.recv())
+            .await
+            .expect("watchdog should report after a runtime pause")
+            .expect("watchdog stop channel should remain open");
+        assert!(matches!(
+            event,
+            RealtimeInterpretationStop::Error(RealtimeInterpretationError::Processing(message))
+                if message.contains("suspended") && message.contains("restart translation")
+        ));
+        task.await.expect("watchdog task should finish cleanly");
+    }
+
+    #[tokio::test]
+    async fn suspension_watchdog_stops_without_reporting_an_error() {
+        let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
+        let stop_requested = Arc::new(AtomicBool::new(true));
+        let task = spawn_suspension_watchdog(
+            RuntimeStopReporter::new(stop_tx),
+            stop_requested,
+            Duration::from_millis(1),
+            Duration::from_millis(10),
+        );
+
+        task.await.expect("watchdog task should finish cleanly");
+        assert!(stop_rx.try_recv().is_err());
     }
 
     #[test]
@@ -1702,6 +1834,31 @@ mod tests {
             )) if message.contains("cannot keep up")
         ));
         assert_eq!(diagnostics.input_drop_count.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn capture_callback_rejects_audio_after_stop_is_requested() {
+        let (input_tx, mut input_rx) = mpsc::channel(1);
+        let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
+        let policy = RealtimeInterpretationPolicy::incoming_spoken();
+        let diagnostics = Arc::new(RuntimeDiagnostics::new(12, &policy));
+        let callback = build_capture_callback(
+            input_tx,
+            RuntimeStopReporter::new(stop_tx),
+            Arc::new(AtomicBool::new(true)),
+            policy,
+            Arc::new(CaptureActivity::new()),
+            diagnostics.clone(),
+        );
+
+        callback(AudioChunk::new(vec![1; 4_800], 24_000, 1));
+
+        assert!(input_rx.try_recv().is_err());
+        assert!(stop_rx.try_recv().is_err());
+        assert_eq!(
+            diagnostics.first_input_ms.load(Ordering::Relaxed),
+            UNSET_DIAGNOSTIC_MS
+        );
     }
 
     #[test]
