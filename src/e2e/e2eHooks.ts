@@ -14,6 +14,7 @@ type E2eApi = {
   getWindowLabel: () => string;
   invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
   emitEvent: (event: string, payload?: unknown) => Promise<void>;
+  useFullRecordingLayout: () => void;
 
   getAppConfig: () => {
     revision: string;
@@ -102,6 +103,9 @@ export function installE2eHooks(pinia: Pinia): void {
     getWindowLabel: () => String(getCurrentWindow().label),
     invoke: (command, args) => invoke(command, args as any),
     emitEvent: (event, payload) => emit(event, payload),
+    useFullRecordingLayout: () => {
+      appConfig.showMiniRecordingWindow = false;
+    },
     getAppConfig: () => ({
       revision: appConfig.revision,
       recordingHotkey: appConfig.recordingHotkey,

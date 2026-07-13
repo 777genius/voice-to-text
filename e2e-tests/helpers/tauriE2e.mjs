@@ -106,7 +106,9 @@ export async function getWindowLabelSafe() {
 export async function ensureFullRecordingLayout() {
   await waitFor(async () => {
     return await browser.execute(() => {
-      return window.__E2E__?.getAppConfig().showMiniRecordingWindow === false;
+      if (!window.__E2E__) return false;
+      window.__E2E__.useFullRecordingLayout();
+      return window.__E2E__.getAppConfig().showMiniRecordingWindow === false;
     });
   });
 }

@@ -77,16 +77,21 @@ test('clickTauriElement rejects a control inside a non-interactive ancestor', as
   );
 });
 
-test('ensureFullRecordingLayout waits for the deterministic E2E layout', async () => {
+test('ensureFullRecordingLayout restores the deterministic layout after initial sync', async () => {
   await withBrowserDom('', async () => {
     let mini = true;
+    let activations = 0;
     window.__E2E__ = {
       getAppConfig: () => ({ showMiniRecordingWindow: mini }),
+      useFullRecordingLayout: () => {
+        activations += 1;
+        mini = false;
+      },
     };
-    setTimeout(() => {
-      mini = false;
-    }, 5);
 
     await ensureFullRecordingLayout();
+
+    assert.equal(mini, false);
+    assert.equal(activations, 1);
   });
 });
