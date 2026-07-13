@@ -587,11 +587,7 @@ fn missing_semantic_facts(
     required_facts: &[RequiredSemanticFact],
 ) -> Vec<String> {
     let normalized = translated.to_lowercase();
-    let clauses = normalized
-        .split(['.', '!', '?', ';', '\n'])
-        .map(str::trim)
-        .filter(|clause| !clause.is_empty())
-        .collect::<Vec<_>>();
+    let clauses = semantic_clauses(&normalized);
 
     required_facts
         .iter()
@@ -611,6 +607,34 @@ fn missing_semantic_facts(
         })
         .map(|fact| fact.label.to_string())
         .collect()
+}
+
+fn semantic_clauses(text: &str) -> Vec<&str> {
+    let mut clauses = Vec::new();
+    let mut start = 0;
+    let mut previous = None;
+
+    for (index, character) in text.char_indices() {
+        let next = text[index + character.len_utf8()..].chars().next();
+        let decimal_or_time_separator = character == '.'
+            && previous.is_some_and(char::is_numeric)
+            && next.is_some_and(char::is_numeric);
+        let clause_separator = matches!(character, '.' | '!' | '?' | ';' | '\n');
+        if clause_separator && !decimal_or_time_separator {
+            let clause = text[start..index].trim();
+            if !clause.is_empty() {
+                clauses.push(clause);
+            }
+            start = index + character.len_utf8();
+        }
+        previous = Some(character);
+    }
+
+    let tail = text[start..].trim();
+    if !tail.is_empty() {
+        clauses.push(tail);
+    }
+    clauses
 }
 
 fn clause_contains_marker(clause: &str, marker: &str, accepts_negation: bool) -> bool {
@@ -1214,9 +1238,13 @@ fn half_volume_semantics_accept_unfilled_without_accepting_closed_tasks() {
         .find(|scenario| scenario.id == "half_volume_source")
         .expect("half_volume_source scenario must exist");
     let valid = "Есть двадцать семь незаполненных задач. Совещание начинается в 9:30 утра.";
+    let dotted_time = valid.replace("9:30 утра", "9.30");
     let wrong_state = valid.replace("незаполненных", "закрытых");
 
     assert!(missing_spoken_semantic_facts(valid, scenario.required_translation_facts).is_empty());
+    assert!(
+        missing_spoken_semantic_facts(&dotted_time, scenario.required_translation_facts).is_empty()
+    );
     assert_eq!(
         missing_spoken_semantic_facts(&wrong_state, scenario.required_translation_facts),
         vec!["27 open tasks"]
