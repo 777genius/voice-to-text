@@ -16,7 +16,11 @@ describe('incoming translation subtitles (real tauri webdriver)', () => {
     await ensureFullRecordingLayout();
 
     const initial = await invoke('get_incoming_translation_state');
-    if (initial.status !== 'Idle' || initial.session_id !== 0) {
+    if (
+      initial.status !== 'Idle' ||
+      initial.session_id !== 0 ||
+      initial.delivery !== 'text_and_audio'
+    ) {
       throw new Error(`incoming translation did not start idle: ${JSON.stringify(initial)}`);
     }
 

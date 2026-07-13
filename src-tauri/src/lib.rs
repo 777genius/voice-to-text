@@ -32,6 +32,16 @@ fn handle_translation_shutdown_run_event(event: &tauri::RunEvent, shutdown: impl
     false
 }
 
+fn apply_webdriver_e2e_app_config(config: &mut crate::domain::AppConfig, enabled: bool) {
+    if !enabled {
+        return;
+    }
+
+    config.openai_api_key = Some("e2e-placeholder-credential".into());
+    config.incoming_translation_delivery = crate::domain::IncomingTranslationDelivery::TextAndAudio;
+    config.show_mini_recording_window = false;
+}
+
 // Определяем базовый NSPanel класс для macOS (появление поверх fullscreen приложений)
 #[cfg(target_os = "macos")]
 use tauri_nspanel::tauri_panel;
@@ -242,10 +252,7 @@ pub fn run() {
                 tauri::async_runtime::block_on(async {
                     *state.is_authenticated.write().await = true;
                     let mut config = state.config.write().await;
-                    config.openai_api_key = Some("e2e-placeholder-credential".into());
-                    config.incoming_translation_delivery =
-                        crate::domain::IncomingTranslationDelivery::TextAndAudio;
-                    config.show_mini_recording_window = false;
+                    apply_webdriver_e2e_app_config(&mut config, true);
                 });
             }
 
@@ -668,6 +675,10 @@ pub fn run() {
                         }
 
                         saved_app_config.stt = state.transcription_service.get_config().await;
+                        apply_webdriver_e2e_app_config(
+                            &mut saved_app_config,
+                            cfg!(all(debug_assertions, feature = "webdriver-e2e")),
+                        );
                         *state.config.write().await = saved_app_config.clone();
                         state.double_space_hotkey_enabled_runtime.store(
                             saved_app_config.double_space_hotkey_enabled,
@@ -850,8 +861,45 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::handle_translation_shutdown_run_event;
+    use super::{apply_webdriver_e2e_app_config, handle_translation_shutdown_run_event};
+    use crate::domain::{AppConfig, IncomingTranslationDelivery};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn webdriver_e2e_config_overrides_values_loaded_from_disk() {
+        let mut config = AppConfig {
+            openai_api_key: None,
+            incoming_translation_delivery: IncomingTranslationDelivery::CaptionsOnly,
+            show_mini_recording_window: true,
+            ..AppConfig::default()
+        };
+
+        apply_webdriver_e2e_app_config(&mut config, true);
+
+        assert_eq!(
+            config.openai_api_key.as_deref(),
+            Some("e2e-placeholder-credential")
+        );
+        assert_eq!(
+            config.incoming_translation_delivery,
+            IncomingTranslationDelivery::TextAndAudio
+        );
+        assert!(!config.show_mini_recording_window);
+    }
+
+    #[test]
+    fn webdriver_e2e_config_is_noop_when_disabled() {
+        let mut config = AppConfig::default();
+        let expected_openai_key = config.openai_api_key.clone();
+        let expected_delivery = config.incoming_translation_delivery;
+        let expected_mini_window = config.show_mini_recording_window;
+
+        apply_webdriver_e2e_app_config(&mut config, false);
+
+        assert_eq!(config.openai_api_key, expected_openai_key);
+        assert_eq!(config.incoming_translation_delivery, expected_delivery);
+        assert_eq!(config.show_mini_recording_window, expected_mini_window);
+    }
 
     #[test]
     fn tauri_exit_event_invokes_translation_shutdown_callback() {
