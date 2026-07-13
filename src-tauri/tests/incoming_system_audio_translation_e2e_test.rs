@@ -59,6 +59,24 @@ const PAID_DIAGNOSTIC_OUTPUT_SCENARIO_IDS: &[&str] = &["mixed_english_russian", 
 const PAID_DIAGNOSTIC_SEMANTIC_SCENARIO_IDS: &[&str] = &["overlapping_speakers"];
 const PAID_DIAGNOSTIC_AUDIO_FACT_POLICIES: &[(&str, &str)] =
     &[("names_and_numbers", "meeting time 3:45 PM")];
+const LONG_CONTEXT_DEPLOYMENT_MARKERS: &[&str] = &[
+    "развертыв",
+    "развёртыв",
+    "деплой",
+    "попытк",
+    "запуск",
+    "поставк",
+    "релиз",
+    "выклад",
+    "выкат",
+    "установ",
+    "размещ",
+    "внедрен",
+    "внедрён",
+    "реализац",
+    "развертк",
+    "развёртк",
+];
 static NEXT_TEMP_AUDIO_ID: AtomicUsize = AtomicUsize::new(0);
 
 fn audible_sample_count(samples: &[i16]) -> usize {
@@ -816,22 +834,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
                     label: "first deployment failed",
                     marker_groups: &[
                         &["перв"],
-                        &[
-                            "развертыв",
-                            "развёртыв",
-                            "деплой",
-                            "запуск",
-                            "поставк",
-                            "релиз",
-                            "выклад",
-                            "выкат",
-                            "установ",
-                            "размещ",
-                            "внедрен",
-                            "внедрён",
-                            "развертк",
-                            "развёртк",
-                        ],
+                        LONG_CONTEXT_DEPLOYMENT_MARKERS,
                         &[
                             "не удалось",
                             "не сработ",
@@ -860,22 +863,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
                     label: "second deployment succeeded",
                     marker_groups: &[
                         &["втор"],
-                        &[
-                            "развертыв",
-                            "развёртыв",
-                            "деплой",
-                            "попытк",
-                            "поставк",
-                            "релиз",
-                            "выклад",
-                            "выкат",
-                            "установ",
-                            "размещ",
-                            "внедрен",
-                            "внедрён",
-                            "развертк",
-                            "развёртк",
-                        ],
+                        LONG_CONTEXT_DEPLOYMENT_MARKERS,
                         &["успеш", "успех", "уда"],
                     ],
                 },
@@ -913,7 +901,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
                 },
                 RequiredSemanticFact {
                     label: "keep both values",
-                    marker_groups: &[&["оба", "обе"], &["значен", "ценност"]],
+                    marker_groups: &[&["оба", "обе"], &["значен", "ценност", "единиц"]],
                 },
             ],
             translation_output_required: true,
@@ -1094,6 +1082,8 @@ fn long_context_semantics_accept_contextual_synonyms_without_weakening_negation(
         .expect("long_context scenario must exist");
     let valid = "Во время вчерашнего инцидента первое развертывание ПО в продакшн завалилось, потому что сертификат истек. После продления второе развертывание ПО в продакшн прошло успешно. Так что не останавливайте миграцию базы данных.";
     let installation_variant = "Во время вчерашнего происшествия первая система установки ПО в продакшн не сработала, потому что сертификат истек. После обновления сертификата вторая установка ПО в продакшн прошла успешно. Так что не останавливайте миграцию базы данных.";
+    let implementation_variant = "Во время вчерашнего инцидента первая реализация ПО на продакшн провалилась, потому что сертификат истек. После обновления сертификата вторая реализация ПО на продакшн прошла успешно. Так что не останавливайте миграцию базы данных.";
+    let launch_variant = "Во время вчерашнего инцидента первый запуск обновления в продакшн завершился неудачей, потому что сертификат просрочился. После обновления сертификата второй запуск обновления в продакшн прошёл успешно, так что не останавливайте миграцию базы данных.";
     let wrong_action = valid.replace("не останавливайте", "не откладывайте");
 
     assert!(missing_semantic_facts(valid, scenario.required_translation_facts).is_empty());
@@ -1101,9 +1091,34 @@ fn long_context_semantics_accept_contextual_synonyms_without_weakening_negation(
         missing_semantic_facts(installation_variant, scenario.required_translation_facts)
             .is_empty()
     );
+    assert!(missing_spoken_semantic_facts(
+        implementation_variant,
+        scenario.required_translation_facts,
+    )
+    .is_empty());
+    assert!(
+        missing_spoken_semantic_facts(launch_variant, scenario.required_translation_facts,)
+            .is_empty()
+    );
     assert_eq!(
         missing_semantic_facts(&wrong_action, scenario.required_translation_facts),
         vec!["do not stop database migration"]
+    );
+}
+
+#[test]
+fn pause_semantics_accept_unit_synonym_without_weakening_plurality() {
+    let scenario = paid_spoken_scenarios()
+        .into_iter()
+        .find(|scenario| scenario.id == "pause_and_silence")
+        .expect("pause_and_silence scenario must exist");
+    let valid = "Первая единица - двенадцать. Вторая единица - сорок семь. Сохраните обе единицы.";
+    let wrong_quantity = valid.replace("обе единицы", "одну единицу");
+
+    assert!(missing_spoken_semantic_facts(valid, scenario.required_translation_facts).is_empty());
+    assert_eq!(
+        missing_spoken_semantic_facts(&wrong_quantity, scenario.required_translation_facts),
+        vec!["keep both values"]
     );
 }
 
