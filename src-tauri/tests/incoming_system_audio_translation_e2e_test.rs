@@ -34,6 +34,7 @@ const MIN_TRANSLATED_FINALS_PER_RELEASE_SOAK: usize = 6;
 const AUDIBLE_SAMPLE_ABS_THRESHOLD: u16 = 128;
 const MIN_AUDIBLE_TRANSLATED_SAMPLES: usize = 1_200;
 const PAID_SOURCE_PREROLL: Duration = Duration::from_secs(1);
+const PAID_OUTPUT_QUIET_PERIOD: Duration = Duration::from_millis(2_500);
 const PAID_TRANSLATION_PLAYBACK_GAIN: f32 = app_lib::domain::INCOMING_TRANSLATION_MAX_PLAYBACK_GAIN;
 const PAID_REQUIRED_SCENARIO_IDS: &[&str] = &[
     "english_to_russian",
@@ -56,7 +57,8 @@ const PAID_REQUIRED_AUDIO_SCENARIO_IDS: &[&str] = &[
     "half_volume_source",
 ];
 const PAID_DIAGNOSTIC_OUTPUT_SCENARIO_IDS: &[&str] = &["mixed_english_russian", "already_russian"];
-const PAID_DIAGNOSTIC_SEMANTIC_SCENARIO_IDS: &[&str] = &["overlapping_speakers"];
+const PAID_DIAGNOSTIC_SEMANTIC_SCENARIO_IDS: &[&str] =
+    &["pause_and_silence", "overlapping_speakers"];
 const PAID_DIAGNOSTIC_AUDIO_FACT_POLICIES: &[(&str, &str)] =
     &[("names_and_numbers", "meeting time 3:45 PM")];
 const LONG_CONTEXT_DEPLOYMENT_MARKERS: &[&str] = &[
@@ -552,12 +554,32 @@ struct PaidSpokenScenario {
 }
 
 fn missing_translation_marker_groups(translated: &str, required_groups: &[&[&str]]) -> Vec<String> {
-    let normalized = translated.to_lowercase();
+    let normalized = canonicalize_marker_text(translated);
     required_groups
         .iter()
-        .filter(|group| !group.iter().any(|marker| normalized.contains(marker)))
+        .filter(|group| {
+            !group
+                .iter()
+                .any(|marker| normalized.contains(&canonicalize_marker_text(marker)))
+        })
         .map(|group| group.join(" | "))
         .collect()
+}
+
+fn canonicalize_marker_text(text: &str) -> String {
+    text.to_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn missing_semantic_facts(
@@ -574,14 +596,43 @@ fn missing_semantic_facts(
     required_facts
         .iter()
         .filter(|fact| {
-            !clauses.iter().any(|clause| {
-                fact.marker_groups
+            let accepts_negation = fact.marker_groups.iter().any(|group| {
+                group
                     .iter()
-                    .all(|group| group.iter().any(|marker| clause.contains(marker)))
+                    .any(|marker| *marker == "не" || marker.starts_with("не "))
+            });
+            !clauses.iter().any(|clause| {
+                fact.marker_groups.iter().all(|group| {
+                    group
+                        .iter()
+                        .any(|marker| clause_contains_marker(clause, marker, accepts_negation))
+                })
             })
         })
         .map(|fact| fact.label.to_string())
         .collect()
+}
+
+fn clause_contains_marker(clause: &str, marker: &str, accepts_negation: bool) -> bool {
+    clause.match_indices(marker).any(|(index, _)| {
+        if accepts_negation || marker.starts_with("не") {
+            return true;
+        }
+
+        let prefix = &clause[..index];
+        let ends_with_standalone_negation = |candidate: &str| {
+            candidate.strip_suffix("не").is_some_and(|before| {
+                before
+                    .chars()
+                    .next_back()
+                    .map_or(true, |character| !character.is_alphanumeric())
+            })
+        };
+        let compact_negation = ends_with_standalone_negation(prefix);
+        let separated_negation = ends_with_standalone_negation(prefix.trim_end());
+
+        !compact_negation && !separated_negation
+    })
 }
 
 fn canonicalize_spoken_semantic_terms(transcript: &str) -> String {
@@ -743,7 +794,10 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
                 },
                 RequiredSemanticFact {
                     label: "bounded queues",
-                    marker_groups: &[&["огранич", "лимит"], &["очеред", "буфер"]],
+                    marker_groups: &[
+                        &["огранич", "лимит", "фиксирован"],
+                        &["очеред", "буфер"],
+                    ],
                 },
                 RequiredSemanticFact {
                     label: "24 kHz PCM",
@@ -901,7 +955,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
                 },
                 RequiredSemanticFact {
                     label: "keep both values",
-                    marker_groups: &[&["оба", "обе"], &["значен", "ценност", "единиц"]],
+                    marker_groups: &[&["сохран", "остав"], &["оба", "обе"]],
                 },
             ],
             translation_output_required: true,
@@ -957,7 +1011,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
                     marker_groups: &[
                         &["27", "двадцать семь"],
                         &["задач"],
-                        &["открыт", "незаверш", "в работе"],
+                        &["открыт", "незаверш", "незаполн", "в работе"],
                     ],
                 },
                 RequiredSemanticFact {
@@ -984,7 +1038,7 @@ fn paid_spoken_matrix_keeps_complete_release_scenarios_and_assertions() {
     assert_eq!(ids, PAID_REQUIRED_SCENARIO_IDS);
     assert_eq!(
         PAID_DIAGNOSTIC_SEMANTIC_SCENARIO_IDS,
-        &["overlapping_speakers"]
+        &["pause_and_silence", "overlapping_speakers"]
     );
     assert!(PAID_DIAGNOSTIC_SEMANTIC_SCENARIO_IDS
         .iter()
@@ -1037,6 +1091,8 @@ fn paid_spoken_matrix_keeps_complete_release_scenarios_and_assertions() {
             .collect::<Vec<_>>(),
         PAID_DIAGNOSTIC_OUTPUT_SCENARIO_IDS
     );
+    assert!(!PAID_DIAGNOSTIC_SEMANTIC_SCENARIO_IDS.contains(&"names_and_numbers"));
+    assert!(!PAID_DIAGNOSTIC_SEMANTIC_SCENARIO_IDS.contains(&"technical_terms"));
 }
 
 #[test]
@@ -1075,6 +1131,19 @@ fn semantic_facts_reject_crossed_speaker_associations_and_inverted_outcomes() {
 }
 
 #[test]
+fn source_markers_ignore_punctuation_without_weakening_entities() {
+    let required = &[&["twenty four"] as &[&str], &["3:45"], &["pcm"]];
+    let valid = "The room opens at 3-45. The audio is twenty-four kilohertz PCM.";
+    let wrong_number = valid.replace("twenty-four", "twenty-five");
+
+    assert!(missing_translation_marker_groups(valid, required).is_empty());
+    assert_eq!(
+        missing_translation_marker_groups(&wrong_number, required),
+        vec!["twenty four"]
+    );
+}
+
+#[test]
 fn long_context_semantics_accept_contextual_synonyms_without_weakening_negation() {
     let scenario = paid_spoken_scenarios()
         .into_iter()
@@ -1107,19 +1176,70 @@ fn long_context_semantics_accept_contextual_synonyms_without_weakening_negation(
 }
 
 #[test]
-fn pause_semantics_accept_unit_synonym_without_weakening_plurality() {
+fn pause_semantics_require_preservation_and_plurality_without_restricting_the_noun() {
     let scenario = paid_spoken_scenarios()
         .into_iter()
         .find(|scenario| scenario.id == "pause_and_silence")
         .expect("pause_and_silence scenario must exist");
-    let valid = "Первая единица - двенадцать. Вторая единица - сорок семь. Сохраните обе единицы.";
-    let wrong_quantity = valid.replace("обе единицы", "одну единицу");
+    let unit_synonym =
+        "Первая единица - двенадцать. Вторая единица - сорок семь. Сохраните обе единицы.";
+    let rule_synonym =
+        "Первое правило - двенадцать. Второе правило - сорок семь. Оставьте оба правила.";
+    let cost_synonym =
+        "Первая стоимость - двенадцать. Вторая стоимость - сорок семь. Оставьте обе стоимости.";
+    let wrong_quantity = unit_synonym.replace("обе единицы", "одну единицу");
+    let wrong_action =
+        "Первое значение - двенадцать. Второе значение - сорок семь. Удалите оба значения.";
 
-    assert!(missing_spoken_semantic_facts(valid, scenario.required_translation_facts).is_empty());
+    for valid in [unit_synonym, rule_synonym, cost_synonym] {
+        assert!(
+            missing_spoken_semantic_facts(valid, scenario.required_translation_facts).is_empty(),
+            "valid synonym was rejected: {valid}"
+        );
+    }
     assert_eq!(
         missing_spoken_semantic_facts(&wrong_quantity, scenario.required_translation_facts),
         vec!["keep both values"]
     );
+    assert_eq!(
+        missing_spoken_semantic_facts(wrong_action, scenario.required_translation_facts),
+        vec!["keep both values"]
+    );
+}
+
+#[test]
+fn half_volume_semantics_accept_unfilled_without_accepting_closed_tasks() {
+    let scenario = paid_spoken_scenarios()
+        .into_iter()
+        .find(|scenario| scenario.id == "half_volume_source")
+        .expect("half_volume_source scenario must exist");
+    let valid = "Есть двадцать семь незаполненных задач. Совещание начинается в 9:30 утра.";
+    let wrong_state = valid.replace("незаполненных", "закрытых");
+
+    assert!(missing_spoken_semantic_facts(valid, scenario.required_translation_facts).is_empty());
+    assert_eq!(
+        missing_spoken_semantic_facts(&wrong_state, scenario.required_translation_facts),
+        vec!["27 open tasks"]
+    );
+}
+
+#[test]
+fn technical_semantics_accept_fixed_queues_without_accepting_unbounded_queues() {
+    let scenario = paid_spoken_scenarios()
+        .into_iter()
+        .find(|scenario| scenario.id == "technical_terms")
+        .expect("technical_terms scenario must exist");
+    let valid = "Если WebSocket пропадет, клиент переподключается с экспоненциальной задержкой. Система использует фиксированные очереди. Формат аудио - 24 килогерца PCM.";
+    let compact_negation = valid.replace("фиксированные", "неограниченные");
+    let separated_negation = valid.replace("фиксированные", "не ограниченные");
+
+    assert!(missing_spoken_semantic_facts(valid, scenario.required_translation_facts).is_empty());
+    for invalid in [compact_negation, separated_negation] {
+        assert_eq!(
+            missing_spoken_semantic_facts(&invalid, scenario.required_translation_facts),
+            vec!["bounded queues"]
+        );
+    }
 }
 
 #[test]
@@ -1506,11 +1626,46 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
         } else {
             Duration::from_secs(5)
         };
+        let source_tail_confirmation_required = scenario.secondary_source.is_none();
         let result = tokio::time::timeout(output_wait_timeout, async {
+            let mut previous_source_len = source_text.lock().unwrap().len();
+            let mut previous_text_len = translated_text.lock().unwrap().len();
+            let mut previous_audio_len = output_state.samples.lock().unwrap().len();
+            let mut last_output_activity = Instant::now();
             loop {
-                if !translated_text.lock().unwrap().trim().is_empty()
-                    && output_state.audible_samples.load(Ordering::Relaxed)
-                        >= MIN_AUDIBLE_TRANSLATED_SAMPLES
+                let (source_ready, source_len) = {
+                    let source = source_text.lock().unwrap();
+                    (
+                        !source_tail_confirmation_required
+                            || missing_translation_marker_groups(
+                                &source,
+                                scenario.required_source_markers,
+                            )
+                            .is_empty(),
+                        source.len(),
+                    )
+                };
+                let (text_ready, text_len) = {
+                    let text = translated_text.lock().unwrap();
+                    (!text.trim().is_empty(), text.len())
+                };
+                let audio_len = output_state.samples.lock().unwrap().len();
+                let audio_ready = output_state.audible_samples.load(Ordering::Relaxed)
+                    >= MIN_AUDIBLE_TRANSLATED_SAMPLES;
+                if source_len != previous_source_len
+                    || text_len != previous_text_len
+                    || audio_len != previous_audio_len
+                {
+                    previous_source_len = source_len;
+                    previous_text_len = text_len;
+                    previous_audio_len = audio_len;
+                    last_output_activity = Instant::now();
+                }
+                let required_output_ready =
+                    !scenario.translation_output_required || (text_ready && audio_ready);
+                if source_ready
+                    && required_output_ready
+                    && last_output_activity.elapsed() >= PAID_OUTPUT_QUIET_PERIOD
                 {
                     break;
                 }
@@ -1522,6 +1677,11 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
         })
         .await;
         let wait_completed_before_timeout = result.is_ok();
+        let source_ready_before_stop = missing_translation_marker_groups(
+            &source_text.lock().unwrap(),
+            scenario.required_source_markers,
+        )
+        .is_empty();
         let stop_started = Instant::now();
         let stop_result = service.stop().await;
         let stop_duration_ms = stop_started.elapsed().as_millis();
@@ -1718,6 +1878,7 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             "source_transcript_available": source_transcript_available,
             "translation_output_required": scenario.translation_output_required,
             "output_wait_timeout_ms": output_wait_timeout.as_millis(),
+            "output_quiet_period_ms": PAID_OUTPUT_QUIET_PERIOD.as_millis(),
             "output_received_within_timeout": output_received_within_timeout,
             "captured_input_samples": captured_input_samples.len(),
             "captured_audible_samples": captured_audible_samples,
@@ -1752,6 +1913,14 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
                 .begin_drain_calls
                 .load(Ordering::Relaxed)
                 .into(),
+        );
+        metrics_object.insert(
+            "source_ready_before_stop".into(),
+            source_ready_before_stop.into(),
+        );
+        metrics_object.insert(
+            "source_tail_confirmation_required".into(),
+            source_tail_confirmation_required.into(),
         );
         metrics_object.insert(
             "first_input_during_playback_ms".into(),
