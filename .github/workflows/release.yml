@@ -53,7 +53,8 @@ jobs:
 
           release_commit="$(git rev-parse HEAD)"
           required_matrix_ids='["english_to_russian","names_and_numbers","technical_terms","mixed_english_russian","already_russian","long_context","pause_and_silence","overlapping_speakers","half_volume_source"]'
-          required_audio_ids='["english_to_russian","names_and_numbers","technical_terms","mixed_english_russian","long_context","pause_and_silence","overlapping_speakers","half_volume_source"]'
+          required_audio_ids='["english_to_russian","names_and_numbers","technical_terms","long_context","pause_and_silence","overlapping_speakers","half_volume_source"]'
+          diagnostic_output_ids='["mixed_english_russian","already_russian"]'
           diagnostic_semantic_ids='["overlapping_speakers"]'
           diagnostic_audio_fact_policies='[["names_and_numbers","meeting time 3:45 PM"]]'
           run_json="$(gh run view "$AUDIO_GATE_RUN_ID" \
@@ -93,6 +94,7 @@ jobs:
             --argjson audio_gate_run_id "$AUDIO_GATE_RUN_ID" \
             --argjson required_matrix_ids "$required_matrix_ids" \
             --argjson required_audio_ids "$required_audio_ids" \
+            --argjson diagnostic_output_ids "$diagnostic_output_ids" \
             --argjson diagnostic_semantic_ids "$diagnostic_semantic_ids" \
             --argjson diagnostic_audio_fact_policies "$diagnostic_audio_fact_policies" \
             '.commit == $commit and
@@ -127,6 +129,7 @@ jobs:
              .paid_matrix.passed_scenario_ids == $required_matrix_ids and
              .paid_matrix.required_audio_scenario_ids == $required_audio_ids and
              .paid_matrix.audio_verified_scenario_ids == $required_audio_ids and
+             .paid_matrix.diagnostic_output_scenario_ids == $diagnostic_output_ids and
              .paid_matrix.diagnostic_semantic_scenario_ids == $diagnostic_semantic_ids and
              .paid_matrix.diagnostic_audio_fact_policies == $diagnostic_audio_fact_policies and
              ((.paid_matrix.quality_degraded_scenario_ids - ($diagnostic_semantic_ids + ($diagnostic_audio_fact_policies | map(.[0])))) | length) == 0 and
@@ -200,6 +203,7 @@ jobs:
           jq -e \
             --argjson required_matrix_ids "$required_matrix_ids" \
             --argjson required_audio_ids "$required_audio_ids" \
+            --argjson diagnostic_output_ids "$diagnostic_output_ids" \
             --argjson diagnostic_semantic_ids "$diagnostic_semantic_ids" \
             --argjson diagnostic_audio_fact_policies "$diagnostic_audio_fact_policies" \
             '
@@ -210,6 +214,7 @@ jobs:
             .passed_scenario_ids == $required_matrix_ids and
             .required_audio_scenario_ids == $required_audio_ids and
             .audio_verified_scenario_ids == $required_audio_ids and
+            .diagnostic_output_scenario_ids == $diagnostic_output_ids and
             .diagnostic_semantic_scenario_ids == $diagnostic_semantic_ids and
             .diagnostic_audio_fact_policies == $diagnostic_audio_fact_policies and
             ((.quality_degraded_scenario_ids - ($diagnostic_semantic_ids + ($diagnostic_audio_fact_policies | map(.[0])))) | length) == 0
