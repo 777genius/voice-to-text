@@ -1,13 +1,14 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
         description: 'Existing release tag, for example v0.10.15'
+        required: true
+        type: string
+      macos_audio_gate_run_id:
+        description: 'Successful macOS Audio Release Gate run ID for the same tagged commit'
         required: true
         type: string
 
@@ -30,6 +31,7 @@ jobs:
         uses: actions/checkout@v6.0.2
         with:
           ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v6.4.0
@@ -65,6 +67,9 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libasound2-dev \
+            webkit2gtk-driver \
+            xvfb \
+            xauth \
             pkg-config
 
       - name: Install frontend dependencies
@@ -76,17 +81,91 @@ jobs:
       - name: Frontend tests
         run: pnpm test:run
 
+      - name: Frontend production build
+        run: pnpm build
+
       - name: Rust format check
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
 
       - name: Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+        run: cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Rust clippy
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --lib
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D clippy::await_holding_lock
+
+      - name: Install Tauri WebDriver bridge
+        run: cargo install tauri-driver --version 2.0.6 --locked
+
+      - name: Tauri WebDriver E2E
+        run: xvfb-run --auto-servernum pnpm e2e:tauri
+
+      - name: Secret scan
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version=8.30.1
+          archive="gitleaks_${version}_linux_x64.tar.gz"
+          checksums="gitleaks_${version}_checksums.txt"
+          base_url="https://github.com/gitleaks/gitleaks/releases/download/v${version}"
+          curl --fail --location --silent --show-error --remote-name "${base_url}/${archive}"
+          curl --fail --location --silent --show-error --remote-name "${base_url}/${checksums}"
+          grep " ${archive}$" "$checksums" | sha256sum --check --strict
+          tar -xzf "$archive" gitleaks
+          ./gitleaks git --redact --verbose
+
+  verify-macos-audio-gate:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+
+      - name: Verify macOS audio evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AUDIO_GATE_RUN_ID: ${{ inputs.macos_audio_gate_run_id }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$AUDIO_GATE_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::macos_audio_gate_run_id must be a numeric GitHub Actions run ID."
+            exit 1
+          fi
+
+          release_commit="$(git rev-parse HEAD)"
+          run_json="$(gh run view "$AUDIO_GATE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json conclusion,event,workflowName,url)"
+          conclusion="$(jq -r .conclusion <<< "$run_json")"
+          workflow_name="$(jq -r .workflowName <<< "$run_json")"
+          event="$(jq -r .event <<< "$run_json")"
+          run_url="$(jq -r .url <<< "$run_json")"
+
+          if [[ "$workflow_name" != "macOS Audio Release Gate" || "$event" != "workflow_dispatch" || "$conclusion" != "success" ]]; then
+            echo "::error::Run $AUDIO_GATE_RUN_ID is not a successful manual macOS Audio Release Gate run: $run_url"
+            exit 1
+          fi
+
+          gh run download "$AUDIO_GATE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name macos-audio-gate-evidence \
+            --dir audio-gate-evidence
+          jq -e \
+            --arg commit "$release_commit" \
+            '.commit == $commit and .soak_seconds >= 1800 and .smoke_passed == true and .soak_passed == true' \
+            audio-gate-evidence/evidence.json >/dev/null
+
+          echo "Verified macOS audio gate $run_url for commit $release_commit"
 
   create-release:
-    needs: quality-gates
+    needs:
+      - quality-gates
+      - verify-macos-audio-gate
     runs-on: ubuntu-24.04
     outputs:
       release_id: ${{ steps.release.outputs.release_id }}
@@ -127,7 +206,7 @@ jobs:
         shell: bash
         run: node scripts/prepare-release-notes.mjs "${{ steps.resolve.outputs.release_tag }}" > release-notes.md
 
-      - name: Create or update GitHub release
+      - name: Create or update draft GitHub release
         id: release
         shell: bash
         env:
@@ -141,21 +220,24 @@ jobs:
           title="VoicetextAI v${version}"
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)"
+            if [[ "$is_draft" != "true" ]]; then
+              echo "::error::Release $RELEASE_TAG is already public; refusing to replace it during a release build."
+              exit 1
+            fi
             gh release edit "$RELEASE_TAG" \
               --title "$title" \
               --notes-file release-notes.md \
-              --draft=false \
+              --draft=true \
               --prerelease=false \
-              --latest \
               --verify-tag \
               --target "$RELEASE_COMMIT"
           else
             gh release create "$RELEASE_TAG" \
               --title "$title" \
               --notes-file release-notes.md \
-              --draft=false \
+              --draft=true \
               --prerelease=false \
-              --latest \
               --verify-tag \
               --target "$RELEASE_COMMIT"
           fi
@@ -245,25 +327,33 @@ jobs:
 
       - name: Import Apple certificate
         if: matrix.platform == 'macos-latest'
+        shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         run: |
-          CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          set -euo pipefail
 
-          echo -n "$APPLE_CERTIFICATE" | base64 --decode > $CERTIFICATE_PATH
+          CERTIFICATE_PATH="$RUNNER_TEMP/certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
 
-          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode > "$CERTIFICATE_PATH"
 
-          security import $CERTIFICATE_PATH -P "$APPLE_CERTIFICATE_PASSWORD" \
-            -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security import "$CERTIFICATE_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
           security set-key-partition-list -S apple-tool:,apple: \
-            -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
-          security list-keychain -d user -s $KEYCHAIN_PATH $(security list-keychains -d user | sed s/\"//g)
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          existing_keychains=()
+          while IFS= read -r keychain; do
+            existing_keychains+=("${keychain//\"/}")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "${existing_keychains[@]}"
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -299,15 +389,15 @@ jobs:
       RELEASE_TAG: ${{ needs.create-release.outputs.release_tag }}
 
     steps:
-      - name: Verify GitHub release assets and updater manifest
+      - name: Verify draft release assets and updater manifest
         shell: bash
         run: |
           set -euo pipefail
 
           version="${RELEASE_TAG#v}"
-          latest_tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
-          if [[ "$latest_tag" != "$RELEASE_TAG" ]]; then
-            echo "::error::Latest GitHub release is $latest_tag, expected $RELEASE_TAG."
+          is_draft="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+          if [[ "$is_draft" != "true" ]]; then
+            echo "::error::Release $RELEASE_TAG became public before asset verification completed."
             exit 1
           fi
 
@@ -335,9 +425,10 @@ jobs:
             fi
           done
 
-          curl --fail --location --silent --show-error \
-            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/latest.json" \
-            --output latest.json
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern latest.json \
+            --clobber
 
           jq -e --arg version "$version" '.version == $version' latest.json >/dev/null
 
@@ -358,3 +449,31 @@ jobs:
               '.platforms[$platform].url and .platforms[$platform].signature' \
               latest.json >/dev/null
           done
+
+  publish-release:
+    needs:
+      - create-release
+      - verify-release
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ needs.create-release.outputs.release_tag }}
+
+    steps:
+      - name: Publish verified release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gh release edit "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false \
+            --prerelease=false \
+            --latest \
+            --verify-tag
+
+          latest_tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+          if [[ "$latest_tag" != "$RELEASE_TAG" ]]; then
+            echo "::error::Latest GitHub release is $latest_tag, expected $RELEASE_TAG."
+            exit 1
+          fi
