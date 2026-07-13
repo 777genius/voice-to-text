@@ -8,23 +8,29 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use app_lib::application::{
+    IncomingTranslationCallbacks, IncomingTranslationConfig, IncomingTranslationFacade,
     LiveTranslationCallbacks, LiveTranslationConfig, LiveTranslationService,
 };
 use app_lib::domain::{
     AudioCapture, AudioCaptureTarget, AudioChunk, AudioChunkCallback, AudioConfig, AudioError,
     AudioResult, PlatformAudioFactory, PlatformAudioSetupState, PlatformAudioSetupStatus,
     RealtimeInputNoiseReduction, RealtimeTranslationConfig, RealtimeTranslationEvent,
-    RecordingStatus, TranslationAudioOutput, TranslationAudioOutputResult,
+    RecordingStatus, SttConfig, TranslationAudioOutput, TranslationAudioOutputResult,
 };
-use app_lib::infrastructure::audio::{AudioOutputConfig, CpalAudioOutput};
+use app_lib::infrastructure::audio::{
+    AudioOutputConfig, CpalAudioOutput, DefaultLocalPlaybackOutputFactory,
+    DefaultPlatformAudioFactory, DefaultSpokenTranslationCapability,
+};
 use app_lib::infrastructure::openai::{
     OpenAIRealtimeTranslationClient, OpenAIRealtimeTranslationFactory,
 };
 use async_trait::async_trait;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
-use paid_e2e_support::{load_paid_e2e_api_key, transcribe_pcm16, wav_pcm16};
+use paid_e2e_support::{
+    load_paid_e2e_api_key, transcribe_pcm16, wav_pcm16, ObservedLocalPlaybackFactory, PlaybackProbe,
+};
 
 static NEXT_TEMP_AUDIO_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -65,18 +71,12 @@ impl Drop for TempGeneratedFile {
     }
 }
 
-fn generate_russian_pcm24() -> Vec<i16> {
-    let aiff_path = TempGeneratedFile::new("voicetext_openai_ru_source", "aiff");
-    let raw_path = TempGeneratedFile::new("voicetext_openai_ru_source", "s16le");
+fn generate_russian_pcm24_phrase(prefix: &str, text: &str) -> Vec<i16> {
+    let aiff_path = TempGeneratedFile::new(prefix, "aiff");
+    let raw_path = TempGeneratedFile::new(prefix, "s16le");
 
     let say_status = Command::new("say")
-        .args([
-            "-v",
-            "Milena",
-            "-o",
-            aiff_path.path_str(),
-            "Привет, меня зовут Алексей. Я проверяю перевод голоса на английский язык.",
-        ])
+        .args(["-v", "Milena", "-o", aiff_path.path_str(), text])
         .status()
         .expect("must run macOS say");
     assert!(say_status.success(), "macOS say failed");
@@ -108,6 +108,38 @@ fn generate_russian_pcm24() -> Vec<i16> {
         .collect();
     samples.extend(std::iter::repeat(0).take(36_000));
     samples
+}
+
+fn generate_russian_pcm24() -> Vec<i16> {
+    generate_russian_pcm24_phrase(
+        "voicetext_openai_ru_source",
+        "Привет, меня зовут Алексей. Я проверяю перевод голоса на английский язык.",
+    )
+}
+
+fn generate_english_system_fixture(prefix: &str, text: &str) -> TempGeneratedFile {
+    let fixture = TempGeneratedFile::new(prefix, "aiff");
+    let say_status = Command::new("say")
+        .args(["-v", "Samantha", "-o", fixture.path_str(), text])
+        .status()
+        .expect("must generate concurrent incoming speech");
+    assert!(say_status.success(), "macOS say failed for duplex fixture");
+    fixture
+}
+
+async fn play_system_fixture(path: &Path, gain: f32) {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let gain = gain.to_string();
+        let status = Command::new("afplay")
+            .args(["--volume", &gain])
+            .arg(path)
+            .status()
+            .expect("must play concurrent incoming fixture");
+        assert!(status.success(), "afplay failed for duplex fixture");
+    })
+    .await
+    .expect("duplex fixture playback worker must not panic");
 }
 
 fn find_blackhole_input() -> cpal::Device {
@@ -283,6 +315,80 @@ fn audible_pcm16_window(samples: &[i16], sample_rate: u32, channels: u16) -> &[i
     &samples[start..end]
 }
 
+fn audible_pcm16_segments(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<&[i16]> {
+    const AUDIBLE_THRESHOLD: i16 = 256;
+    const SPLIT_SILENCE_MS: usize = 800;
+    const PADDING_MS: usize = 500;
+    const MIN_SPEECH_MS: usize = 100;
+
+    let channels = usize::from(channels.max(1));
+    let total_frames = samples.len() / channels;
+    let sample_rate = sample_rate as usize;
+    let split_silence_frames = sample_rate.saturating_mul(SPLIT_SILENCE_MS) / 1_000;
+    let padding_frames = sample_rate.saturating_mul(PADDING_MS) / 1_000;
+    let min_speech_frames = (sample_rate.saturating_mul(MIN_SPEECH_MS) / 1_000).max(2);
+    let mut ranges = Vec::<(usize, usize)>::new();
+    let mut speech_start = None::<usize>;
+    let mut last_audible = 0usize;
+
+    let mut finish_segment = |start: usize, last: usize| {
+        if last.saturating_sub(start).saturating_add(1) < min_speech_frames {
+            return;
+        }
+        ranges.push((
+            start.saturating_sub(padding_frames),
+            last.saturating_add(padding_frames)
+                .saturating_add(1)
+                .min(total_frames),
+        ));
+    };
+
+    for (frame_index, frame) in samples.chunks_exact(channels).enumerate() {
+        let audible = frame
+            .iter()
+            .any(|sample| sample.unsigned_abs() >= AUDIBLE_THRESHOLD as u16);
+        if audible {
+            speech_start.get_or_insert(frame_index);
+            last_audible = frame_index;
+        } else if let Some(start) = speech_start {
+            if frame_index.saturating_sub(last_audible) >= split_silence_frames {
+                finish_segment(start, last_audible);
+                speech_start = None;
+            }
+        }
+    }
+    if let Some(start) = speech_start {
+        finish_segment(start, last_audible);
+    }
+    if ranges.is_empty() {
+        return vec![samples];
+    }
+    ranges
+        .into_iter()
+        .map(|(start, end)| &samples[start * channels..end * channels])
+        .collect()
+}
+
+async fn transcribe_audible_pcm16(
+    client: &reqwest::Client,
+    api_key: &str,
+    sample_rate: u32,
+    channels: u16,
+    samples: &[i16],
+) -> Result<String, String> {
+    let segments = audible_pcm16_segments(samples, sample_rate, channels);
+    let mut transcripts = Vec::with_capacity(segments.len());
+    for segment in segments {
+        transcripts.push(
+            transcribe_pcm16(client, api_key, sample_rate, channels, segment)
+                .await?
+                .trim()
+                .to_string(),
+        );
+    }
+    Ok(transcripts.join(" "))
+}
+
 fn outgoing_artifact_root() -> PathBuf {
     if let Some(path) = std::env::var_os("OUTGOING_TRANSLATION_E2E_ARTIFACTS") {
         return PathBuf::from(path);
@@ -307,6 +413,23 @@ fn audible_window_trims_outer_silence_with_channel_aligned_padding() {
     assert_eq!(window.len() % 2, 0);
     assert_eq!(window, &samples[12..30]);
     assert_eq!(audible_pcm16_window(&[0; 8], 8, 1), &[0; 8]);
+}
+
+#[test]
+fn audible_segments_split_long_internal_silence_and_ignore_short_clicks() {
+    let mut samples = vec![0i16; 10];
+    samples.extend(vec![500i16; 10]);
+    samples.extend(vec![0i16; 10]);
+    samples.extend(vec![-500i16; 10]);
+    samples.extend(vec![0i16; 10]);
+    samples.push(700);
+    samples.extend(vec![0i16; 10]);
+
+    let segments = audible_pcm16_segments(&samples, 10, 1);
+
+    assert_eq!(segments.len(), 2);
+    assert!(segments[0].iter().any(|sample| *sample == 500));
+    assert!(segments[1].iter().any(|sample| *sample == -500));
 }
 
 fn live_audio_soak_duration() -> Duration {
@@ -381,6 +504,152 @@ struct SyntheticMicToBlackholeFactory {
     mic_started: Arc<AtomicBool>,
     mic_stopped: Arc<AtomicBool>,
     mic_finished: Arc<AtomicBool>,
+}
+
+struct ControlledPcmMicrophone {
+    receiver: Option<mpsc::UnboundedReceiver<Vec<i16>>>,
+    config: AudioConfig,
+    started: Arc<AtomicBool>,
+    stopped: Arc<AtomicBool>,
+    completed_phrases: Arc<AtomicUsize>,
+    stop_signal: Arc<Notify>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+#[async_trait]
+impl AudioCapture for ControlledPcmMicrophone {
+    async fn initialize(&mut self, config: AudioConfig) -> AudioResult<()> {
+        self.config = config;
+        Ok(())
+    }
+
+    async fn start_capture(&mut self, on_chunk: AudioChunkCallback) -> AudioResult<()> {
+        let mut receiver = self.receiver.take().ok_or_else(|| {
+            AudioError::Capture("controlled microphone cannot be started twice".into())
+        })?;
+        self.started.store(true, Ordering::SeqCst);
+        self.stopped.store(false, Ordering::SeqCst);
+
+        let config = self.config;
+        let stopped = self.stopped.clone();
+        let completed_phrases = self.completed_phrases.clone();
+        let stop_signal = self.stop_signal.clone();
+        self.task = Some(tokio::spawn(async move {
+            'capture: loop {
+                let pcm = tokio::select! {
+                    _ = stop_signal.notified() => break,
+                    pcm = receiver.recv() => match pcm {
+                        Some(pcm) => pcm,
+                        None => break,
+                    },
+                };
+                for chunk in pcm.chunks(4_800) {
+                    if stopped.load(Ordering::SeqCst) {
+                        break 'capture;
+                    }
+                    on_chunk(AudioChunk::new(
+                        chunk.to_vec(),
+                        config.sample_rate,
+                        config.channels,
+                    ));
+                    tokio::select! {
+                        _ = stop_signal.notified() => break 'capture,
+                        _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+                    }
+                }
+                completed_phrases.fetch_add(1, Ordering::SeqCst);
+            }
+        }));
+        Ok(())
+    }
+
+    async fn stop_capture(&mut self) -> AudioResult<()> {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.stop_signal.notify_one();
+        if let Some(task) = self.task.take() {
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .map_err(|_| AudioError::Capture("controlled microphone stop timed out".into()))?
+                .map_err(|error| {
+                    AudioError::Capture(format!("controlled microphone task failed: {error}"))
+                })?;
+        }
+        Ok(())
+    }
+
+    fn is_capturing(&self) -> bool {
+        self.started.load(Ordering::SeqCst) && !self.stopped.load(Ordering::SeqCst)
+    }
+
+    fn config(&self) -> AudioConfig {
+        self.config
+    }
+}
+
+struct ControlledMicToBlackholeFactory {
+    receiver: Mutex<Option<mpsc::UnboundedReceiver<Vec<i16>>>>,
+    requested_target: Arc<Mutex<Option<AudioCaptureTarget>>>,
+    mic_started: Arc<AtomicBool>,
+    mic_stopped: Arc<AtomicBool>,
+    completed_phrases: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl PlatformAudioFactory for ControlledMicToBlackholeFactory {
+    fn create_microphone_capture(
+        &self,
+        _device_name: Option<String>,
+        target: AudioCaptureTarget,
+    ) -> AudioResult<Box<dyn AudioCapture>> {
+        *self.requested_target.lock().unwrap() = Some(target);
+        let receiver =
+            self.receiver.lock().unwrap().take().ok_or_else(|| {
+                AudioError::Capture("controlled microphone already created".into())
+            })?;
+        Ok(Box::new(ControlledPcmMicrophone {
+            receiver: Some(receiver),
+            config: AudioConfig::default(),
+            started: self.mic_started.clone(),
+            stopped: self.mic_stopped.clone(),
+            completed_phrases: self.completed_phrases.clone(),
+            stop_signal: Arc::new(Notify::new()),
+            task: None,
+        }))
+    }
+
+    fn create_translation_output(
+        &self,
+    ) -> TranslationAudioOutputResult<Box<dyn TranslationAudioOutput>> {
+        Ok(Box::new(CpalAudioOutput::new()))
+    }
+
+    fn create_system_loopback_capture(
+        &self,
+        _target: AudioCaptureTarget,
+    ) -> AudioResult<Box<dyn AudioCapture>> {
+        Err(AudioError::Configuration(
+            "not used by controlled duplex e2e".to_string(),
+        ))
+    }
+
+    async fn setup_status(&self) -> PlatformAudioSetupStatus {
+        PlatformAudioSetupStatus {
+            platform: std::env::consts::OS.to_string(),
+            status: PlatformAudioSetupState::Ready,
+            outgoing_supported: true,
+            incoming_supported: true,
+            virtual_microphone_name: "BlackHole 2ch".to_string(),
+            message: "controlled mic to platform virtual output".to_string(),
+        }
+    }
+
+    fn is_virtual_microphone_input(&self, _name: &str) -> bool {
+        false
+    }
+
+    fn microphone_preflight(&self) -> Result<(), AudioError> {
+        Ok(())
+    }
 }
 
 struct LoopingPcmMicrophone {
@@ -700,7 +969,7 @@ async fn live_translation_service_synthetic_voice_reaches_blackhole() {
         .collect();
     let audible_pcm16 =
         audible_pcm16_window(&captured_pcm16, capture_sample_rate, capture_channels);
-    let virtual_mic_transcript = transcribe_pcm16(
+    let virtual_mic_transcript = transcribe_audible_pcm16(
         &reqwest::Client::new(),
         &api_key,
         capture_sample_rate,
@@ -778,6 +1047,431 @@ async fn live_translation_service_synthetic_voice_reaches_blackhole() {
     assert!(
         measured_rms > 0.005 && peak > 0.03,
         "service translated audio did not reach BlackHole input: rms={measured_rms:.6}, peak={peak:.6}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "paid/manual: requires macOS system audio permission, BlackHole 2ch, VOICETEXT_RUN_PAID_E2E=1, and a dedicated OPENAI_E2E_API_KEY"]
+async fn simultaneous_incoming_and_outgoing_routes_translate_and_stop_independently() {
+    let api_key = load_paid_e2e_api_key();
+    let first_incoming_fixture = generate_english_system_fixture(
+        "voicetext_duplex_en_initial",
+        "There are forty two release checks. The final review is Friday morning.",
+    );
+    let incoming_after_outgoing_stop_fixture = generate_english_system_fixture(
+        "voicetext_duplex_en_after_outgoing_stop",
+        "The deployment checklist contains seventeen verification tasks. The backup review happens on Monday afternoon.",
+    );
+    let first_outgoing_pcm = generate_russian_pcm24();
+    let outgoing_after_incoming_stop_pcm = generate_russian_pcm24_phrase(
+        "voicetext_duplex_ru_after_incoming_stop",
+        "После остановки входящего перевода канал продолжает работать. Код Феникс семь.",
+    );
+
+    let blackhole_capture = Arc::new(Mutex::new(Vec::<f32>::new()));
+    let (input_stream, capture_sample_rate, capture_channels) =
+        start_blackhole_capture(blackhole_capture.clone());
+    input_stream
+        .play()
+        .expect("must start duplex BlackHole capture");
+
+    let playback_probe = Arc::new(PlaybackProbe::default());
+    let incoming = IncomingTranslationFacade::new_spoken_with_factories(
+        Arc::new(DefaultPlatformAudioFactory::new()),
+        Arc::new(ObservedLocalPlaybackFactory::new(
+            Arc::new(DefaultLocalPlaybackOutputFactory::new()),
+            playback_probe.clone(),
+        )),
+        Arc::new(OpenAIRealtimeTranslationFactory),
+        Arc::new(DefaultSpokenTranslationCapability::new()),
+    );
+    let incoming_text = Arc::new(Mutex::new(String::new()));
+    let incoming_errors = Arc::new(Mutex::new(Vec::<String>::new()));
+    let incoming_callbacks = IncomingTranslationCallbacks {
+        on_source_final: Arc::new(|_| {}),
+        on_translation_delta: {
+            let incoming_text = incoming_text.clone();
+            Arc::new(move |text| incoming_text.lock().unwrap().push_str(&text))
+        },
+        on_error: {
+            let incoming_errors = incoming_errors.clone();
+            Arc::new(move |error| incoming_errors.lock().unwrap().push(error.to_string()))
+        },
+        on_status: Arc::new(|_| {}),
+    };
+    let incoming_config = |session_id| {
+        let mut config =
+            IncomingTranslationConfig::new_with_defaults(SttConfig::default(), session_id);
+        config.openai_api_key = api_key.clone();
+        config.target_language = "ru".into();
+        config.playback_gain = 0.8;
+        config
+    };
+
+    let requested_target = Arc::new(Mutex::new(None));
+    let mic_started = Arc::new(AtomicBool::new(false));
+    let mic_stopped = Arc::new(AtomicBool::new(false));
+    let completed_phrases = Arc::new(AtomicUsize::new(0));
+    let (mic_tx, mic_rx) = mpsc::unbounded_channel();
+    let outgoing = LiveTranslationService::new_with_factories(
+        Arc::new(ControlledMicToBlackholeFactory {
+            receiver: Mutex::new(Some(mic_rx)),
+            requested_target: requested_target.clone(),
+            mic_started: mic_started.clone(),
+            mic_stopped: mic_stopped.clone(),
+            completed_phrases: completed_phrases.clone(),
+        }),
+        Arc::new(OpenAIRealtimeTranslationFactory),
+    );
+    let outgoing_text = Arc::new(Mutex::new(String::new()));
+    let outgoing_errors = Arc::new(Mutex::new(Vec::<String>::new()));
+    let outgoing_callbacks = LiveTranslationCallbacks {
+        on_transcript_delta: {
+            let outgoing_text = outgoing_text.clone();
+            Arc::new(move |text| outgoing_text.lock().unwrap().push_str(&text))
+        },
+        on_audio_spectrum: Arc::new(|_| {}),
+        on_error: {
+            let outgoing_errors = outgoing_errors.clone();
+            Arc::new(move |error| outgoing_errors.lock().unwrap().push(error.to_string()))
+        },
+        on_status: Arc::new(|_| {}),
+    };
+    let mut outgoing_config = LiveTranslationConfig::new_with_defaults(32_002);
+    outgoing_config.openai_api_key = api_key.clone();
+    outgoing_config.target_language = "en".into();
+    outgoing_config.microphone_sensitivity = 100;
+
+    incoming
+        .start(incoming_config(32_001), incoming_callbacks.clone())
+        .await
+        .expect("duplex incoming translation must start");
+    outgoing
+        .start_translation(outgoing_config, outgoing_callbacks)
+        .await
+        .expect("duplex outgoing translation must start");
+    assert_eq!(incoming.get_status().await, RecordingStatus::Recording);
+    assert_eq!(outgoing.get_status().await, RecordingStatus::Recording);
+    assert!(mic_started.load(Ordering::SeqCst));
+
+    mic_tx
+        .send(first_outgoing_pcm)
+        .expect("must queue first controlled microphone phrase");
+    tokio::time::sleep(Duration::from_millis(750)).await;
+    play_system_fixture(first_incoming_fixture.path(), 0.8).await;
+    let initial_evidence = tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let translated = incoming_text.lock().unwrap().to_lowercase();
+            let has_count = translated.contains("42") || translated.contains("сорок дв");
+            let has_checks = translated.contains("провер") || translated.contains("чек");
+            let has_friday = translated.contains("пятниц");
+            if has_count
+                && has_checks
+                && has_friday
+                && playback_probe.audible_accepted_samples() >= 12_000
+                && blackhole_capture
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|sample| sample.abs() >= 0.008)
+                    .count()
+                    >= 4_000
+                && completed_phrases.load(Ordering::SeqCst) >= 1
+            {
+                return Ok::<(), String>(());
+            }
+            let current_incoming_errors = incoming_errors.lock().unwrap().clone();
+            let current_outgoing_errors = outgoing_errors.lock().unwrap().clone();
+            if !current_incoming_errors.is_empty() || !current_outgoing_errors.is_empty() {
+                return Err(format!(
+                    "duplex translation failed: incoming={current_incoming_errors:?}, outgoing={current_outgoing_errors:?}"
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    let initial_failure = match initial_evidence {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(error),
+        Err(_) => Some(format!(
+            "initial duplex evidence timed out: incoming={:?}, outgoing={:?}, accepted_audible={}, blackhole_audible={}, completed_phrases={}, incoming_errors={:?}, outgoing_errors={:?}",
+            incoming_text.lock().unwrap().clone(),
+            outgoing_text.lock().unwrap().clone(),
+            playback_probe.audible_accepted_samples(),
+            blackhole_capture
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|sample| sample.abs() >= 0.008)
+                .count(),
+            completed_phrases.load(Ordering::SeqCst),
+            incoming_errors.lock().unwrap().clone(),
+            outgoing_errors.lock().unwrap().clone()
+        )),
+    };
+    if let Some(error) = initial_failure {
+        let _ = incoming.stop().await;
+        let _ = outgoing.stop_translation().await;
+        drop(input_stream);
+        panic!("{error}");
+    }
+
+    incoming
+        .stop()
+        .await
+        .expect("first duplex incoming session must stop");
+    assert_eq!(incoming.get_status().await, RecordingStatus::Idle);
+    assert_eq!(outgoing.get_status().await, RecordingStatus::Recording);
+    let first_incoming_dropped_batches = playback_probe.dropped_batches();
+    let first_incoming_dropped_audio = playback_probe.dropped_audio_duration();
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let outgoing_text_boundary = outgoing_text.lock().unwrap().len();
+    let blackhole_audible_boundary = blackhole_capture
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|sample| sample.abs() >= 0.008)
+        .count();
+    mic_tx
+        .send(outgoing_after_incoming_stop_pcm)
+        .expect("outgoing mic must accept fresh speech after incoming stops");
+    let outgoing_continued = tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let blackhole_audible = blackhole_capture
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|sample| sample.abs() >= 0.008)
+                .count();
+            if blackhole_audible >= blackhole_audible_boundary.saturating_add(4_000)
+                && completed_phrases.load(Ordering::SeqCst) >= 2
+            {
+                return Ok::<(), String>(());
+            }
+            let errors = outgoing_errors.lock().unwrap().clone();
+            if !errors.is_empty() {
+                return Err(format!("outgoing failed after incoming stop: {errors:?}"));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    let outgoing_failure = match outgoing_continued {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(error),
+        Err(_) => Some(format!(
+            "outgoing produced no fresh evidence after incoming stop: fresh_text={:?}, blackhole_audible_delta={}, completed_phrases={}, errors={:?}",
+            outgoing_text
+                .lock()
+                .unwrap()
+                .get(outgoing_text_boundary..)
+                .unwrap_or_default()
+                .to_string(),
+            blackhole_capture
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|sample| sample.abs() >= 0.008)
+                .count()
+                .saturating_sub(blackhole_audible_boundary),
+            completed_phrases.load(Ordering::SeqCst),
+            outgoing_errors.lock().unwrap().clone()
+        )),
+    };
+    if let Some(error) = outgoing_failure {
+        let _ = outgoing.stop_translation().await;
+        drop(input_stream);
+        panic!("{error}");
+    }
+
+    incoming
+        .start(incoming_config(32_003), incoming_callbacks)
+        .await
+        .expect("incoming must restart while outgoing remains active");
+    assert_eq!(incoming.get_status().await, RecordingStatus::Recording);
+    assert_eq!(outgoing.get_status().await, RecordingStatus::Recording);
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    outgoing
+        .stop_translation()
+        .await
+        .expect("duplex outgoing translation must stop");
+    assert_eq!(outgoing.get_status().await, RecordingStatus::Idle);
+    assert_eq!(incoming.get_status().await, RecordingStatus::Recording);
+    assert!(mic_stopped.load(Ordering::SeqCst));
+
+    let incoming_text_boundary = incoming_text.lock().unwrap().len();
+    let incoming_audio_boundary = playback_probe.audible_accepted_samples();
+    tokio::time::sleep(Duration::from_millis(750)).await;
+    play_system_fixture(incoming_after_outgoing_stop_fixture.path(), 0.8).await;
+    let incoming_continued = tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let incoming_guard = incoming_text.lock().unwrap();
+            let fresh_incoming = incoming_guard
+                .get(incoming_text_boundary..)
+                .unwrap_or_default()
+                .to_lowercase();
+            drop(incoming_guard);
+            let has_count = fresh_incoming.contains("17") || fresh_incoming.contains("семнадцать");
+            let has_checks = fresh_incoming.contains("провер") || fresh_incoming.contains("задач");
+            let has_monday = fresh_incoming.contains("понедель");
+            if has_count
+                && has_checks
+                && has_monday
+                && playback_probe.audible_accepted_samples()
+                    >= incoming_audio_boundary.saturating_add(12_000)
+            {
+                return Ok::<(), String>(());
+            }
+            let errors = incoming_errors.lock().unwrap().clone();
+            if !errors.is_empty() {
+                return Err(format!("incoming failed after outgoing stop: {errors:?}"));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    let incoming_failure = match incoming_continued {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(error),
+        Err(_) => Some(format!(
+            "incoming produced no fresh evidence after outgoing stop: fresh_text={:?}, accepted_audible_delta={}, errors={:?}",
+            incoming_text
+                .lock()
+                .unwrap()
+                .get(incoming_text_boundary..)
+                .unwrap_or_default()
+                .to_string(),
+            playback_probe
+                .audible_accepted_samples()
+                .saturating_sub(incoming_audio_boundary),
+            incoming_errors.lock().unwrap().clone()
+        )),
+    };
+    if let Some(error) = incoming_failure {
+        let _ = incoming.stop().await;
+        drop(input_stream);
+        panic!("{error}");
+    }
+
+    incoming
+        .stop()
+        .await
+        .expect("restarted duplex incoming session must stop");
+    assert_eq!(incoming.get_status().await, RecordingStatus::Idle);
+    assert_eq!(playback_probe.opened(), 2);
+    assert_eq!(playback_probe.closed(), 2);
+    assert!(playback_probe.accepted_samples() >= playback_probe.audible_accepted_samples());
+    assert!(playback_probe.audible_accepted_samples() >= 24_000);
+    let second_incoming_dropped_batches = playback_probe
+        .dropped_batches()
+        .saturating_sub(first_incoming_dropped_batches);
+    let second_incoming_dropped_audio = playback_probe
+        .dropped_audio_duration()
+        .saturating_sub(first_incoming_dropped_audio);
+    println!(
+        "duplex_playback_drops=first:{} batches/{}ms second:{} batches/{}ms",
+        first_incoming_dropped_batches,
+        first_incoming_dropped_audio.as_millis(),
+        second_incoming_dropped_batches,
+        second_incoming_dropped_audio.as_millis()
+    );
+    assert!(
+        first_incoming_dropped_batches < 8 && second_incoming_dropped_batches < 8,
+        "incoming playback reached overload drop threshold: first={first_incoming_dropped_batches}, second={second_incoming_dropped_batches}"
+    );
+    assert!(
+        first_incoming_dropped_audio <= Duration::from_secs(1)
+            && second_incoming_dropped_audio <= Duration::from_secs(1),
+        "incoming playback dropped too much audio: first={}ms, second={}ms",
+        first_incoming_dropped_audio.as_millis(),
+        second_incoming_dropped_audio.as_millis()
+    );
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drop(input_stream);
+    let captured_samples = blackhole_capture.lock().unwrap().clone();
+    let captured_pcm16: Vec<i16> = captured_samples
+        .iter()
+        .map(|sample| (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16)
+        .collect();
+    let audible_pcm16 =
+        audible_pcm16_window(&captured_pcm16, capture_sample_rate, capture_channels);
+    let virtual_mic_transcript = transcribe_audible_pcm16(
+        &reqwest::Client::new(),
+        &api_key,
+        capture_sample_rate,
+        capture_channels,
+        audible_pcm16,
+    )
+    .await
+    .expect("duplex virtual microphone audio must be independently transcribable");
+
+    let incoming_transcript = incoming_text.lock().unwrap().clone();
+    let outgoing_transcript = outgoing_text.lock().unwrap().clone();
+    let artifact_root = outgoing_artifact_root();
+    fs::create_dir_all(&artifact_root).expect("must create duplex artifact directory");
+    fs::write(
+        artifact_root.join("duplex-virtual-mic.wav"),
+        wav_pcm16(capture_sample_rate, capture_channels, audible_pcm16),
+    )
+    .expect("must write duplex virtual microphone artifact");
+    fs::write(
+        artifact_root.join("duplex-incoming-transcript.txt"),
+        &incoming_transcript,
+    )
+    .expect("must write duplex incoming transcript");
+    fs::write(
+        artifact_root.join("duplex-outgoing-transcript.txt"),
+        &outgoing_transcript,
+    )
+    .expect("must write duplex outgoing transcript");
+    fs::write(
+        artifact_root.join("duplex-virtual-mic-transcript.txt"),
+        &virtual_mic_transcript,
+    )
+    .expect("must write duplex virtual microphone transcript");
+    println!("duplex_incoming_text={incoming_transcript}");
+    println!("duplex_outgoing_text={outgoing_transcript}");
+    println!("duplex_virtual_mic_text={virtual_mic_transcript}");
+    println!("duplex_artifacts={}", artifact_root.display());
+
+    let outgoing_normalized = outgoing_transcript.to_lowercase();
+    let virtual_mic_normalized = virtual_mic_transcript.to_lowercase();
+    let incoming_normalized = incoming_transcript.to_lowercase();
+    assert!(
+        (incoming_normalized.contains("42") || incoming_normalized.contains("сорок дв"))
+            && (incoming_normalized.contains("провер") || incoming_normalized.contains("чек"))
+            && incoming_normalized.contains("пятниц")
+            && (incoming_normalized.contains("17") || incoming_normalized.contains("семнадцать"))
+            && incoming_normalized.contains("понедель"),
+        "duplex incoming text lost meaning: {incoming_transcript}"
+    );
+    assert!(
+        outgoing_normalized.contains("alex")
+            && outgoing_normalized.contains("english")
+            && (outgoing_normalized.contains("voice")
+                || outgoing_normalized.contains("translation"))
+            && outgoing_normalized.contains("phoenix")
+            && (outgoing_normalized.contains('7') || outgoing_normalized.contains("seven")),
+        "duplex outgoing text lost meaning: {outgoing_transcript}"
+    );
+    assert!(
+        virtual_mic_normalized.contains("alex")
+            && virtual_mic_normalized.contains("english")
+            && (virtual_mic_normalized.contains("voice")
+                || virtual_mic_normalized.contains("translation"))
+            && virtual_mic_normalized.contains("phoenix")
+            && (virtual_mic_normalized.contains('7') || virtual_mic_normalized.contains("seven")),
+        "duplex virtual microphone lost meaning: {virtual_mic_transcript}"
+    );
+    assert!(
+        incoming_errors.lock().unwrap().is_empty() && outgoing_errors.lock().unwrap().is_empty(),
+        "duplex errors: incoming={:?}, outgoing={:?}",
+        incoming_errors.lock().unwrap(),
+        outgoing_errors.lock().unwrap()
     );
 }
 
@@ -943,7 +1637,8 @@ async fn openai_translation_audio_is_written_to_blackhole() {
 
     let mut output = CpalAudioOutput::new();
     let output_config = AudioOutputConfig {
-        max_buffered_frames: 1_000_000,
+        max_buffered_duration: Duration::from_secs(20),
+        drain_max_buffered_duration: Duration::from_secs(20),
         ..AudioOutputConfig::openai_translation()
     };
     output

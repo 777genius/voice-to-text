@@ -1,7 +1,159 @@
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use app_lib::domain::{
+    AudioEnqueueOutcome, LocalPlaybackOutputFactory, LocalPlaybackRoute, TranslationAudioOutput,
+    TranslationAudioOutputConfig, TranslationAudioOutputResult,
+};
+use async_trait::async_trait;
 use reqwest::header::CONTENT_TYPE;
 
 const OPENAI_TRANSCRIPTIONS_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
 const OPENAI_TRANSCRIPTION_MODEL: &str = "gpt-4o-transcribe";
+
+#[derive(Default)]
+#[allow(dead_code)]
+pub struct PlaybackProbe {
+    opened: AtomicUsize,
+    closed: AtomicUsize,
+    accepted_samples: AtomicUsize,
+    audible_accepted_samples: AtomicUsize,
+    dropped_batches: AtomicUsize,
+    dropped_audio_micros: AtomicU64,
+}
+
+#[allow(dead_code)]
+impl PlaybackProbe {
+    pub fn opened(&self) -> usize {
+        self.opened.load(Ordering::SeqCst)
+    }
+
+    pub fn closed(&self) -> usize {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    pub fn accepted_samples(&self) -> usize {
+        self.accepted_samples.load(Ordering::Relaxed)
+    }
+
+    pub fn audible_accepted_samples(&self) -> usize {
+        self.audible_accepted_samples.load(Ordering::Relaxed)
+    }
+
+    pub fn dropped_batches(&self) -> usize {
+        self.dropped_batches.load(Ordering::Relaxed)
+    }
+
+    pub fn dropped_audio_duration(&self) -> Duration {
+        Duration::from_micros(self.dropped_audio_micros.load(Ordering::Relaxed))
+    }
+}
+
+#[allow(dead_code)]
+pub struct ObservedLocalPlaybackFactory {
+    inner: Arc<dyn LocalPlaybackOutputFactory>,
+    probe: Arc<PlaybackProbe>,
+}
+
+#[allow(dead_code)]
+impl ObservedLocalPlaybackFactory {
+    pub fn new(inner: Arc<dyn LocalPlaybackOutputFactory>, probe: Arc<PlaybackProbe>) -> Self {
+        Self { inner, probe }
+    }
+}
+
+impl LocalPlaybackOutputFactory for ObservedLocalPlaybackFactory {
+    fn create_local_playback_output(
+        &self,
+        route: LocalPlaybackRoute,
+    ) -> TranslationAudioOutputResult<Box<dyn TranslationAudioOutput>> {
+        Ok(Box::new(ObservedLocalPlaybackOutput {
+            inner: self.inner.create_local_playback_output(route)?,
+            probe: self.probe.clone(),
+        }))
+    }
+}
+
+#[allow(dead_code)]
+struct ObservedLocalPlaybackOutput {
+    inner: Box<dyn TranslationAudioOutput>,
+    probe: Arc<PlaybackProbe>,
+}
+
+#[async_trait]
+impl TranslationAudioOutput for ObservedLocalPlaybackOutput {
+    async fn open(
+        &mut self,
+        config: TranslationAudioOutputConfig,
+    ) -> TranslationAudioOutputResult<()> {
+        self.inner.open(config).await?;
+        self.probe.opened.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn enqueue_pcm16(
+        &self,
+        samples: &[i16],
+    ) -> TranslationAudioOutputResult<AudioEnqueueOutcome> {
+        let outcome = self.inner.enqueue_pcm16(samples).await?;
+        self.probe
+            .accepted_samples
+            .fetch_add(samples.len(), Ordering::Relaxed);
+        self.probe.audible_accepted_samples.fetch_add(
+            samples
+                .iter()
+                .filter(|sample| sample.unsigned_abs() > 256)
+                .count(),
+            Ordering::Relaxed,
+        );
+        match outcome {
+            AudioEnqueueOutcome::Queued { .. } => {}
+            AudioEnqueueOutcome::DroppedOldest { duration, .. } => {
+                self.probe.dropped_batches.fetch_add(1, Ordering::Relaxed);
+                self.probe.dropped_audio_micros.fetch_add(
+                    duration.as_micros().min(u64::MAX as u128) as u64,
+                    Ordering::Relaxed,
+                );
+            }
+        }
+        Ok(outcome)
+    }
+
+    async fn close(&mut self) -> TranslationAudioOutputResult<()> {
+        self.inner.close().await?;
+        self.probe.closed.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn set_gain(&mut self, gain: f32) -> TranslationAudioOutputResult<()> {
+        self.inner.set_gain(gain)
+    }
+
+    fn is_open(&self) -> bool {
+        self.inner.is_open()
+    }
+
+    fn health_check(&self) -> TranslationAudioOutputResult<()> {
+        self.inner.health_check()
+    }
+
+    fn device_name(&self) -> Option<String> {
+        self.inner.device_name()
+    }
+
+    fn begin_drain_mode(&self) {
+        self.inner.begin_drain_mode();
+    }
+
+    fn prepare_for_drain(&self) -> TranslationAudioOutputResult<Duration> {
+        self.inner.prepare_for_drain()
+    }
+
+    fn pending_playback_duration(&self) -> Duration {
+        self.inner.pending_playback_duration()
+    }
+}
 
 pub fn load_paid_e2e_api_key() -> String {
     assert_eq!(
