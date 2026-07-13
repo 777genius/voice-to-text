@@ -21,15 +21,17 @@ const DEEP_LINK_SCHEME: &str = "voicetotext-dev";
 #[cfg(not(debug_assertions))]
 const DEEP_LINK_SCHEME: &str = "voicetotext";
 
-fn handle_translation_shutdown_run_event(event: &tauri::RunEvent, shutdown: impl FnOnce()) -> bool {
+fn handle_translation_shutdown_run_event<T>(
+    event: &tauri::RunEvent,
+    shutdown: impl FnOnce() -> T,
+) -> Option<T> {
     if matches!(
         event,
         tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
     ) {
-        shutdown();
-        return true;
+        return Some(shutdown());
     }
-    false
+    None
 }
 
 fn apply_webdriver_e2e_app_config(config: &mut crate::domain::AppConfig, enabled: bool) {
@@ -823,7 +825,9 @@ pub fn run() {
                 if let Some(state) = _app.try_state::<AppState>() {
                     tauri::async_runtime::block_on(state.shutdown_translation_runtimes());
                 }
-            }) {
+            })
+            .is_some()
+            {
                 return;
             }
 
@@ -909,7 +913,7 @@ mod tests {
             calls.fetch_add(1, Ordering::SeqCst);
         });
 
-        assert!(handled);
+        assert!(handled.is_some());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

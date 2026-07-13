@@ -593,8 +593,7 @@ fn spawn_live_runtime_cleanup_monitor(
 mod tests {
     use super::*;
     use crate::application::services::{
-        abort_translation_runtimes, IncomingTranslationCallbacks, IncomingTranslationConfig,
-        IncomingTranslationFacade,
+        IncomingTranslationCallbacks, IncomingTranslationConfig, IncomingTranslationFacade,
     };
     use crate::domain::{
         AudioCapture, AudioChunk, AudioChunkCallback, LocalPlaybackOutputFactory,
@@ -602,6 +601,7 @@ mod tests {
         SpokenIncomingCapability, SpokenTranslationCapability, SttConfig,
         SystemAudioCaptureFactory, SystemAudioCaptureRequest, TranslationAudioOutput,
     };
+    use crate::presentation::state::AppState;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
@@ -1510,10 +1510,15 @@ mod tests {
             .start_translation(valid_config(302), test_callbacks())
             .await
             .unwrap();
-        let shutdown =
-            abort_translation_runtimes(Some(incoming.clone()), Some(outgoing.clone())).await;
+        let app_state = AppState::new();
+        *app_state.incoming_translation_facade.write().await = Some(incoming.clone());
+        *app_state.live_translation_service.write().await = Some(outgoing.clone());
+        let shutdown = crate::handle_translation_shutdown_run_event(&tauri::RunEvent::Exit, || {
+            app_state.shutdown_translation_runtimes()
+        })
+        .expect("Tauri Exit must schedule translation cleanup");
+        shutdown.await;
 
-        assert!(shutdown.is_ok(), "app shutdown errors: {shutdown:?}");
         assert_eq!(incoming.get_status().await, RecordingStatus::Idle);
         assert_eq!(outgoing.get_status().await, RecordingStatus::Idle);
         assert!(incoming_capture_started.load(Ordering::SeqCst));
