@@ -3,6 +3,8 @@ import { join } from 'node:path';
 import process from 'node:process';
 
 import {
+  liveAudioCargoEnvironment,
+  preflightLiveAudioCommands,
   resolvePaidE2eEnvironment,
   runLiveAudioCommand,
   sanitizedAudioTestEnvironment,
@@ -14,6 +16,7 @@ import {
 } from './helpers/liveAudioEvidenceContract.mjs';
 
 const TEST_TIMEOUT_MS = 180_000;
+const CARGO_PREFLIGHT_TIMEOUT_MS = 30 * 60 * 1000;
 const PAID_MATRIX_ARTIFACT_DIRECTORY = join(
   process.cwd(),
   'src-tauri',
@@ -369,7 +372,9 @@ if (!sameOrderedLabels(plannedLabels, REQUIRED_LIVE_AUDIO_SMOKE_LABELS)) {
 }
 
 const paidE2e = resolvePaidE2eEnvironment();
-const childBaseEnv = sanitizedAudioTestEnvironment();
+const childBaseEnv = liveAudioCargoEnvironment({
+  env: sanitizedAudioTestEnvironment(),
+});
 
 if (process.platform !== 'darwin') {
   fail('This smoke runner currently targets macOS BlackHole and ScreenCaptureKit.');
@@ -382,6 +387,14 @@ if (!paidE2e.acknowledged) {
 if (!paidE2e.apiKey) {
   fail('OPENAI_E2E_API_KEY is required; OPENAI_API_KEY and .env are intentionally ignored.');
 }
+
+preflightLiveAudioCommands({
+  tests,
+  env: childBaseEnv,
+  fail,
+  maxBuffer: 20 * 1024 * 1024,
+  timeoutMs: CARGO_PREFLIGHT_TIMEOUT_MS,
+});
 
 rmSync(PAID_MATRIX_ARTIFACT_DIRECTORY, { recursive: true, force: true });
 

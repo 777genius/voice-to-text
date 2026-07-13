@@ -3,8 +3,10 @@ import { join } from 'node:path';
 import process from 'node:process';
 
 import {
+  liveAudioCargoEnvironment,
   nativeSpokenSoakMetricViolations,
   parsePositiveIntegerEnv,
+  preflightLiveAudioCommands,
   resolvePaidE2eEnvironment,
   runLiveAudioCommand,
   sanitizedAudioTestEnvironment,
@@ -17,6 +19,7 @@ import {
 } from './helpers/liveAudioEvidenceContract.mjs';
 
 const DEFAULT_SOAK_SECONDS = 1800;
+const CARGO_PREFLIGHT_TIMEOUT_MS = 30 * 60 * 1000;
 const soakSeconds = parsePositiveIntegerEnv(
   process.env.LIVE_AUDIO_SOAK_SECONDS,
   DEFAULT_SOAK_SECONDS,
@@ -156,7 +159,9 @@ if (!sameOrderedLabels(plannedLabels, REQUIRED_LIVE_AUDIO_SOAK_LABELS)) {
 }
 
 const paidE2e = resolvePaidE2eEnvironment();
-const childBaseEnv = sanitizedAudioTestEnvironment();
+const childBaseEnv = liveAudioCargoEnvironment({
+  env: sanitizedAudioTestEnvironment(),
+});
 
 if (process.platform !== 'darwin') {
   fail('This soak runner currently targets macOS BlackHole and ScreenCaptureKit.');
@@ -176,6 +181,14 @@ if (soakSeconds < 1800) {
   }
   console.warn(`[live-audio-soak] development-only short soak enabled (${soakSeconds}s); this is not release evidence.`);
 }
+
+preflightLiveAudioCommands({
+  tests,
+  env: childBaseEnv,
+  fail,
+  maxBuffer: 24 * 1024 * 1024,
+  timeoutMs: CARGO_PREFLIGHT_TIMEOUT_MS,
+});
 
 rmSync(NATIVE_SPOKEN_METRICS_PATH, { force: true });
 rmSync(RESTART_STRESS_METRICS_PATH, { force: true });

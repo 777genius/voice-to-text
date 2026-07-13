@@ -7,6 +7,8 @@ import test from 'node:test';
 import {
   assertCommandSucceeded,
   assertExpectedTestRan,
+  liveAudioCargoEnvironment,
+  liveAudioCargoPreflightCommands,
   nativeSpokenSoakMetricViolations,
   parsePositiveIntegerEnv,
   resolvePaidE2eEnvironment,
@@ -110,6 +112,105 @@ test('sanitizedAudioTestEnvironment removes all paid credentials from native chi
   });
 
   assert.deepEqual(result, { PATH: '/test/bin' });
+});
+
+test('liveAudioCargoEnvironment isolates stable non-incremental test artifacts', () => {
+  const result = liveAudioCargoEnvironment({
+    env: { PATH: '/test/bin' },
+    root: '/repository',
+  });
+
+  assert.deepEqual(result, {
+    PATH: '/test/bin',
+    CARGO_TARGET_DIR: join(
+      '/repository',
+      'src-tauri',
+      'target',
+      'live-audio-cargo',
+    ),
+    CARGO_INCREMENTAL: '0',
+    CARGO_PROFILE_TEST_SPLIT_DEBUGINFO: 'packed',
+  });
+});
+
+test('liveAudioCargoEnvironment preserves explicit Cargo overrides', () => {
+  const result = liveAudioCargoEnvironment({
+    env: {
+      CARGO_TARGET_DIR: ' /tmp/audio-target ',
+      CARGO_INCREMENTAL: ' 1 ',
+      CARGO_PROFILE_TEST_SPLIT_DEBUGINFO: ' off ',
+    },
+    root: '/repository',
+  });
+
+  assert.equal(result.CARGO_TARGET_DIR, '/tmp/audio-target');
+  assert.equal(result.CARGO_INCREMENTAL, '1');
+  assert.equal(result.CARGO_PROFILE_TEST_SPLIT_DEBUGINFO, 'off');
+});
+
+test('liveAudioCargoPreflightCommands compiles each Cargo target once without test filters', () => {
+  const commands = liveAudioCargoPreflightCommands([
+    {
+      testName: 'module::first_case',
+      command: [
+        'cargo',
+        'test',
+        '--lib',
+        'module::first_case',
+        '--',
+        '--exact',
+      ],
+    },
+    {
+      testName: 'module::second_case',
+      command: [
+        'cargo',
+        'test',
+        '--lib',
+        'module::second_case',
+        '--',
+        '--exact',
+      ],
+    },
+    {
+      testName: 'captures_audio',
+      command: [
+        'cargo',
+        'test',
+        '--test',
+        'incoming_audio_test',
+        'captures_audio',
+        '--',
+        '--ignored',
+        '--exact',
+      ],
+    },
+  ]);
+
+  assert.deepEqual(commands, [
+    ['cargo', 'test', '--locked', '--lib', '--no-run'],
+    [
+      'cargo',
+      'test',
+      '--locked',
+      '--test',
+      'incoming_audio_test',
+      '--no-run',
+    ],
+  ]);
+});
+
+test('liveAudioCargoPreflightCommands rejects commands without the declared filter', () => {
+  assert.throws(
+    () =>
+      liveAudioCargoPreflightCommands([
+        {
+          testName: 'missing_case',
+          command: ['cargo', 'test', '--lib', 'different_case'],
+        },
+      ]),
+    /does not contain test filter/,
+  );
 });
 
 test('parsePositiveIntegerEnv accepts only complete positive integer strings', () => {

@@ -52,6 +52,55 @@ export function sanitizedAudioTestEnvironment({ env = process.env } = {}) {
   return sanitized;
 }
 
+export function liveAudioCargoEnvironment({ env = process.env, root = process.cwd() } = {}) {
+  const targetDirectory = env.CARGO_TARGET_DIR?.trim();
+  const incremental = env.CARGO_INCREMENTAL?.trim();
+  const splitDebuginfo = env.CARGO_PROFILE_TEST_SPLIT_DEBUGINFO?.trim();
+
+  return {
+    ...env,
+    CARGO_TARGET_DIR:
+      targetDirectory || join(root, 'src-tauri', 'target', 'live-audio-cargo'),
+    CARGO_INCREMENTAL: incremental || '0',
+    CARGO_PROFILE_TEST_SPLIT_DEBUGINFO: splitDebuginfo || 'packed',
+  };
+}
+
+export function liveAudioCargoPreflightCommands(tests) {
+  const uniqueCommands = new Map();
+
+  for (const { command, testName } of tests) {
+    if (command[0] !== 'cargo' || command[1] !== 'test') {
+      throw new Error(`unsupported live audio test command: ${command.join(' ')}`);
+    }
+
+    const harnessSeparator = command.indexOf('--');
+    const cargoArguments = command.slice(
+      2,
+      harnessSeparator === -1 ? command.length : harnessSeparator,
+    );
+    const testFilterIndex = cargoArguments.indexOf(testName);
+    if (testFilterIndex === -1) {
+      throw new Error(`cargo command does not contain test filter: ${testName}`);
+    }
+    cargoArguments.splice(testFilterIndex, 1);
+
+    const preflightArguments = cargoArguments.filter(
+      (argument) => argument !== '--no-run' && argument !== '--locked',
+    );
+    const preflightCommand = [
+      'cargo',
+      'test',
+      '--locked',
+      ...preflightArguments,
+      '--no-run',
+    ];
+    uniqueCommands.set(preflightCommand.join('\0'), preflightCommand);
+  }
+
+  return [...uniqueCommands.values()];
+}
+
 export function parsePositiveIntegerEnv(value, fallback) {
   const raw = String(value ?? '').trim();
   if (!/^\d+$/.test(raw)) {
@@ -194,4 +243,39 @@ export function runLiveAudioCommand({
 
   assertCommandSucceeded(label, result, { timeoutMs, fail });
   assertExpectedTestRan(label, testName, `${result.stdout ?? ''}\n${result.stderr ?? ''}`, fail);
+}
+
+export function preflightLiveAudioCommands({
+  tests,
+  env,
+  fail,
+  maxBuffer,
+  timeoutMs,
+}) {
+  let commands;
+  try {
+    commands = liveAudioCargoPreflightCommands(tests);
+  } catch (error) {
+    fail(`cannot prepare Cargo preflight: ${error.message}`);
+    return;
+  }
+
+  for (const command of commands) {
+    const target = command.slice(2, -1).join(' ');
+    console.log(`\n[live-audio-preflight] compiling ${target}`);
+    const result = spawnSync(command[0], command.slice(1), {
+      cwd: 'src-tauri',
+      detached: process.platform !== 'win32',
+      env,
+      encoding: 'utf8',
+      maxBuffer,
+      stdio: 'pipe',
+      timeout: timeoutMs,
+    });
+
+    if (result.stdout) process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+
+    assertCommandSucceeded(`Cargo preflight (${target})`, result, { timeoutMs, fail });
+  }
 }
