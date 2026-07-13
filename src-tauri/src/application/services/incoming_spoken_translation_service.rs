@@ -1484,7 +1484,9 @@ mod tests {
             false,
         );
 
-        service.start(config(303), no_op_callbacks()).await.unwrap();
+        let mut boosted = config(303);
+        boosted.playback_gain = crate::domain::INCOMING_TRANSLATION_MAX_PLAYBACK_GAIN;
+        service.start(boosted, no_op_callbacks()).await.unwrap();
         service.set_muted(true).await.unwrap();
         let (_, _, playback_state, muted) = service.state_snapshot().await;
         assert_eq!(
@@ -1493,7 +1495,14 @@ mod tests {
         );
         service.set_muted(false).await.unwrap();
 
-        assert_eq!(state.output_gains.lock().unwrap().as_slice(), &[0.0, 0.75]);
+        assert_eq!(
+            state.output_configs.lock().unwrap()[0].gain,
+            crate::domain::INCOMING_TRANSLATION_MAX_PLAYBACK_GAIN
+        );
+        assert_eq!(
+            state.output_gains.lock().unwrap().as_slice(),
+            &[0.0, crate::domain::INCOMING_TRANSLATION_MAX_PLAYBACK_GAIN]
+        );
         assert_eq!(state.translation_connect_calls.load(Ordering::SeqCst), 1);
         assert_eq!(state.capture_start_calls.load(Ordering::SeqCst), 1);
         service.stop().await.unwrap();

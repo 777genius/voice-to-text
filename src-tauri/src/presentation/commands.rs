@@ -6,10 +6,11 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
 
 use crate::domain::{
-    AppConfig, AudioCapture, AudioCaptureTarget, AudioConfig, AudioError, BackendStreamingProvider,
-    IncomingTranslationDelivery, PlatformAudioFactory, PlatformAudioSetupState,
-    PlatformAudioSetupStatus, RecordingMode, RecordingStatus, RecordingWindowPosition, SttConfig,
-    SttConnectionCategory, SttError, SttProviderType, Transcription, TranslationAudioOutputConfig,
+    incoming_translation_volume_gain, AppConfig, AudioCapture, AudioCaptureTarget, AudioConfig,
+    AudioError, BackendStreamingProvider, IncomingTranslationDelivery, PlatformAudioFactory,
+    PlatformAudioSetupState, PlatformAudioSetupStatus, RecordingMode, RecordingStatus,
+    RecordingWindowPosition, SttConfig, SttConnectionCategory, SttError, SttProviderType,
+    Transcription, TranslationAudioOutputConfig,
 };
 use crate::infrastructure::{
     audio::DefaultPlatformAudioFactory, auto_paste::AutoPasteTarget,
@@ -1330,7 +1331,7 @@ async fn start_incoming_translation_inner(
     let mut cfg = IncomingTranslationConfig::new_with_defaults(stt_config, session_id);
     cfg.openai_api_key = resolve_openai_api_key(&app_config);
     cfg.target_language = resolve_incoming_translation_target_language(&app_config);
-    cfg.playback_gain = f32::from(app_config.incoming_translation_volume.min(100)) / 100.0;
+    cfg.playback_gain = incoming_translation_volume_gain(app_config.incoming_translation_volume);
 
     let source_handle = app_handle.clone();
     let on_source_final: std::sync::Arc<dyn Fn(String) + Send + Sync> =

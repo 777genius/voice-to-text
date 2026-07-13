@@ -34,7 +34,7 @@ const MIN_TRANSLATED_FINALS_PER_RELEASE_SOAK: usize = 6;
 const AUDIBLE_SAMPLE_ABS_THRESHOLD: u16 = 128;
 const MIN_AUDIBLE_TRANSLATED_SAMPLES: usize = 1_200;
 const PAID_SOURCE_PREROLL: Duration = Duration::from_secs(1);
-const PAID_TRANSLATION_PLAYBACK_GAIN: f32 = 1.0;
+const PAID_TRANSLATION_PLAYBACK_GAIN: f32 = app_lib::domain::INCOMING_TRANSLATION_MAX_PLAYBACK_GAIN;
 const PAID_REQUIRED_SCENARIO_IDS: &[&str] = &[
     "english_to_russian",
     "names_and_numbers",

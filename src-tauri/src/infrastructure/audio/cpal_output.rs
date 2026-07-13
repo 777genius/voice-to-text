@@ -20,6 +20,15 @@ pub use crate::domain::{
 const RESAMPLER_CHUNK_SIZE: usize = 256;
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
 
+fn apply_output_gain(sample: f32, gain: f32) -> f32 {
+    let amplified = sample * gain;
+    if gain <= 1.0 {
+        amplified.clamp(-1.0, 1.0)
+    } else {
+        amplified.tanh()
+    }
+}
+
 fn frames_for_duration(duration: Duration, sample_rate: u32) -> usize {
     let numerator = duration.as_nanos().saturating_mul(u128::from(sample_rate));
     numerator
@@ -350,7 +359,7 @@ impl CpalAudioOutput {
         for chunk in local_chunks {
             let mono_f32: Vec<f32> = chunk
                 .iter()
-                .map(|&sample| ((sample as f32 / 32_768.0) * gain).clamp(-1.0, 1.0))
+                .map(|&sample| apply_output_gain(sample as f32 / 32_768.0, gain))
                 .collect();
             let native_mono: Vec<f32> = if let Some(rs) = resampler {
                 let mut r = rs
@@ -366,6 +375,7 @@ impl CpalAudioOutput {
 
             // mono → native_ch: дублируем сэмпл во все каналы.
             for sample in native_mono {
+                let sample = sample.clamp(-1.0, 1.0);
                 for _ in 0..native_channels.max(1) {
                     expanded_samples.push(sample);
                 }
@@ -1221,6 +1231,19 @@ mod tests {
         assert!((ready[0] - 0.5).abs() < 0.001);
         assert!((ready[1] + 0.5).abs() < 0.001);
         assert!(ready.iter().all(|sample| (-1.0..=1.0).contains(sample)));
+    }
+
+    #[test]
+    fn boosted_output_uses_symmetric_soft_limiting_without_changing_unity_gain() {
+        let unity = apply_output_gain(0.75, 1.0);
+        let boosted = apply_output_gain(0.75, 2.0);
+        let boosted_negative = apply_output_gain(-0.75, 2.0);
+
+        assert_eq!(unity, 0.75);
+        assert!(boosted > unity);
+        assert!(boosted < 1.0);
+        assert!((boosted + boosted_negative).abs() < f32::EPSILON);
+        assert_eq!(apply_output_gain(0.0, 2.0), 0.0);
     }
 
     #[test]

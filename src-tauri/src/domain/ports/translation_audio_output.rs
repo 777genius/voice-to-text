@@ -24,6 +24,8 @@ pub enum TranslationAudioOutputError {
 
 pub type TranslationAudioOutputResult<T> = Result<T, TranslationAudioOutputError>;
 
+pub const INCOMING_TRANSLATION_MAX_PLAYBACK_GAIN: f32 = 2.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioEnqueueOutcome {
     Queued {
@@ -78,10 +80,14 @@ impl TranslationAudioOutputConfig {
 
 pub fn normalize_output_gain(gain: f32) -> f32 {
     if gain.is_finite() {
-        gain.clamp(0.0, 1.0)
+        gain.clamp(0.0, INCOMING_TRANSLATION_MAX_PLAYBACK_GAIN)
     } else {
         1.0
     }
+}
+
+pub fn incoming_translation_volume_gain(volume: u8) -> f32 {
+    f32::from(volume.min(100)) / 100.0 * INCOMING_TRANSLATION_MAX_PLAYBACK_GAIN
 }
 
 #[async_trait]
@@ -122,9 +128,19 @@ mod tests {
     fn output_gain_is_clamped_and_non_finite_values_use_safe_default() {
         assert_eq!(normalize_output_gain(-0.5), 0.0);
         assert_eq!(normalize_output_gain(0.25), 0.25);
-        assert_eq!(normalize_output_gain(1.5), 1.0);
+        assert_eq!(normalize_output_gain(1.5), 1.5);
+        assert_eq!(normalize_output_gain(3.0), 2.0);
         assert_eq!(normalize_output_gain(f32::NAN), 1.0);
         assert_eq!(normalize_output_gain(f32::INFINITY), 1.0);
+    }
+
+    #[test]
+    fn incoming_volume_uses_full_slider_range_for_six_db_makeup_gain() {
+        assert_eq!(incoming_translation_volume_gain(0), 0.0);
+        assert_eq!(incoming_translation_volume_gain(25), 0.5);
+        assert_eq!(incoming_translation_volume_gain(50), 1.0);
+        assert_eq!(incoming_translation_volume_gain(100), 2.0);
+        assert_eq!(incoming_translation_volume_gain(u8::MAX), 2.0);
     }
 }
 
