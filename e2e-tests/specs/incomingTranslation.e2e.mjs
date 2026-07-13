@@ -2,6 +2,7 @@ import {
   clickTauriElement,
   emitEvent,
   ensureE2E,
+  ensureFullRecordingLayout,
   findWindowHandleByLabel,
   invoke,
   waitFor,
@@ -12,6 +13,7 @@ describe('incoming translation subtitles (real tauri webdriver)', () => {
     await ensureE2E();
     const mainHandle = await findWindowHandleByLabel('main');
     await browser.switchToWindow(mainHandle);
+    await ensureFullRecordingLayout();
 
     const initial = await invoke('get_incoming_translation_state');
     if (initial.status !== 'Idle' || initial.session_id !== 0) {
@@ -57,6 +59,7 @@ describe('incoming translation subtitles (real tauri webdriver)', () => {
     await ensureE2E();
     const mainHandle = await findWindowHandleByLabel('main');
     await browser.switchToWindow(mainHandle);
+    await ensureFullRecordingLayout();
 
     await emitEvent('incoming_translation:status', {
       session_id: 901,

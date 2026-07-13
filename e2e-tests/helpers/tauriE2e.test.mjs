@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { JSDOM } from 'jsdom';
 
-import { clickTauriElement } from './tauriE2e.mjs';
+import { clickTauriElement, ensureFullRecordingLayout } from './tauriE2e.mjs';
 
 async function withBrowserDom(markup, run) {
   const dom = new JSDOM(markup);
@@ -12,8 +12,10 @@ async function withBrowserDom(markup, run) {
     document: globalThis.document,
     getComputedStyle: globalThis.getComputedStyle,
     HTMLElement: globalThis.HTMLElement,
+    window: globalThis.window,
   };
 
+  globalThis.window = dom.window;
   globalThis.document = dom.window.document;
   globalThis.getComputedStyle = dom.window.getComputedStyle.bind(dom.window);
   globalThis.HTMLElement = dom.window.HTMLElement;
@@ -28,6 +30,7 @@ async function withBrowserDom(markup, run) {
     globalThis.document = previous.document;
     globalThis.getComputedStyle = previous.getComputedStyle;
     globalThis.HTMLElement = previous.HTMLElement;
+    globalThis.window = previous.window;
     dom.window.close();
   }
 }
@@ -72,4 +75,18 @@ test('clickTauriElement rejects a control inside a non-interactive ancestor', as
       );
     },
   );
+});
+
+test('ensureFullRecordingLayout waits for the deterministic E2E layout', async () => {
+  await withBrowserDom('', async () => {
+    let mini = true;
+    window.__E2E__ = {
+      getAppConfig: () => ({ showMiniRecordingWindow: mini }),
+    };
+    setTimeout(() => {
+      mini = false;
+    }, 5);
+
+    await ensureFullRecordingLayout();
+  });
 });

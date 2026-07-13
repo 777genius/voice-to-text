@@ -103,6 +103,14 @@ export async function getWindowLabelSafe() {
   });
 }
 
+export async function ensureFullRecordingLayout() {
+  await waitFor(async () => {
+    return await browser.execute(() => {
+      return window.__E2E__?.getAppConfig().showMiniRecordingWindow === false;
+    });
+  });
+}
+
 export async function findWindowHandleByLabel(label, { timeoutMs = 15_000 } = {}) {
   const start = Date.now();
   // eslint-disable-next-line no-constant-condition
@@ -123,5 +131,6 @@ export async function findWindowHandleByLabel(label, { timeoutMs = 15_000 } = {}
 }
 
 export async function openSettingsWindow() {
+  await ensureFullRecordingLayout();
   await clickTauriElement('[data-testid="open-settings"]');
 }

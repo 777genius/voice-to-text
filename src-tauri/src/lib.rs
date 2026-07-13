@@ -247,6 +247,7 @@ pub fn run() {
                     config.openai_api_key = Some("e2e-placeholder-credential".into());
                     config.incoming_translation_delivery =
                         crate::domain::IncomingTranslationDelivery::TextAndAudio;
+                    config.show_mini_recording_window = false;
                 });
             }
 
