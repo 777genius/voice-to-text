@@ -8,10 +8,10 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::domain::{
-    amplify_i16_samples, AudioCapture, AudioCaptureErrorCallback, AudioChunk, AudioChunkCallback,
-    AudioEnqueueOutcome, AudioError, RealtimeTranslationError, RealtimeTranslationErrorKind,
-    RealtimeTranslationEvent, RealtimeTranslationSession, TranslationAudioOutput,
-    TranslationAudioOutputConfig, TranslationAudioOutputError,
+    amplify_i16_samples, AudioCapture, AudioCaptureErrorCallback, AudioCaptureHealthProbe,
+    AudioChunk, AudioChunkCallback, AudioEnqueueOutcome, AudioError, RealtimeTranslationError,
+    RealtimeTranslationErrorKind, RealtimeTranslationEvent, RealtimeTranslationSession,
+    TranslationAudioOutput, TranslationAudioOutputConfig, TranslationAudioOutputError,
 };
 
 use super::frame_assembler::Pcm16FrameAssembler;
@@ -107,6 +107,7 @@ pub struct RealtimeInterpretationPolicy {
     input_drain_timeout: Duration,
     event_drain_timeout: Duration,
     translation_finish_timeout: Duration,
+    capture_health_poll_interval: Duration,
     output_health_poll_interval: Duration,
     suspension_watchdog_poll: Duration,
     suspension_watchdog_threshold: Duration,
@@ -149,6 +150,7 @@ impl RealtimeInterpretationPolicy {
             input_drain_timeout: Duration::from_millis(1_500),
             event_drain_timeout: Duration::from_millis(1_500),
             translation_finish_timeout: Duration::from_millis(8_000),
+            capture_health_poll_interval: Duration::from_millis(250),
             output_health_poll_interval: Duration::from_millis(250),
             suspension_watchdog_poll: Duration::from_secs(1),
             suspension_watchdog_threshold: Duration::from_secs(8),
@@ -185,6 +187,7 @@ impl RealtimeInterpretationPolicy {
             input_drain_timeout: Duration::from_millis(1_500),
             event_drain_timeout: Duration::from_millis(1_500),
             translation_finish_timeout: Duration::from_millis(5_000),
+            capture_health_poll_interval: Duration::from_millis(250),
             output_health_poll_interval: Duration::from_millis(250),
             suspension_watchdog_poll: Duration::from_secs(1),
             suspension_watchdog_threshold: Duration::from_secs(8),
@@ -517,6 +520,7 @@ pub struct RealtimeInterpretationSession {
     output_abort_tx: watch::Sender<bool>,
     output_worker_task: Option<OutputWorkerTask>,
     silence_cadence_task: Option<JoinHandle<()>>,
+    capture_health_task: Option<JoinHandle<()>>,
     suspension_watchdog_task: Option<JoinHandle<()>>,
     stop_requested: Arc<AtomicBool>,
     startup_state: Arc<AtomicUsize>,
@@ -603,6 +607,7 @@ impl RealtimeInterpretationSession {
         );
 
         let mut capture = ports.capture;
+        let capture_health_probe = capture.health_probe();
         let capture_reporter = reporter.clone();
         let capture_stop_requested = stop_requested.clone();
         let input_source_name = config.policy.input_source_name;
@@ -629,6 +634,7 @@ impl RealtimeInterpretationSession {
             output_abort_tx,
             output_worker_task: Some(output_worker_task),
             silence_cadence_task,
+            capture_health_task: None,
             suspension_watchdog_task: None,
             stop_requested,
             startup_state,
@@ -675,6 +681,15 @@ impl RealtimeInterpretationSession {
                 ));
             }
         }
+        session.capture_health_task = capture_health_probe.map(|probe| {
+            spawn_capture_health_watchdog(
+                probe,
+                reporter.clone(),
+                session.stop_requested.clone(),
+                session.policy.capture_health_poll_interval,
+                session.policy.input_source_name,
+            )
+        });
         session.suspension_watchdog_task = Some(spawn_suspension_watchdog(
             reporter,
             session.stop_requested.clone(),
@@ -714,6 +729,10 @@ impl RealtimeInterpretationSession {
         let cleanup_started = Instant::now();
         self.stop_requested.store(true, Ordering::SeqCst);
         if let Some(task) = self.silence_cadence_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = self.capture_health_task.take() {
             task.abort();
             let _ = task.await;
         }
@@ -1087,6 +1106,9 @@ impl Drop for RealtimeInterpretationSession {
             task.abort();
         }
         if let Some(task) = self.silence_cadence_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.capture_health_task.take() {
             task.abort();
         }
         if let Some(task) = self.suspension_watchdog_task.take() {
@@ -1725,6 +1747,33 @@ fn suspension_gap_exceeded(
     monotonic_elapsed >= threshold || wall_elapsed.is_some_and(|elapsed| elapsed >= threshold)
 }
 
+fn spawn_capture_health_watchdog(
+    probe: AudioCaptureHealthProbe,
+    reporter: RuntimeStopReporter,
+    stop_requested: Arc<AtomicBool>,
+    poll: Duration,
+    input_source_name: &'static str,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(poll);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if stop_requested.load(Ordering::SeqCst) {
+                return;
+            }
+            if !probe() {
+                reporter.error(RealtimeInterpretationError::InputDeviceLost(format!(
+                    "{} capture stopped unexpectedly",
+                    input_source_name
+                )));
+                return;
+            }
+        }
+    })
+}
+
 fn spawn_suspension_watchdog(
     reporter: RuntimeStopReporter,
     stop_requested: Arc<AtomicBool>,
@@ -2230,6 +2279,7 @@ mod tests {
     #[derive(Default)]
     struct ContractState {
         capture_start_entered: AtomicBool,
+        capture_running: AtomicBool,
         capture_stopped: AtomicBool,
         capture_stop_entered: AtomicBool,
         append_calls: AtomicUsize,
@@ -2268,6 +2318,7 @@ mod tests {
             &mut self,
             callback: AudioChunkCallback,
         ) -> crate::domain::AudioResult<()> {
+            self.state.capture_running.store(true, Ordering::SeqCst);
             callback(AudioChunk::new(vec![1_200; 4_800], 24_000, 1));
             self.callback = Some(callback);
             Ok(())
@@ -2277,6 +2328,7 @@ mod tests {
             self.state
                 .capture_stop_entered
                 .store(true, Ordering::SeqCst);
+            self.state.capture_running.store(false, Ordering::SeqCst);
             self.state.capture_stopped.store(true, Ordering::SeqCst);
             self.callback = None;
             Ok(())
@@ -2284,6 +2336,13 @@ mod tests {
 
         fn set_terminal_error_callback(&mut self, callback: Option<AudioCaptureErrorCallback>) {
             *self.state.capture_error_callback.lock().unwrap() = callback;
+        }
+
+        fn health_probe(&self) -> Option<AudioCaptureHealthProbe> {
+            let state = self.state.clone();
+            Some(Arc::new(move || {
+                state.capture_running.load(Ordering::SeqCst)
+            }))
         }
 
         fn is_capturing(&self) -> bool {
@@ -2704,6 +2763,51 @@ mod tests {
                 if message.contains("Microphone capture failed") && message.contains("device lost")
         ));
         assert!(stop_rx.try_recv().is_err());
+
+        session
+            .shutdown(RealtimeInterpretationShutdown::Abort)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn capture_health_probe_stops_session_when_terminal_callback_is_lost() {
+        let state = Arc::new(ContractState::default());
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let mut config = RealtimeInterpretationConfig::outgoing(761, 1.0);
+        config.policy.capture_health_poll_interval = Duration::from_millis(5);
+        let (session, mut stop_rx) = RealtimeInterpretationSession::start(
+            config,
+            RealtimeInterpretationPorts {
+                capture: Box::new(ContractCapture {
+                    state: state.clone(),
+                    callback: None,
+                }),
+                output: Box::new(ContractOutput {
+                    state: state.clone(),
+                }),
+                translation: Box::new(ContractTranslationSession {
+                    state: state.clone(),
+                    events: event_tx,
+                }),
+                translation_events: event_rx,
+            },
+            RealtimeInterpretationCallbacks::no_op(),
+        )
+        .await
+        .unwrap();
+        assert!(session.try_publish_startup());
+
+        state.capture_running.store(false, Ordering::SeqCst);
+
+        let stop = tokio::time::timeout(Duration::from_secs(1), stop_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            stop,
+            RealtimeInterpretationStop::Error(RealtimeInterpretationError::InputDeviceLost(message))
+                if message.contains("Microphone capture stopped unexpectedly")
+        ));
 
         session
             .shutdown(RealtimeInterpretationShutdown::Abort)

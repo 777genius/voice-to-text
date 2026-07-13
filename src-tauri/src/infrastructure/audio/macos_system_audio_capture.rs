@@ -8,8 +8,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::domain::{
-    AudioCapture, AudioCaptureErrorCallback, AudioCaptureTarget, AudioChunk, AudioChunkCallback,
-    AudioConfig, AudioError, AudioResult, SelfAudioExclusionRequirement, SystemAudioCaptureRequest,
+    AudioCapture, AudioCaptureErrorCallback, AudioCaptureHealthProbe, AudioCaptureTarget,
+    AudioChunk, AudioChunkCallback, AudioConfig, AudioError, AudioResult,
+    SelfAudioExclusionRequirement, SystemAudioCaptureRequest,
 };
 
 const NATIVE_SAMPLE_RATE: u32 = 48_000;
@@ -661,6 +662,11 @@ impl AudioCapture for MacosSystemAudioCapture {
                 error
             ),
         }
+    }
+
+    fn health_probe(&self) -> Option<AudioCaptureHealthProbe> {
+        let callback_gate = self.callback_gate.clone();
+        Some(Arc::new(move || callback_gate.is_running()))
     }
 
     fn is_capturing(&self) -> bool {

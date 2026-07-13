@@ -28,6 +28,7 @@ pub enum AudioError {
 /// Callback type for receiving audio chunks
 pub type AudioChunkCallback = Arc<dyn Fn(AudioChunk) + Send + Sync>;
 pub type AudioCaptureErrorCallback = Arc<dyn Fn(AudioError) + Send + Sync>;
+pub type AudioCaptureHealthProbe = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// Trait defining the contract for audio capture
 ///
@@ -50,6 +51,12 @@ pub trait AudioCapture: Send + Sync {
     /// Registers a callback for terminal native stream errors after a successful start.
     /// Implementations without an asynchronous device error channel may keep the default no-op.
     fn set_terminal_error_callback(&mut self, _callback: Option<AudioCaptureErrorCallback>) {}
+
+    /// Returns a cloneable health probe when the native adapter exposes shared stream state.
+    /// The runtime uses it as a fallback when an asynchronous terminal callback is lost.
+    fn health_probe(&self) -> Option<AudioCaptureHealthProbe> {
+        None
+    }
 
     /// Check if currently capturing
     fn is_capturing(&self) -> bool;
