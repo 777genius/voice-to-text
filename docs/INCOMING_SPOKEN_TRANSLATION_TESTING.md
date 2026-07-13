@@ -181,8 +181,9 @@ metrics under `src-tauri/target/e2e-artifacts/outgoing-live-*`; override the dir
 
 ## Reproducible macOS Release Runners
 
-The smoke runner combines BlackHole loopback, native capture format and self-exclusion, outgoing
-virtual-microphone translation, captions regression, and the incoming spoken half-volume scenario:
+The smoke runner combines BlackHole loopback, a nine-second no-drop incoming playback burst,
+native capture format and self-exclusion, outgoing virtual-microphone translation, captions
+regression, the incoming spoken half-volume scenario, and paid full duplex:
 
 ```bash
 cd frontend
@@ -199,6 +200,13 @@ VOICETEXT_RUN_PAID_E2E=1 OPENAI_E2E_API_KEY="sk-..." \
 ```
 
 Both runners reject `OPENAI_API_KEY` and do not read `.env`.
+
+The full-duplex gate starts real incoming and outgoing OpenAI sessions together. It stops incoming,
+requires a second distinct outgoing phrase to reach BlackHole, restarts incoming, stops outgoing,
+then requires a second distinct system-audio phrase to produce new Russian text and local PCM.
+Independent transcription of the captured virtual-microphone WAV must retain both outgoing
+phrases. Playback overflow is measured per incoming session and must stay below the production
+overload threshold and one second of dropped audio.
 
 ## Manual Fault Checks
 
@@ -222,5 +230,7 @@ Do not ship macOS spoken incoming translation unless all items are recorded for 
 - native 440/880 Hz self-exclusion passes;
 - paid OpenAI text and PCM test passes with a dedicated key;
 - paid outgoing translation reaches the BlackHole virtual microphone;
+- paid full duplex preserves both routes and both independent stop orders;
+- a nine-second incoming playback burst reaches BlackHole without bounded-buffer overflow;
 - output disconnect and sleep/wake manual checks produce terminal cleanup;
 - captions-only remains the persisted default and works as the rollback path.

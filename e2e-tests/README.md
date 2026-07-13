@@ -39,10 +39,12 @@ default and must be run manually.
 They cover:
 
 - BlackHole output to BlackHole input loopback.
+- A nine-second incoming spoken playback burst fits the device-rate-independent bounded buffer without dropping audio.
 - ScreenCaptureKit 24 kHz mono capture, callback stop, and same-process playback exclusion.
 - Outgoing live translation service: synthetic voice -> OpenAI realtime -> virtual microphone route.
 - Incoming subtitles service: system output audio -> ScreenCaptureKit loopback -> OpenAI speech-to-text -> OpenAI text translation.
 - Incoming spoken service: half-volume system speech -> OpenAI realtime -> Russian text and local translated playback.
+- Full duplex: incoming and outgoing paid routes run together, then each direction produces fresh evidence after the other is stopped.
 
 Prerequisites:
 
@@ -63,8 +65,10 @@ The runner intentionally ignores `OPENAI_API_KEY` and `.env` so a normal develop
 cannot trigger paid audio tests accidentally. `pnpm e2e:live-audio` also works when the local pnpm
 version is compatible with the lockfile.
 
-This does not launch Zoom. It proves the same local virtual audio route that
-Zoom/Meet use when BlackHole 2ch is selected as the microphone.
+This does not launch Zoom. It proves the same local virtual audio route that Zoom/Meet use when
+BlackHole 2ch is selected as the microphone. The full-duplex gate uses real ScreenCaptureKit,
+system-default playback, OpenAI sessions in both directions, and independent BlackHole
+transcription. Acoustic speaker leakage remains a manual check.
 
 ## Live audio soak tests (macOS)
 

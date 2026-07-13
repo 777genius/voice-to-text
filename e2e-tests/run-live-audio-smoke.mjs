@@ -42,6 +42,22 @@ const tests = [
     ],
   },
   {
+    label: 'incoming-playback-nine-second-burst',
+    paid: false,
+    testName: 'incoming_spoken_profile_accepts_nine_second_burst_without_drop',
+    command: [
+      'cargo',
+      'test',
+      '--test',
+      'blackhole_loopback_test',
+      'incoming_spoken_profile_accepts_nine_second_burst_without_drop',
+      '--',
+      '--ignored',
+      '--exact',
+      '--nocapture',
+    ],
+  },
+  {
     label: 'incoming-native-self-exclusion',
     paid: false,
     testName: 'system_default_playback_is_drained_and_excluded_from_system_capture',
@@ -107,6 +123,22 @@ const tests = [
     env: {
       INCOMING_SPOKEN_E2E_SCENARIO: 'half_volume_source',
     },
+  },
+  {
+    label: 'paid-full-duplex-independent-stop',
+    paid: true,
+    testName: 'simultaneous_incoming_and_outgoing_routes_translate_and_stop_independently',
+    command: [
+      'cargo',
+      'test',
+      '--test',
+      'openai_realtime_translation_e2e_test',
+      'simultaneous_incoming_and_outgoing_routes_translate_and_stop_independently',
+      '--',
+      '--ignored',
+      '--exact',
+      '--nocapture',
+    ],
   },
 ];
 
