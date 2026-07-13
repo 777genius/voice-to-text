@@ -233,11 +233,9 @@ pub fn run() {
             // - main окно было видно сразу
             // - не блокироваться на auth UI
             //
-            // Важно: включаем только в debug, чтобы это не могло случайно попасть в релиз.
-            #[cfg(debug_assertions)]
-            let is_e2e = std::env::var("VOICETEXT_E2E").ok().as_deref() == Some("1");
-            #[cfg(not(debug_assertions))]
-            let is_e2e = false;
+            // The explicit Cargo feature survives the WebDriver process boundary.
+            // debug_assertions keeps the fixture unreachable in release builds.
+            let is_e2e = cfg!(all(debug_assertions, feature = "webdriver-e2e"));
 
             if is_e2e {
                 let state = app.state::<AppState>();

@@ -28,9 +28,8 @@ const result = spawnSync(resolveNodeBin('wdio'), ['run', 'e2e-tests/wdio.conf.mj
   shell: process.platform === 'win32',
   env: {
     ...process.env,
-    // Включаем e2e hooks и упрощаем авторизацию в debug режиме.
+    // Включаем frontend e2e hooks. Rust fixtures are selected by the build feature.
     VITE_E2E: '1',
-    VOICETEXT_E2E: '1',
   },
 });
 

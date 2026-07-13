@@ -58,16 +58,19 @@ export const config = {
 
   onPrepare: () => {
     // Собираем debug бинарь без бандла, чтобы путь был стабильным.
-    const res = spawnSync(resolveNodeBin('tauri'), ['build', '--debug', '--no-bundle', '--ci'], {
-      cwd: path.resolve(__dirname, '..'),
-      stdio: 'inherit',
-      shell: process.platform === 'win32',
-      env: {
-        ...process.env,
-        VITE_E2E: '1',
-        VOICETEXT_E2E: '1',
+    const res = spawnSync(
+      resolveNodeBin('tauri'),
+      ['build', '--debug', '--no-bundle', '--ci', '--features', 'webdriver-e2e'],
+      {
+        cwd: path.resolve(__dirname, '..'),
+        stdio: 'inherit',
+        shell: process.platform === 'win32',
+        env: {
+          ...process.env,
+          VITE_E2E: '1',
+        },
       },
-    });
+    );
     if (res.error) {
       throw new Error(`[e2e] failed to run local Tauri CLI: ${res.error.message}`);
     }

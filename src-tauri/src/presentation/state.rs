@@ -3,19 +3,22 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::RwLock;
 
+#[cfg(not(all(debug_assertions, feature = "webdriver-e2e")))]
+use crate::application::services::IncomingSpokenTranslationPorts;
 use crate::application::services::{
-    IncomingSpokenTranslationPorts, IncomingTranslationFacade, IncomingTranslationFacadeFactory,
-    LiveTranslationPorts, LiveTranslationService,
+    IncomingTranslationFacade, IncomingTranslationFacadeFactory, LiveTranslationPorts,
+    LiveTranslationService,
 };
 use crate::application::TranscriptionService;
 use crate::domain::{
     AppConfig, AudioCapture, AudioError, RecordingMode, Transcription, UiPreferences,
 };
+#[cfg(not(all(debug_assertions, feature = "webdriver-e2e")))]
+use crate::infrastructure::audio::{
+    DefaultLocalPlaybackOutputFactory, DefaultSpokenTranslationCapability,
+};
 use crate::infrastructure::{
-    audio::{
-        DefaultLocalPlaybackOutputFactory, DefaultPlatformAudioFactory,
-        DefaultSpokenTranslationCapability, SystemAudioCapture, VadCaptureWrapper, VadProcessor,
-    },
+    audio::{DefaultPlatformAudioFactory, SystemAudioCapture, VadCaptureWrapper, VadProcessor},
     auto_paste::AutoPasteTarget,
     openai::OpenAIRealtimeTranslationFactory,
     AuthSession, AuthStore, AuthStoreData, AuthUser, ConfigStore, DefaultSttProviderFactory,
@@ -26,24 +29,27 @@ const TRANSLATION_APP_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::f
 
 fn default_incoming_translation_factory() -> IncomingTranslationFacadeFactory {
     let audio_factory = Arc::new(DefaultPlatformAudioFactory::new());
-    #[cfg(debug_assertions)]
-    if std::env::var("VOICETEXT_E2E").ok().as_deref() == Some("1") {
-        return IncomingTranslationFacadeFactory::new(
+    #[cfg(all(debug_assertions, feature = "webdriver-e2e"))]
+    {
+        IncomingTranslationFacadeFactory::new(
             Arc::new(DefaultSttProviderFactory::new()),
             audio_factory,
             crate::presentation::e2e_translation::spoken_translation_ports(),
-        );
+        )
     }
-    IncomingTranslationFacadeFactory::new(
-        Arc::new(DefaultSttProviderFactory::new()),
-        audio_factory.clone(),
-        IncomingSpokenTranslationPorts::new(
-            audio_factory,
-            Arc::new(DefaultLocalPlaybackOutputFactory::new()),
-            Arc::new(OpenAIRealtimeTranslationFactory),
-            Arc::new(DefaultSpokenTranslationCapability::new()),
-        ),
-    )
+    #[cfg(not(all(debug_assertions, feature = "webdriver-e2e")))]
+    {
+        IncomingTranslationFacadeFactory::new(
+            Arc::new(DefaultSttProviderFactory::new()),
+            audio_factory.clone(),
+            IncomingSpokenTranslationPorts::new(
+                audio_factory,
+                Arc::new(DefaultLocalPlaybackOutputFactory::new()),
+                Arc::new(OpenAIRealtimeTranslationFactory),
+                Arc::new(DefaultSpokenTranslationCapability::new()),
+            ),
+        )
+    }
 }
 
 fn default_live_translation_ports() -> LiveTranslationPorts {

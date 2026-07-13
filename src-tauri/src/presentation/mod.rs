@@ -1,7 +1,7 @@
 /// Presentation layer - Tauri commands, events, and application state
 /// This layer handles communication with the frontend
 pub mod commands;
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, feature = "webdriver-e2e"))]
 mod e2e_translation;
 pub mod events;
 pub mod state;
