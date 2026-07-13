@@ -20,7 +20,6 @@
 //! ввести новые поля, парсер должен оставаться устойчивым.
 
 use std::future::Future;
-use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -34,7 +33,7 @@ use http::HeaderValue;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -182,7 +181,7 @@ pub struct OpenAIRealtimeTranslationClient {
     send_timeout: Duration,
     force_close_timeout: Duration,
     target_language: Option<String>,
-    sink: Arc<Mutex<Option<WsSink>>>,
+    sink: Option<WsSink>,
     reader_task: Option<JoinHandle<()>>,
     /// Канал из reader_task в верхний слой. Receiver отдаётся через connect(); Sender хранится здесь
     /// чтобы close() мог послать synthetic Closed для случая когда WS оборвался без `session.closed`.
@@ -204,7 +203,7 @@ impl OpenAIRealtimeTranslationClient {
             send_timeout: WS_SEND_TIMEOUT,
             force_close_timeout: WS_FORCE_CLOSE_TIMEOUT,
             target_language: None,
-            sink: Arc::new(Mutex::new(None)),
+            sink: None,
             reader_task: None,
             event_tx: None,
         }
@@ -234,6 +233,11 @@ impl OpenAIRealtimeTranslationClient {
         &mut self,
         config: RealtimeTranslationConfig,
     ) -> Result<mpsc::Receiver<RealtimeTranslationEvent>, RealtimeTranslationError> {
+        if self.sink.is_some() || self.reader_task.is_some() || self.event_tx.is_some() {
+            return Err(RealtimeTranslationError::Connection(
+                "realtime translation client already has an active session".to_string(),
+            ));
+        }
         if config.credential.trim().is_empty() {
             return Err(RealtimeTranslationError::Authentication(
                 "OPENAI_API_KEY не задан".to_string(),
@@ -338,12 +342,9 @@ impl OpenAIRealtimeTranslationClient {
             }
         }
 
-        {
-            let mut guard = self.sink.lock().await;
-            let (sink, reader_task) = pending.into_parts();
-            *guard = Some(sink);
-            self.reader_task = Some(reader_task);
-        }
+        let (sink, reader_task) = pending.into_parts();
+        self.sink = Some(sink);
+        self.reader_task = Some(reader_task);
         self.event_tx = Some(tx);
         self.target_language = Some(config.target_language);
         log::info!("OpenAI realtime translation: session.updated confirmed");
@@ -367,8 +368,7 @@ impl OpenAIRealtimeTranslationClient {
             "audio": b64,
         });
 
-        let mut guard = self.sink.lock().await;
-        let Some(sink) = guard.as_mut() else {
+        let Some(sink) = self.sink.as_mut() else {
             return Err(RealtimeTranslationError::Connection(
                 "WebSocket sink не инициализирован".to_string(),
             ));
@@ -389,20 +389,17 @@ impl OpenAIRealtimeTranslationClient {
     ) -> Result<(), RealtimeTranslationError> {
         // 1. Translation session close. WS Close frame alone can skip the API-level
         // shutdown path and cut the final translated tail.
-        {
-            let mut guard = self.sink.lock().await;
-            if let Some(sink) = guard.as_mut() {
-                let close_msg = json!({ "type": "session.close" });
-                await_ws_operation(
-                    async {
-                        sink.send(Message::Text(close_msg.to_string())).await?;
-                        sink.flush().await
-                    },
-                    self.send_timeout,
-                    "session.close send",
-                )
-                .await?;
-            }
+        if let Some(sink) = self.sink.as_mut() {
+            let close_msg = json!({ "type": "session.close" });
+            await_ws_operation(
+                async {
+                    sink.send(Message::Text(close_msg.to_string())).await?;
+                    sink.flush().await
+                },
+                self.send_timeout,
+                "session.close send",
+            )
+            .await?;
         }
 
         // 2. Ждём пока reader task завершится при `session.closed`/Close/ошибке.
@@ -419,21 +416,18 @@ impl OpenAIRealtimeTranslationClient {
                         "OpenAI realtime translation: session.close timeout {} ms exceeded, closing websocket",
                         drain_timeout.as_millis()
                     );
-                    {
-                        let mut guard = self.sink.lock().await;
-                        if let Some(sink) = guard.as_mut() {
-                            if timeout(self.force_close_timeout, async {
-                                let _ = sink.send(Message::Close(None)).await;
-                                let _ = sink.flush().await;
-                            })
-                            .await
-                            .is_err()
-                            {
-                                log::warn!(
-                                    "OpenAI realtime translation: websocket force-close timed out after {} ms",
-                                    self.force_close_timeout.as_millis()
-                                );
-                            }
+                    if let Some(sink) = self.sink.as_mut() {
+                        if timeout(self.force_close_timeout, async {
+                            let _ = sink.send(Message::Close(None)).await;
+                            let _ = sink.flush().await;
+                        })
+                        .await
+                        .is_err()
+                        {
+                            log::warn!(
+                                "OpenAI realtime translation: websocket force-close timed out after {} ms",
+                                self.force_close_timeout.as_millis()
+                            );
                         }
                     }
                     task.abort();
@@ -446,10 +440,7 @@ impl OpenAIRealtimeTranslationClient {
         }
 
         // 3. Прибиваем sink
-        {
-            let mut guard = self.sink.lock().await;
-            *guard = None;
-        }
+        self.sink = None;
         self.event_tx = None;
         self.target_language = None;
         log::info!("OpenAI realtime translation: closed");
@@ -462,8 +453,7 @@ impl OpenAIRealtimeTranslationClient {
             task.abort();
             let _ = task.await;
         }
-        let mut guard = self.sink.lock().await;
-        *guard = None;
+        self.sink = None;
         if let Some(tx) = self.event_tx.take() {
             let _ = tx.try_send(RealtimeTranslationEvent::Closed);
         }
@@ -1007,6 +997,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connect_rejects_a_second_active_session_without_replacing_its_reader() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (dropped_tx, mut dropped_rx) = tokio::sync::oneshot::channel();
+        let mut client = OpenAIRealtimeTranslationClient::with_endpoint("ws://127.0.0.1:9");
+        client.reader_task = Some(tokio::spawn(async move {
+            let _drop_signal = ReaderDropSignal(Some(dropped_tx));
+            let _ = started_tx.send(());
+            pending::<()>().await;
+        }));
+        started_rx.await.expect("active reader task must start");
+
+        let error = client
+            .connect(RealtimeTranslationConfig::new(
+                "test-key".to_string(),
+                "ru".to_string(),
+                RealtimeInputNoiseReduction::NearField,
+            ))
+            .await
+            .expect_err("an active client must reject a second paid session");
+
+        assert!(matches!(
+            error,
+            RealtimeTranslationError::Connection(message)
+                if message.contains("already has an active session")
+        ));
+        assert!(client
+            .reader_task
+            .as_ref()
+            .is_some_and(|task| !task.is_finished()));
+        assert!(matches!(
+            dropped_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+
+        client.abort().await;
+        timeout(Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("active reader future must be dropped by abort")
+            .expect("reader drop signal");
+    }
+
+    #[tokio::test]
     async fn cancelling_connect_after_reader_spawn_closes_websocket() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -1071,7 +1103,7 @@ mod tests {
             .expect("server must observe websocket cleanup")
             .expect("local websocket server task must not panic");
         assert!(client.reader_task.is_none());
-        assert!(client.sink.lock().await.is_none());
+        assert!(client.sink.is_none());
     }
 
     #[tokio::test]
