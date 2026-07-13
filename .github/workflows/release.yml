@@ -54,6 +54,8 @@ jobs:
           release_commit="$(git rev-parse HEAD)"
           required_matrix_ids='["english_to_russian","names_and_numbers","technical_terms","mixed_english_russian","already_russian","long_context","pause_and_silence","overlapping_speakers","half_volume_source"]'
           required_audio_ids='["english_to_russian","names_and_numbers","technical_terms","mixed_english_russian","long_context","pause_and_silence","overlapping_speakers","half_volume_source"]'
+          diagnostic_semantic_ids='["overlapping_speakers"]'
+          diagnostic_audio_fact_policies='[["names_and_numbers","meeting time 3:45 PM"]]'
           run_json="$(gh run view "$AUDIO_GATE_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
             --json conclusion,event,workflowName,url)"
@@ -91,6 +93,8 @@ jobs:
             --argjson audio_gate_run_id "$AUDIO_GATE_RUN_ID" \
             --argjson required_matrix_ids "$required_matrix_ids" \
             --argjson required_audio_ids "$required_audio_ids" \
+            --argjson diagnostic_semantic_ids "$diagnostic_semantic_ids" \
+            --argjson diagnostic_audio_fact_policies "$diagnostic_audio_fact_policies" \
             '.commit == $commit and
              .manual_attestation_run_id == $audio_gate_run_id and
              .soak_seconds >= 1800 and
@@ -123,6 +127,9 @@ jobs:
              .paid_matrix.passed_scenario_ids == $required_matrix_ids and
              .paid_matrix.required_audio_scenario_ids == $required_audio_ids and
              .paid_matrix.audio_verified_scenario_ids == $required_audio_ids and
+             .paid_matrix.diagnostic_semantic_scenario_ids == $diagnostic_semantic_ids and
+             .paid_matrix.diagnostic_audio_fact_policies == $diagnostic_audio_fact_policies and
+             ((.paid_matrix.quality_degraded_scenario_ids - ($diagnostic_semantic_ids + ($diagnostic_audio_fact_policies | map(.[0])))) | length) == 0 and
              .native_spoken_soak.schema_version == 1 and
              .native_spoken_soak.soak_seconds >= 1800 and
              .native_spoken_soak.release_grade == true and
@@ -193,6 +200,8 @@ jobs:
           jq -e \
             --argjson required_matrix_ids "$required_matrix_ids" \
             --argjson required_audio_ids "$required_audio_ids" \
+            --argjson diagnostic_semantic_ids "$diagnostic_semantic_ids" \
+            --argjson diagnostic_audio_fact_policies "$diagnostic_audio_fact_policies" \
             '
             .schema_version == 1 and
             .scenario_filter == "all" and
@@ -200,7 +209,10 @@ jobs:
             .required_scenario_ids == $required_matrix_ids and
             .passed_scenario_ids == $required_matrix_ids and
             .required_audio_scenario_ids == $required_audio_ids and
-            .audio_verified_scenario_ids == $required_audio_ids
+            .audio_verified_scenario_ids == $required_audio_ids and
+            .diagnostic_semantic_scenario_ids == $diagnostic_semantic_ids and
+            .diagnostic_audio_fact_policies == $diagnostic_audio_fact_policies and
+            ((.quality_degraded_scenario_ids - ($diagnostic_semantic_ids + ($diagnostic_audio_fact_policies | map(.[0])))) | length) == 0
           ' audio-gate-evidence/matrix-summary.json >/dev/null
 
           echo "Verified macOS audio gate $run_url for commit $release_commit"
