@@ -18,19 +18,44 @@ pub async fn shutdown_translation_runtimes(
     incoming: Option<Arc<IncomingTranslationFacade>>,
     outgoing: Option<Arc<LiveTranslationService>>,
 ) -> TranslationRuntimeShutdownResult {
+    shutdown_translation_runtimes_with_mode(incoming, outgoing, false).await
+}
+
+pub async fn abort_translation_runtimes(
+    incoming: Option<Arc<IncomingTranslationFacade>>,
+    outgoing: Option<Arc<LiveTranslationService>>,
+) -> TranslationRuntimeShutdownResult {
+    shutdown_translation_runtimes_with_mode(incoming, outgoing, true).await
+}
+
+async fn shutdown_translation_runtimes_with_mode(
+    incoming: Option<Arc<IncomingTranslationFacade>>,
+    outgoing: Option<Arc<LiveTranslationService>>,
+    abort: bool,
+) -> TranslationRuntimeShutdownResult {
     let incoming_stop = async move {
         match incoming {
-            Some(service) => service.stop().await.err().map(|error| error.to_string()),
+            Some(service) => {
+                let result = if abort {
+                    service.abort().await
+                } else {
+                    service.stop().await
+                };
+                result.err().map(|error| error.to_string())
+            }
             None => None,
         }
     };
     let outgoing_stop = async move {
         match outgoing {
-            Some(service) => service
-                .stop_translation()
-                .await
-                .err()
-                .map(|error| error.to_string()),
+            Some(service) => {
+                let result = if abort {
+                    service.abort_translation().await
+                } else {
+                    service.stop_translation().await
+                };
+                result.err().map(|error| error.to_string())
+            }
             None => None,
         }
     };

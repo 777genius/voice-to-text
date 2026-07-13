@@ -22,6 +22,7 @@ use crate::infrastructure::{
 };
 
 const RECORDING_WINDOW_POSITION_SAVE_SUPPRESSION_MS: i64 = 800;
+const TRANSLATION_APP_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(4_500);
 
 fn default_incoming_translation_factory() -> IncomingTranslationFacadeFactory {
     let audio_factory = Arc::new(DefaultPlatformAudioFactory::new());
@@ -561,22 +562,24 @@ impl AppState {
             return;
         }
 
-        let _incoming_guard = self.incoming_translation_lifecycle_guard.lock().await;
-        let _recording_guard = self.recording_lifecycle_guard.lock().await;
-        let incoming = self.incoming_translation_facade.read().await.clone();
-        let outgoing = self.live_translation_service.read().await.clone();
-        let result =
-            crate::application::services::shutdown_translation_runtimes(incoming, outgoing).await;
-        let succeeded = result.is_ok();
-        if let Some(error) = result.incoming_error {
-            log::warn!("Incoming translation shutdown failed during app exit: {error}");
-        }
-        if let Some(error) = result.outgoing_error {
-            log::warn!("Outgoing translation shutdown failed during app exit: {error}");
-        }
-        if !succeeded {
-            self.translation_shutdown_started
-                .store(false, Ordering::SeqCst);
+        let cleanup = async {
+            let incoming = self.incoming_translation_facade.read().await.clone();
+            let outgoing = self.live_translation_service.read().await.clone();
+            crate::application::services::abort_translation_runtimes(incoming, outgoing).await
+        };
+        match tokio::time::timeout(TRANSLATION_APP_EXIT_TIMEOUT, cleanup).await {
+            Ok(result) => {
+                if let Some(error) = result.incoming_error {
+                    log::warn!("Incoming translation abort failed during app exit: {error}");
+                }
+                if let Some(error) = result.outgoing_error {
+                    log::warn!("Outgoing translation abort failed during app exit: {error}");
+                }
+            }
+            Err(_) => log::warn!(
+                "Translation cleanup exceeded the {} ms application-exit deadline; remaining resources will be released by process exit",
+                TRANSLATION_APP_EXIT_TIMEOUT.as_millis()
+            ),
         }
     }
 

@@ -17,6 +17,7 @@ pub use incoming_spoken_translation_service::{
 };
 pub use incoming_translation_facade::{
     IncomingSpokenTranslationPorts, IncomingTranslationFacade, IncomingTranslationFacadeFactory,
+    IncomingTranslationStateSnapshot,
 };
 pub use live_translation_service::{
     LiveTranslationCallbacks, LiveTranslationConfig, LiveTranslationError, LiveTranslationPorts,

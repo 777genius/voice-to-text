@@ -15,7 +15,7 @@ use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -51,6 +51,7 @@ const STT_START_TIMEOUT: Duration = Duration::from_secs(20);
 const STT_SEND_TIMEOUT: Duration = Duration::from_secs(6);
 const STT_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const STT_ABORT_TIMEOUT: Duration = Duration::from_secs(3);
+const CAPTURE_ABORT_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 pub struct IncomingTranslationConfig {
@@ -280,6 +281,7 @@ pub(super) struct IncomingCaptionTranslationService {
     audio_factory: Arc<dyn PlatformAudioFactory>,
     translator_factory: Arc<dyn TextTranslatorFactory>,
     inner: Arc<Mutex<Option<RunningIncomingSession>>>,
+    lifecycle: Arc<Mutex<()>>,
 }
 
 struct RunningIncomingSession {
@@ -412,6 +414,7 @@ impl IncomingCaptionTranslationService {
             audio_factory,
             translator_factory: Arc::new(OpenAITextTranslatorFactory),
             inner: Arc::new(Mutex::new(None)),
+            lifecycle: Arc::new(Mutex::new(())),
         }
     }
 
@@ -427,6 +430,7 @@ impl IncomingCaptionTranslationService {
             audio_factory,
             translator_factory,
             inner: Arc::new(Mutex::new(None)),
+            lifecycle: Arc::new(Mutex::new(())),
         }
     }
 
@@ -445,7 +449,7 @@ impl IncomingCaptionTranslationService {
     pub(super) async fn state_snapshot(&self) -> (Option<u64>, RecordingStatus) {
         let guard = self.inner.lock().await;
         let session_id = guard.as_ref().map(|session| session.session_id);
-        let status = *self.status.read().await;
+        let status = normalize_caption_snapshot_status(session_id, *self.status.read().await);
         (session_id, status)
     }
 
@@ -454,8 +458,8 @@ impl IncomingCaptionTranslationService {
         config: IncomingTranslationConfig,
         callbacks: IncomingTranslationCallbacks,
     ) -> Result<(), IncomingTranslationError> {
-        let mut guard = self.inner.lock().await;
-        if guard.is_some() {
+        let _lifecycle_guard = self.lifecycle.lock().await;
+        if self.inner.lock().await.is_some() {
             return Err(IncomingTranslationError::AlreadyActive);
         }
 
@@ -689,7 +693,7 @@ impl IncomingCaptionTranslationService {
             runtime_failure_reporter.clone(),
         );
 
-        *guard = Some(RunningIncomingSession {
+        *self.inner.lock().await = Some(RunningIncomingSession {
             capture,
             stt_provider: provider,
             audio_pump_task,
@@ -701,6 +705,7 @@ impl IncomingCaptionTranslationService {
         });
         spawn_runtime_cleanup_monitor(
             self.inner.clone(),
+            Arc::downgrade(&self.lifecycle),
             self.status.clone(),
             runtime_cleanup_rx,
             config.session_id,
@@ -736,11 +741,13 @@ impl IncomingCaptionTranslationService {
     }
 
     pub(super) async fn stop(&self) -> Result<(), IncomingTranslationError> {
+        let _lifecycle_guard = self.lifecycle.lock().await;
         let mut guard = self.inner.lock().await;
         let Some(mut session) = guard.take() else {
             *self.status.write().await = RecordingStatus::Idle;
             return Ok(());
         };
+        drop(guard);
 
         session.stop_requested.store(true, Ordering::SeqCst);
         *self.status.write().await = RecordingStatus::Processing;
@@ -776,6 +783,52 @@ impl IncomingCaptionTranslationService {
 
         *self.status.write().await = RecordingStatus::Idle;
         Ok(())
+    }
+
+    pub(super) async fn abort(&self) -> Result<(), IncomingTranslationError> {
+        let _lifecycle_guard = self.lifecycle.lock().await;
+        let session = self.inner.lock().await.take();
+        let Some(mut session) = session else {
+            *self.status.write().await = RecordingStatus::Idle;
+            return Ok(());
+        };
+
+        session.stop_requested.store(true, Ordering::SeqCst);
+        session.running.store(false, Ordering::SeqCst);
+        session.audio_pump_task.abort();
+        session.translation_task.abort();
+
+        if tokio::time::timeout(CAPTURE_ABORT_TIMEOUT, session.capture.stop_capture())
+            .await
+            .is_err()
+        {
+            log::warn!(
+                "IncomingCaptionTranslationService: capture abort timed out for session {}",
+                session.session_id
+            );
+        }
+        abort_stt_provider(
+            &session.stt_provider,
+            session.session_id,
+            "application exit",
+        )
+        .await;
+
+        let _ = session.audio_pump_task.await;
+        let _ = session.translation_task.await;
+        *self.status.write().await = RecordingStatus::Idle;
+        Ok(())
+    }
+}
+
+fn normalize_caption_snapshot_status(
+    session_id: Option<u64>,
+    status: RecordingStatus,
+) -> RecordingStatus {
+    if session_id.is_none() && status == RecordingStatus::Recording {
+        RecordingStatus::Processing
+    } else {
+        status
     }
 }
 
@@ -1108,6 +1161,7 @@ async fn run_audio_pump(
 
 fn spawn_runtime_cleanup_monitor(
     inner: Arc<Mutex<Option<RunningIncomingSession>>>,
+    lifecycle: Weak<Mutex<()>>,
     status: Arc<RwLock<RecordingStatus>>,
     mut runtime_cleanup_rx: mpsc::UnboundedReceiver<()>,
     session_id: u64,
@@ -1116,6 +1170,10 @@ fn spawn_runtime_cleanup_monitor(
         if runtime_cleanup_rx.recv().await.is_none() {
             return;
         }
+        let Some(lifecycle) = lifecycle.upgrade() else {
+            return;
+        };
+        let _lifecycle_guard = lifecycle.lock().await;
 
         let mut guard = inner.lock().await;
         let is_current = guard
@@ -1127,10 +1185,10 @@ fn spawn_runtime_cleanup_monitor(
         let Some(session) = session else {
             return;
         };
+        drop(guard);
 
         *status.write().await = RecordingStatus::Error;
         cleanup_session_after_runtime_error(session).await;
-        drop(guard);
     });
 }
 
@@ -1193,6 +1251,32 @@ async fn abort_initialized_stt_after_start_failure(
             session_id,
             abort_err
         );
+    }
+}
+
+async fn abort_stt_provider(
+    provider: &Arc<Mutex<Box<dyn SttProvider>>>,
+    session_id: u64,
+    reason: &str,
+) {
+    let result = tokio::time::timeout(STT_ABORT_TIMEOUT, async {
+        let mut provider = provider.lock().await;
+        provider.abort().await
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => log::warn!(
+            "IncomingCaptionTranslationService: stt abort failed during {} for session {}: {}",
+            reason,
+            session_id,
+            error
+        ),
+        Err(_) => log::warn!(
+            "IncomingCaptionTranslationService: stt abort timed out during {} for session {}",
+            reason,
+            session_id
+        ),
     }
 }
 
@@ -1486,6 +1570,9 @@ mod tests {
         initialized_config: StdMutex<Option<AudioConfig>>,
         started: std::sync::atomic::AtomicBool,
         stopped: std::sync::atomic::AtomicBool,
+        block_stop: std::sync::atomic::AtomicBool,
+        stop_entered: tokio::sync::Notify,
+        release_stop: tokio::sync::Notify,
     }
 
     struct SyntheticIncomingCapture {
@@ -1517,6 +1604,10 @@ mod tests {
 
         async fn stop_capture(&mut self) -> crate::domain::AudioResult<()> {
             self.state.stopped.store(true, Ordering::SeqCst);
+            if self.state.block_stop.load(Ordering::SeqCst) {
+                self.state.stop_entered.notify_one();
+                self.state.release_stop.notified().await;
+            }
             self.callback = None;
             Ok(())
         }
@@ -1591,6 +1682,7 @@ mod tests {
         initialized: std::sync::atomic::AtomicBool,
         started: std::sync::atomic::AtomicBool,
         stopped: std::sync::atomic::AtomicBool,
+        aborted: std::sync::atomic::AtomicBool,
         fail_during_start: std::sync::atomic::AtomicBool,
         fail_send: std::sync::atomic::AtomicBool,
         sent_chunks: std::sync::atomic::AtomicUsize,
@@ -1654,6 +1746,7 @@ mod tests {
         }
 
         async fn abort(&mut self) -> crate::domain::SttResult<()> {
+            self.state.aborted.store(true, Ordering::SeqCst);
             Ok(())
         }
 
@@ -3070,6 +3163,102 @@ mod tests {
             &[("late final from stop".to_string(), "ru".to_string())]
         );
         assert_eq!(service.get_status().await, RecordingStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn application_exit_abort_skips_caption_drain_and_releases_resources() {
+        let capture_state = std::sync::Arc::new(SyntheticIncomingCaptureState::default());
+        let provider_state = std::sync::Arc::new(SyntheticIncomingProviderState::default());
+        let service = IncomingCaptionTranslationService::new_with_all_factories(
+            std::sync::Arc::new(SyntheticIncomingSttFactory {
+                state: provider_state.clone(),
+            }),
+            std::sync::Arc::new(SyntheticIncomingAudioFactory {
+                capture_state: capture_state.clone(),
+                requested_target: std::sync::Arc::new(StdMutex::new(None)),
+            }),
+            std::sync::Arc::new(SyntheticTextTranslatorFactory {
+                state: std::sync::Arc::new(SyntheticTextTranslatorState::default()),
+            }),
+        );
+        let callbacks = IncomingTranslationCallbacks {
+            on_source_final: Arc::new(|_| {}),
+            on_translation_delta: Arc::new(|_| {}),
+            on_error: Arc::new(|error| panic!("unexpected incoming translation error: {error}")),
+            on_status: Arc::new(|_| {}),
+        };
+        let mut config = IncomingTranslationConfig::new_with_defaults(SttConfig::default(), 104);
+        config.openai_api_key = "sk-test".to_string();
+
+        service.start(config, callbacks).await.unwrap();
+        service.abort().await.unwrap();
+
+        assert_eq!(service.get_status().await, RecordingStatus::Idle);
+        assert!(capture_state.stopped.load(Ordering::SeqCst));
+        assert!(provider_state.aborted.load(Ordering::SeqCst));
+        assert!(!provider_state.stopped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn caption_start_waits_for_in_progress_stop_cleanup() {
+        let capture_state = std::sync::Arc::new(SyntheticIncomingCaptureState::default());
+        capture_state.block_stop.store(true, Ordering::SeqCst);
+        let service =
+            std::sync::Arc::new(IncomingCaptionTranslationService::new_with_all_factories(
+                std::sync::Arc::new(SyntheticIncomingSttFactory {
+                    state: std::sync::Arc::new(SyntheticIncomingProviderState::default()),
+                }),
+                std::sync::Arc::new(SyntheticIncomingAudioFactory {
+                    capture_state: capture_state.clone(),
+                    requested_target: std::sync::Arc::new(StdMutex::new(None)),
+                }),
+                std::sync::Arc::new(SyntheticTextTranslatorFactory {
+                    state: std::sync::Arc::new(SyntheticTextTranslatorState::default()),
+                }),
+            ));
+        let callbacks = || IncomingTranslationCallbacks {
+            on_source_final: Arc::new(|_| {}),
+            on_translation_delta: Arc::new(|_| {}),
+            on_error: Arc::new(|error| panic!("unexpected incoming translation error: {error}")),
+            on_status: Arc::new(|_| {}),
+        };
+        let config = |session_id| {
+            let mut config =
+                IncomingTranslationConfig::new_with_defaults(SttConfig::default(), session_id);
+            config.openai_api_key = "sk-test".to_string();
+            config
+        };
+
+        service.start(config(201), callbacks()).await.unwrap();
+        let stop_service = service.clone();
+        let stop_task = tokio::spawn(async move { stop_service.stop().await });
+        capture_state.stop_entered.notified().await;
+
+        let start_service = service.clone();
+        let start_task =
+            tokio::spawn(async move { start_service.start(config(202), callbacks()).await });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(!start_task.is_finished(), "new start bypassed stop cleanup");
+
+        capture_state.release_stop.notify_waiters();
+        stop_task.await.unwrap().unwrap();
+        start_task.await.unwrap().unwrap();
+        assert_eq!(service.active_session_id().await, Some(202));
+        assert_eq!(service.get_status().await, RecordingStatus::Recording);
+
+        capture_state.block_stop.store(false, Ordering::SeqCst);
+        service.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn caption_snapshot_never_reports_recording_without_an_owned_session() {
+        let service = IncomingCaptionTranslationService::new();
+        *service.status.write().await = RecordingStatus::Recording;
+
+        assert_eq!(
+            service.state_snapshot().await,
+            (None, RecordingStatus::Processing)
+        );
     }
 
     #[tokio::test]

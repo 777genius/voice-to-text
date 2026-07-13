@@ -20,6 +20,14 @@ enum IncomingRuntime {
     Spoken(IncomingSpokenTranslationService),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IncomingTranslationStateSnapshot {
+    pub session_id: Option<u64>,
+    pub status: RecordingStatus,
+    pub playback_state: Option<IncomingPlaybackState>,
+    pub muted: bool,
+}
+
 /// Stable application boundary for incoming translation delivery modes.
 pub struct IncomingTranslationFacade {
     runtime: IncomingRuntime,
@@ -161,13 +169,6 @@ impl IncomingTranslationFacade {
         }
     }
 
-    pub async fn playback_snapshot(&self) -> Option<(IncomingPlaybackState, bool)> {
-        match &self.runtime {
-            IncomingRuntime::Captions(_) => None,
-            IncomingRuntime::Spoken(service) => Some(service.playback_snapshot().await),
-        }
-    }
-
     pub async fn set_muted(&self, muted: bool) -> Result<(), IncomingTranslationError> {
         match &self.runtime {
             IncomingRuntime::Captions(_) => Err(IncomingTranslationError::Configuration(
@@ -193,10 +194,26 @@ impl IncomingTranslationFacade {
         }
     }
 
-    pub async fn state_snapshot(&self) -> (Option<u64>, RecordingStatus) {
+    pub async fn state_snapshot(&self) -> IncomingTranslationStateSnapshot {
         match &self.runtime {
-            IncomingRuntime::Captions(service) => service.state_snapshot().await,
-            IncomingRuntime::Spoken(service) => service.state_snapshot().await,
+            IncomingRuntime::Captions(service) => {
+                let (session_id, status) = service.state_snapshot().await;
+                IncomingTranslationStateSnapshot {
+                    session_id,
+                    status,
+                    playback_state: None,
+                    muted: false,
+                }
+            }
+            IncomingRuntime::Spoken(service) => {
+                let (session_id, status, playback_state, muted) = service.state_snapshot().await;
+                IncomingTranslationStateSnapshot {
+                    session_id,
+                    status,
+                    playback_state: Some(playback_state),
+                    muted,
+                }
+            }
         }
     }
 
@@ -241,6 +258,13 @@ impl IncomingTranslationFacade {
         match &self.runtime {
             IncomingRuntime::Captions(service) => service.stop().await,
             IncomingRuntime::Spoken(service) => service.stop().await.map_err(map_spoken_error),
+        }
+    }
+
+    pub async fn abort(&self) -> Result<(), IncomingTranslationError> {
+        match &self.runtime {
+            IncomingRuntime::Captions(service) => service.abort().await,
+            IncomingRuntime::Spoken(service) => service.abort().await.map_err(map_spoken_error),
         }
     }
 }
@@ -302,7 +326,15 @@ mod tests {
 
         assert_eq!(facade.get_status().await, RecordingStatus::Idle);
         assert_eq!(facade.active_session_id().await, None);
-        assert_eq!(facade.state_snapshot().await, (None, RecordingStatus::Idle));
+        assert_eq!(
+            facade.state_snapshot().await,
+            IncomingTranslationStateSnapshot {
+                session_id: None,
+                status: RecordingStatus::Idle,
+                playback_state: None,
+                muted: false,
+            }
+        );
     }
 
     #[test]

@@ -360,6 +360,7 @@ impl LiveTranslationService {
         *self.inner.lock().await = Some(session);
         spawn_live_runtime_cleanup_monitor(
             Arc::downgrade(&self.inner),
+            Arc::downgrade(&self.lifecycle),
             self.status.clone(),
             callbacks.clone(),
             runtime_stop_rx,
@@ -390,6 +391,7 @@ impl LiveTranslationService {
         let _lifecycle_guard = self.lifecycle.lock().await;
         let session = self.inner.lock().await.take();
         let Some(session) = session else {
+            *self.status.write().await = RecordingStatus::Idle;
             return Ok(());
         };
         *self.status.write().await = RecordingStatus::Processing;
@@ -398,6 +400,20 @@ impl LiveTranslationService {
             .shutdown(RealtimeInterpretationShutdown::Graceful)
             .await;
 
+        *self.status.write().await = RecordingStatus::Idle;
+        Ok(())
+    }
+
+    /// Immediate cleanup for application exit. Unlike a user stop, this discards untranslated
+    /// tail audio and delegates all worker deadlines to `RealtimeInterpretationSession`.
+    pub async fn abort_translation(&self) -> Result<(), LiveTranslationError> {
+        let _lifecycle_guard = self.lifecycle.lock().await;
+        let session = self.inner.lock().await.take();
+        if let Some(session) = session {
+            session
+                .shutdown(RealtimeInterpretationShutdown::Abort)
+                .await;
+        }
         *self.status.write().await = RecordingStatus::Idle;
         Ok(())
     }
@@ -430,6 +446,7 @@ async fn mark_live_recording_started(
 
 fn spawn_live_runtime_cleanup_monitor(
     inner: Weak<Mutex<Option<RealtimeInterpretationSession>>>,
+    lifecycle: Weak<Mutex<()>>,
     status: Arc<RwLock<RecordingStatus>>,
     callbacks: LiveTranslationCallbacks,
     runtime_stop_rx: tokio::sync::mpsc::UnboundedReceiver<RealtimeInterpretationStop>,
@@ -439,6 +456,10 @@ fn spawn_live_runtime_cleanup_monitor(
         session_id,
         runtime_stop_rx,
         move |session_id, stop| async move {
+            let Some(lifecycle) = lifecycle.upgrade() else {
+                return;
+            };
+            let _lifecycle_guard = lifecycle.lock().await;
             let Some(inner) = inner.upgrade() else {
                 return;
             };
@@ -478,7 +499,7 @@ fn spawn_live_runtime_cleanup_monitor(
 mod tests {
     use super::*;
     use crate::application::services::{
-        shutdown_translation_runtimes, IncomingTranslationCallbacks, IncomingTranslationConfig,
+        abort_translation_runtimes, IncomingTranslationCallbacks, IncomingTranslationConfig,
         IncomingTranslationFacade,
     };
     use crate::domain::{
@@ -1297,7 +1318,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn simultaneous_directions_stop_independently_and_app_shutdown_closes_both() {
+    async fn simultaneous_directions_stop_independently_and_app_exit_aborts_both() {
         let incoming_output = Arc::new(SyntheticOutputState::default());
         let incoming_capture_started = Arc::new(AtomicBool::new(false));
         let incoming_capture_stopped = Arc::new(AtomicBool::new(false));
@@ -1318,6 +1339,7 @@ mod tests {
 
         let outgoing_output = Arc::new(SyntheticOutputState::default());
         let outgoing_capture_stopped = Arc::new(AtomicBool::new(false));
+        let outgoing_realtime = Arc::new(SyntheticRealtimeState::default());
         let outgoing = Arc::new(LiveTranslationService::new_with_factories(
             Arc::new(SyntheticPlatformAudioFactory {
                 output_state: outgoing_output.clone(),
@@ -1326,7 +1348,7 @@ mod tests {
                 mic_target: Arc::new(StdMutex::new(None)),
             }),
             Arc::new(SyntheticRealtimeClientFactory {
-                state: Arc::new(SyntheticRealtimeState::default()),
+                state: outgoing_realtime.clone(),
             }),
         ));
 
@@ -1372,7 +1394,7 @@ mod tests {
             .await
             .unwrap();
         let shutdown =
-            shutdown_translation_runtimes(Some(incoming.clone()), Some(outgoing.clone())).await;
+            abort_translation_runtimes(Some(incoming.clone()), Some(outgoing.clone())).await;
 
         assert!(shutdown.is_ok(), "app shutdown errors: {shutdown:?}");
         assert_eq!(incoming.get_status().await, RecordingStatus::Idle);
@@ -1382,7 +1404,10 @@ mod tests {
         assert!(outgoing_capture_stopped.load(Ordering::SeqCst));
         assert!(incoming_output.closed.load(Ordering::SeqCst));
         assert!(outgoing_output.closed.load(Ordering::SeqCst));
-        assert_eq!(incoming_realtime.close_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(incoming_realtime.close_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(incoming_realtime.abort_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(outgoing_realtime.close_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(outgoing_realtime.abort_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

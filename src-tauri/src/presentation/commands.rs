@@ -1467,7 +1467,14 @@ async fn stop_incoming_translation_inner(
     Ok("Incoming translation stopped".to_string())
 }
 
-async fn restart_active_incoming_translation_after_delivery_change(
+fn incoming_status_requires_controlled_restart(status: RecordingStatus) -> bool {
+    matches!(
+        status,
+        RecordingStatus::Starting | RecordingStatus::Recording | RecordingStatus::Processing
+    )
+}
+
+async fn restart_active_incoming_translation_if_active(
     state: &AppState,
     app_handle: &AppHandle,
 ) -> Result<(), String> {
@@ -1479,13 +1486,7 @@ async fn restart_active_incoming_translation_after_delivery_change(
     let Some(service) = service else {
         return Ok(());
     };
-    let requested_delivery = state.config.read().await.incoming_translation_delivery;
-    let resolution = resolve_incoming_delivery(
-        Some(service.delivery()),
-        service.get_status().await,
-        requested_delivery,
-    );
-    if resolution != IncomingDeliveryResolution::RestartActive {
+    if !incoming_status_requires_controlled_restart(service.get_status().await) {
         return Ok(());
     }
 
@@ -1548,9 +1549,14 @@ pub async fn get_incoming_translation_state(
         .load(Ordering::Relaxed);
     let runtime_delivery = service.as_ref().map(|service| service.delivery());
     let (active_session_id, status, playback) = if let Some(service) = service {
-        let (session_id, status) = service.state_snapshot().await;
-        let playback = service.playback_snapshot().await;
-        (session_id, status, playback)
+        let snapshot = service.state_snapshot().await;
+        (
+            snapshot.session_id,
+            snapshot.status,
+            snapshot
+                .playback_state
+                .map(|playback_state| (playback_state, snapshot.muted)),
+        )
     } else {
         (None, RecordingStatus::Idle, None)
     };
@@ -2835,7 +2841,8 @@ mod snapshot_contract_tests {
     use super::{
         active_recording_status_payload, auto_paste_text_can_trigger_recording_hotkey,
         calculate_recording_window_position, configure_incoming_translation_source,
-        hotkey_action_is_stale, incoming_stop_session_id, incoming_translation_state_payload,
+        hotkey_action_is_stale, incoming_status_requires_controlled_restart,
+        incoming_stop_session_id, incoming_translation_state_payload,
         is_audio_capture_start_failure, live_translation_health_check_blocks_recording_status,
         live_translation_health_check_blocks_service_status, point_inside_rect,
         recording_hotkey_press_intent, recording_hotkey_release_intent, recording_start_is_busy,
@@ -3224,6 +3231,25 @@ mod snapshot_contract_tests {
         assert_eq!(incoming_stop_session_id(Some(42), 7), 42);
         assert_eq!(incoming_stop_session_id(None, 7), 7);
         assert_eq!(incoming_stop_session_id(None, 0), 1);
+    }
+
+    #[test]
+    fn incoming_config_change_restarts_only_an_active_session() {
+        assert!(!incoming_status_requires_controlled_restart(
+            RecordingStatus::Idle
+        ));
+        assert!(!incoming_status_requires_controlled_restart(
+            RecordingStatus::Error
+        ));
+        assert!(incoming_status_requires_controlled_restart(
+            RecordingStatus::Starting
+        ));
+        assert!(incoming_status_requires_controlled_restart(
+            RecordingStatus::Recording
+        ));
+        assert!(incoming_status_requires_controlled_restart(
+            RecordingStatus::Processing
+        ));
     }
 
     #[test]
@@ -4300,7 +4326,7 @@ pub async fn update_stt_config(
         model
     );
 
-    let _guard = state.stt_config_guard.lock().await;
+    let stt_config_guard = state.stt_config_guard.lock().await;
 
     // Выбор провайдера отключён — всегда используем Backend.
     // Параметр provider оставлен, чтобы не ломать совместимость API.
@@ -4375,7 +4401,8 @@ pub async fn update_stt_config(
 
     // Синхронизация между окнами — бампим ревизию при любых изменениях STT конфига,
     // чтобы state-sync корректно подтягивал актуальный snapshot (включая keyterms и т.д.)
-    let stt_changed = config.language != old_stt.language
+    let incoming_language_changed = config.language != old_stt.language;
+    let stt_changed = incoming_language_changed
         || config.streaming_keyterms != old_stt.streaming_keyterms
         || config.backend_streaming_provider != old_stt.backend_streaming_provider
         || config.provider != old_stt.provider;
@@ -4390,6 +4417,17 @@ pub async fn update_stt_config(
                 timestamp_ms: chrono::Utc::now().timestamp_millis(),
             },
         );
+    }
+    drop(stt_config_guard);
+
+    if incoming_language_changed {
+        restart_active_incoming_translation_if_active(state.inner(), &app_handle)
+            .await
+            .map_err(|error| {
+                format!(
+                    "STT settings were saved, but incoming translation could not restart for the new language: {error}"
+                )
+            })?;
     }
 
     log::info!("STT configuration updated and saved successfully");
@@ -4968,7 +5006,7 @@ pub async fn update_app_config(
     }
 
     let incoming_restart_error = if incoming_delivery_changed {
-        restart_active_incoming_translation_after_delivery_change(state.inner(), &app_handle)
+        restart_active_incoming_translation_if_active(state.inner(), &app_handle)
             .await
             .err()
     } else {

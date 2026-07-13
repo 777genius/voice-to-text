@@ -191,26 +191,20 @@ impl IncomingSpokenTranslationService {
             .map(|running| running.session.session_id())
     }
 
-    pub(super) async fn state_snapshot(&self) -> (Option<u64>, RecordingStatus) {
-        let session_id = self.active_session_id().await;
-        (session_id, self.get_status().await)
-    }
-
-    pub(super) async fn playback_snapshot(&self) -> (IncomingPlaybackState, bool) {
-        let muted = self
-            .inner
-            .lock()
-            .await
-            .as_ref()
-            .map(|running| running.muted)
-            .unwrap_or(false);
-        let state = match self.get_status().await {
+    pub(super) async fn state_snapshot(
+        &self,
+    ) -> (Option<u64>, RecordingStatus, IncomingPlaybackState, bool) {
+        let inner = self.inner.lock().await;
+        let session_id = inner.as_ref().map(|running| running.session.session_id());
+        let muted = inner.as_ref().map(|running| running.muted).unwrap_or(false);
+        let status = normalize_spoken_snapshot_status(session_id, *self.status.read().await);
+        let playback_state = match status {
             RecordingStatus::Starting => IncomingPlaybackState::Opening,
             RecordingStatus::Recording => IncomingPlaybackState::Playing,
             RecordingStatus::Processing => IncomingPlaybackState::Draining,
             RecordingStatus::Idle | RecordingStatus::Error => IncomingPlaybackState::Stopped,
         };
-        (state, muted)
+        (session_id, status, playback_state, muted)
     }
 
     pub(super) async fn set_muted(
@@ -236,9 +230,13 @@ impl IncomingSpokenTranslationService {
             )
         };
         output_control.set_gain(gain).await?;
-        if let Some(running) = self.inner.lock().await.as_mut() {
-            running.muted = muted;
-        }
+        let mut inner = self.inner.lock().await;
+        let Some(running) = inner.as_mut() else {
+            return Err(IncomingSpokenTranslationError::Processing(
+                "incoming spoken translation ended while playback volume was changing".into(),
+            ));
+        };
+        running.muted = muted;
         Ok(())
     }
 
@@ -396,6 +394,7 @@ impl IncomingSpokenTranslationService {
         });
         spawn_spoken_runtime_cleanup_monitor(
             Arc::downgrade(&self.inner),
+            Arc::downgrade(&self.lifecycle),
             self.status.clone(),
             callbacks.clone(),
             runtime_stop_rx,
@@ -418,6 +417,7 @@ impl IncomingSpokenTranslationService {
         let _lifecycle_guard = self.lifecycle.lock().await;
         let running = self.inner.lock().await.take();
         let Some(running) = running else {
+            *self.status.write().await = RecordingStatus::Idle;
             return Ok(());
         };
         let callbacks = running.callbacks;
@@ -429,6 +429,25 @@ impl IncomingSpokenTranslationService {
         running
             .session
             .shutdown(RealtimeInterpretationShutdown::Graceful)
+            .await;
+        self.set_status(RecordingStatus::Idle, &callbacks).await;
+        call_spoken_callback("playback stopped", || {
+            (callbacks.on_playback_state)(IncomingPlaybackState::Stopped)
+        });
+        Ok(())
+    }
+
+    pub(super) async fn abort(&self) -> Result<(), IncomingSpokenTranslationError> {
+        let _lifecycle_guard = self.lifecycle.lock().await;
+        let running = self.inner.lock().await.take();
+        let Some(running) = running else {
+            *self.status.write().await = RecordingStatus::Idle;
+            return Ok(());
+        };
+        let callbacks = running.callbacks;
+        running
+            .session
+            .shutdown(RealtimeInterpretationShutdown::Abort)
             .await;
         self.set_status(RecordingStatus::Idle, &callbacks).await;
         call_spoken_callback("playback stopped", || {
@@ -461,6 +480,17 @@ impl IncomingSpokenTranslationService {
             (callbacks.on_status)(RecordingStatus::Recording)
         });
         true
+    }
+}
+
+fn normalize_spoken_snapshot_status(
+    session_id: Option<u64>,
+    status: RecordingStatus,
+) -> RecordingStatus {
+    if session_id.is_none() && status == RecordingStatus::Recording {
+        RecordingStatus::Processing
+    } else {
+        status
     }
 }
 
@@ -559,6 +589,7 @@ fn map_runtime_stop(stop: RealtimeInterpretationStop) -> IncomingSpokenTranslati
 
 fn spawn_spoken_runtime_cleanup_monitor(
     inner: Weak<Mutex<Option<RunningIncomingSpokenSession>>>,
+    lifecycle: Weak<Mutex<()>>,
     status: Arc<RwLock<RecordingStatus>>,
     callbacks: IncomingSpokenTranslationCallbacks,
     runtime_stop_rx: tokio::sync::mpsc::UnboundedReceiver<RealtimeInterpretationStop>,
@@ -568,6 +599,10 @@ fn spawn_spoken_runtime_cleanup_monitor(
         session_id,
         runtime_stop_rx,
         move |session_id, stop| async move {
+            let Some(lifecycle) = lifecycle.upgrade() else {
+                return;
+            };
+            let _lifecycle_guard = lifecycle.lock().await;
             let Some(inner) = inner.upgrade() else {
                 return;
             };
@@ -1233,8 +1268,9 @@ mod tests {
 
         service.start(config(303), no_op_callbacks()).await.unwrap();
         service.set_muted(true).await.unwrap();
+        let (_, _, playback_state, muted) = service.state_snapshot().await;
         assert_eq!(
-            service.playback_snapshot().await,
+            (playback_state, muted),
             (IncomingPlaybackState::Playing, true)
         );
         service.set_muted(false).await.unwrap();
@@ -1243,6 +1279,25 @@ mod tests {
         assert_eq!(state.translation_connect_calls.load(Ordering::SeqCst), 1);
         assert_eq!(state.capture_start_calls.load(Ordering::SeqCst), 1);
         service.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_never_reports_playing_without_an_owned_session() {
+        let service = service_with_fakes(
+            Arc::new(FakeState::default()),
+            SpokenIncomingCapability::Ready,
+            false,
+            false,
+            false,
+        );
+        *service.status.write().await = RecordingStatus::Recording;
+
+        let (session_id, status, playback_state, muted) = service.state_snapshot().await;
+
+        assert_eq!(session_id, None);
+        assert_eq!(status, RecordingStatus::Processing);
+        assert_eq!(playback_state, IncomingPlaybackState::Draining);
+        assert!(!muted);
     }
 
     #[tokio::test]
@@ -1351,6 +1406,68 @@ mod tests {
         assert_eq!(service.get_status().await, RecordingStatus::Idle);
         assert_eq!(state.capture_start_calls.load(Ordering::SeqCst), 2);
         assert_eq!(state.output_close_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn abort_wins_terminal_supervisor_race_without_late_callbacks() {
+        let state = Arc::new(FakeState::default());
+        let service = service_with_fakes(
+            state.clone(),
+            SpokenIncomingCapability::Ready,
+            false,
+            false,
+            false,
+        );
+        let abort_completed = Arc::new(AtomicBool::new(false));
+        let callbacks_after_abort = Arc::new(AtomicUsize::new(0));
+        let callbacks = IncomingSpokenTranslationCallbacks {
+            on_source_delta: Arc::new(|_| {}),
+            on_translation_delta: Arc::new(|_| {}),
+            on_playback_state: {
+                let abort_completed = abort_completed.clone();
+                let callbacks_after_abort = callbacks_after_abort.clone();
+                Arc::new(move |_| {
+                    if abort_completed.load(Ordering::SeqCst) {
+                        callbacks_after_abort.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+            },
+            on_error: {
+                let abort_completed = abort_completed.clone();
+                let callbacks_after_abort = callbacks_after_abort.clone();
+                Arc::new(move |_| {
+                    if abort_completed.load(Ordering::SeqCst) {
+                        callbacks_after_abort.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+            },
+            on_status: {
+                let abort_completed = abort_completed.clone();
+                let callbacks_after_abort = callbacks_after_abort.clone();
+                Arc::new(move |_| {
+                    if abort_completed.load(Ordering::SeqCst) {
+                        callbacks_after_abort.fetch_add(1, Ordering::SeqCst);
+                    }
+                })
+            },
+        };
+
+        service.start(config(509), callbacks).await.unwrap();
+        let terminal_error = state
+            .capture_error_callbacks
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .unwrap();
+        terminal_error(AudioError::Capture("race".into()));
+        service.abort().await.unwrap();
+        abort_completed.store(true, Ordering::SeqCst);
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(service.get_status().await, RecordingStatus::Idle);
+        assert_eq!(service.active_session_id().await, None);
+        assert_eq!(callbacks_after_abort.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

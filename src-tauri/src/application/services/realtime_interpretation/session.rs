@@ -101,6 +101,7 @@ pub struct RealtimeInterpretationPolicy {
     input_overload_drop_threshold: u64,
     output_queue_capacity_chunks: usize,
     output_overload_drop_threshold: u64,
+    output_pending_overload: Option<OutputPendingOverloadPolicy>,
     input_drain_timeout: Duration,
     event_drain_timeout: Duration,
     translation_finish_timeout: Duration,
@@ -125,6 +126,12 @@ struct SilenceCadencePolicy {
     channels: u16,
 }
 
+#[derive(Debug, Clone)]
+struct OutputPendingOverloadPolicy {
+    limit: Duration,
+    grace: Duration,
+}
+
 impl RealtimeInterpretationPolicy {
     pub fn outgoing() -> Self {
         Self {
@@ -133,6 +140,7 @@ impl RealtimeInterpretationPolicy {
             input_overload_drop_threshold: 32,
             output_queue_capacity_chunks: 32,
             output_overload_drop_threshold: 32,
+            output_pending_overload: None,
             input_drain_timeout: Duration::from_millis(1_500),
             event_drain_timeout: Duration::from_millis(1_500),
             translation_finish_timeout: Duration::from_millis(8_000),
@@ -142,21 +150,26 @@ impl RealtimeInterpretationPolicy {
             output_drain_poll: Duration::from_millis(50),
             output_drain_empty_threshold: Duration::from_millis(30),
             worker_stop_timeout: Duration::from_millis(1_500),
-            graceful_shutdown_timeout: Duration::from_secs(18),
+            graceful_shutdown_timeout: Duration::ZERO,
             forced_shutdown_timeout: Duration::from_secs(2),
             input_source_name: "Microphone",
             output_route_name: "virtual microphone",
             silence_cadence: None,
         }
+        .with_derived_graceful_shutdown_timeout()
     }
 
     pub fn incoming_spoken() -> Self {
         Self {
             input_frame_samples: 4_800,
-            input_queue_capacity_chunks: 160,
-            input_overload_drop_threshold: 32,
+            input_queue_capacity_chunks: 64,
+            input_overload_drop_threshold: 8,
             output_queue_capacity_chunks: 32,
             output_overload_drop_threshold: 8,
+            output_pending_overload: Some(OutputPendingOverloadPolicy {
+                limit: Duration::from_secs(8),
+                grace: Duration::from_secs(2),
+            }),
             input_drain_timeout: Duration::from_millis(1_500),
             event_drain_timeout: Duration::from_millis(1_500),
             translation_finish_timeout: Duration::from_millis(5_000),
@@ -166,7 +179,7 @@ impl RealtimeInterpretationPolicy {
             output_drain_poll: Duration::from_millis(50),
             output_drain_empty_threshold: Duration::from_millis(30),
             worker_stop_timeout: Duration::from_millis(1_000),
-            graceful_shutdown_timeout: Duration::from_secs(6),
+            graceful_shutdown_timeout: Duration::ZERO,
             forced_shutdown_timeout: Duration::from_secs(1),
             input_source_name: "System audio",
             output_route_name: "local playback",
@@ -177,6 +190,28 @@ impl RealtimeInterpretationPolicy {
                 channels: 1,
             }),
         }
+        .with_derived_graceful_shutdown_timeout()
+    }
+
+    fn with_derived_graceful_shutdown_timeout(mut self) -> Self {
+        self.graceful_shutdown_timeout = self.required_graceful_shutdown_timeout();
+        self
+    }
+
+    fn required_graceful_shutdown_timeout(&self) -> Duration {
+        self.input_drain_timeout
+            .saturating_add(self.translation_finish_timeout)
+            .saturating_add(self.event_drain_timeout)
+            .saturating_add(self.output_drain_max)
+            .saturating_add(self.output_drain_safety)
+            .saturating_add(self.worker_stop_timeout.saturating_mul(6))
+    }
+
+    #[cfg(test)]
+    fn maximum_shutdown_timeout(&self) -> Duration {
+        self.worker_stop_timeout
+            .saturating_add(self.graceful_shutdown_timeout)
+            .saturating_add(self.forced_shutdown_timeout)
     }
 }
 
@@ -249,6 +284,45 @@ impl RuntimeStopReporter {
 pub(crate) enum AudioQueueEnqueueError {
     Full(u64),
     Closed,
+}
+
+const DROP_PRESSURE_RECOVERY_SUCCESSES: u64 = 8;
+
+struct DropPressure {
+    pressure: AtomicU64,
+    recovery_successes: AtomicU64,
+}
+
+impl DropPressure {
+    fn new() -> Self {
+        Self {
+            pressure: AtomicU64::new(0),
+            recovery_successes: AtomicU64::new(0),
+        }
+    }
+
+    fn record_drop(&self) -> u64 {
+        self.recovery_successes.store(0, Ordering::Relaxed);
+        self.pressure.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    fn record_success(&self) {
+        let successes = self.recovery_successes.fetch_add(1, Ordering::Relaxed) + 1;
+        if successes < DROP_PRESSURE_RECOVERY_SUCCESSES {
+            return;
+        }
+        self.recovery_successes.store(0, Ordering::Relaxed);
+        let _ = self
+            .pressure
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pressure| {
+                Some(pressure.saturating_sub(1))
+            });
+    }
+
+    #[cfg(test)]
+    fn value(&self) -> u64 {
+        self.pressure.load(Ordering::Relaxed)
+    }
 }
 
 enum OutputCommand {
@@ -569,12 +643,18 @@ impl RealtimeInterpretationSession {
             let _ = task.await;
         }
         if let Some(capture) = self.capture.as_mut() {
-            if let Err(error) = capture.stop_capture().await {
-                log::warn!(
+            match tokio::time::timeout(self.policy.worker_stop_timeout, capture.stop_capture()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => log::warn!(
                     "RealtimeInterpretationSession: capture stop failed for session {}: {}",
                     self.session_id,
                     error
-                );
+                ),
+                Err(_) => log::warn!(
+                    "RealtimeInterpretationSession: capture stop timed out after {} ms for session {}",
+                    self.policy.worker_stop_timeout.as_millis(),
+                    self.session_id
+                ),
             }
             capture.set_terminal_error_callback(None);
         }
@@ -1190,7 +1270,8 @@ async fn run_output_worker(
     diagnostics: Arc<RuntimeDiagnostics>,
 ) -> Box<dyn TranslationAudioOutput> {
     let mut health_poll = tokio::time::interval(policy.output_health_poll_interval);
-    let mut consecutive_output_drops = 0u64;
+    let output_drop_pressure = DropPressure::new();
+    let mut pending_overload_since = None;
     health_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     health_poll.tick().await;
 
@@ -1213,20 +1294,32 @@ async fn run_output_worker(
                         };
                         match enqueue_result {
                             Ok(AudioEnqueueOutcome::Queued { pending }) => {
-                                consecutive_output_drops = 0;
+                                output_drop_pressure.record_success();
                                 diagnostics.observe_output_pending(pending);
+                                if output_pending_is_overloaded(
+                                    pending,
+                                    &policy,
+                                    &mut pending_overload_since,
+                                    Instant::now(),
+                                ) {
+                                    reporter.error(RealtimeInterpretationError::OutputOverload(format!(
+                                        "{} output remained above the safe pending-audio limit; translation was stopped to avoid excessive delay",
+                                        policy.output_route_name
+                                    )));
+                                    return output;
+                                }
                             }
                             Ok(AudioEnqueueOutcome::DroppedOldest { duration, pending }) => {
-                                consecutive_output_drops = consecutive_output_drops.saturating_add(1);
+                                let drop_pressure = output_drop_pressure.record_drop();
                                 diagnostics.observe_output_drop(duration, pending);
                                 log::warn!(
-                                    "RealtimeInterpretationSession: {} output dropped {} ms (pending={} ms, consecutive={})",
+                                    "RealtimeInterpretationSession: {} output dropped {} ms (pending={} ms, pressure={})",
                                     policy.output_route_name,
                                     duration.as_millis(),
                                     pending.as_millis(),
-                                    consecutive_output_drops
+                                    drop_pressure
                                 );
-                                if consecutive_output_drops >= policy.output_overload_drop_threshold {
+                                if drop_pressure >= policy.output_overload_drop_threshold {
                                     reporter.error(RealtimeInterpretationError::OutputOverload(format!(
                                         "{} output repeatedly overflowed; translation was stopped to avoid incomplete delayed speech",
                                         policy.output_route_name
@@ -1266,9 +1359,41 @@ async fn run_output_worker(
                     reporter.error(map_output_error(error, policy.output_route_name));
                     return output;
                 }
+                let pending = output.pending_playback_duration();
+                diagnostics.observe_output_pending(pending);
+                if output_pending_is_overloaded(
+                    pending,
+                    &policy,
+                    &mut pending_overload_since,
+                    Instant::now(),
+                ) {
+                    reporter.error(RealtimeInterpretationError::OutputOverload(format!(
+                        "{} output remained above the safe pending-audio limit; translation was stopped to avoid excessive delay",
+                        policy.output_route_name
+                    )));
+                    return output;
+                }
             }
         }
     }
+}
+
+fn output_pending_is_overloaded(
+    pending: Duration,
+    policy: &RealtimeInterpretationPolicy,
+    high_since: &mut Option<Instant>,
+    now: Instant,
+) -> bool {
+    let Some(overload) = policy.output_pending_overload.as_ref() else {
+        *high_since = None;
+        return false;
+    };
+    if pending <= overload.limit {
+        *high_since = None;
+        return false;
+    }
+    let started = high_since.get_or_insert(now);
+    now.saturating_duration_since(*started) >= overload.grace
 }
 
 fn map_output_error(
@@ -1360,7 +1485,7 @@ fn build_capture_callback(
     capture_activity: Arc<CaptureActivity>,
     diagnostics: Arc<RuntimeDiagnostics>,
 ) -> AudioChunkCallback {
-    let consecutive_drops = AtomicU64::new(0);
+    let drop_pressure = DropPressure::new();
     Arc::new(move |chunk| {
         capture_activity.touch();
         let queue_capacity = input_tx.max_capacity();
@@ -1371,7 +1496,7 @@ fn build_capture_callback(
                 .saturating_add(1)
                 .min(queue_capacity),
         );
-        match try_enqueue_audio_chunk(&input_tx, chunk, &consecutive_drops) {
+        match try_enqueue_audio_chunk(&input_tx, chunk, &drop_pressure) {
             Ok(()) => {}
             Err(AudioQueueEnqueueError::Full(drops))
                 if drops == policy.input_overload_drop_threshold =>
@@ -1465,18 +1590,18 @@ fn spawn_silence_cadence_task(
     }))
 }
 
-pub(crate) fn try_enqueue_audio_chunk(
+fn try_enqueue_audio_chunk(
     input_tx: &mpsc::Sender<AudioChunk>,
     chunk: AudioChunk,
-    consecutive_drops: &AtomicU64,
+    drop_pressure: &DropPressure,
 ) -> Result<(), AudioQueueEnqueueError> {
     match input_tx.try_send(chunk) {
         Ok(()) => {
-            consecutive_drops.store(0, Ordering::Relaxed);
+            drop_pressure.record_success();
             Ok(())
         }
         Err(mpsc::error::TrySendError::Full(_)) => {
-            let drops = consecutive_drops.fetch_add(1, Ordering::Relaxed) + 1;
+            let drops = drop_pressure.record_drop();
             Err(AudioQueueEnqueueError::Full(drops))
         }
         Err(mpsc::error::TrySendError::Closed(_)) => Err(AudioQueueEnqueueError::Closed),
@@ -1517,9 +1642,9 @@ mod tests {
     }
 
     #[test]
-    fn input_queue_drop_counter_resets_after_success() {
+    fn input_queue_drop_pressure_requires_sustained_success_to_recover() {
         let (tx, mut rx) = mpsc::channel(1);
-        let drops = AtomicU64::new(0);
+        let drops = DropPressure::new();
         let first = AudioChunk::new(vec![1], 24_000, 1);
         let second = AudioChunk::new(vec![2], 24_000, 1);
 
@@ -1530,7 +1655,24 @@ mod tests {
         );
         assert!(rx.try_recv().is_ok());
         assert_eq!(try_enqueue_audio_chunk(&tx, second, &drops), Ok(()));
-        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert_eq!(drops.value(), 1);
+
+        for _ in 1..DROP_PRESSURE_RECOVERY_SUCCESSES {
+            drops.record_success();
+        }
+        assert_eq!(drops.value(), 0);
+    }
+
+    #[test]
+    fn alternating_drops_accumulate_overload_pressure() {
+        let pressure = DropPressure::new();
+
+        for expected in 1..=8 {
+            assert_eq!(pressure.record_drop(), expected);
+            pressure.record_success();
+        }
+
+        assert_eq!(pressure.value(), 8);
     }
 
     #[tokio::test]
@@ -1664,6 +1806,60 @@ mod tests {
         (callbacks.on_translated_text)("translation".into());
     }
 
+    #[test]
+    fn incoming_policy_bounds_queue_and_derives_complete_shutdown_budget() {
+        let policy = RealtimeInterpretationPolicy::incoming_spoken();
+
+        assert!(policy.input_queue_capacity_chunks * 30 <= 2_000);
+        assert_eq!(policy.input_overload_drop_threshold, 8);
+        assert_eq!(
+            policy.graceful_shutdown_timeout,
+            policy.required_graceful_shutdown_timeout()
+        );
+        assert!(policy.graceful_shutdown_timeout >= Duration::from_secs(19));
+        assert!(policy.maximum_shutdown_timeout() >= Duration::from_secs(21));
+        assert!(policy.maximum_shutdown_timeout() < Duration::from_secs(22));
+    }
+
+    #[test]
+    fn sustained_high_pending_audio_is_terminal_but_a_short_burst_recovers() {
+        let policy = RealtimeInterpretationPolicy::incoming_spoken();
+        let overload = policy.output_pending_overload.as_ref().unwrap();
+        let started = Instant::now();
+        let mut high_since = None;
+
+        assert!(!output_pending_is_overloaded(
+            overload.limit + Duration::from_millis(1),
+            &policy,
+            &mut high_since,
+            started,
+        ));
+        assert!(!output_pending_is_overloaded(
+            overload.limit + Duration::from_millis(1),
+            &policy,
+            &mut high_since,
+            started + overload.grace - Duration::from_millis(1),
+        ));
+        assert!(!output_pending_is_overloaded(
+            overload.limit,
+            &policy,
+            &mut high_since,
+            started + overload.grace,
+        ));
+        assert!(!output_pending_is_overloaded(
+            overload.limit + Duration::from_millis(1),
+            &policy,
+            &mut high_since,
+            started + overload.grace,
+        ));
+        assert!(output_pending_is_overloaded(
+            overload.limit + Duration::from_millis(1),
+            &policy,
+            &mut high_since,
+            started + overload.grace.saturating_mul(2),
+        ));
+    }
+
     #[tokio::test]
     async fn translated_callback_panic_does_not_hide_terminal_close() {
         let (event_tx, event_rx) = mpsc::channel(2);
@@ -1701,6 +1897,7 @@ mod tests {
     #[derive(Default)]
     struct ContractState {
         capture_stopped: AtomicBool,
+        capture_stop_entered: AtomicBool,
         append_calls: AtomicUsize,
         finish_calls: AtomicUsize,
         abort_calls: AtomicUsize,
@@ -1734,6 +1931,9 @@ mod tests {
         }
 
         async fn stop_capture(&mut self) -> crate::domain::AudioResult<()> {
+            self.state
+                .capture_stop_entered
+                .store(true, Ordering::SeqCst);
             self.state.capture_stopped.store(true, Ordering::SeqCst);
             self.callback = None;
             Ok(())
@@ -1741,6 +1941,45 @@ mod tests {
 
         fn set_terminal_error_callback(&mut self, callback: Option<AudioCaptureErrorCallback>) {
             *self.state.capture_error_callback.lock().unwrap() = callback;
+        }
+
+        fn is_capturing(&self) -> bool {
+            self.callback.is_some()
+        }
+
+        fn config(&self) -> AudioConfig {
+            AudioConfig {
+                sample_rate: 24_000,
+                channels: 1,
+                buffer_size: 4_800,
+            }
+        }
+    }
+
+    struct BlockingStopCapture {
+        state: Arc<ContractState>,
+        callback: Option<AudioChunkCallback>,
+    }
+
+    #[async_trait::async_trait]
+    impl AudioCapture for BlockingStopCapture {
+        async fn initialize(&mut self, _config: AudioConfig) -> crate::domain::AudioResult<()> {
+            Ok(())
+        }
+
+        async fn start_capture(
+            &mut self,
+            callback: AudioChunkCallback,
+        ) -> crate::domain::AudioResult<()> {
+            self.callback = Some(callback);
+            Ok(())
+        }
+
+        async fn stop_capture(&mut self) -> crate::domain::AudioResult<()> {
+            self.state
+                .capture_stop_entered
+                .store(true, Ordering::SeqCst);
+            std::future::pending::<crate::domain::AudioResult<()>>().await
         }
 
         fn is_capturing(&self) -> bool {
@@ -2164,6 +2403,46 @@ mod tests {
 
         assert!(state.capture_stopped.load(Ordering::SeqCst));
         assert!(state.output_dropped.load(Ordering::SeqCst));
+        assert_eq!(state.abort_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn abort_is_bounded_when_capture_stop_never_returns() {
+        let state = Arc::new(ContractState::default());
+        let (event_tx, event_rx) = mpsc::channel(8);
+        let mut config = RealtimeInterpretationConfig::incoming_spoken(7_801);
+        config.policy.worker_stop_timeout = Duration::from_millis(30);
+        config.policy.forced_shutdown_timeout = Duration::from_millis(100);
+
+        let (session, _stop_rx) = RealtimeInterpretationSession::start(
+            config,
+            RealtimeInterpretationPorts {
+                capture: Box::new(BlockingStopCapture {
+                    state: state.clone(),
+                    callback: None,
+                }),
+                output: Box::new(ContractOutput {
+                    state: state.clone(),
+                }),
+                translation: Box::new(ContractTranslationSession {
+                    state: state.clone(),
+                    events: event_tx,
+                }),
+                translation_events: event_rx,
+            },
+            RealtimeInterpretationCallbacks::no_op(),
+        )
+        .await
+        .unwrap();
+
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            session.shutdown(RealtimeInterpretationShutdown::Abort),
+        )
+        .await
+        .expect("abort must bound a stalled capture stop");
+
+        assert!(state.capture_stop_entered.load(Ordering::SeqCst));
         assert_eq!(state.abort_calls.load(Ordering::SeqCst), 1);
     }
 
