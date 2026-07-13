@@ -24,95 +24,9 @@ env:
 
 jobs:
   quality-gates:
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6.0.2
-        with:
-          ref: ${{ env.RELEASE_TAG }}
-          fetch-depth: 0
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6.4.0
-        with:
-          node-version: lts/*
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v6.0.8
-        with:
-          version: 9.15.9
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2.9.1
-        with:
-          workspaces: './src-tauri -> target'
-
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            build-essential \
-            curl \
-            wget \
-            file \
-            libxdo-dev \
-            libssl-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libasound2-dev \
-            webkit2gtk-driver \
-            xvfb \
-            xauth \
-            pkg-config
-
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Frontend typecheck
-        run: pnpm typecheck
-
-      - name: Frontend tests
-        run: pnpm test:run
-
-      - name: Frontend production build
-        run: pnpm build
-
-      - name: Rust format check
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
-
-      - name: Rust tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml
-
-      - name: Rust clippy
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D clippy::await_holding_lock
-
-      - name: Install Tauri WebDriver bridge
-        run: cargo install tauri-driver --version 2.0.6 --locked
-
-      - name: Tauri WebDriver E2E
-        run: xvfb-run --auto-servernum pnpm e2e:tauri
-
-      - name: Secret scan
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          version=8.30.1
-          archive="gitleaks_${version}_linux_x64.tar.gz"
-          checksums="gitleaks_${version}_checksums.txt"
-          base_url="https://github.com/gitleaks/gitleaks/releases/download/v${version}"
-          curl --fail --location --silent --show-error --remote-name "${base_url}/${archive}"
-          curl --fail --location --silent --show-error --remote-name "${base_url}/${checksums}"
-          grep " ${archive}$" "$checksums" | sha256sum --check --strict
-          tar -xzf "$archive" gitleaks
-          ./gitleaks git --redact --verbose
+    uses: ./.github/workflows/quality-gates.yml
+    with:
+      ref: ${{ inputs.tag }}
 
   verify-macos-audio-gate:
     runs-on: ubuntu-24.04
