@@ -43,7 +43,7 @@ They cover:
 - ScreenCaptureKit 24 kHz mono capture, callback stop, and same-process playback exclusion.
 - Outgoing live translation service: synthetic voice -> OpenAI realtime -> virtual microphone route.
 - Incoming subtitles service: system output audio -> ScreenCaptureKit loopback -> OpenAI speech-to-text -> OpenAI text translation.
-- Incoming spoken service: full linguistic/volume matrix -> OpenAI realtime -> Russian text and local translated playback.
+- Incoming spoken service: full linguistic/volume matrix -> OpenAI realtime -> Russian text and local translated playback, with independent transcription of translated PCM to verify meaning.
 - Mid-phrase stop preserves the accepted translated text/audio tail and emits no callbacks after terminal stop.
 - A controlled WebSocket relay interrupts a real paid translation session after the first PCM append and requires capture/output cleanup.
 - Full duplex: incoming and outgoing paid routes run together, then each direction produces fresh evidence after the other is stopped.

@@ -13,6 +13,7 @@ use reqwest::header::CONTENT_TYPE;
 
 const OPENAI_TRANSCRIPTIONS_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
 const OPENAI_TRANSCRIPTION_MODEL: &str = "gpt-4o-transcribe";
+const OPENAI_TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Default)]
 #[allow(dead_code)]
@@ -211,6 +212,7 @@ pub async fn transcribe_pcm16(
             CONTENT_TYPE,
             format!("multipart/form-data; boundary={boundary}"),
         )
+        .timeout(OPENAI_TRANSCRIPTION_TIMEOUT)
         .body(multipart_transcription_body(&boundary, &wav))
         .send()
         .await

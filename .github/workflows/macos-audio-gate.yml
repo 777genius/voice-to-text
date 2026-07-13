@@ -97,6 +97,7 @@ jobs:
           soak_summary="src-tauri/target/e2e-artifacts/live-audio-soak-summary.json"
           matrix_summary="src-tauri/target/e2e-artifacts/incoming-spoken-paid-matrix/matrix-summary.json"
           required_matrix_ids='["english_to_russian","names_and_numbers","technical_terms","mixed_english_russian","already_russian","long_context","pause_and_silence","overlapping_speakers","half_volume_source"]'
+          required_audio_ids='["english_to_russian","names_and_numbers","technical_terms","mixed_english_russian","long_context","pause_and_silence","overlapping_speakers","half_volume_source"]'
           test -s "$smoke_summary"
           test -s "$soak_summary"
           test -s "$matrix_summary"
@@ -138,11 +139,14 @@ jobs:
             "$soak_summary" >/dev/null
           jq -e \
             --argjson required_ids "$required_matrix_ids" \
+            --argjson required_audio_ids "$required_audio_ids" \
             '.schema_version == 1 and
              .scenario_filter == "all" and
              .complete_release_matrix == true and
              .required_scenario_ids == $required_ids and
-             .passed_scenario_ids == $required_ids' \
+             .passed_scenario_ids == $required_ids and
+             .required_audio_scenario_ids == $required_audio_ids and
+             .audio_verified_scenario_ids == $required_audio_ids' \
             "$matrix_summary" >/dev/null
 
           mkdir -p audio-gate-evidence

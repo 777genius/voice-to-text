@@ -1014,6 +1014,7 @@ app translated output: 880 Hz
 
 - source audio;
 - translated audio;
+- independent transcript of translated audio with semantic marker results;
 - source transcript;
 - translated transcript;
 - timestamps first input/first text/first audio;

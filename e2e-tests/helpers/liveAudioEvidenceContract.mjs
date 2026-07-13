@@ -29,6 +29,17 @@ export const REQUIRED_LIVE_AUDIO_SOAK_LABELS = Object.freeze([
   'incoming-long-system-audio-soak',
 ]);
 
+export const REQUIRED_PAID_AUDIO_SCENARIO_IDS = Object.freeze([
+  'english_to_russian',
+  'names_and_numbers',
+  'technical_terms',
+  'mixed_english_russian',
+  'long_context',
+  'pause_and_silence',
+  'overlapping_speakers',
+  'half_volume_source',
+]);
+
 export function sameOrderedLabels(actual, expected) {
   return actual.length === expected.length
     && actual.every((label, index) => label === expected[index]);

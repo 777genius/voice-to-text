@@ -43,6 +43,16 @@ const PAID_REQUIRED_SCENARIO_IDS: &[&str] = &[
     "overlapping_speakers",
     "half_volume_source",
 ];
+const PAID_REQUIRED_AUDIO_SCENARIO_IDS: &[&str] = &[
+    "english_to_russian",
+    "names_and_numbers",
+    "technical_terms",
+    "mixed_english_russian",
+    "long_context",
+    "pause_and_silence",
+    "overlapping_speakers",
+    "half_volume_source",
+];
 static NEXT_TEMP_AUDIO_ID: AtomicUsize = AtomicUsize::new(0);
 
 fn audible_sample_count(samples: &[i16]) -> usize {
@@ -430,6 +440,12 @@ impl AudioCapture for ObservedSystemAudioCapture {
 }
 
 #[derive(Clone, Copy)]
+struct RequiredSemanticFact {
+    label: &'static str,
+    marker_groups: &'static [&'static [&'static str]],
+}
+
+#[derive(Clone, Copy)]
 struct PaidSpokenScenario {
     id: &'static str,
     primary_voice: &'static str,
@@ -438,7 +454,7 @@ struct PaidSpokenScenario {
     secondary_source: Option<&'static str>,
     human_reference: &'static str,
     required_source_markers: &'static [&'static [&'static str]],
-    required_translation_markers: &'static [&'static [&'static str]],
+    required_translation_facts: &'static [RequiredSemanticFact],
     translation_output_required: bool,
 }
 
@@ -451,6 +467,30 @@ fn missing_translation_marker_groups(translated: &str, required_groups: &[&[&str
         .collect()
 }
 
+fn missing_semantic_facts(
+    translated: &str,
+    required_facts: &[RequiredSemanticFact],
+) -> Vec<String> {
+    let normalized = translated.to_lowercase();
+    let clauses = normalized
+        .split(['.', '!', '?', ';', '\n'])
+        .map(str::trim)
+        .filter(|clause| !clause.is_empty())
+        .collect::<Vec<_>>();
+
+    required_facts
+        .iter()
+        .filter(|fact| {
+            !clauses.iter().any(|clause| {
+                fact.marker_groups
+                    .iter()
+                    .all(|group| group.iter().any(|marker| clause.contains(marker)))
+            })
+        })
+        .map(|fact| fact.label.to_string())
+        .collect()
+}
+
 fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
     vec![
         PaidSpokenScenario {
@@ -459,9 +499,23 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             source: "Hello from the call. Please translate this sentence into Russian.",
             source_playback_gain: 1.0,
             secondary_source: None,
-            human_reference: "Natural Russian translation preserving the request.",
+            human_reference:
+                "Привет с этого звонка. Пожалуйста, переведите это предложение на русский язык.",
             required_source_markers: &[&["hello"], &["call"], &["translate"]],
-            required_translation_markers: &[&["перевед", "перевод"]],
+            required_translation_facts: &[
+                RequiredSemanticFact {
+                    label: "greeting",
+                    marker_groups: &[&["привет", "здравств"]],
+                },
+                RequiredSemanticFact {
+                    label: "call context",
+                    marker_groups: &[&["звон", "созвон", "разговор"]],
+                },
+                RequiredSemanticFact {
+                    label: "translation request",
+                    marker_groups: &[&["перевед", "перевод"]],
+                },
+            ],
             translation_output_required: true,
         },
         PaidSpokenScenario {
@@ -470,7 +524,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             source: "My name is Robert Brown. This is a business meeting. The meeting date is October 21st. The meeting time is 3:45 PM. The room number is 207.",
             source_playback_gain: 1.0,
             secondary_source: None,
-            human_reference: "Preserve the name, meeting context, date, time, and room 207.",
+            human_reference: "Меня зовут Роберт Браун. Это деловая встреча 21 октября в 15:45, комната 207.",
             required_source_markers: &[
                 &["robert"],
                 &["october"],
@@ -478,13 +532,35 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
                 &["3:45", "three forty five"],
                 &["207", "two hundred seven"],
             ],
-            required_translation_markers: &[
-                &["роберт"],
-                &["встреч", "совещ"],
-                &["октябр"],
-                &["21", "двадцать перв"],
-                &["3:45", "15:45", "три сорок пять", "пятнадцать сорок пять"],
-                &["207", "два ноль семь", "двести семь"],
+            required_translation_facts: &[
+                RequiredSemanticFact {
+                    label: "Robert Brown",
+                    marker_groups: &[&["роберт"], &["браун"]],
+                },
+                RequiredSemanticFact {
+                    label: "business meeting",
+                    marker_groups: &[&["делов"], &["встреч", "совещ"]],
+                },
+                RequiredSemanticFact {
+                    label: "October 21",
+                    marker_groups: &[&["октябр"], &["21", "двадцать перв"]],
+                },
+                RequiredSemanticFact {
+                    label: "meeting time 3:45 PM",
+                    marker_groups: &[&[
+                        "3:45",
+                        "15:45",
+                        "три сорок пять",
+                        "пятнадцать сорок пять",
+                    ]],
+                },
+                RequiredSemanticFact {
+                    label: "room 207",
+                    marker_groups: &[
+                        &["комнат", "кабинет", "зал"],
+                        &["207", "два ноль семь", "двести семь"],
+                    ],
+                },
             ],
             translation_output_required: true,
         },
@@ -494,7 +570,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             source: "The WebSocket reconnect uses exponential backoff. The system uses bounded queues. The audio format is 24 kilohertz PCM.",
             source_playback_gain: 1.0,
             secondary_source: None,
-            human_reference: "Preserve WebSocket, exponential backoff, bounded queues, and 24 kHz PCM.",
+            human_reference: "Переподключение WebSocket использует экспоненциальную задержку. Система использует ограниченные очереди. Формат аудио - PCM 24 килогерца.",
             required_source_markers: &[
                 &["websocket", "web socket"],
                 &["exponential"],
@@ -502,12 +578,23 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
                 &["24", "twenty four"],
                 &["pcm"],
             ],
-            required_translation_markers: &[
-                &["websocket", "веб-сокет", "вебсокет"],
-                &["экспоненц", "exponential"],
-                &["очеред"],
-                &["24", "двадцать четыре"],
-                &["pcm"],
+            required_translation_facts: &[
+                RequiredSemanticFact {
+                    label: "WebSocket reconnect with exponential backoff",
+                    marker_groups: &[
+                        &["websocket", "веб-сокет", "вебсокет"],
+                        &["переподключ", "повторн"],
+                        &["экспоненц", "exponential"],
+                    ],
+                },
+                RequiredSemanticFact {
+                    label: "bounded queues",
+                    marker_groups: &[&["огранич", "лимит"], &["очеред"]],
+                },
+                RequiredSemanticFact {
+                    label: "24 kHz PCM",
+                    marker_groups: &[&["24", "двадцать четыре"], &["pcm"]],
+                },
             ],
             translation_output_required: true,
         },
@@ -517,18 +604,27 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             source: "Please open настройки and choose режим text and audio for this call.",
             source_playback_gain: 1.0,
             secondary_source: None,
-            human_reference: "Produce coherent Russian while preserving the UI mode name.",
+            human_reference: "Пожалуйста, откройте настройки и выберите для этого звонка режим текста и аудио.",
             required_source_markers: &[
                 &["настрой"],
                 &["режим"],
                 &["text"],
                 &["audio"],
             ],
-            required_translation_markers: &[
-                &["настрой"],
-                &["режим"],
-                &["текст"],
-                &["аудио", "звук"],
+            required_translation_facts: &[
+                RequiredSemanticFact {
+                    label: "open settings",
+                    marker_groups: &[&["открой", "открыть"], &["настрой"]],
+                },
+                RequiredSemanticFact {
+                    label: "choose text and audio mode",
+                    marker_groups: &[
+                        &["выбер", "выбрать"],
+                        &["режим"],
+                        &["текст"],
+                        &["аудио", "звук"],
+                    ],
+                },
             ],
             translation_output_required: true,
         },
@@ -538,13 +634,22 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             source: "Добрый день. Проверяем, что русская речь остается понятной и не искажается.",
             source_playback_gain: 1.0,
             secondary_source: None,
-            human_reference: "Keep the Russian meaning without inventing content.",
+            human_reference:
+                "Добрый день. Проверяем, что русская речь остается понятной и не искажается.",
             required_source_markers: &[&["добрый"], &["русск"], &["понят"]],
-            required_translation_markers: &[
-                &["добрый день"],
-                &["русск"],
-                &["понят"],
-                &["искаж"],
+            required_translation_facts: &[
+                RequiredSemanticFact {
+                    label: "greeting",
+                    marker_groups: &[&["добрый день"]],
+                },
+                RequiredSemanticFact {
+                    label: "Russian speech remains understandable",
+                    marker_groups: &[&["русск"], &["понят"]],
+                },
+                RequiredSemanticFact {
+                    label: "speech is not distorted",
+                    marker_groups: &[&["не"], &["искаж"]],
+                },
             ],
             translation_output_required: false,
         },
@@ -554,7 +659,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             source: "During yesterday's incident the first deployment failed because the certificate expired. After the certificate was renewed, the second deployment succeeded, so do not roll back the database migration.",
             source_playback_gain: 1.0,
             secondary_source: None,
-            human_reference: "Preserve chronology, causality, and the instruction not to roll back.",
+            human_reference: "Во время вчерашнего инцидента первое развертывание не удалось из-за истекшего сертификата. После обновления сертификата второе развертывание прошло успешно, поэтому не откатывайте миграцию базы данных.",
             required_source_markers: &[
                 &["first"],
                 &["deployment"],
@@ -565,15 +670,42 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
                 &["not roll back", "do not roll back"],
                 &["migration"],
             ],
-            required_translation_markers: &[
-                &["перв"],
-                &["развертыв", "развёртыв", "деплой"],
-                &["сертификат"],
-                &["истек", "истёк", "просроч"],
-                &["втор"],
-                &["успеш"],
-                &["не откат", "не делать откат", "не отмен"],
-                &["миграц"],
+            required_translation_facts: &[
+                RequiredSemanticFact {
+                    label: "first deployment failed",
+                    marker_groups: &[
+                        &["перв"],
+                        &["развертыв", "развёртыв", "деплой"],
+                        &["не удалось", "провал", "ошиб", "неуспеш"],
+                    ],
+                },
+                RequiredSemanticFact {
+                    label: "certificate expired",
+                    marker_groups: &[&["сертификат"], &["истек", "истёк", "просроч"]],
+                },
+                RequiredSemanticFact {
+                    label: "certificate renewed",
+                    marker_groups: &[
+                        &["сертификат"],
+                        &["обнов", "продл", "возобнов", "замен"],
+                    ],
+                },
+                RequiredSemanticFact {
+                    label: "second deployment succeeded",
+                    marker_groups: &[
+                        &["втор"],
+                        &["развертыв", "развёртыв", "деплой"],
+                        &["успеш"],
+                    ],
+                },
+                RequiredSemanticFact {
+                    label: "do not roll back database migration",
+                    marker_groups: &[
+                        &["не"],
+                        &["откат", "отмен"],
+                        &["миграц"],
+                    ],
+                },
             ],
             translation_output_required: true,
         },
@@ -583,14 +715,25 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             source: "The first value is twelve. [[slnc 700]] The second value is forty seven. [[slnc 900]] Keep both values.",
             source_playback_gain: 1.0,
             secondary_source: None,
-            human_reference: "Preserve values 12 and 47 across pauses.",
+            human_reference:
+                "Первое значение - двенадцать. Второе значение - сорок семь. Сохраните оба значения.",
             required_source_markers: &[
                 &["12", "twelve"],
                 &["47", "forty seven"],
             ],
-            required_translation_markers: &[
-                &["12", "двенадцать"],
-                &["47", "сорок семь"],
+            required_translation_facts: &[
+                RequiredSemanticFact {
+                    label: "first value is 12",
+                    marker_groups: &[&["перв"], &["12", "двенадцать"]],
+                },
+                RequiredSemanticFact {
+                    label: "second value is 47",
+                    marker_groups: &[&["втор"], &["47", "сорок семь"]],
+                },
+                RequiredSemanticFact {
+                    label: "keep both values",
+                    marker_groups: &[&["оба", "обе"], &["значен"]],
+                },
             ],
             translation_output_required: true,
         },
@@ -600,18 +743,30 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             source: "Alice says the release is scheduled for Friday morning.",
             source_playback_gain: 1.0,
             secondary_source: Some("Bob says the security review must finish before Thursday evening."),
-            human_reference: "Best effort mixed-track translation; note any lost speaker or timing detail.",
+            human_reference: "Алиса говорит, что релиз запланирован на утро пятницы. Боб говорит, что проверка безопасности должна завершиться до вечера четверга.",
             required_source_markers: &[
                 &["alice"],
                 &["bob"],
                 &["friday"],
                 &["thursday"],
             ],
-            required_translation_markers: &[
-                &["алис", "элис"],
-                &["боб"],
-                &["пятниц"],
-                &["четверг"],
+            required_translation_facts: &[
+                RequiredSemanticFact {
+                    label: "Alice associates the release with Friday",
+                    marker_groups: &[
+                        &["алис", "элис"],
+                        &["релиз", "выпуск"],
+                        &["пятниц"],
+                    ],
+                },
+                RequiredSemanticFact {
+                    label: "Bob associates the security review with Thursday",
+                    marker_groups: &[
+                        &["боб"],
+                        &["безопасн"],
+                        &["четверг"],
+                    ],
+                },
             ],
             translation_output_required: true,
         },
@@ -621,14 +776,29 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             source: "There are twenty seven open tasks. The meeting starts at nine thirty AM.",
             source_playback_gain: 0.5,
             secondary_source: None,
-            human_reference: "Preserve 27 open tasks and meeting time 9:30 without adding context.",
+            human_reference:
+                "Открыто двадцать семь задач. Встреча начинается в девять тридцать утра.",
             required_source_markers: &[
                 &["27", "twenty seven"],
                 &["9:30", "nine thirty"],
             ],
-            required_translation_markers: &[
-                &["27", "twenty seven", "двадцать семь"],
-                &["9:30", "9.30", "nine thirty", "девять тридцать"],
+            required_translation_facts: &[
+                RequiredSemanticFact {
+                    label: "27 open tasks",
+                    marker_groups: &[
+                        &["27", "двадцать семь"],
+                        &["задач"],
+                        &["открыт", "незаверш", "в работе"],
+                    ],
+                },
+                RequiredSemanticFact {
+                    label: "meeting starts at 9:30 AM",
+                    marker_groups: &[
+                        &["встреч", "совещ"],
+                        &["9:30", "9.30", "девять тридцать"],
+                        &["утр"],
+                    ],
+                },
             ],
             translation_output_required: true,
         },
@@ -644,12 +814,27 @@ fn paid_spoken_matrix_keeps_complete_release_scenarios_and_assertions() {
         .collect::<Vec<_>>();
 
     assert_eq!(ids, PAID_REQUIRED_SCENARIO_IDS);
+    assert_eq!(
+        scenarios
+            .iter()
+            .filter(|scenario| scenario.translation_output_required)
+            .map(|scenario| scenario.id)
+            .collect::<Vec<_>>(),
+        PAID_REQUIRED_AUDIO_SCENARIO_IDS
+    );
     assert!(scenarios
         .iter()
         .all(|scenario| !scenario.required_source_markers.is_empty()));
     assert!(scenarios
         .iter()
-        .all(|scenario| !scenario.required_translation_markers.is_empty()));
+        .all(|scenario| !scenario.required_translation_facts.is_empty()));
+    assert!(scenarios.iter().all(|scenario| {
+        missing_semantic_facts(
+            scenario.human_reference,
+            scenario.required_translation_facts,
+        )
+        .is_empty()
+    }));
     assert_eq!(
         scenarios
             .iter()
@@ -657,6 +842,41 @@ fn paid_spoken_matrix_keeps_complete_release_scenarios_and_assertions() {
             .map(|scenario| scenario.id)
             .collect::<Vec<_>>(),
         vec!["already_russian"]
+    );
+}
+
+#[test]
+fn semantic_facts_reject_crossed_speaker_associations_and_inverted_outcomes() {
+    let facts = [
+        RequiredSemanticFact {
+            label: "Alice release Friday",
+            marker_groups: &[&["алис"], &["релиз"], &["пятниц"]],
+        },
+        RequiredSemanticFact {
+            label: "Bob review Thursday",
+            marker_groups: &[&["боб"], &["провер"], &["четверг"]],
+        },
+        RequiredSemanticFact {
+            label: "first deployment failed",
+            marker_groups: &[&["перв"], &["развертыв"], &["не удалось"]],
+        },
+        RequiredSemanticFact {
+            label: "second deployment succeeded",
+            marker_groups: &[&["втор"], &["развертыв"], &["успеш"]],
+        },
+    ];
+    let correct = "Алиса говорит, что релиз будет в пятницу. Боб завершит проверку в четверг. Первое развертывание не удалось. Второе развертывание прошло успешно.";
+    let inverted = "Алиса говорит, что релиз будет в четверг. Боб завершит проверку в пятницу. Первое развертывание прошло успешно. Второе развертывание не удалось.";
+
+    assert!(missing_semantic_facts(correct, &facts).is_empty());
+    assert_eq!(
+        missing_semantic_facts(inverted, &facts),
+        vec![
+            "Alice release Friday",
+            "Bob review Thursday",
+            "first deployment failed",
+            "second deployment succeeded",
+        ]
     );
 }
 
@@ -920,6 +1140,7 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
     );
     let transcription_client = reqwest::Client::new();
     let mut passed_scenario_ids = Vec::new();
+    let mut audio_verified_scenario_ids = Vec::new();
 
     for (index, scenario) in scenarios.into_iter().enumerate() {
         let fixture = generate_spoken_audio_fixture(
@@ -1061,6 +1282,29 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             .err()
             .map(ToString::to_string);
         let captured_input_transcript = captured_input_transcription.unwrap_or_default();
+        let translated_audio_transcription_attempted =
+            translated_audible_samples >= MIN_AUDIBLE_TRANSLATED_SAMPLES;
+        let translated_audio_transcription = if translated_audio_transcription_attempted {
+            Some(
+                transcribe_pcm16(
+                    &transcription_client,
+                    &api_key,
+                    24_000,
+                    1,
+                    &translated_samples,
+                )
+                .await,
+            )
+        } else {
+            None
+        };
+        let translated_audio_transcription_error = translated_audio_transcription
+            .as_ref()
+            .and_then(|result| result.as_ref().err())
+            .map(ToString::to_string);
+        let translated_audio_transcript = translated_audio_transcription
+            .and_then(Result::ok)
+            .unwrap_or_default();
         let terminal_errors = errors.lock().unwrap().clone();
         let source_transcript_available = !source.trim().is_empty();
         let longest_audible_activity_gap_ms = longest_internal_activity_gap_ms(
@@ -1072,8 +1316,16 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             &captured_input_transcript,
             scenario.required_source_markers,
         );
-        let missing_marker_groups =
-            missing_translation_marker_groups(&translated, scenario.required_translation_markers);
+        let missing_translation_facts =
+            missing_semantic_facts(&translated, scenario.required_translation_facts);
+        let missing_audio_facts = if translated_audio_transcription_attempted {
+            missing_semantic_facts(
+                &translated_audio_transcript,
+                scenario.required_translation_facts,
+            )
+        } else {
+            Vec::new()
+        };
         let translation_output_emitted =
             !translated.trim().is_empty() || !translated_samples.is_empty();
         let output_received_within_timeout = wait_completed_before_timeout
@@ -1089,6 +1341,11 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             wav_pcm16(24_000, 1, &translated_samples),
         )
         .expect("must write translated audio");
+        fs::write(
+            scenario_dir.join("translated-audio-transcript.txt"),
+            &translated_audio_transcript,
+        )
+        .expect("must write translated audio transcript");
         fs::write(
             scenario_dir.join("captured-input.wav"),
             wav_pcm16(24_000, 1, &captured_input_samples),
@@ -1122,7 +1379,11 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             "missing_source_marker_groups": missing_source_marker_groups.clone(),
             "translated_audio_samples": translated_samples.len(),
             "translated_audible_samples": translated_audible_samples,
-            "missing_translation_marker_groups": missing_marker_groups.clone(),
+            "translated_audio_verification_required": scenario.translation_output_required,
+            "translated_audio_transcription_attempted": translated_audio_transcription_attempted,
+            "translated_audio_transcription_error": translated_audio_transcription_error.clone(),
+            "missing_translated_audio_facts": missing_audio_facts.clone(),
+            "missing_translation_facts": missing_translation_facts.clone(),
             "errors": terminal_errors.clone(),
             "stop_error": stop_error,
         });
@@ -1240,10 +1501,10 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
                 scenario.id
             );
             assert!(
-                missing_marker_groups.is_empty(),
-                "scenario {} lost required meaning/entities {:?}; translated: {}",
+                missing_translation_facts.is_empty(),
+                "scenario {} lost required semantic facts {:?}; translated: {}",
                 scenario.id,
-                missing_marker_groups,
+                missing_translation_facts,
                 translated
             );
             assert!(
@@ -1251,6 +1512,27 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
                 "scenario {} translated PCM contains no meaningful audio",
                 scenario.id
             );
+            assert!(
+                translated_audio_transcription_error.is_none(),
+                "scenario {} translated audio transcription failed: {:?}",
+                scenario.id,
+                translated_audio_transcription_error
+            );
+            assert!(
+                !translated_audio_transcript.trim().is_empty(),
+                "scenario {} translated audio transcript is empty",
+                scenario.id
+            );
+            assert!(
+                missing_audio_facts.is_empty(),
+                "scenario {} translated audio lost required semantic facts {:?}; independent audio transcript: {}",
+                scenario.id,
+                missing_audio_facts,
+                translated_audio_transcript
+            );
+            if scenario.translation_output_required {
+                audio_verified_scenario_ids.push(scenario.id);
+            }
         }
         assert!(output_state.opened.load(Ordering::SeqCst));
         assert!(output_state.closed.load(Ordering::SeqCst));
@@ -1261,9 +1543,14 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
 
     if scenario_filter == "all" {
         assert_eq!(passed_scenario_ids, PAID_REQUIRED_SCENARIO_IDS);
+        assert_eq!(
+            audio_verified_scenario_ids,
+            PAID_REQUIRED_AUDIO_SCENARIO_IDS
+        );
     }
-    let complete_release_matrix =
-        scenario_filter == "all" && passed_scenario_ids == PAID_REQUIRED_SCENARIO_IDS;
+    let complete_release_matrix = scenario_filter == "all"
+        && passed_scenario_ids == PAID_REQUIRED_SCENARIO_IDS
+        && audio_verified_scenario_ids == PAID_REQUIRED_AUDIO_SCENARIO_IDS;
     fs::write(
         artifact_root.join("matrix-summary.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
@@ -1271,6 +1558,8 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             "scenario_filter": scenario_filter,
             "required_scenario_ids": PAID_REQUIRED_SCENARIO_IDS,
             "passed_scenario_ids": passed_scenario_ids,
+            "required_audio_scenario_ids": PAID_REQUIRED_AUDIO_SCENARIO_IDS,
+            "audio_verified_scenario_ids": audio_verified_scenario_ids,
             "complete_release_matrix": complete_release_matrix,
         }))
         .expect("matrix summary must serialize"),

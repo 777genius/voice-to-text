@@ -139,6 +139,7 @@ jobs:
 
           release_commit="$(git rev-parse HEAD)"
           required_matrix_ids='["english_to_russian","names_and_numbers","technical_terms","mixed_english_russian","already_russian","long_context","pause_and_silence","overlapping_speakers","half_volume_source"]'
+          required_audio_ids='["english_to_russian","names_and_numbers","technical_terms","mixed_english_russian","long_context","pause_and_silence","overlapping_speakers","half_volume_source"]'
           run_json="$(gh run view "$AUDIO_GATE_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
             --json conclusion,event,workflowName,url)"
@@ -159,6 +160,7 @@ jobs:
           jq -e \
             --arg commit "$release_commit" \
             --argjson required_matrix_ids "$required_matrix_ids" \
+            --argjson required_audio_ids "$required_audio_ids" \
             '.commit == $commit and
              .soak_seconds >= 1800 and
              .smoke_passed == true and
@@ -183,6 +185,8 @@ jobs:
              .paid_matrix.scenario_filter == "all" and
              .paid_matrix.required_scenario_ids == $required_matrix_ids and
              .paid_matrix.passed_scenario_ids == $required_matrix_ids and
+             .paid_matrix.required_audio_scenario_ids == $required_audio_ids and
+             .paid_matrix.audio_verified_scenario_ids == $required_audio_ids and
              (.smoke_checks | index("tauri-exit-shutdown-callback-binding")) != null and
              (.smoke_checks | index("translation-shutdown-claim-idempotence")) != null and
              (.smoke_checks | index("bidirectional-runtime-abort-helper")) != null and
@@ -211,12 +215,15 @@ jobs:
             audio-gate-evidence/evidence.json >/dev/null
           jq -e \
             --argjson required_matrix_ids "$required_matrix_ids" \
+            --argjson required_audio_ids "$required_audio_ids" \
             '
             .schema_version == 1 and
             .scenario_filter == "all" and
             .complete_release_matrix == true and
             .required_scenario_ids == $required_matrix_ids and
-            .passed_scenario_ids == $required_matrix_ids
+            .passed_scenario_ids == $required_matrix_ids and
+            .required_audio_scenario_ids == $required_audio_ids and
+            .audio_verified_scenario_ids == $required_audio_ids
           ' audio-gate-evidence/matrix-summary.json >/dev/null
 
           echo "Verified macOS audio gate $run_url for commit $release_commit"
