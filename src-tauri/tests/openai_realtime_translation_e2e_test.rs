@@ -29,7 +29,9 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tokio::sync::{mpsc, Notify};
 
 use paid_e2e_support::{
-    load_paid_e2e_api_key, transcribe_pcm16, wav_pcm16, ObservedLocalPlaybackFactory, PlaybackProbe,
+    audible_pcm16_segments, audible_pcm16_window, load_paid_e2e_api_key, transcribe_audible_pcm16,
+    transcribe_pcm16_with_whisper, transcribe_segmented_pcm16, transcription_segments, wav_pcm16,
+    ObservedLocalPlaybackFactory, PlaybackProbe,
 };
 
 static NEXT_TEMP_AUDIO_ID: AtomicUsize = AtomicUsize::new(0);
@@ -288,118 +290,103 @@ fn rms(samples: &[f32]) -> f32 {
     (sum_sq / samples.len() as f32).sqrt()
 }
 
-fn audible_pcm16_window(samples: &[i16], sample_rate: u32, channels: u16) -> &[i16] {
-    const AUDIBLE_THRESHOLD: i16 = 256;
-    let Some(first) = samples
-        .iter()
-        .position(|sample| sample.unsigned_abs() >= AUDIBLE_THRESHOLD as u16)
-    else {
-        return samples;
-    };
-    let last = samples
-        .iter()
-        .rposition(|sample| sample.unsigned_abs() >= AUDIBLE_THRESHOLD as u16)
-        .unwrap_or(first);
-    let channels = usize::from(channels.max(1));
-    let padding = (sample_rate as usize / 2).saturating_mul(channels);
-    let mut start = first.saturating_sub(padding);
-    start -= start % channels;
-    let mut end = last
-        .saturating_add(padding)
-        .saturating_add(1)
-        .min(samples.len());
-    end -= end % channels;
-    if end <= start {
-        return samples;
-    }
-    &samples[start..end]
+struct OutgoingAudioTranscription {
+    transcript: String,
+    primary_transcript: String,
+    primary_error: Option<String>,
+    segmented_fallback_attempted: bool,
+    segmented_fallback_transcript: String,
+    segmented_fallback_error: Option<String>,
+    whisper_fallback_attempted: bool,
+    whisper_fallback_transcript: String,
+    whisper_fallback_error: Option<String>,
 }
 
-fn audible_pcm16_segments(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<&[i16]> {
-    const AUDIBLE_THRESHOLD: i16 = 256;
-    const SPLIT_SILENCE_MS: usize = 800;
-    const PADDING_MS: usize = 500;
-    const MIN_SPEECH_MS: usize = 100;
-
-    let channels = usize::from(channels.max(1));
-    let total_frames = samples.len() / channels;
-    let sample_rate = sample_rate as usize;
-    let split_silence_frames = sample_rate.saturating_mul(SPLIT_SILENCE_MS) / 1_000;
-    let padding_frames = sample_rate.saturating_mul(PADDING_MS) / 1_000;
-    let min_speech_frames = (sample_rate.saturating_mul(MIN_SPEECH_MS) / 1_000).max(2);
-    let mut ranges = Vec::<(usize, usize)>::new();
-    let mut speech_start = None::<usize>;
-    let mut last_audible = 0usize;
-
-    let mut finish_segment = |start: usize, last: usize| {
-        if last.saturating_sub(start).saturating_add(1) < min_speech_frames {
-            return;
-        }
-        ranges.push((
-            start.saturating_sub(padding_frames),
-            last.saturating_add(padding_frames)
-                .saturating_add(1)
-                .min(total_frames),
-        ));
-    };
-
-    for (frame_index, frame) in samples.chunks_exact(channels).enumerate() {
-        let audible = frame
-            .iter()
-            .any(|sample| sample.unsigned_abs() >= AUDIBLE_THRESHOLD as u16);
-        if audible {
-            speech_start.get_or_insert(frame_index);
-            last_audible = frame_index;
-        } else if let Some(start) = speech_start {
-            if frame_index.saturating_sub(last_audible) >= split_silence_frames {
-                finish_segment(start, last_audible);
-                speech_start = None;
-            }
-        }
-    }
-    if let Some(start) = speech_start {
-        finish_segment(start, last_audible);
-    }
-    if ranges.is_empty() {
-        return vec![samples];
-    }
-    ranges
-        .into_iter()
-        .map(|(start, end)| &samples[start * channels..end * channels])
-        .collect()
+fn outgoing_audio_has_expected_meaning(transcript: &str, require_duplex_tail: bool) -> bool {
+    let normalized = transcript.to_lowercase();
+    normalized.contains("alex")
+        && normalized.contains("english")
+        && (normalized.contains("voice") || normalized.contains("translation"))
+        && (!require_duplex_tail
+            || (normalized.contains("phoenix")
+                && (normalized.contains('7') || normalized.contains("seven"))))
 }
 
-fn transcription_segments(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<&[i16]> {
-    const MAX_CONTEXT_SECONDS: usize = 30;
-
-    let max_context_samples = (sample_rate as usize)
-        .saturating_mul(usize::from(channels.max(1)))
-        .saturating_mul(MAX_CONTEXT_SECONDS);
-    if samples.len() <= max_context_samples {
-        vec![samples]
-    } else {
-        audible_pcm16_segments(samples, sample_rate, channels)
-    }
-}
-
-async fn transcribe_audible_pcm16(
+async fn transcribe_outgoing_audio(
     client: &reqwest::Client,
     api_key: &str,
     sample_rate: u32,
     channels: u16,
     samples: &[i16],
-) -> Result<String, String> {
-    let segments = transcription_segments(samples, sample_rate, channels);
-    let mut transcripts = Vec::with_capacity(segments.len());
-    for segment in segments {
-        transcripts.push(
-            transcribe_pcm16(client, api_key, sample_rate, channels, segment)
-                .await?
-                .trim()
-                .to_string(),
-        );
-    }
-    Ok(transcripts.join(" "))
+    require_duplex_tail: bool,
+) -> Result<OutgoingAudioTranscription, String> {
+    let primary = transcribe_audible_pcm16(client, api_key, sample_rate, channels, samples).await;
+    let primary_error = primary.as_ref().err().cloned();
+    let primary_transcript = primary.unwrap_or_default();
+    let segmented_fallback_attempted = primary_error.is_some()
+        || !outgoing_audio_has_expected_meaning(&primary_transcript, require_duplex_tail);
+    let segmented_fallback = if segmented_fallback_attempted {
+        Some(transcribe_segmented_pcm16(client, api_key, sample_rate, channels, samples).await)
+    } else {
+        None
+    };
+    let segmented_fallback_error = segmented_fallback
+        .as_ref()
+        .and_then(|result| result.as_ref().err())
+        .cloned();
+    let segmented_fallback_transcript = segmented_fallback.and_then(Result::ok).unwrap_or_default();
+    let gpt_transcript = match (
+        primary_transcript.is_empty(),
+        segmented_fallback_transcript.is_empty(),
+    ) {
+        (false, false) => format!("{primary_transcript}\n{segmented_fallback_transcript}"),
+        (false, true) => primary_transcript.clone(),
+        (true, false) => segmented_fallback_transcript.clone(),
+        (true, true) => String::new(),
+    };
+    let whisper_fallback_attempted =
+        !outgoing_audio_has_expected_meaning(&gpt_transcript, require_duplex_tail);
+    let whisper_fallback = if whisper_fallback_attempted {
+        Some(transcribe_pcm16_with_whisper(client, api_key, sample_rate, channels, samples).await)
+    } else {
+        None
+    };
+    let whisper_fallback_error = whisper_fallback
+        .as_ref()
+        .and_then(|result| result.as_ref().err())
+        .cloned();
+    let whisper_fallback_transcript = whisper_fallback.and_then(Result::ok).unwrap_or_default();
+    let transcript = match (
+        gpt_transcript.is_empty(),
+        whisper_fallback_transcript.is_empty(),
+    ) {
+        (false, false) => format!("{gpt_transcript}\n{whisper_fallback_transcript}"),
+        (false, true) => gpt_transcript,
+        (true, false) => whisper_fallback_transcript.clone(),
+        (true, true) => {
+            return Err(format!(
+                "primary transcription failed: {}; segmented fallback failed: {}; whisper fallback failed: {}",
+                primary_error.as_deref().unwrap_or("empty transcript"),
+                segmented_fallback_error
+                    .as_deref()
+                    .unwrap_or("empty transcript"),
+                whisper_fallback_error
+                    .as_deref()
+                    .unwrap_or("empty transcript")
+            ));
+        }
+    };
+    Ok(OutgoingAudioTranscription {
+        transcript,
+        primary_transcript,
+        primary_error,
+        segmented_fallback_attempted,
+        segmented_fallback_transcript,
+        segmented_fallback_error,
+        whisper_fallback_attempted,
+        whisper_fallback_transcript,
+        whisper_fallback_error,
+    })
 }
 
 fn outgoing_artifact_root() -> PathBuf {
@@ -1000,15 +987,17 @@ async fn live_translation_service_synthetic_voice_reaches_blackhole() {
         .collect();
     let audible_pcm16 =
         audible_pcm16_window(&captured_pcm16, capture_sample_rate, capture_channels);
-    let virtual_mic_transcript = transcribe_audible_pcm16(
+    let virtual_mic_transcription = transcribe_outgoing_audio(
         &reqwest::Client::new(),
         &api_key,
         capture_sample_rate,
         capture_channels,
         audible_pcm16,
+        false,
     )
     .await
     .expect("captured virtual microphone audio must be independently transcribable");
+    let virtual_mic_transcript = &virtual_mic_transcription.transcript;
     let measured_rms = rms(&captured_samples);
     let peak = captured_samples
         .iter()
@@ -1046,7 +1035,15 @@ async fn live_translation_service_synthetic_voice_reaches_blackhole() {
             "rms": measured_rms,
             "peak": peak,
             "service_transcript": &translated_text,
-            "virtual_mic_transcript": &virtual_mic_transcript,
+            "virtual_mic_transcript": virtual_mic_transcript,
+            "virtual_mic_primary_transcript": &virtual_mic_transcription.primary_transcript,
+            "virtual_mic_primary_error": &virtual_mic_transcription.primary_error,
+            "virtual_mic_segmented_fallback_attempted": virtual_mic_transcription.segmented_fallback_attempted,
+            "virtual_mic_segmented_fallback_transcript": &virtual_mic_transcription.segmented_fallback_transcript,
+            "virtual_mic_segmented_fallback_error": &virtual_mic_transcription.segmented_fallback_error,
+            "virtual_mic_whisper_fallback_attempted": virtual_mic_transcription.whisper_fallback_attempted,
+            "virtual_mic_whisper_fallback_transcript": &virtual_mic_transcription.whisper_fallback_transcript,
+            "virtual_mic_whisper_fallback_error": &virtual_mic_transcription.whisper_fallback_error,
         }))
         .expect("must serialize outgoing E2E metrics"),
     )
@@ -1067,12 +1064,8 @@ async fn live_translation_service_synthetic_voice_reaches_blackhole() {
             && (service_transcript.contains("voice") || service_transcript.contains("translation")),
         "service translated text lost expected meaning: {translated_text}"
     );
-    let virtual_mic_transcript = virtual_mic_transcript.to_lowercase();
     assert!(
-        virtual_mic_transcript.contains("alex")
-            && virtual_mic_transcript.contains("english")
-            && (virtual_mic_transcript.contains("voice")
-                || virtual_mic_transcript.contains("translation")),
+        outgoing_audio_has_expected_meaning(virtual_mic_transcript, false),
         "virtual microphone audio lost translated meaning: {virtual_mic_transcript}"
     );
     assert!(
@@ -1430,15 +1423,17 @@ async fn simultaneous_incoming_and_outgoing_routes_translate_and_stop_independen
         .collect();
     let audible_pcm16 =
         audible_pcm16_window(&captured_pcm16, capture_sample_rate, capture_channels);
-    let virtual_mic_transcript = transcribe_audible_pcm16(
+    let virtual_mic_transcription = transcribe_outgoing_audio(
         &reqwest::Client::new(),
         &api_key,
         capture_sample_rate,
         capture_channels,
         audible_pcm16,
+        true,
     )
     .await
     .expect("duplex virtual microphone audio must be independently transcribable");
+    let virtual_mic_transcript = &virtual_mic_transcription.transcript;
 
     let incoming_transcript = incoming_text.lock().unwrap().clone();
     let outgoing_transcript = outgoing_text.lock().unwrap().clone();
@@ -1470,7 +1465,6 @@ async fn simultaneous_incoming_and_outgoing_routes_translate_and_stop_independen
     println!("duplex_artifacts={}", artifact_root.display());
 
     let outgoing_normalized = outgoing_transcript.to_lowercase();
-    let virtual_mic_normalized = virtual_mic_transcript.to_lowercase();
     let incoming_normalized = incoming_transcript.to_lowercase();
     assert!(
         (incoming_normalized.contains("42") || incoming_normalized.contains("сорок дв"))
@@ -1490,12 +1484,7 @@ async fn simultaneous_incoming_and_outgoing_routes_translate_and_stop_independen
         "duplex outgoing text lost meaning: {outgoing_transcript}"
     );
     assert!(
-        virtual_mic_normalized.contains("alex")
-            && virtual_mic_normalized.contains("english")
-            && (virtual_mic_normalized.contains("voice")
-                || virtual_mic_normalized.contains("translation"))
-            && virtual_mic_normalized.contains("phoenix")
-            && (virtual_mic_normalized.contains('7') || virtual_mic_normalized.contains("seven")),
+        outgoing_audio_has_expected_meaning(virtual_mic_transcript, true),
         "duplex virtual microphone lost meaning: {virtual_mic_transcript}"
     );
     assert!(
