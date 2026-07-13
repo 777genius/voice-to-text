@@ -885,6 +885,36 @@ describe('transcription connect-retry reliability', () => {
     expect(store.incomingTranslationText).toBe('перевод до стопа');
   });
 
+  it('incoming translation не применяет старый stop response поверх новой session', async () => {
+    const handlers = new Map<string, any>();
+    const pendingStop = deferred<string>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === 'stop_incoming_translation') return pendingStop.promise;
+      return Promise.resolve(null);
+    });
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 613, status: 'Recording' },
+    });
+
+    const stop = store.toggleIncomingTranslation();
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 614, status: 'Recording' },
+    });
+    pendingStop.resolve('Incoming translation stopped');
+    await stop;
+
+    expect(store.incomingTranslationStatus).toBe('Recording');
+    expect(store.incomingTranslationSessionId).toBe(614);
+  });
+
   it('spoken playback snapshot восстанавливает mute и отбрасывает stale playback events', async () => {
     const handlers = new Map<string, any>();
     listenMock.mockImplementation(async (eventName: string, handler: any) => {

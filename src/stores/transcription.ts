@@ -2985,12 +2985,14 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     try {
       await invoke<string>(command);
       if (shouldStop) {
-        incomingTranslationStatus.value = RecordingStatus.Idle;
         if (incomingTerminalSessionId === sessionBeforeCommand) {
           incomingTerminalSessionId = null;
         }
         if (sessionBeforeCommand !== null) {
           markIncomingTranslationSessionClosed(sessionBeforeCommand, 'stop_command_success');
+        }
+        if (incomingTranslationSessionId.value === null) {
+          incomingTranslationStatus.value = RecordingStatus.Idle;
         }
       } else {
         await reconcileIncomingTranslationState('start_command_success');
