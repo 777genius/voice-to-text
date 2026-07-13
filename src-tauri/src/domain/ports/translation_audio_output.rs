@@ -40,8 +40,8 @@ pub struct TranslationAudioOutputConfig {
     pub source_sample_rate: u32,
     pub source_channels: u16,
     pub prebuffer_ms: u64,
-    pub max_buffered_frames: usize,
-    pub drain_max_buffered_frames: usize,
+    pub max_buffered_duration: Duration,
+    pub drain_max_buffered_duration: Duration,
     pub gain: f32,
 }
 
@@ -51,9 +51,16 @@ impl TranslationAudioOutputConfig {
             source_sample_rate: 24_000,
             source_channels: 1,
             prebuffer_ms: 200,
-            max_buffered_frames: 300_000,
-            drain_max_buffered_frames: 720_000,
+            max_buffered_duration: Duration::from_millis(6_250),
+            drain_max_buffered_duration: Duration::from_secs(15),
             gain: 1.0,
+        }
+    }
+
+    pub fn incoming_spoken_translation() -> Self {
+        Self {
+            max_buffered_duration: Duration::from_secs(10),
+            ..Self::openai_translation()
         }
     }
 

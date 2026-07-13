@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use app_lib::domain::AudioEnqueueOutcome;
 use app_lib::infrastructure::audio::{AudioOutput, AudioOutputConfig, CpalAudioOutput};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -116,4 +117,30 @@ async fn cpal_output_reaches_blackhole_input() {
         "BlackHole loopback captured silence/too low signal: device={input_name}, samples={}, rms={measured_rms:.6}, peak={peak:.6}",
         samples.len()
     );
+}
+
+#[tokio::test]
+#[ignore = "requires installed BlackHole 2ch and real CoreAudio devices"]
+async fn incoming_spoken_profile_accepts_nine_second_burst_without_drop() {
+    let mut output = CpalAudioOutput::new();
+    output
+        .open(AudioOutputConfig::incoming_spoken_translation())
+        .await
+        .expect("must open BlackHole with incoming spoken profile");
+
+    let tone = generated_tone_pcm16(24_000, Duration::from_secs(9), 660.0);
+    let outcome = output
+        .enqueue_pcm16(&tone)
+        .await
+        .expect("must enqueue long incoming translation burst");
+
+    assert!(
+        matches!(outcome, AudioEnqueueOutcome::Queued { .. }),
+        "nine-second incoming burst must fit without dropping audio: {outcome:?}"
+    );
+    assert!(
+        output.pending_playback_duration() <= Duration::from_secs(10),
+        "bounded incoming playback exceeded its configured headroom"
+    );
+    output.close().await.expect("must close BlackHole output");
 }

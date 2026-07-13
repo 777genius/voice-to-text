@@ -296,7 +296,8 @@ impl IncomingSpokenTranslationService {
         };
         if let Err(error) = output
             .open(
-                TranslationAudioOutputConfig::openai_translation().with_gain(config.playback_gain),
+                TranslationAudioOutputConfig::incoming_spoken_translation()
+                    .with_gain(config.playback_gain),
             )
             .await
         {
@@ -640,6 +641,7 @@ mod tests {
         requested_route: StdMutex<Option<LocalPlaybackRoute>>,
         requested_language: StdMutex<Option<String>>,
         output_samples: StdMutex<Vec<i16>>,
+        output_configs: StdMutex<Vec<TranslationAudioOutputConfig>>,
         output_gains: StdMutex<Vec<f32>>,
         output_health_fail: AtomicBool,
         capture_error_callbacks: StdMutex<Vec<AudioCaptureErrorCallback>>,
@@ -792,9 +794,10 @@ mod tests {
     impl TranslationAudioOutput for FakeOutput {
         async fn open(
             &mut self,
-            _config: TranslationAudioOutputConfig,
+            config: TranslationAudioOutputConfig,
         ) -> TranslationAudioOutputResult<()> {
             self.state.output_open_calls.fetch_add(1, Ordering::SeqCst);
+            self.state.output_configs.lock().unwrap().push(config);
             if self.fail_open {
                 return Err(TranslationAudioOutputError::Device(
                     "output unavailable".into(),
@@ -1163,6 +1166,9 @@ mod tests {
             state.requested_language.lock().unwrap().as_deref(),
             Some("ru")
         );
+        let output_config = state.output_configs.lock().unwrap()[0];
+        assert_eq!(output_config.max_buffered_duration, Duration::from_secs(10));
+        assert_eq!(output_config.gain, 0.75);
 
         service.stop().await.unwrap();
 

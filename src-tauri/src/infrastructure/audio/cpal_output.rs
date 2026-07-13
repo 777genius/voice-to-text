@@ -18,6 +18,16 @@ pub use crate::domain::{
 
 /// Размер чанка для resampler внутри output pipeline (в source-сэмплах, mono).
 const RESAMPLER_CHUNK_SIZE: usize = 256;
+const NANOS_PER_SECOND: u128 = 1_000_000_000;
+
+fn frames_for_duration(duration: Duration, sample_rate: u32) -> usize {
+    let numerator = duration.as_nanos().saturating_mul(u128::from(sample_rate));
+    numerator
+        .saturating_add(NANOS_PER_SECOND - 1)
+        .checked_div(NANOS_PER_SECOND)
+        .unwrap_or(0)
+        .min(usize::MAX as u128) as usize
+}
 
 /// Имя env-переменной для оверрайда output устройства (для devs которым нужно другое имя).
 pub const ENV_TRANSLATION_OUTPUT_DEVICE: &str = "VOICETEXT_TRANSLATION_OUTPUT_DEVICE";
@@ -463,6 +473,18 @@ impl CpalAudioOutput {
         }
     }
 
+    fn record_output_drop(&self, duration: Duration) {
+        if duration.is_zero() {
+            return;
+        }
+        if let Ok(mut state) = self.playback_state.lock() {
+            state.overflow_count = state.overflow_count.saturating_add(1);
+            state.dropped_audio_ms = state
+                .dropped_audio_ms
+                .saturating_add(duration.as_millis().min(u64::MAX as u128) as u64);
+        }
+    }
+
     /// Flushes the final partial source chunk and lets the output callback play
     /// whatever remains without waiting for another full prebuffer.
     pub fn prepare_for_drain(&self) -> AudioOutputResult<Duration> {
@@ -476,15 +498,25 @@ impl CpalAudioOutput {
         let Some(cfg) = self.config.as_ref() else {
             return Err(AudioOutputError::Closed);
         };
-        Self::drain_source_and_push(
+        let dropped_frames = Self::drain_source_and_push(
             &self.source_queue,
             &self.output_ready,
             &self.resampler,
             native.channels() as usize,
-            cfg.drain_max_buffered_frames,
+            frames_for_duration(cfg.drain_max_buffered_duration, native.sample_rate().0),
             cfg.gain,
             true,
         )?;
+        if dropped_frames > 0 {
+            let dropped_duration = Duration::from_secs_f64(
+                dropped_frames as f64 / native.sample_rate().0.max(1) as f64,
+            );
+            self.record_output_drop(dropped_duration);
+            return Err(AudioOutputError::Stream(format!(
+                "translation output overflowed during drain and dropped {} ms",
+                dropped_duration.as_millis()
+            )));
+        }
 
         let pending = self.pending_playback_duration();
         if pending > Duration::ZERO {
@@ -583,15 +615,15 @@ impl TranslationAudioOutput for CpalAudioOutput {
         let config = config.normalized();
         if config.source_sample_rate == 0
             || config.source_channels != 1
-            || config.max_buffered_frames == 0
-            || config.drain_max_buffered_frames < config.max_buffered_frames
+            || config.max_buffered_duration.is_zero()
+            || config.drain_max_buffered_duration < config.max_buffered_duration
         {
             return Err(AudioOutputError::Configuration(format!(
-                "Invalid translation output config: {} Hz {} ch, buffer={} drain_buffer={}",
+                "Invalid translation output config: {} Hz {} ch, buffer={}ms drain_buffer={}ms",
                 config.source_sample_rate,
                 config.source_channels,
-                config.max_buffered_frames,
-                config.drain_max_buffered_frames
+                config.max_buffered_duration.as_millis(),
+                config.drain_max_buffered_duration.as_millis()
             )));
         }
         let host = cpal::default_host();
@@ -698,9 +730,9 @@ impl TranslationAudioOutput for CpalAudioOutput {
             .map(|state| state.draining)
             .unwrap_or(false)
         {
-            cfg.drain_max_buffered_frames
+            frames_for_duration(cfg.drain_max_buffered_duration, native.sample_rate().0)
         } else {
-            cfg.max_buffered_frames
+            frames_for_duration(cfg.max_buffered_duration, native.sample_rate().0)
         };
 
         let max_source_samples = ((max_buffered_frames as u128)
@@ -731,12 +763,7 @@ impl TranslationAudioOutput for CpalAudioOutput {
             let dropped_output_duration =
                 Duration::from_secs_f64(dropped_frames as f64 / native_sample_rate as f64);
             let dropped_duration = dropped_source_duration.saturating_add(dropped_output_duration);
-            if let Ok(mut state) = self.playback_state.lock() {
-                state.overflow_count = state.overflow_count.saturating_add(1);
-                state.dropped_audio_ms = state
-                    .dropped_audio_ms
-                    .saturating_add(dropped_duration.as_millis().min(u64::MAX as u128) as u64);
-            }
+            self.record_output_drop(dropped_duration);
             Ok(AudioEnqueueOutcome::DroppedOldest {
                 duration: dropped_duration,
                 pending,
@@ -916,9 +943,44 @@ mod tests {
         assert_eq!(cfg.source_sample_rate, 24_000);
         assert_eq!(cfg.source_channels, 1);
         assert_eq!(cfg.prebuffer_ms, 200);
-        assert!(cfg.max_buffered_frames >= 288_000); // headroom хотя бы 6 сек на 48 kHz
-        assert!(cfg.drain_max_buffered_frames > cfg.max_buffered_frames);
+        assert_eq!(cfg.max_buffered_duration, Duration::from_millis(6_250));
+        assert!(cfg.drain_max_buffered_duration > cfg.max_buffered_duration);
         assert_eq!(cfg.gain, 1.0);
+    }
+
+    #[test]
+    fn incoming_spoken_profile_has_device_independent_ten_second_headroom() {
+        let cfg = AudioOutputConfig::incoming_spoken_translation();
+        let outgoing = AudioOutputConfig::openai_translation();
+
+        assert_eq!(cfg.max_buffered_duration, Duration::from_secs(10));
+        assert_eq!(
+            frames_for_duration(cfg.max_buffered_duration, 44_100),
+            441_000
+        );
+        assert_eq!(
+            frames_for_duration(cfg.max_buffered_duration, 96_000),
+            960_000
+        );
+        assert!(cfg.drain_max_buffered_duration >= cfg.max_buffered_duration);
+        assert_eq!(
+            frames_for_duration(outgoing.max_buffered_duration, 44_100),
+            275_625
+        );
+        assert_eq!(
+            frames_for_duration(outgoing.max_buffered_duration, 48_000),
+            300_000
+        );
+        assert_eq!(
+            frames_for_duration(outgoing.max_buffered_duration, 96_000),
+            600_000
+        );
+        assert_eq!(
+            frames_for_duration(Duration::from_secs(10) + Duration::from_nanos(1), 48_000),
+            480_001
+        );
+        assert_eq!(frames_for_duration(Duration::ZERO, 48_000), 0);
+        assert_eq!(frames_for_duration(Duration::MAX, u32::MAX), usize::MAX);
     }
 
     #[test]
@@ -1113,6 +1175,37 @@ mod tests {
         assert_eq!(ready[1], 3000.0 / 32_768.0);
         assert_eq!(ready[4], 5000.0 / 32_768.0);
         assert_eq!(ready[5], 5000.0 / 32_768.0);
+    }
+
+    #[test]
+    fn prepare_for_drain_reports_partial_chunk_overflow() {
+        let mut output = CpalAudioOutput::new();
+        output.is_open = true;
+        output.native_config = Some(SupportedStreamConfig::new(
+            1,
+            cpal::SampleRate(100),
+            cpal::SupportedBufferSize::Range { min: 1, max: 128 },
+            SampleFormat::F32,
+        ));
+        output.config = Some(AudioOutputConfig {
+            max_buffered_duration: Duration::from_millis(30),
+            drain_max_buffered_duration: Duration::from_millis(30),
+            ..AudioOutputConfig::openai_translation()
+        });
+        output.output_ready.lock().unwrap().extend([0.1, 0.2, 0.3]);
+        output.source_queue.lock().unwrap().push_back(1_000);
+
+        let error = output
+            .prepare_for_drain()
+            .expect_err("partial drain overflow must not stay silent");
+
+        assert!(matches!(
+            error,
+            AudioOutputError::Stream(message) if message.contains("overflowed during drain")
+        ));
+        let state = output.playback_state.lock().unwrap();
+        assert_eq!(state.overflow_count, 1);
+        assert_eq!(state.dropped_audio_ms, 10);
     }
 
     #[test]
