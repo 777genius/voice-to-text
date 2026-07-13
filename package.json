@@ -10,7 +10,7 @@
     "test": "vitest",
     "test:run": "vitest run && npm run --silent test:e2e-helpers",
     "test:coverage": "vitest run --coverage",
-    "test:e2e-helpers": "node --test e2e-tests/helpers/liveAudioEvidenceContract.test.mjs e2e-tests/helpers/liveAudioRunner.test.mjs e2e-tests/helpers/processUtils.test.mjs",
+    "test:e2e-helpers": "node --test e2e-tests/helpers/liveAudioEvidenceContract.test.mjs e2e-tests/helpers/liveAudioRunner.test.mjs e2e-tests/helpers/processUtils.test.mjs e2e-tests/helpers/tauriE2e.test.mjs",
     "typecheck": "vue-tsc --noEmit",
     "release:notes": "node scripts/prepare-release-notes.mjs",
     "tauri": "tauri",

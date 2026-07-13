@@ -1,4 +1,5 @@
 import {
+  clickTauriElement,
   emitEvent,
   ensureE2E,
   findWindowHandleByLabel,
@@ -17,9 +18,8 @@ describe('incoming translation subtitles (real tauri webdriver)', () => {
       throw new Error(`incoming translation did not start idle: ${JSON.stringify(initial)}`);
     }
 
-    const toggle = await $('[data-testid="incoming-translation-toggle"]');
-    await toggle.waitForClickable({ timeout: 15_000 });
-    await toggle.click();
+    const toggleSelector = '[data-testid="incoming-translation-toggle"]';
+    await clickTauriElement(toggleSelector);
 
     let firstSessionId = 0;
     await waitFor(async () => {
@@ -31,8 +31,7 @@ describe('incoming translation subtitles (real tauri webdriver)', () => {
     const text = await $('[data-testid="incoming-translation-text"]');
     await waitFor(async () => (await text.getText()).includes('привет из e2e звонка'));
 
-    await toggle.waitForClickable({ timeout: 15_000 });
-    await toggle.click();
+    await clickTauriElement(toggleSelector);
     await waitFor(async () => {
       const state = await invoke('get_incoming_translation_state');
       return state.status === 'Idle' && state.session_id === 0;
@@ -40,16 +39,14 @@ describe('incoming translation subtitles (real tauri webdriver)', () => {
 
     // The debug output factory rejects this restart unless the previous session
     // enqueued the exact translated PCM, drained it, and closed the output.
-    await toggle.waitForClickable({ timeout: 15_000 });
-    await toggle.click();
+    await clickTauriElement(toggleSelector);
     await waitFor(async () => {
       const state = await invoke('get_incoming_translation_state');
       return state.status === 'Recording' && state.session_id > firstSessionId;
     });
     await waitFor(async () => (await text.getText()).includes('привет из e2e звонка'));
 
-    await toggle.waitForClickable({ timeout: 15_000 });
-    await toggle.click();
+    await clickTauriElement(toggleSelector);
     await waitFor(async () => {
       const state = await invoke('get_incoming_translation_state');
       return state.status === 'Idle' && state.session_id === 0;

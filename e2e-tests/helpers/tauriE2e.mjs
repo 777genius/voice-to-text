@@ -47,6 +47,55 @@ export async function waitFor(fn, { timeoutMs = 15_000, intervalMs = 200 } = {})
   }
 }
 
+export async function clickTauriElement(
+  selector,
+  { timeoutMs = 15_000, intervalMs = 200 } = {},
+) {
+  await waitFor(
+    async () => {
+      const result = await browser.execute((targetSelector) => {
+        const element = document.querySelector(targetSelector);
+        if (!(element instanceof HTMLElement)) {
+          return { clicked: false, reason: 'element is missing' };
+        }
+        if (!element.isConnected) {
+          return { clicked: false, reason: 'element is detached' };
+        }
+        if (element.matches(':disabled') || element.getAttribute('aria-disabled') === 'true') {
+          return { clicked: false, reason: 'element is disabled' };
+        }
+
+        let current = element;
+        while (current instanceof HTMLElement) {
+          const style = getComputedStyle(current);
+          if (current.hidden || current.inert) {
+            return { clicked: false, reason: 'element or ancestor is hidden' };
+          }
+          if (style.display === 'none') {
+            return { clicked: false, reason: 'element or ancestor has display:none' };
+          }
+          if (style.visibility === 'hidden' || style.visibility === 'collapse') {
+            return { clicked: false, reason: 'element or ancestor is not visible' };
+          }
+          if (style.pointerEvents === 'none') {
+            return { clicked: false, reason: 'element or ancestor ignores pointer events' };
+          }
+          current = current.parentElement;
+        }
+
+        element.click();
+        return { clicked: true, reason: null };
+      }, selector);
+
+      if (!result?.clicked) {
+        throw new Error(`cannot click ${selector}: ${result?.reason ?? 'unknown browser response'}`);
+      }
+      return true;
+    },
+    { timeoutMs, intervalMs },
+  );
+}
+
 export async function getWindowLabelSafe() {
   return await browser.execute(() => {
     if (!window.__E2E__) return null;
@@ -74,7 +123,5 @@ export async function findWindowHandleByLabel(label, { timeoutMs = 15_000 } = {}
 }
 
 export async function openSettingsWindow() {
-  const settingsButton = await $('[data-testid="open-settings"]');
-  await settingsButton.waitForExist({ timeout: 15000 });
-  await settingsButton.click();
+  await clickTauriElement('[data-testid="open-settings"]');
 }
