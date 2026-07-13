@@ -745,8 +745,8 @@ async fn handle_server_text(
             };
             if let Some(code) = error.code.as_deref() {
                 log::warn!(
-                    "OpenAI realtime translation error: code={}",
-                    truncate_for_log(code, 128)
+                    "OpenAI realtime translation error included a server code (bytes={})",
+                    code.len()
                 );
             }
             fail_reader(tx, handshake, error_from_kind(kind, message)).await;
@@ -754,17 +754,17 @@ async fn handle_server_text(
         }
         Ok(ServerEvent::Unknown) => {
             log::debug!(
-                "OpenAI realtime translation: ignored unknown server event: {}",
-                truncate_for_log(text, 256)
+                "OpenAI realtime translation: ignored unknown server event (payload_bytes={})",
+                text.len()
             );
             false
         }
         Err(e) => {
-            let message = format!("invalid OpenAI realtime server event: {}", e);
+            let parse_context = json_parse_error_context(&e, text.len());
+            let message = format!("invalid OpenAI realtime server event: {parse_context}");
             log::warn!(
-                "OpenAI realtime translation: failed to parse server event ({}). raw: {}",
-                e,
-                truncate_for_log(text, 256)
+                "OpenAI realtime translation: failed to parse server event ({})",
+                parse_context
             );
             fail_reader(tx, handshake, RealtimeTranslationError::Protocol(message)).await;
             true
@@ -834,20 +834,14 @@ fn error_from_kind(
     }
 }
 
-fn truncate_for_log(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        let boundary = s
-            .char_indices()
-            .map(|(idx, _)| idx)
-            .take_while(|idx| *idx <= max)
-            .last()
-            .unwrap_or(0);
-        let mut out = s[..boundary].to_string();
-        out.push('…');
-        out
-    }
+fn json_parse_error_context(error: &serde_json::Error, payload_bytes: usize) -> String {
+    format!(
+        "category={:?}, line={}, column={}, payload_bytes={}",
+        error.classify(),
+        error.line(),
+        error.column(),
+        payload_bytes
+    )
 }
 
 /// Утилита для генерации `session.input_audio_buffer.append` JSON — открытая для тестов
@@ -936,10 +930,18 @@ mod tests {
     }
 
     #[test]
-    fn truncate_for_log_handles_unicode_boundaries() {
-        assert_eq!(truncate_for_log("abc", 10), "abc");
-        assert_eq!(truncate_for_log("a🙂b", 2), "a…");
-        assert_eq!(truncate_for_log("🙂🙂", 1), "…");
+    fn malformed_event_log_context_contains_metadata_but_not_payload() {
+        let secret = "private transcript and base64 audio";
+        let raw = format!(r#"{{"type":"session.updated","secret":"{secret}""#);
+        let error = serde_json::from_str::<ServerEvent>(&raw).unwrap_err();
+
+        let context = json_parse_error_context(&error, raw.len());
+
+        assert!(context.contains("category=Eof"));
+        assert!(context.contains(&format!("payload_bytes={}", raw.len())));
+        assert!(!context.contains(secret));
+        assert!(!context.contains("transcript"));
+        assert!(!context.contains("base64"));
     }
 
     #[test]
