@@ -438,7 +438,7 @@ fn live_audio_soak_duration() -> Duration {
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|seconds| *seconds > 0)
         .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(600))
+        .unwrap_or_else(|| Duration::from_secs(30 * 60))
 }
 
 struct SyntheticPcmMicrophone {

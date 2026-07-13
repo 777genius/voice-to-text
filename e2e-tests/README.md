@@ -21,7 +21,7 @@ sudo apt-get install -y webkit2gtk-driver
 2) Установить tauri-driver:
 
 ```bash
-cargo install tauri-driver --locked
+cargo install tauri-driver --version 2.0.6 --locked
 ```
 
 3) Запустить тесты:
@@ -43,7 +43,8 @@ They cover:
 - ScreenCaptureKit 24 kHz mono capture, callback stop, and same-process playback exclusion.
 - Outgoing live translation service: synthetic voice -> OpenAI realtime -> virtual microphone route.
 - Incoming subtitles service: system output audio -> ScreenCaptureKit loopback -> OpenAI speech-to-text -> OpenAI text translation.
-- Incoming spoken service: half-volume system speech -> OpenAI realtime -> Russian text and local translated playback.
+- Incoming spoken service: full linguistic/volume matrix -> OpenAI realtime -> Russian text and local translated playback.
+- Mid-phrase stop preserves the accepted translated text/audio tail and emits no callbacks after terminal stop.
 - Full duplex: incoming and outgoing paid routes run together, then each direction produces fresh evidence after the other is stopped.
 
 Prerequisites:
@@ -51,6 +52,7 @@ Prerequisites:
 - macOS with BlackHole 2ch installed.
 - BlackHole 2ch available as an input and output device.
 - Screen & System Audio Recording permission granted for the test binary or terminal.
+- The macOS GUI session is unlocked for the entire ScreenCaptureKit run; a locked/headless session exposes no shareable display.
 - A dedicated, revocable `OPENAI_E2E_API_KEY` in the environment.
 - Explicit paid-test acknowledgement with `VOICETEXT_RUN_PAID_E2E=1`.
 
@@ -77,7 +79,7 @@ stop/start cleanup, delayed OpenAI output, and system audio permission issues th
 test can miss. It also runs the constant-memory incoming spoken WebSocket runtime soak for the same
 duration.
 
-Default duration is 10 minutes per long test:
+Default duration is 30 minutes per long test:
 
 ```bash
 cd frontend
@@ -89,13 +91,21 @@ For development, run a shorter pass:
 ```bash
 cd frontend
 VOICETEXT_RUN_PAID_E2E=1 OPENAI_E2E_API_KEY=... \
-  LIVE_AUDIO_SOAK_SECONDS=60 npm run e2e:live-audio-soak
+  LIVE_AUDIO_SOAK_SECONDS=60 LIVE_AUDIO_ALLOW_SHORT_SOAK=1 npm run e2e:live-audio-soak
 ```
 
-For release confidence, use 10-30 minutes:
+The release soak requires at least 30 minutes:
 
 ```bash
 cd frontend
 VOICETEXT_RUN_PAID_E2E=1 OPENAI_E2E_API_KEY=... \
   LIVE_AUDIO_SOAK_SECONDS=1800 npm run e2e:live-audio-soak
 ```
+
+The deterministic spoken runtime soak samples process RSS after warmup, enforces at most 16 MiB
+growth, checks that the translated-event backlog stays bounded throughout the run, and requires it
+to drain near real time before shutdown.
+
+GitHub releases require a successful manual `macOS Audio Release Gate` run on the self-hosted
+`voicetext-audio` Mac. The `Release` workflow accepts that run ID only when its evidence artifact
+matches the exact tagged commit and records a soak of at least 1,800 seconds.

@@ -106,7 +106,7 @@ const tests = [
     ],
   },
   {
-    label: 'incoming-spoken-half-volume',
+    label: 'incoming-spoken-paid-matrix',
     paid: true,
     testName: 'incoming_spoken_translation_returns_realtime_text_and_audio_from_system_capture',
     command: [
@@ -120,9 +120,24 @@ const tests = [
       '--exact',
       '--nocapture',
     ],
-    env: {
-      INCOMING_SPOKEN_E2E_SCENARIO: 'half_volume_source',
-    },
+    timeoutMs: 1_200_000,
+  },
+  {
+    label: 'incoming-spoken-stop-mid-phrase',
+    paid: true,
+    testName: 'incoming_spoken_translation_paid_stop_mid_phrase_is_bounded',
+    command: [
+      'cargo',
+      'test',
+      '--test',
+      'incoming_system_audio_translation_e2e_test',
+      'incoming_spoken_translation_paid_stop_mid_phrase_is_bounded',
+      '--',
+      '--ignored',
+      '--exact',
+      '--nocapture',
+    ],
+    timeoutMs: 240_000,
   },
   {
     label: 'paid-full-duplex-independent-stop',
@@ -162,7 +177,7 @@ if (!paidE2e.apiKey) {
   fail('OPENAI_E2E_API_KEY is required; OPENAI_API_KEY and .env are intentionally ignored.');
 }
 
-for (const { label, paid, testName, command, env = {} } of tests) {
+for (const { label, paid, testName, command, env = {}, timeoutMs = TEST_TIMEOUT_MS } of tests) {
   console.log(`\n[live-audio-smoke] running ${label}`);
   runLiveAudioCommand({
     command,
@@ -180,7 +195,7 @@ for (const { label, paid, testName, command, env = {} } of tests) {
     label,
     maxBuffer: 20 * 1024 * 1024,
     testName,
-    timeoutMs: TEST_TIMEOUT_MS,
+    timeoutMs,
   });
 }
 

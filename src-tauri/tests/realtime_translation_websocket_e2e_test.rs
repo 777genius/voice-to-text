@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -672,6 +673,21 @@ fn spoken_soak_duration() -> Duration {
         .unwrap_or_else(|| Duration::from_secs(30 * 60))
 }
 
+fn current_process_rss_kib() -> Option<u64> {
+    let output = Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    std::str::from_utf8(&output.stdout)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 #[tokio::test]
 #[ignore = "30-minute synthetic spoken soak; set SPOKEN_TRANSLATION_SOAK_SECONDS for a shorter manual run"]
 async fn spoken_runtime_long_soak_keeps_audio_flow_bounded_and_stops_cleanly() {
@@ -753,11 +769,36 @@ async fn spoken_runtime_long_soak_keeps_audio_flow_bounded_and_stops_cleanly() {
     let duration = spoken_soak_duration();
 
     service.start(config, callbacks).await.unwrap();
+    let warmup = Duration::from_secs(10).min(duration / 4);
+    let sample_interval = Duration::from_secs(5).min(duration.max(Duration::from_secs(1)));
+    let started_at = tokio::time::Instant::now();
     let deadline = tokio::time::Instant::now() + duration;
+    let mut next_rss_sample = started_at + warmup;
+    let mut rss_samples_kib = Vec::new();
+    let mut max_backlog_events = 0usize;
+    let mut final_backlog_events = 0usize;
     while tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_secs(1).min(duration)).await;
         assert_eq!(service.get_status().await, RecordingStatus::Recording);
         assert!(errors.lock().unwrap().is_empty());
+
+        let emitted = emitted_audio_events.load(Ordering::SeqCst);
+        let consumed = flow_state.output_sample_count.load(Ordering::Relaxed) / 3;
+        final_backlog_events = emitted.saturating_sub(consumed);
+        max_backlog_events = max_backlog_events.max(final_backlog_events);
+        assert!(
+            final_backlog_events <= 20,
+            "spoken runtime output backlog exceeded two seconds: emitted={emitted}, consumed={consumed}, backlog={final_backlog_events}"
+        );
+
+        let now = tokio::time::Instant::now();
+        if now >= next_rss_sample {
+            rss_samples_kib.push(
+                current_process_rss_kib()
+                    .expect("release soak requires a working ps RSS measurement"),
+            );
+            next_rss_sample = now + sample_interval;
+        }
     }
     service.stop().await.unwrap();
     tokio::time::timeout(TEST_TIMEOUT, server)
@@ -768,14 +809,34 @@ async fn spoken_runtime_long_soak_keeps_audio_flow_bounded_and_stops_cleanly() {
     let events = emitted_audio_events.load(Ordering::SeqCst);
     let samples = flow_state.output_sample_count.load(Ordering::Relaxed);
     let text_chars = translated_text_chars.load(Ordering::Relaxed);
+    assert!(
+        rss_samples_kib.len() >= 2,
+        "spoken runtime soak requires at least two RSS samples, got {:?}",
+        rss_samples_kib
+    );
+    let baseline_rss_kib = rss_samples_kib[0];
+    let max_rss_kib = *rss_samples_kib.iter().max().unwrap();
+    let rss_growth_kib = max_rss_kib.saturating_sub(baseline_rss_kib);
     println!(
-        "spoken_soak_seconds={}, audio_events={events}, output_samples={samples}, text_chars={}",
+        "spoken_soak_seconds={}, audio_events={events}, output_samples={samples}, text_chars={}, max_backlog_events={}, final_backlog_events={}, rss_samples_kib={:?}, rss_growth_kib={}",
         duration.as_secs(),
-        text_chars
+        text_chars,
+        max_backlog_events,
+        final_backlog_events,
+        rss_samples_kib,
+        rss_growth_kib
     );
     assert!(events > 0);
     assert_eq!(samples, events * 3);
     assert!(samples <= (duration.as_secs() as usize + 2) * 33);
+    assert!(
+        final_backlog_events <= 5,
+        "spoken runtime backlog did not drain near real time: {final_backlog_events} events"
+    );
+    assert!(
+        rss_growth_kib <= 16 * 1024,
+        "spoken runtime peak RSS grew by {rss_growth_kib} KiB across the measured soak window"
+    );
     assert!(flow_state.output_samples.lock().unwrap().is_empty());
     assert!(flow_state.capture_stopped.load(Ordering::SeqCst));
     assert!(flow_state.output_closed.load(Ordering::SeqCst));

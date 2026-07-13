@@ -137,8 +137,9 @@ stream. Outgoing physical-microphone translation keeps the `near_field` policy. 
 WebSocket E2E asserts this route-specific `session.update` contract.
 
 Run `incoming_spoken_translation_paid_stop_mid_phrase_is_bounded` with the same paid-key guard to
-verify the incoming runtime's six-second graceful drain plus one-second forced cleanup budget
-against a real OpenAI session. Deterministic network interruption,
+stop while the source fixture is still speaking. It verifies captured source PCM, Russian text,
+audible translated PCM, the derived 22-second outer stop bound, and zero text/audio/status/error
+callbacks after terminal stop against a real OpenAI session. Deterministic network interruption,
 malformed frames, abrupt close, stalled close, 401/429, and oversized messages are covered by
 `realtime_translation_websocket_e2e_test` without a paid key.
 
@@ -183,7 +184,8 @@ metrics under `src-tauri/target/e2e-artifacts/outgoing-live-*`; override the dir
 
 The smoke runner combines BlackHole loopback, a nine-second no-drop incoming playback burst,
 native capture format and self-exclusion, outgoing virtual-microphone translation, captions
-regression, the incoming spoken half-volume scenario, and paid full duplex:
+regression, the full incoming linguistic/volume matrix, stop-mid-phrase tail preservation, and paid
+full duplex:
 
 ```bash
 cd frontend
@@ -200,6 +202,11 @@ VOICETEXT_RUN_PAID_E2E=1 OPENAI_E2E_API_KEY="sk-..." \
 ```
 
 Both runners reject `OPENAI_API_KEY` and do not read `.env`.
+
+For a GitHub release, run the manual `macOS Audio Release Gate` workflow on the labeled self-hosted
+test Mac. Pass its successful run ID to the manual `Release` workflow. Release publication verifies
+the evidence artifact belongs to the exact tagged commit and records at least a 1,800-second soak;
+a tag push alone cannot publish the feature.
 
 The full-duplex gate starts real incoming and outgoing OpenAI sessions together. It stops incoming,
 requires a second distinct outgoing phrase to reach BlackHole, restarts incoming, stops outgoing,

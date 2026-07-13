@@ -46,7 +46,7 @@ fn live_audio_soak_duration() -> Duration {
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|seconds| *seconds > 0)
         .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(600))
+        .unwrap_or_else(|| Duration::from_secs(30 * 60))
 }
 
 struct TempAudioFixture {
@@ -519,7 +519,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
             source_playback_gain: 1.0,
             secondary_source: Some("Bob says the security review must finish before Thursday evening."),
             human_reference: "Best effort mixed-track translation; note any lost speaker or timing detail.",
-            required_translation_markers: &[&["пятниц", "четверг"]],
+            required_translation_markers: &[&["пятниц"], &["четверг"]],
             translation_output_required: true,
         },
         PaidSpokenScenario {
@@ -894,6 +894,8 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
         let source_transcript_available = !source.trim().is_empty();
         let missing_marker_groups =
             missing_translation_marker_groups(&translated, scenario.required_translation_markers);
+        let translation_output_emitted =
+            !translated.trim().is_empty() || !translated_samples.is_empty();
         let output_received_within_timeout = wait_completed_before_timeout
             && terminal_errors.is_empty()
             && !translated.trim().is_empty()
@@ -982,7 +984,7 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
         if let Err(error) = stop_result {
             panic!("paid scenario {} must stop: {error}", scenario.id);
         }
-        if scenario.translation_output_required {
+        if scenario.translation_output_required || translation_output_emitted {
             assert!(
                 translated
                     .chars()
@@ -1022,10 +1024,22 @@ async fn incoming_spoken_translation_paid_stop_mid_phrase_is_bounded() {
         "This is a deliberately long sentence about a production incident, a certificate renewal, a database migration, and a scheduled release, and the translation session will be stopped before the speaker can finish the complete thought.",
     );
     let output_state = Arc::new(PaidSpokenOutputState::default());
+    let captured_samples = Arc::new(Mutex::new(Vec::<i16>::new()));
+    let first_input_ms = Arc::new(Mutex::new(None::<u128>));
+    let source_text = Arc::new(Mutex::new(String::new()));
+    let translated_text = Arc::new(Mutex::new(String::new()));
+    let terminal_errors = Arc::new(Mutex::new(Vec::<String>::new()));
+    let stop_completed = Arc::new(AtomicBool::new(false));
+    let callbacks_after_stop = Arc::new(AtomicUsize::new(0));
     let started_at = Instant::now();
     *output_state.started_at.lock().unwrap() = Some(started_at);
     let service = IncomingTranslationFacade::new_spoken_with_factories(
-        Arc::new(DefaultPlatformAudioFactory::new()),
+        Arc::new(ObservedSystemAudioCaptureFactory {
+            inner: DefaultPlatformAudioFactory::new(),
+            started_at,
+            first_input_ms: first_input_ms.clone(),
+            captured_samples: captured_samples.clone(),
+        }),
         Arc::new(PaidSpokenOutputFactory {
             state: output_state.clone(),
         }),
@@ -1033,10 +1047,48 @@ async fn incoming_spoken_translation_paid_stop_mid_phrase_is_bounded() {
         Arc::new(PaidSpokenReadyCapability),
     );
     let callbacks = IncomingTranslationCallbacks {
-        on_source_final: Arc::new(|_| {}),
-        on_translation_delta: Arc::new(|_| {}),
-        on_error: Arc::new(|_| {}),
-        on_status: Arc::new(|_| {}),
+        on_source_final: {
+            let source_text = source_text.clone();
+            let stop_completed = stop_completed.clone();
+            let callbacks_after_stop = callbacks_after_stop.clone();
+            Arc::new(move |delta| {
+                if stop_completed.load(Ordering::SeqCst) {
+                    callbacks_after_stop.fetch_add(1, Ordering::SeqCst);
+                }
+                source_text.lock().unwrap().push_str(&delta);
+            })
+        },
+        on_translation_delta: {
+            let translated_text = translated_text.clone();
+            let stop_completed = stop_completed.clone();
+            let callbacks_after_stop = callbacks_after_stop.clone();
+            Arc::new(move |delta| {
+                if stop_completed.load(Ordering::SeqCst) {
+                    callbacks_after_stop.fetch_add(1, Ordering::SeqCst);
+                }
+                translated_text.lock().unwrap().push_str(&delta);
+            })
+        },
+        on_error: {
+            let terminal_errors = terminal_errors.clone();
+            let stop_completed = stop_completed.clone();
+            let callbacks_after_stop = callbacks_after_stop.clone();
+            Arc::new(move |error| {
+                if stop_completed.load(Ordering::SeqCst) {
+                    callbacks_after_stop.fetch_add(1, Ordering::SeqCst);
+                }
+                terminal_errors.lock().unwrap().push(error.to_string());
+            })
+        },
+        on_status: {
+            let stop_completed = stop_completed.clone();
+            let callbacks_after_stop = callbacks_after_stop.clone();
+            Arc::new(move |_| {
+                if stop_completed.load(Ordering::SeqCst) {
+                    callbacks_after_stop.fetch_add(1, Ordering::SeqCst);
+                }
+            })
+        },
     };
     let mut config = IncomingTranslationConfig::new_with_defaults(SttConfig::default(), 40_001);
     config.openai_api_key = api_key;
@@ -1047,25 +1099,82 @@ async fn incoming_spoken_translation_paid_stop_mid_phrase_is_bounded() {
         .await
         .expect("paid stop-mid-phrase session must start");
 
+    tokio::time::sleep(PAID_SOURCE_PREROLL).await;
     let mut player = Command::new("afplay")
         .arg(fixture.path())
         .spawn()
         .expect("must play stop-mid-phrase fixture");
-    tokio::time::sleep(Duration::from_millis(700)).await;
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    assert!(
+        player
+            .try_wait()
+            .expect("must inspect stop-mid-phrase player")
+            .is_none(),
+        "source fixture finished before the mid-phrase stop was requested"
+    );
+    let translated_text_before_stop = translated_text.lock().unwrap().clone();
+    let translated_samples_before_stop = output_state.samples.lock().unwrap().len();
+    let translated_audible_before_stop = output_state.audible_samples.load(Ordering::Relaxed);
     let stop_started = Instant::now();
-    tokio::time::timeout(Duration::from_secs(8), service.stop())
+    tokio::time::timeout(Duration::from_secs(22), service.stop())
         .await
         .expect("stop mid phrase must remain bounded")
         .expect("stop mid phrase must cleanly close the realtime session");
+    let stop_duration = stop_started.elapsed();
+    stop_completed.store(true, Ordering::SeqCst);
     let _ = player.kill();
     let _ = player.wait();
 
     let samples_after_stop = output_state.samples.lock().unwrap().len();
+    let translated_after_stop = translated_text.lock().unwrap().clone();
+    let captured_after_stop = captured_samples.lock().unwrap().clone();
+    let errors_after_stop = terminal_errors.lock().unwrap().clone();
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
         output_state.samples.lock().unwrap().len(),
         samples_after_stop,
         "translated audio arrived after stop completed"
+    );
+    assert_eq!(
+        translated_text.lock().unwrap().as_str(),
+        translated_after_stop,
+        "translated text arrived after stop completed"
+    );
+    assert_eq!(
+        callbacks_after_stop.load(Ordering::SeqCst),
+        0,
+        "callbacks arrived after terminal stop"
+    );
+    assert!(
+        errors_after_stop.is_empty(),
+        "stop-mid-phrase terminal errors: {:?}",
+        errors_after_stop
+    );
+    assert!(
+        audible_sample_count(&captured_after_stop) >= 16_000,
+        "stop-mid-phrase capture did not receive enough source speech"
+    );
+    assert!(
+        translated_after_stop
+            .chars()
+            .any(|character| ('\u{0400}'..='\u{04ff}').contains(&character)),
+        "graceful stop did not preserve a Russian translated text tail: {translated_after_stop}"
+    );
+    assert!(
+        translated_after_stop.len() > translated_text_before_stop.len(),
+        "graceful stop emitted no additional translated text tail; before={translated_text_before_stop:?}, after={translated_after_stop:?}"
+    );
+    assert!(
+        samples_after_stop > translated_samples_before_stop,
+        "graceful stop emitted no additional translated audio tail"
+    );
+    assert!(
+        output_state.audible_samples.load(Ordering::Relaxed) >= MIN_AUDIBLE_TRANSLATED_SAMPLES,
+        "graceful stop did not preserve meaningful translated audio"
+    );
+    assert!(
+        output_state.audible_samples.load(Ordering::Relaxed) > translated_audible_before_stop,
+        "graceful stop emitted no additional audible translated tail"
     );
     assert!(output_state.closed.load(Ordering::SeqCst));
     assert_eq!(service.get_status().await, RecordingStatus::Idle);
@@ -1080,11 +1189,33 @@ async fn incoming_spoken_translation_paid_stop_mid_phrase_is_bounded() {
     )
     .expect("must persist stop-mid-phrase translated audio");
     fs::write(
+        artifact_dir.join("captured-input.wav"),
+        wav_pcm16(24_000, 1, &captured_after_stop),
+    )
+    .expect("must persist stop-mid-phrase captured input");
+    fs::write(
+        artifact_dir.join("translated-text.txt"),
+        &translated_after_stop,
+    )
+    .expect("must persist stop-mid-phrase translated text");
+    fs::write(
         artifact_dir.join("metrics.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
             "stop_requested_ms": stop_started.duration_since(started_at).as_millis(),
-            "stop_duration_ms": stop_started.elapsed().as_millis(),
+            "stop_duration_ms": stop_duration.as_millis(),
             "translated_audio_samples": samples_after_stop,
+            "translated_audio_samples_before_stop": translated_samples_before_stop,
+            "translated_audible_samples": output_state.audible_samples.load(Ordering::Relaxed),
+            "translated_audible_samples_before_stop": translated_audible_before_stop,
+            "captured_input_samples": captured_after_stop.len(),
+            "captured_audible_samples": audible_sample_count(&captured_after_stop),
+            "first_input_ms": *first_input_ms.lock().unwrap(),
+            "first_translated_audio_ms": *output_state.first_audio_ms.lock().unwrap(),
+            "source_text": source_text.lock().unwrap().clone(),
+            "translated_text_before_stop": translated_text_before_stop,
+            "translated_text": translated_after_stop,
+            "callbacks_after_stop": callbacks_after_stop.load(Ordering::SeqCst),
+            "errors": errors_after_stop,
         }))
         .expect("stop-mid-phrase metrics must serialize"),
     )

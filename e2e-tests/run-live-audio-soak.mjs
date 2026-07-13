@@ -7,11 +7,12 @@ import {
   sanitizedAudioTestEnvironment,
 } from './helpers/liveAudioRunner.mjs';
 
-const DEFAULT_SOAK_SECONDS = 600;
+const DEFAULT_SOAK_SECONDS = 1800;
 const soakSeconds = parsePositiveIntegerEnv(
   process.env.LIVE_AUDIO_SOAK_SECONDS,
   DEFAULT_SOAK_SECONDS,
 );
+const allowShortSoak = process.env.LIVE_AUDIO_ALLOW_SHORT_SOAK === '1';
 const TEST_TIMEOUT_MS = (soakSeconds + 240) * 1000;
 
 const tests = [
@@ -104,8 +105,11 @@ if (!paidE2e.apiKey) {
   fail('OPENAI_E2E_API_KEY is required; OPENAI_API_KEY and .env are intentionally ignored.');
 }
 
-if (soakSeconds < 60) {
-  console.warn(`[live-audio-soak] LIVE_AUDIO_SOAK_SECONDS=${soakSeconds}; use 600-1800 for release-grade soak.`);
+if (soakSeconds < 1800) {
+  if (!allowShortSoak) {
+    fail(`LIVE_AUDIO_SOAK_SECONDS=${soakSeconds}; release gate requires at least 1800 seconds. Set LIVE_AUDIO_ALLOW_SHORT_SOAK=1 only for local development.`);
+  }
+  console.warn(`[live-audio-soak] development-only short soak enabled (${soakSeconds}s); this is not release evidence.`);
 }
 
 for (const { label, paid, testName, command, env = {} } of tests) {
@@ -131,4 +135,8 @@ for (const { label, paid, testName, command, env = {} } of tests) {
   });
 }
 
-console.log('\n[live-audio-soak] all long-session checks passed');
+console.log(
+  allowShortSoak
+    ? '\n[live-audio-soak] development-only short checks passed'
+    : '\n[live-audio-soak] release-grade long-session checks passed',
+);
