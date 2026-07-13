@@ -96,3 +96,42 @@ test('paid matrix audio artifacts are checksummed and verified before release', 
     assert.ok(release.includes(artifact));
   }
 });
+
+test('release evidence requires manual Zoom and hardware recovery attestations', () => {
+  const gate = readRepositoryFile('.github/workflows/macos-audio-gate.yml');
+  const release = readRepositoryFile('.github/workflows/release.yml');
+
+  for (const input of [
+    'zoom_half_volume_bidirectional_verified',
+    'output_disconnect_recovery_verified',
+    'sleep_wake_recovery_verified',
+  ]) {
+    assert.ok(gate.includes(`${input}:`), `macOS gate does not declare ${input}`);
+  }
+
+  for (const field of [
+    'zoom_half_volume_bidirectional',
+    'output_disconnect_recovery',
+    'sleep_wake_recovery',
+  ]) {
+    assert.ok(gate.includes(`${field}: $`), `macOS gate does not persist ${field}`);
+    assert.ok(release.includes(`.manual_attestations.${field} == true`));
+  }
+  assert.ok(gate.includes('manual_attestation_actor: $manual_attestation_actor'));
+  assert.ok(release.includes('(.manual_attestation_actor | length) > 0'));
+  assert.ok(release.includes('.manual_attestation_run_id == $audio_gate_run_id'));
+});
+
+test('normal CI and release share the same keyless quality gate workflow', () => {
+  const ci = readRepositoryFile('.github/workflows/ci.yml');
+  const quality = readRepositoryFile('.github/workflows/quality-gates.yml');
+  const release = readRepositoryFile('.github/workflows/release.yml');
+  const reusableWorkflow = 'uses: ./.github/workflows/quality-gates.yml';
+
+  assert.ok(ci.includes('pull_request:'));
+  assert.ok(ci.includes(reusableWorkflow));
+  assert.ok(release.includes(reusableWorkflow));
+  assert.ok(quality.includes('workflow_call:'));
+  assert.ok(!quality.includes('OPENAI_E2E_API_KEY'));
+  assert.ok(!quality.includes('VOICETEXT_RUN_PAID_E2E'));
+});

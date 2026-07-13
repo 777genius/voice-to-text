@@ -1061,7 +1061,15 @@ Feature нельзя считать enabled на macOS, пока не выпол
 - synthetic runtime/fault suite;
 - existing captions/outgoing regression suite;
 - measured queue threshold;
-- app exit cleanup test.
+- app exit cleanup test;
+- real Zoom bidirectional check with Zoom Speaker Volume at 50%;
+- physical output disconnect/recovery check;
+- sleep/wake cleanup and recovery check.
+
+Три hardware/Zoom проверки выполняются вручную на том же commit перед `macOS Audio Release Gate`.
+Workflow требует явные boolean attestations, сохраняет actor/run ID в checksummed evidence, а
+`Release` повторно проверяет эти поля. Обычный push/PR использует общий keyless quality workflow и
+не требует OpenAI key, ScreenCaptureKit permission или физических audio devices.
 
 ### 19.3. Rollback strategy
 

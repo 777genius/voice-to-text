@@ -88,9 +88,11 @@ jobs:
           done < <(jq -r '.[]' <<< "$required_audio_ids")
           jq -e \
             --arg commit "$release_commit" \
+            --argjson audio_gate_run_id "$AUDIO_GATE_RUN_ID" \
             --argjson required_matrix_ids "$required_matrix_ids" \
             --argjson required_audio_ids "$required_audio_ids" \
             '.commit == $commit and
+             .manual_attestation_run_id == $audio_gate_run_id and
              .soak_seconds >= 1800 and
              .smoke_passed == true and
              .soak_passed == true and
@@ -109,6 +111,11 @@ jobs:
              .incoming_captions_regression_passed == true and
              .incoming_stop_mid_phrase_passed == true and
              .incoming_paid_network_interruption_passed == true and
+             .manual_attestations.zoom_half_volume_bidirectional == true and
+             .manual_attestations.output_disconnect_recovery == true and
+             .manual_attestations.sleep_wake_recovery == true and
+             (.manual_attestation_actor | type) == "string" and
+             (.manual_attestation_actor | length) > 0 and
              .paid_matrix_complete == true and
              .paid_matrix.schema_version == 1 and
              .paid_matrix.scenario_filter == "all" and

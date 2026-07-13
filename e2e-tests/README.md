@@ -120,3 +120,18 @@ GitHub releases require a successful manual `macOS Audio Release Gate` run on th
 matches the exact tagged commit and records a soak of at least 1,800 seconds. The durable evidence
 bundle includes the paid matrix WAV/transcript/metrics files and a SHA-256 manifest rechecked by
 the release workflow.
+
+Before starting that gate, the operator must complete and attest all three hardware checks on the
+same commit:
+
+1. Join a real Zoom call with a second participant, set Zoom Speaker Volume to 50%, and verify both
+   incoming English -> Russian text/audio and outgoing Russian -> English virtual microphone audio.
+2. During incoming spoken translation, disconnect the active USB/Bluetooth output, verify terminal
+   cleanup, select a valid output, restart, and verify a fresh translation.
+3. During incoming spoken translation, sleep and wake the Mac, verify that no stale session keeps
+   producing events, restart, and verify a fresh translation.
+
+Use a headset for the Zoom check so acoustic speaker leakage is not confused with a routing fault.
+The workflow stores the GitHub actor, run ID, and all three attestations in the checksummed release
+evidence. Normal pushes and pull requests use the shared keyless `Quality Gates` workflow and never
+require an audio device or OpenAI credential.

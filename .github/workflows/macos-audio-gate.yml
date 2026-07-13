@@ -12,6 +12,21 @@ on:
         required: true
         default: '1800'
         type: string
+      zoom_half_volume_bidirectional_verified:
+        description: 'Real Zoom call passed both directions with Zoom speaker volume at 50%'
+        required: true
+        default: false
+        type: boolean
+      output_disconnect_recovery_verified:
+        description: 'Active spoken session cleaned up after output disconnect and restarted successfully'
+        required: true
+        default: false
+        type: boolean
+      sleep_wake_recovery_verified:
+        description: 'Active spoken session cleaned up across sleep/wake and restarted successfully'
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -32,10 +47,13 @@ jobs:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
 
-      - name: Validate release soak duration and GUI session
+      - name: Validate release inputs and GUI session
         shell: bash
         env:
           SOAK_SECONDS: ${{ inputs.soak_seconds }}
+          ZOOM_HALF_VOLUME_VERIFIED: ${{ inputs.zoom_half_volume_bidirectional_verified }}
+          OUTPUT_DISCONNECT_VERIFIED: ${{ inputs.output_disconnect_recovery_verified }}
+          SLEEP_WAKE_VERIFIED: ${{ inputs.sleep_wake_recovery_verified }}
         run: |
           set -euo pipefail
 
@@ -43,6 +61,15 @@ jobs:
             echo "::error::Release audio evidence requires soak_seconds >= 1800."
             exit 1
           fi
+          for attestation in \
+            "$ZOOM_HALF_VOLUME_VERIFIED" \
+            "$OUTPUT_DISCONNECT_VERIFIED" \
+            "$SLEEP_WAKE_VERIFIED"; do
+            if [[ "$attestation" != "true" ]]; then
+              echo "::error::All manual hardware and Zoom attestations must be verified before the release gate."
+              exit 1
+            fi
+          done
           session_info="$(ioreg -n Root -d1)"
           if grep -q '"CGSSessionScreenIsLocked"=Yes' <<< "$session_info"; then
             echo "::error::The macOS GUI session is locked; ScreenCaptureKit cannot expose a shareable display."
@@ -91,6 +118,11 @@ jobs:
         env:
           EVIDENCE_REF: ${{ inputs.ref }}
           SOAK_SECONDS: ${{ inputs.soak_seconds }}
+          MANUAL_ATTESTATION_ACTOR: ${{ github.actor }}
+          MANUAL_ATTESTATION_RUN_ID: ${{ github.run_id }}
+          ZOOM_HALF_VOLUME_VERIFIED: ${{ inputs.zoom_half_volume_bidirectional_verified }}
+          OUTPUT_DISCONNECT_VERIFIED: ${{ inputs.output_disconnect_recovery_verified }}
+          SLEEP_WAKE_VERIFIED: ${{ inputs.sleep_wake_recovery_verified }}
         run: |
           set -euo pipefail
           smoke_summary="src-tauri/target/e2e-artifacts/live-audio-smoke-summary.json"
@@ -209,6 +241,11 @@ jobs:
           jq -n \
             --arg commit "$(git rev-parse HEAD)" \
             --arg ref "$EVIDENCE_REF" \
+            --arg manual_attestation_actor "$MANUAL_ATTESTATION_ACTOR" \
+            --argjson manual_attestation_run_id "$MANUAL_ATTESTATION_RUN_ID" \
+            --argjson zoom_half_volume_verified "$ZOOM_HALF_VOLUME_VERIFIED" \
+            --argjson output_disconnect_verified "$OUTPUT_DISCONNECT_VERIFIED" \
+            --argjson sleep_wake_verified "$SLEEP_WAKE_VERIFIED" \
             --argjson soak_seconds "$SOAK_SECONDS" \
             --slurpfile smoke "$smoke_summary" \
             --slurpfile soak "$soak_summary" \
@@ -217,6 +254,13 @@ jobs:
               commit: $commit,
               ref: $ref,
               soak_seconds: $soak_seconds,
+              manual_attestation_actor: $manual_attestation_actor,
+              manual_attestation_run_id: $manual_attestation_run_id,
+              manual_attestations: {
+                zoom_half_volume_bidirectional: $zoom_half_volume_verified,
+                output_disconnect_recovery: $output_disconnect_verified,
+                sleep_wake_recovery: $sleep_wake_verified
+              },
               smoke_passed: true,
               soak_passed: true,
               tauri_exit_shutdown_callback_bound: ($smoke[0].passed_labels | index("tauri-exit-shutdown-callback-binding") != null),
