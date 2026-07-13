@@ -5,7 +5,7 @@ mod paid_e2e_support;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -94,6 +94,21 @@ fn soak_activity_near_end_grace(soak_duration: Duration) -> Duration {
 fn soak_final_interval(soak_duration: Duration) -> Duration {
     let active_span = soak_duration.saturating_sub(soak_activity_near_end_grace(soak_duration));
     active_span.div_f64((MAX_TRANSLATED_FINALS_PER_SOAK - 1) as f64)
+}
+
+fn current_process_rss_kib() -> Option<u64> {
+    let output = Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    std::str::from_utf8(&output.stdout)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 struct TempAudioFixture {
@@ -250,6 +265,11 @@ struct PaidSpokenOutputState {
     started_at: Mutex<Option<Instant>>,
     first_audio_ms: Mutex<Option<u128>>,
     audible_samples: AtomicUsize,
+    audio_activity: Mutex<Vec<Instant>>,
+    dropped_batches: AtomicUsize,
+    dropped_audio_micros: AtomicU64,
+    pending_high_water_micros: AtomicU64,
+    pending_at_close_micros: AtomicU64,
 }
 
 struct PaidSpokenOutputFactory {
@@ -292,6 +312,7 @@ impl TranslationAudioOutput for PaidSpokenOutput {
         samples: &[i16],
     ) -> TranslationAudioOutputResult<AudioEnqueueOutcome> {
         let outcome = self.delegate.enqueue_pcm16(samples).await?;
+        let audible_samples = audible_sample_count(samples);
         let mut first_audio_ms = self.state.first_audio_ms.lock().unwrap();
         if first_audio_ms.is_none() {
             *first_audio_ms = self
@@ -309,11 +330,40 @@ impl TranslationAudioOutput for PaidSpokenOutput {
             .extend_from_slice(samples);
         self.state
             .audible_samples
-            .fetch_add(audible_sample_count(samples), Ordering::Relaxed);
+            .fetch_add(audible_samples, Ordering::Relaxed);
+        if audible_samples > 0 {
+            self.state
+                .audio_activity
+                .lock()
+                .unwrap()
+                .push(Instant::now());
+        }
+        let pending_micros = self
+            .delegate
+            .pending_playback_duration()
+            .as_micros()
+            .min(u64::MAX as u128) as u64;
+        self.state
+            .pending_high_water_micros
+            .fetch_max(pending_micros, Ordering::Relaxed);
+        if let AudioEnqueueOutcome::DroppedOldest { duration, .. } = &outcome {
+            self.state.dropped_batches.fetch_add(1, Ordering::Relaxed);
+            self.state.dropped_audio_micros.fetch_add(
+                duration.as_micros().min(u64::MAX as u128) as u64,
+                Ordering::Relaxed,
+            );
+        }
         Ok(outcome)
     }
 
     async fn close(&mut self) -> TranslationAudioOutputResult<()> {
+        self.state.pending_at_close_micros.store(
+            self.delegate
+                .pending_playback_duration()
+                .as_micros()
+                .min(u64::MAX as u128) as u64,
+            Ordering::Relaxed,
+        );
         self.delegate.close().await?;
         self.state.closed.store(true, Ordering::SeqCst);
         Ok(())
@@ -1379,6 +1429,10 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             "missing_source_marker_groups": missing_source_marker_groups.clone(),
             "translated_audio_samples": translated_samples.len(),
             "translated_audible_samples": translated_audible_samples,
+            "playback_dropped_batches": output_state.dropped_batches.load(Ordering::Relaxed),
+            "playback_dropped_audio_ms": output_state.dropped_audio_micros.load(Ordering::Relaxed) / 1_000,
+            "playback_pending_high_water_ms": output_state.pending_high_water_micros.load(Ordering::Relaxed) / 1_000,
+            "playback_pending_at_close_ms": output_state.pending_at_close_micros.load(Ordering::Relaxed) / 1_000,
             "translated_audio_verification_required": scenario.translation_output_required,
             "translated_audio_transcription_attempted": translated_audio_transcription_attempted,
             "translated_audio_transcription_error": translated_audio_transcription_error.clone(),
@@ -1536,6 +1590,18 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
         }
         assert!(output_state.opened.load(Ordering::SeqCst));
         assert!(output_state.closed.load(Ordering::SeqCst));
+        assert_eq!(
+            output_state.dropped_batches.load(Ordering::Relaxed),
+            0,
+            "scenario {} dropped translated playback audio",
+            scenario.id
+        );
+        assert!(
+            output_state.pending_at_close_micros.load(Ordering::Relaxed) <= 30_000,
+            "scenario {} closed with undrained translated playback: {} us",
+            scenario.id,
+            output_state.pending_at_close_micros.load(Ordering::Relaxed)
+        );
         assert_eq!(*output_state.gain.lock().unwrap(), Some(0.8));
         assert_eq!(service.get_status().await, RecordingStatus::Idle);
         passed_scenario_ids.push(scenario.id);
@@ -2197,6 +2263,190 @@ async fn incoming_translation_service_long_running_system_audio_soak() {
         stt_state.transcription_requests.load(Ordering::SeqCst),
         deadline.saturating_duration_since(last_final).as_millis(),
         deadline.saturating_duration_since(last_translation).as_millis(),
+    );
+}
+
+#[tokio::test]
+#[ignore = "paid/manual native spoken soak: requires unlocked macOS GUI, system audio permission, audible output, VOICETEXT_RUN_PAID_E2E=1, and OPENAI_E2E_API_KEY"]
+async fn incoming_spoken_translation_long_running_native_soak() {
+    const RELEASE_RSS_GROWTH_LIMIT_KIB: u64 = 32 * 1_024;
+    const MAX_PENDING_PLAYBACK_MICROS: u64 = 2_000_000;
+
+    let api_key = load_paid_e2e_api_key();
+    let soak_duration = live_audio_soak_duration();
+    let fixture = generate_spoken_audio_fixture(
+        "voicetext_native_spoken_soak",
+        "Samantha",
+        "Hello from the long running call. Deployment forty two remains stable, and the translation pipeline is still active.",
+    );
+    let output_state = Arc::new(PaidSpokenOutputState::default());
+    let service = IncomingTranslationFacade::new_spoken_with_factories(
+        Arc::new(DefaultPlatformAudioFactory::new()),
+        Arc::new(PaidSpokenOutputFactory {
+            state: output_state.clone(),
+        }),
+        Arc::new(OpenAIRealtimeTranslationFactory),
+        Arc::new(PaidSpokenReadyCapability),
+    );
+    let source_text = Arc::new(Mutex::new(String::new()));
+    let translated_text = Arc::new(Mutex::new(String::new()));
+    let translated_activity = Arc::new(Mutex::new(Vec::<Instant>::new()));
+    let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+    let callbacks = IncomingTranslationCallbacks {
+        on_source_final: {
+            let source_text = source_text.clone();
+            Arc::new(move |text| source_text.lock().unwrap().push_str(&text))
+        },
+        on_translation_delta: {
+            let translated_text = translated_text.clone();
+            let translated_activity = translated_activity.clone();
+            Arc::new(move |text| {
+                if !text.trim().is_empty() {
+                    translated_activity.lock().unwrap().push(Instant::now());
+                }
+                translated_text.lock().unwrap().push_str(&text);
+            })
+        },
+        on_error: {
+            let errors = errors.clone();
+            Arc::new(move |error| errors.lock().unwrap().push(error.to_string()))
+        },
+        on_status: Arc::new(|_| {}),
+    };
+    let mut config = IncomingTranslationConfig::new_with_defaults(SttConfig::default(), 20_002);
+    config.openai_api_key = api_key;
+    config.target_language = "ru".into();
+    config.playback_gain = 0.8;
+
+    service
+        .start(config, callbacks)
+        .await
+        .expect("native spoken soak must start");
+    assert_eq!(service.get_status().await, RecordingStatus::Recording);
+
+    let release_grade = soak_duration >= Duration::from_secs(30 * 60);
+    let target_plays = if release_grade {
+        MAX_TRANSLATED_FINALS_PER_SOAK
+    } else {
+        2
+    };
+    let started_at = Instant::now();
+    let deadline = started_at + soak_duration;
+    let first_play_offset = Duration::from_secs(1).min(soak_duration / 10);
+    let near_end_grace = soak_activity_near_end_grace(soak_duration);
+    let active_play_span = soak_duration
+        .saturating_sub(first_play_offset)
+        .saturating_sub(near_end_grace);
+    let play_interval = active_play_span.div_f64((target_plays.saturating_sub(1)).max(1) as f64);
+    let rss_warmup = Duration::from_secs(10).min(soak_duration / 4);
+    let rss_interval = Duration::from_secs(30).min((soak_duration / 4).max(Duration::from_secs(1)));
+    let mut next_play_at = started_at + first_play_offset;
+    let mut next_rss_at = started_at + rss_warmup;
+    let mut play_count = 0usize;
+    let mut rss_samples_kib = Vec::new();
+
+    while Instant::now() < deadline {
+        let now = Instant::now();
+        if play_count < target_plays && now >= next_play_at {
+            play_paid_scenario(fixture.path(), None, 1.0).await;
+            play_count += 1;
+            next_play_at =
+                started_at + first_play_offset + play_interval.mul_f64(play_count as f64);
+        }
+        assert_eq!(service.get_status().await, RecordingStatus::Recording);
+        assert!(
+            errors.lock().unwrap().is_empty(),
+            "native spoken soak failed: {:?}",
+            errors.lock().unwrap()
+        );
+        let now = Instant::now();
+        if now >= next_rss_at {
+            rss_samples_kib.push(
+                current_process_rss_kib()
+                    .expect("native spoken soak requires a working ps RSS measurement"),
+            );
+            next_rss_at = now + rss_interval;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        tokio::time::sleep(Duration::from_millis(250).min(remaining)).await;
+    }
+
+    service.stop().await.expect("native spoken soak must stop");
+    let translated_text = translated_text.lock().unwrap().clone();
+    let source_text = source_text.lock().unwrap().clone();
+    let translated_activity = translated_activity.lock().unwrap().clone();
+    let audio_activity = output_state.audio_activity.lock().unwrap().clone();
+    let terminal_errors = errors.lock().unwrap().clone();
+    let baseline_rss_kib = *rss_samples_kib
+        .first()
+        .expect("native spoken soak requires at least one RSS sample");
+    let max_rss_kib = *rss_samples_kib.iter().max().unwrap();
+    let rss_growth_kib = max_rss_kib.saturating_sub(baseline_rss_kib);
+    let last_text_age = translated_activity
+        .last()
+        .map(|last| deadline.saturating_duration_since(*last));
+    let last_audio_age = audio_activity
+        .last()
+        .map(|last| deadline.saturating_duration_since(*last));
+    let artifact_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/e2e-artifacts/incoming-spoken-native-soak");
+    fs::create_dir_all(&artifact_dir).expect("must create native spoken soak artifact directory");
+    fs::write(
+        artifact_dir.join("metrics.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "soak_seconds": soak_duration.as_secs(),
+            "release_grade": release_grade,
+            "source_play_count": play_count,
+            "source_text_chars": source_text.len(),
+            "translated_text_chars": translated_text.len(),
+            "translated_audio_samples": output_state.samples.lock().unwrap().len(),
+            "translated_audible_samples": output_state.audible_samples.load(Ordering::Relaxed),
+            "playback_dropped_batches": output_state.dropped_batches.load(Ordering::Relaxed),
+            "playback_dropped_audio_ms": output_state.dropped_audio_micros.load(Ordering::Relaxed) / 1_000,
+            "playback_pending_high_water_ms": output_state.pending_high_water_micros.load(Ordering::Relaxed) / 1_000,
+            "playback_pending_at_close_ms": output_state.pending_at_close_micros.load(Ordering::Relaxed) / 1_000,
+            "rss_samples_kib": rss_samples_kib,
+            "rss_growth_kib": rss_growth_kib,
+            "last_translation_text_age_ms": last_text_age.map(|age| age.as_millis()),
+            "last_translation_audio_age_ms": last_audio_age.map(|age| age.as_millis()),
+            "errors": terminal_errors,
+        }))
+        .expect("native spoken soak metrics must serialize"),
+    )
+    .expect("must write native spoken soak metrics");
+
+    assert_eq!(service.get_status().await, RecordingStatus::Idle);
+    assert_eq!(play_count, target_plays);
+    assert!(output_state.opened.load(Ordering::SeqCst));
+    assert!(output_state.closed.load(Ordering::SeqCst));
+    assert!(!translated_text.trim().is_empty());
+    assert!(output_state.audible_samples.load(Ordering::Relaxed) > 0);
+    assert!(terminal_errors.is_empty());
+    assert_eq!(output_state.dropped_batches.load(Ordering::Relaxed), 0);
+    assert!(
+        output_state
+            .pending_high_water_micros
+            .load(Ordering::Relaxed)
+            <= MAX_PENDING_PLAYBACK_MICROS
+    );
+    assert!(output_state.pending_at_close_micros.load(Ordering::Relaxed) <= 30_000);
+    assert!(
+        rss_samples_kib.len() >= 2,
+        "native spoken soak requires at least two RSS samples: {rss_samples_kib:?}"
+    );
+    assert!(
+        rss_growth_kib <= RELEASE_RSS_GROWTH_LIMIT_KIB,
+        "native spoken soak RSS grew by {rss_growth_kib} KiB: {rss_samples_kib:?}"
+    );
+    let activity_grace = near_end_grace + Duration::from_secs(30);
+    assert!(
+        last_text_age.is_some_and(|age| age <= activity_grace),
+        "native spoken translation text was not active near the end: {last_text_age:?}"
+    );
+    assert!(
+        last_audio_age.is_some_and(|age| age <= activity_grace),
+        "native spoken translation audio was not active near the end: {last_audio_age:?}"
     );
 }
 

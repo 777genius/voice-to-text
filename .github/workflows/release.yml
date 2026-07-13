@@ -157,6 +157,21 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --name macos-audio-gate-evidence \
             --dir audio-gate-evidence
+          (
+            cd audio-gate-evidence
+            shasum -a 256 -c SHA256SUMS
+          )
+          while IFS= read -r scenario; do
+            test -s "audio-gate-evidence/incoming-spoken-paid-matrix/$scenario/source-primary.aiff"
+            test -s "audio-gate-evidence/incoming-spoken-paid-matrix/$scenario/captured-input.wav"
+            test -s "audio-gate-evidence/incoming-spoken-paid-matrix/$scenario/captured-input-transcript.txt"
+            test -e "audio-gate-evidence/incoming-spoken-paid-matrix/$scenario/translated-transcript.txt"
+            test -s "audio-gate-evidence/incoming-spoken-paid-matrix/$scenario/metrics.json"
+          done < <(jq -r '.[]' <<< "$required_matrix_ids")
+          while IFS= read -r scenario; do
+            test -s "audio-gate-evidence/incoming-spoken-paid-matrix/$scenario/translated-audio.wav"
+            test -s "audio-gate-evidence/incoming-spoken-paid-matrix/$scenario/translated-audio-transcript.txt"
+          done < <(jq -r '.[]' <<< "$required_audio_ids")
           jq -e \
             --arg commit "$release_commit" \
             --argjson required_matrix_ids "$required_matrix_ids" \
@@ -187,6 +202,45 @@ jobs:
              .paid_matrix.passed_scenario_ids == $required_matrix_ids and
              .paid_matrix.required_audio_scenario_ids == $required_audio_ids and
              .paid_matrix.audio_verified_scenario_ids == $required_audio_ids and
+             .native_spoken_soak.schema_version == 1 and
+             .native_spoken_soak.soak_seconds >= 1800 and
+             .native_spoken_soak.release_grade == true and
+             .native_spoken_soak.source_play_count == 7 and
+             .native_spoken_soak.translated_text_chars > 0 and
+             .native_spoken_soak.translated_audible_samples > 0 and
+             .native_spoken_soak.playback_dropped_batches == 0 and
+             .native_spoken_soak.playback_pending_high_water_ms <= 2000 and
+             .native_spoken_soak.playback_pending_at_close_ms <= 30 and
+             (.native_spoken_soak.rss_samples_kib | type) == "array" and
+             (.native_spoken_soak.rss_samples_kib | length) >= 2 and
+             .native_spoken_soak.rss_growth_kib <= 32768 and
+             (.native_spoken_soak.last_translation_text_age_ms | type) == "number" and
+             .native_spoken_soak.last_translation_text_age_ms <= 120000 and
+             (.native_spoken_soak.last_translation_audio_age_ms | type) == "number" and
+             .native_spoken_soak.last_translation_audio_age_ms <= 120000 and
+             (.native_spoken_soak.errors | type) == "array" and
+             (.native_spoken_soak.errors | length) == 0 and
+             .spoken_restart_stress.schema_version == 1 and
+             .spoken_restart_stress.cycles == 25 and
+             .spoken_restart_stress.capture_starts == 25 and
+             .spoken_restart_stress.capture_stops == 25 and
+             .spoken_restart_stress.output_opens == 25 and
+             .spoken_restart_stress.output_closes == 25 and
+             .spoken_restart_stress.translation_sessions_created == 25 and
+             .spoken_restart_stress.translation_sessions_dropped == 25 and
+             .spoken_restart_stress.translation_finishes == 25 and
+             .spoken_restart_stress.translation_aborts == 0 and
+             .spoken_restart_stress.post_stop_send_attempts == 25 and
+             .spoken_restart_stress.error_callbacks == 0 and
+             .spoken_restart_stress.active_capture_high_water == 1 and
+             .spoken_restart_stress.active_output_high_water == 1 and
+             .spoken_restart_stress.active_translation_session_high_water == 1 and
+             .spoken_restart_stress.active_translation_task_high_water == 1 and
+             .spoken_restart_stress.active_websocket_high_water == 1 and
+             .spoken_restart_stress.active_server_task_high_water == 1 and
+             (.spoken_restart_stress.rss_samples_kib | type) == "array" and
+             (.spoken_restart_stress.rss_samples_kib | length) >= 2 and
+             .spoken_restart_stress.rss_growth_kib <= 16384 and
              (.smoke_checks | index("tauri-exit-shutdown-callback-binding")) != null and
              (.smoke_checks | index("translation-shutdown-claim-idempotence")) != null and
              (.smoke_checks | index("bidirectional-runtime-abort-helper")) != null and
@@ -210,6 +264,8 @@ jobs:
              (.smoke_checks | index("paid-full-duplex-independent-stop")) != null and
              (.soak_checks | index("blackhole-loopback-preflight")) != null and
              (.soak_checks | index("incoming-spoken-runtime-soak")) != null and
+             (.soak_checks | index("incoming-spoken-restart-stress")) != null and
+             (.soak_checks | index("incoming-spoken-native-soak")) != null and
              (.soak_checks | index("outgoing-long-live-translation-soak")) != null and
              (.soak_checks | index("incoming-long-system-audio-soak")) != null' \
             audio-gate-evidence/evidence.json >/dev/null

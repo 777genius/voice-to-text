@@ -1,6 +1,8 @@
 mod paid_e2e_support;
 
+use std::fs;
 use std::future::Future;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -12,11 +14,11 @@ use app_lib::application::{
 use app_lib::domain::{
     AudioCapture, AudioCaptureTarget, AudioChunk, AudioChunkCallback, AudioConfig,
     AudioEnqueueOutcome, AudioResult, LocalPlaybackOutputFactory, LocalPlaybackRoute,
-    RealtimeInputNoiseReduction, RealtimeTranslationConfig, RealtimeTranslationErrorKind,
-    RealtimeTranslationEvent, RealtimeTranslationFactory, RealtimeTranslationSession,
-    RecordingStatus, SpokenIncomingCapability, SpokenTranslationCapability, SttConfig,
-    SystemAudioCaptureFactory, SystemAudioCaptureRequest, TranslationAudioOutput,
-    TranslationAudioOutputConfig, TranslationAudioOutputResult,
+    RealtimeInputNoiseReduction, RealtimeTranslationConfig, RealtimeTranslationError,
+    RealtimeTranslationErrorKind, RealtimeTranslationEvent, RealtimeTranslationFactory,
+    RealtimeTranslationSession, RecordingStatus, SpokenIncomingCapability,
+    SpokenTranslationCapability, SttConfig, SystemAudioCaptureFactory, SystemAudioCaptureRequest,
+    TranslationAudioOutput, TranslationAudioOutputConfig, TranslationAudioOutputResult,
 };
 use app_lib::infrastructure::openai::OpenAIRealtimeTranslationClient;
 use async_trait::async_trait;
@@ -27,7 +29,7 @@ use http::HeaderValue;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
@@ -161,8 +163,16 @@ struct SyntheticFlowState {
     capture_request: Mutex<Option<SystemAudioCaptureRequest>>,
     capture_started: AtomicBool,
     capture_stopped: AtomicBool,
+    capture_start_count: AtomicUsize,
+    capture_stop_count: AtomicUsize,
+    active_captures: AtomicUsize,
+    active_captures_high_water: AtomicUsize,
     output_opened: AtomicBool,
     output_closed: AtomicBool,
+    output_open_count: AtomicUsize,
+    output_close_count: AtomicUsize,
+    active_outputs: AtomicUsize,
+    active_outputs_high_water: AtomicUsize,
     output_samples: Mutex<Vec<i16>>,
     output_sample_count: AtomicUsize,
     output_pending_high_water_samples: AtomicUsize,
@@ -242,6 +252,7 @@ impl SystemAudioCaptureFactory for SyntheticCaptureFactory {
             state: self.state.clone(),
             samples: self.samples.clone(),
             config: AudioConfig::default(),
+            capturing: false,
         }))
     }
 }
@@ -250,6 +261,7 @@ struct SyntheticCapture {
     state: Arc<SyntheticFlowState>,
     samples: Arc<Vec<i16>>,
     config: AudioConfig,
+    capturing: bool,
 }
 
 #[async_trait]
@@ -260,7 +272,17 @@ impl AudioCapture for SyntheticCapture {
     }
 
     async fn start_capture(&mut self, on_chunk: AudioChunkCallback) -> AudioResult<()> {
+        assert!(!self.capturing, "synthetic capture started twice");
+        self.capturing = true;
         self.state.capture_started.store(true, Ordering::SeqCst);
+        self.state.capture_stopped.store(false, Ordering::SeqCst);
+        self.state
+            .capture_start_count
+            .fetch_add(1, Ordering::SeqCst);
+        let active = self.state.active_captures.fetch_add(1, Ordering::SeqCst) + 1;
+        self.state
+            .active_captures_high_water
+            .fetch_max(active, Ordering::SeqCst);
         for samples in self.samples.chunks(4_800) {
             on_chunk(AudioChunk::new(
                 samples.to_vec(),
@@ -272,13 +294,19 @@ impl AudioCapture for SyntheticCapture {
     }
 
     async fn stop_capture(&mut self) -> AudioResult<()> {
+        assert!(self.capturing, "synthetic capture stopped while inactive");
+        self.capturing = false;
         self.state.capture_stopped.store(true, Ordering::SeqCst);
+        self.state.capture_stop_count.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            self.state.active_captures.fetch_sub(1, Ordering::SeqCst) > 0,
+            "active synthetic capture counter underflow"
+        );
         Ok(())
     }
 
     fn is_capturing(&self) -> bool {
-        self.state.capture_started.load(Ordering::SeqCst)
-            && !self.state.capture_stopped.load(Ordering::SeqCst)
+        self.capturing
     }
 
     fn config(&self) -> AudioConfig {
@@ -300,6 +328,7 @@ impl LocalPlaybackOutputFactory for CollectingOutputFactory {
         Ok(Box::new(CollectingOutput {
             state: self.state.clone(),
             retain_samples: self.retain_samples,
+            opened: false,
         }))
     }
 }
@@ -307,6 +336,7 @@ impl LocalPlaybackOutputFactory for CollectingOutputFactory {
 struct CollectingOutput {
     state: Arc<SyntheticFlowState>,
     retain_samples: bool,
+    opened: bool,
 }
 
 #[async_trait]
@@ -315,7 +345,15 @@ impl TranslationAudioOutput for CollectingOutput {
         &mut self,
         config: TranslationAudioOutputConfig,
     ) -> TranslationAudioOutputResult<()> {
+        assert!(!self.opened, "synthetic output opened twice");
+        self.opened = true;
         self.state.output_opened.store(true, Ordering::SeqCst);
+        self.state.output_closed.store(false, Ordering::SeqCst);
+        self.state.output_open_count.fetch_add(1, Ordering::SeqCst);
+        let active = self.state.active_outputs.fetch_add(1, Ordering::SeqCst) + 1;
+        self.state
+            .active_outputs_high_water
+            .fetch_max(active, Ordering::SeqCst);
         *self.state.output_gain.lock().unwrap() = Some(config.gain);
         Ok(())
     }
@@ -339,7 +377,14 @@ impl TranslationAudioOutput for CollectingOutput {
     }
 
     async fn close(&mut self) -> TranslationAudioOutputResult<()> {
+        assert!(self.opened, "synthetic output closed while inactive");
+        self.opened = false;
         self.state.output_closed.store(true, Ordering::SeqCst);
+        self.state.output_close_count.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            self.state.active_outputs.fetch_sub(1, Ordering::SeqCst) > 0,
+            "active synthetic output counter underflow"
+        );
         Ok(())
     }
 
@@ -349,8 +394,7 @@ impl TranslationAudioOutput for CollectingOutput {
     }
 
     fn is_open(&self) -> bool {
-        self.state.output_opened.load(Ordering::SeqCst)
-            && !self.state.output_closed.load(Ordering::SeqCst)
+        self.opened
     }
 
     fn device_name(&self) -> Option<String> {
@@ -902,6 +946,534 @@ fn current_process_rss_kib() -> Option<u64> {
         .trim()
         .parse()
         .ok()
+}
+
+const DEFAULT_SPOKEN_RESTART_STRESS_CYCLES: usize = 25;
+
+fn spoken_restart_stress_cycles() -> usize {
+    std::env::var("SPOKEN_TRANSLATION_RESTART_STRESS_CYCLES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|cycles| *cycles >= 2)
+        .unwrap_or(DEFAULT_SPOKEN_RESTART_STRESS_CYCLES)
+}
+
+#[derive(Default)]
+struct RestartStressCounters {
+    translation_sessions_created: AtomicUsize,
+    translation_sessions_dropped: AtomicUsize,
+    translation_connects: AtomicUsize,
+    translation_finishes: AtomicUsize,
+    translation_aborts: AtomicUsize,
+    active_translation_sessions: AtomicUsize,
+    active_translation_sessions_high_water: AtomicUsize,
+    active_translation_tasks: AtomicUsize,
+    active_translation_tasks_high_water: AtomicUsize,
+    websocket_opens: AtomicUsize,
+    session_closes: AtomicUsize,
+    audio_appends: AtomicUsize,
+    post_stop_send_attempts: AtomicUsize,
+    active_websocket_sessions: AtomicUsize,
+    active_websocket_sessions_high_water: AtomicUsize,
+    active_server_tasks: AtomicUsize,
+    active_server_tasks_high_water: AtomicUsize,
+    source_callbacks: AtomicUsize,
+    translation_callbacks: AtomicUsize,
+    error_callbacks: AtomicUsize,
+    callback_count: AtomicUsize,
+}
+
+fn increment_active_counter(counter: &AtomicUsize, high_water: &AtomicUsize) {
+    let active = counter.fetch_add(1, Ordering::SeqCst) + 1;
+    high_water.fetch_max(active, Ordering::SeqCst);
+}
+
+fn decrement_active_counter(counter: &AtomicUsize, label: &str) {
+    assert!(
+        counter.fetch_sub(1, Ordering::SeqCst) > 0,
+        "{label} counter underflow"
+    );
+}
+
+struct CountingLocalWebSocketTranslationFactory {
+    endpoint: String,
+    counters: Arc<RestartStressCounters>,
+}
+
+impl RealtimeTranslationFactory for CountingLocalWebSocketTranslationFactory {
+    fn create(&self) -> Box<dyn RealtimeTranslationSession> {
+        self.counters
+            .translation_sessions_created
+            .fetch_add(1, Ordering::SeqCst);
+        increment_active_counter(
+            &self.counters.active_translation_sessions,
+            &self.counters.active_translation_sessions_high_water,
+        );
+        Box::new(CountingLocalWebSocketTranslationSession {
+            inner: OpenAIRealtimeTranslationClient::with_endpoint(self.endpoint.clone())
+                .with_timeouts(
+                    TEST_TIMEOUT,
+                    TEST_TIMEOUT,
+                    TEST_TIMEOUT,
+                    Duration::from_millis(100),
+                ),
+            counters: self.counters.clone(),
+            connected: false,
+        })
+    }
+}
+
+struct CountingLocalWebSocketTranslationSession {
+    inner: OpenAIRealtimeTranslationClient,
+    counters: Arc<RestartStressCounters>,
+    connected: bool,
+}
+
+impl CountingLocalWebSocketTranslationSession {
+    fn mark_translation_task_stopped(&mut self) {
+        if self.connected {
+            self.connected = false;
+            decrement_active_counter(
+                &self.counters.active_translation_tasks,
+                "active translation task",
+            );
+        }
+    }
+}
+
+impl Drop for CountingLocalWebSocketTranslationSession {
+    fn drop(&mut self) {
+        self.counters
+            .translation_sessions_dropped
+            .fetch_add(1, Ordering::SeqCst);
+        decrement_active_counter(
+            &self.counters.active_translation_sessions,
+            "active translation session",
+        );
+    }
+}
+
+#[async_trait]
+impl RealtimeTranslationSession for CountingLocalWebSocketTranslationSession {
+    async fn connect(
+        &mut self,
+        config: RealtimeTranslationConfig,
+    ) -> Result<tokio::sync::mpsc::Receiver<RealtimeTranslationEvent>, RealtimeTranslationError>
+    {
+        let events = self.inner.connect(config).await?;
+        assert!(!self.connected, "translation session connected twice");
+        self.connected = true;
+        self.counters
+            .translation_connects
+            .fetch_add(1, Ordering::SeqCst);
+        increment_active_counter(
+            &self.counters.active_translation_tasks,
+            &self.counters.active_translation_tasks_high_water,
+        );
+        Ok(events)
+    }
+
+    async fn append_pcm16(&mut self, samples: &[i16]) -> Result<(), RealtimeTranslationError> {
+        self.inner.append_pcm16(samples).await
+    }
+
+    async fn finish(&mut self, timeout: Duration) -> Result<(), RealtimeTranslationError> {
+        self.counters
+            .translation_finishes
+            .fetch_add(1, Ordering::SeqCst);
+        let result = self.inner.finish(timeout).await;
+        self.mark_translation_task_stopped();
+        result
+    }
+
+    async fn abort(&mut self) {
+        self.counters
+            .translation_aborts
+            .fetch_add(1, Ordering::SeqCst);
+        self.inner.abort().await;
+        self.mark_translation_task_stopped();
+    }
+}
+
+async fn spawn_repeated_spoken_stress_server(
+    cycles: usize,
+    counters: Arc<RestartStressCounters>,
+    post_stop: Arc<Vec<tokio::sync::Notify>>,
+) -> (String, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let mut handlers = JoinSet::new();
+        for cycle in 0..cycles {
+            let (stream, _) = listener.accept().await.unwrap();
+            let counters = counters.clone();
+            let post_stop = post_stop.clone();
+            handlers.spawn(async move {
+                increment_active_counter(
+                    &counters.active_server_tasks,
+                    &counters.active_server_tasks_high_water,
+                );
+                let mut ws = accept_async(stream).await.unwrap();
+                counters.websocket_opens.fetch_add(1, Ordering::SeqCst);
+                increment_active_counter(
+                    &counters.active_websocket_sessions,
+                    &counters.active_websocket_sessions_high_water,
+                );
+
+                assert_eq!(receive_json(&mut ws).await["type"], "session.update");
+                send_json(&mut ws, json!({ "type": "session.created" })).await;
+                send_json(&mut ws, json!({ "type": "session.updated" })).await;
+
+                let append = receive_json(&mut ws).await;
+                assert_eq!(append["type"], "session.input_audio_buffer.append");
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(append["audio"].as_str().expect("append must contain audio"))
+                    .expect("append audio must be base64");
+                let samples: Vec<i16> = bytes
+                    .chunks_exact(2)
+                    .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+                    .collect();
+                assert_eq!(samples, vec![7; 4_800]);
+                counters.audio_appends.fetch_add(1, Ordering::SeqCst);
+
+                send_json(
+                    &mut ws,
+                    json!({
+                        "type": "session.input_transcript.delta",
+                        "delta": format!("source-{cycle}")
+                    }),
+                )
+                .await;
+                send_json(
+                    &mut ws,
+                    json!({
+                        "type": "session.output_transcript.delta",
+                        "delta": format!("translated-{cycle}")
+                    }),
+                )
+                .await;
+                send_json(
+                    &mut ws,
+                    json!({
+                        "type": "session.output_audio.delta",
+                        "delta": pcm16_base64(&[120, -240, 360])
+                    }),
+                )
+                .await;
+
+                loop {
+                    let message = receive_json(&mut ws).await;
+                    if message["type"] == "session.close" {
+                        counters.session_closes.fetch_add(1, Ordering::SeqCst);
+                        break;
+                    }
+                }
+                send_json(&mut ws, json!({ "type": "session.closed" })).await;
+
+                post_stop[cycle].notified().await;
+                counters
+                    .post_stop_send_attempts
+                    .fetch_add(1, Ordering::SeqCst);
+                let _ = ws
+                    .send(Message::Text(
+                        json!({
+                            "type": "session.output_transcript.delta",
+                            "delta": "late-after-stop"
+                        })
+                        .to_string(),
+                    ))
+                    .await;
+                let _ = ws
+                    .send(Message::Text(
+                        json!({
+                            "type": "session.output_audio.delta",
+                            "delta": pcm16_base64(&[999])
+                        })
+                        .to_string(),
+                    ))
+                    .await;
+
+                decrement_active_counter(
+                    &counters.active_websocket_sessions,
+                    "active websocket session",
+                );
+                decrement_active_counter(&counters.active_server_tasks, "active server task");
+            });
+        }
+
+        while let Some(result) = handlers.join_next().await {
+            result.expect("stress WebSocket handler must not panic");
+        }
+    });
+    (
+        format!("ws://{address}/v1/realtime/translations?model=test"),
+        task,
+    )
+}
+
+#[tokio::test]
+#[ignore = "repeated spoken runtime stress; set SPOKEN_TRANSLATION_RESTART_STRESS_CYCLES for a shorter development run"]
+async fn spoken_runtime_repeated_start_stop_stress_releases_every_session_and_task() {
+    const MAX_RSS_GROWTH_KIB: u64 = 16 * 1024;
+
+    let cycles = spoken_restart_stress_cycles();
+    let counters = Arc::new(RestartStressCounters::default());
+    let post_stop = Arc::new(
+        (0..cycles)
+            .map(|_| tokio::sync::Notify::new())
+            .collect::<Vec<_>>(),
+    );
+    let (endpoint, server) =
+        spawn_repeated_spoken_stress_server(cycles, counters.clone(), post_stop.clone()).await;
+    let flow_state = Arc::new(SyntheticFlowState::default());
+    let service = IncomingTranslationFacade::new_spoken_with_factories(
+        Arc::new(SyntheticCaptureFactory {
+            state: flow_state.clone(),
+            samples: Arc::new(vec![7; 4_800]),
+        }),
+        Arc::new(CollectingOutputFactory {
+            state: flow_state.clone(),
+            retain_samples: false,
+        }),
+        Arc::new(CountingLocalWebSocketTranslationFactory {
+            endpoint,
+            counters: counters.clone(),
+        }),
+        Arc::new(ReadyCapability),
+    );
+    let warmup_cycles = (cycles / 5).clamp(1, 5);
+    let mut rss_samples_kib = Vec::new();
+
+    for cycle in 0..cycles {
+        let callbacks = IncomingTranslationCallbacks {
+            on_source_final: {
+                let counters = counters.clone();
+                Arc::new(move |_| {
+                    counters.source_callbacks.fetch_add(1, Ordering::SeqCst);
+                    counters.callback_count.fetch_add(1, Ordering::SeqCst);
+                })
+            },
+            on_translation_delta: {
+                let counters = counters.clone();
+                Arc::new(move |_| {
+                    counters
+                        .translation_callbacks
+                        .fetch_add(1, Ordering::SeqCst);
+                    counters.callback_count.fetch_add(1, Ordering::SeqCst);
+                })
+            },
+            on_error: {
+                let counters = counters.clone();
+                Arc::new(move |_| {
+                    counters.error_callbacks.fetch_add(1, Ordering::SeqCst);
+                    counters.callback_count.fetch_add(1, Ordering::SeqCst);
+                })
+            },
+            on_status: {
+                let counters = counters.clone();
+                Arc::new(move |_| {
+                    counters.callback_count.fetch_add(1, Ordering::SeqCst);
+                })
+            },
+        };
+        let session_id = 10_000 + cycle as u64;
+        let mut config =
+            IncomingTranslationConfig::new_with_defaults(SttConfig::default(), session_id);
+        config.openai_api_key = TEST_CREDENTIAL.into();
+        config.target_language = "ru".into();
+
+        service.start(config, callbacks).await.unwrap();
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            loop {
+                if counters.audio_appends.load(Ordering::SeqCst) >= cycle + 1
+                    && counters.source_callbacks.load(Ordering::SeqCst) >= cycle + 1
+                    && counters.translation_callbacks.load(Ordering::SeqCst) >= cycle + 1
+                    && flow_state.output_sample_count.load(Ordering::SeqCst) >= (cycle + 1) * 3
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("capture, local translator, callbacks, and output must complete each cycle");
+        assert_eq!(service.active_session_id().await, Some(session_id));
+        assert_eq!(service.get_status().await, RecordingStatus::Recording);
+        assert_eq!(flow_state.active_captures.load(Ordering::SeqCst), 1);
+        assert_eq!(flow_state.active_outputs.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            counters.active_translation_sessions.load(Ordering::SeqCst),
+            1
+        );
+        assert_eq!(counters.active_translation_tasks.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.active_websocket_sessions.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.active_server_tasks.load(Ordering::SeqCst), 1);
+
+        service.stop().await.unwrap();
+        assert_eq!(service.active_session_id().await, None);
+        assert_eq!(service.get_status().await, RecordingStatus::Idle);
+        assert_eq!(flow_state.active_captures.load(Ordering::SeqCst), 0);
+        assert_eq!(flow_state.active_outputs.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            counters.active_translation_sessions.load(Ordering::SeqCst),
+            0
+        );
+        assert_eq!(counters.active_translation_tasks.load(Ordering::SeqCst), 0);
+
+        let callbacks_after_stop = counters.callback_count.load(Ordering::SeqCst);
+        let output_after_stop = flow_state.output_sample_count.load(Ordering::SeqCst);
+        post_stop[cycle].notify_one();
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            loop {
+                if counters.active_websocket_sessions.load(Ordering::SeqCst) == 0
+                    && counters.active_server_tasks.load(Ordering::SeqCst) == 0
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("post-stop WebSocket handler must terminate");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            counters.callback_count.load(Ordering::SeqCst),
+            callbacks_after_stop,
+            "callback fired after stop in cycle {cycle}"
+        );
+        assert_eq!(
+            flow_state.output_sample_count.load(Ordering::SeqCst),
+            output_after_stop,
+            "audio reached output after stop in cycle {cycle}"
+        );
+
+        if cycle + 1 >= warmup_cycles {
+            rss_samples_kib.push(
+                current_process_rss_kib().expect("restart stress requires ps RSS measurement"),
+            );
+        }
+    }
+
+    tokio::time::timeout(TEST_TIMEOUT, server)
+        .await
+        .expect("restart stress server must stop")
+        .expect("restart stress server task must not panic");
+
+    let expected = cycles;
+    assert_eq!(
+        flow_state.capture_start_count.load(Ordering::SeqCst),
+        expected
+    );
+    assert_eq!(
+        flow_state.capture_stop_count.load(Ordering::SeqCst),
+        expected
+    );
+    assert_eq!(
+        flow_state.output_open_count.load(Ordering::SeqCst),
+        expected
+    );
+    assert_eq!(
+        flow_state.output_close_count.load(Ordering::SeqCst),
+        expected
+    );
+    assert_eq!(
+        counters.translation_sessions_created.load(Ordering::SeqCst),
+        expected
+    );
+    assert_eq!(
+        counters.translation_sessions_dropped.load(Ordering::SeqCst),
+        expected
+    );
+    assert_eq!(
+        counters.translation_connects.load(Ordering::SeqCst),
+        expected
+    );
+    assert_eq!(
+        counters.translation_finishes.load(Ordering::SeqCst),
+        expected
+    );
+    assert_eq!(counters.translation_aborts.load(Ordering::SeqCst), 0);
+    assert_eq!(counters.websocket_opens.load(Ordering::SeqCst), expected);
+    assert_eq!(counters.session_closes.load(Ordering::SeqCst), expected);
+    assert_eq!(counters.audio_appends.load(Ordering::SeqCst), expected);
+    assert_eq!(
+        counters.post_stop_send_attempts.load(Ordering::SeqCst),
+        expected
+    );
+    assert_eq!(counters.error_callbacks.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        flow_state.active_captures_high_water.load(Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        flow_state.active_outputs_high_water.load(Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        counters
+            .active_translation_sessions_high_water
+            .load(Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        counters
+            .active_translation_tasks_high_water
+            .load(Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        counters
+            .active_websocket_sessions_high_water
+            .load(Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        counters
+            .active_server_tasks_high_water
+            .load(Ordering::SeqCst),
+        1
+    );
+    assert!(rss_samples_kib.len() >= 2);
+    let baseline_rss_kib = rss_samples_kib[0];
+    let max_rss_kib = *rss_samples_kib.iter().max().unwrap();
+    let rss_growth_kib = max_rss_kib.saturating_sub(baseline_rss_kib);
+    println!(
+        "spoken_restart_stress_cycles={cycles}, rss_samples_kib={rss_samples_kib:?}, rss_growth_kib={rss_growth_kib}"
+    );
+    let artifact_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/e2e-artifacts/incoming-spoken-restart-stress");
+    fs::create_dir_all(&artifact_dir).expect("must create restart stress artifact directory");
+    fs::write(
+        artifact_dir.join("metrics.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema_version": 1,
+            "cycles": cycles,
+            "capture_starts": flow_state.capture_start_count.load(Ordering::SeqCst),
+            "capture_stops": flow_state.capture_stop_count.load(Ordering::SeqCst),
+            "output_opens": flow_state.output_open_count.load(Ordering::SeqCst),
+            "output_closes": flow_state.output_close_count.load(Ordering::SeqCst),
+            "translation_sessions_created": counters.translation_sessions_created.load(Ordering::SeqCst),
+            "translation_sessions_dropped": counters.translation_sessions_dropped.load(Ordering::SeqCst),
+            "translation_finishes": counters.translation_finishes.load(Ordering::SeqCst),
+            "translation_aborts": counters.translation_aborts.load(Ordering::SeqCst),
+            "post_stop_send_attempts": counters.post_stop_send_attempts.load(Ordering::SeqCst),
+            "error_callbacks": counters.error_callbacks.load(Ordering::SeqCst),
+            "active_capture_high_water": flow_state.active_captures_high_water.load(Ordering::SeqCst),
+            "active_output_high_water": flow_state.active_outputs_high_water.load(Ordering::SeqCst),
+            "active_translation_session_high_water": counters.active_translation_sessions_high_water.load(Ordering::SeqCst),
+            "active_translation_task_high_water": counters.active_translation_tasks_high_water.load(Ordering::SeqCst),
+            "active_websocket_high_water": counters.active_websocket_sessions_high_water.load(Ordering::SeqCst),
+            "active_server_task_high_water": counters.active_server_tasks_high_water.load(Ordering::SeqCst),
+            "rss_samples_kib": rss_samples_kib,
+            "rss_growth_kib": rss_growth_kib,
+        }))
+        .expect("restart stress metrics must serialize"),
+    )
+    .expect("must write restart stress metrics");
+    assert!(
+        rss_growth_kib <= MAX_RSS_GROWTH_KIB,
+        "spoken runtime peak RSS grew by {rss_growth_kib} KiB after warmup"
+    );
 }
 
 #[tokio::test]

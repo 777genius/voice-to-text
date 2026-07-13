@@ -1,10 +1,14 @@
+import { readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import process from 'node:process';
 
 import {
+  nativeSpokenSoakMetricViolations,
   parsePositiveIntegerEnv,
   resolvePaidE2eEnvironment,
   runLiveAudioCommand,
   sanitizedAudioTestEnvironment,
+  spokenRestartStressMetricViolations,
   writeLiveAudioSummary,
 } from './helpers/liveAudioRunner.mjs';
 import {
@@ -19,6 +23,22 @@ const soakSeconds = parsePositiveIntegerEnv(
 );
 const allowShortSoak = process.env.LIVE_AUDIO_ALLOW_SHORT_SOAK === '1';
 const TEST_TIMEOUT_MS = (soakSeconds + 240) * 1000;
+const NATIVE_SPOKEN_METRICS_PATH = join(
+  process.cwd(),
+  'src-tauri',
+  'target',
+  'e2e-artifacts',
+  'incoming-spoken-native-soak',
+  'metrics.json',
+);
+const RESTART_STRESS_METRICS_PATH = join(
+  process.cwd(),
+  'src-tauri',
+  'target',
+  'e2e-artifacts',
+  'incoming-spoken-restart-stress',
+  'metrics.json',
+);
 
 const tests = [
   {
@@ -55,6 +75,41 @@ const tests = [
     env: {
       SPOKEN_TRANSLATION_SOAK_SECONDS: String(soakSeconds),
     },
+  },
+  {
+    label: 'incoming-spoken-restart-stress',
+    paid: false,
+    testName: 'spoken_runtime_repeated_start_stop_stress_releases_every_session_and_task',
+    command: [
+      'cargo',
+      'test',
+      '--test',
+      'realtime_translation_websocket_e2e_test',
+      'spoken_runtime_repeated_start_stop_stress_releases_every_session_and_task',
+      '--',
+      '--ignored',
+      '--exact',
+      '--nocapture',
+    ],
+    env: {
+      SPOKEN_TRANSLATION_RESTART_STRESS_CYCLES: '25',
+    },
+  },
+  {
+    label: 'incoming-spoken-native-soak',
+    paid: true,
+    testName: 'incoming_spoken_translation_long_running_native_soak',
+    command: [
+      'cargo',
+      'test',
+      '--test',
+      'incoming_system_audio_translation_e2e_test',
+      'incoming_spoken_translation_long_running_native_soak',
+      '--',
+      '--ignored',
+      '--exact',
+      '--nocapture',
+    ],
   },
   {
     label: 'outgoing-long-live-translation-soak',
@@ -122,6 +177,9 @@ if (soakSeconds < 1800) {
   console.warn(`[live-audio-soak] development-only short soak enabled (${soakSeconds}s); this is not release evidence.`);
 }
 
+rmSync(NATIVE_SPOKEN_METRICS_PATH, { force: true });
+rmSync(RESTART_STRESS_METRICS_PATH, { force: true });
+
 const passedLabels = [];
 for (const { label, paid, testName, command, env = {} } of tests) {
   console.log(`\n[live-audio-soak] running ${label} (${soakSeconds}s soak window)`);
@@ -148,12 +206,39 @@ for (const { label, paid, testName, command, env = {} } of tests) {
 }
 
 const releaseGrade = soakSeconds >= DEFAULT_SOAK_SECONDS;
+let nativeSpokenMetrics;
+try {
+  nativeSpokenMetrics = JSON.parse(readFileSync(NATIVE_SPOKEN_METRICS_PATH, 'utf8'));
+} catch (error) {
+  fail(`cannot read native spoken soak metrics: ${error.message}`);
+}
+const nativeMetricViolations = nativeSpokenSoakMetricViolations(nativeSpokenMetrics, {
+  soakSeconds,
+  releaseGrade,
+});
+if (nativeMetricViolations.length > 0) {
+  fail(`native spoken soak metrics violate ${nativeMetricViolations.join(', ')}: ${JSON.stringify(nativeSpokenMetrics)}`);
+}
+let restartStressMetrics;
+try {
+  restartStressMetrics = JSON.parse(readFileSync(RESTART_STRESS_METRICS_PATH, 'utf8'));
+} catch (error) {
+  fail(`cannot read spoken restart stress metrics: ${error.message}`);
+}
+const restartStressViolations = spokenRestartStressMetricViolations(restartStressMetrics, {
+  expectedCycles: 25,
+});
+if (restartStressViolations.length > 0) {
+  fail(`spoken restart stress metrics violate ${restartStressViolations.join(', ')}: ${JSON.stringify(restartStressMetrics)}`);
+}
 const summaryPath = writeLiveAudioSummary('live-audio-soak-summary.json', {
   schema_version: 1,
   platform: process.platform,
   soak_seconds: soakSeconds,
   release_grade: releaseGrade,
   passed_labels: passedLabels,
+  native_spoken_metrics: nativeSpokenMetrics,
+  restart_stress_metrics: restartStressMetrics,
 });
 
 console.log(

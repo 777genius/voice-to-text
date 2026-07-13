@@ -7,12 +7,54 @@ import test from 'node:test';
 import {
   assertCommandSucceeded,
   assertExpectedTestRan,
+  nativeSpokenSoakMetricViolations,
   parsePositiveIntegerEnv,
   resolvePaidE2eEnvironment,
   sanitizedAudioTestEnvironment,
+  spokenRestartStressMetricViolations,
   terminateProcessGroup,
   writeLiveAudioSummary,
 } from './liveAudioRunner.mjs';
+
+const validNativeSpokenMetrics = Object.freeze({
+  schema_version: 1,
+  soak_seconds: 1800,
+  release_grade: true,
+  source_play_count: 7,
+  translated_text_chars: 120,
+  translated_audible_samples: 48_000,
+  playback_dropped_batches: 0,
+  playback_pending_high_water_ms: 850,
+  playback_pending_at_close_ms: 20,
+  rss_samples_kib: [100_000, 101_000],
+  rss_growth_kib: 1000,
+  last_translation_text_age_ms: 25_000,
+  last_translation_audio_age_ms: 26_000,
+  errors: [],
+});
+
+const validRestartStressMetrics = Object.freeze({
+  schema_version: 1,
+  cycles: 25,
+  capture_starts: 25,
+  capture_stops: 25,
+  output_opens: 25,
+  output_closes: 25,
+  translation_sessions_created: 25,
+  translation_sessions_dropped: 25,
+  translation_finishes: 25,
+  translation_aborts: 0,
+  post_stop_send_attempts: 25,
+  error_callbacks: 0,
+  active_capture_high_water: 1,
+  active_output_high_water: 1,
+  active_translation_session_high_water: 1,
+  active_translation_task_high_water: 1,
+  active_websocket_high_water: 1,
+  active_server_task_high_water: 1,
+  rss_samples_kib: [100_000, 100_096],
+  rss_growth_kib: 96,
+});
 
 function throwingFail(message) {
   throw new Error(message);
@@ -77,6 +119,65 @@ test('parsePositiveIntegerEnv accepts only complete positive integer strings', (
   assert.equal(parsePositiveIntegerEnv('0', 120), 120);
   assert.equal(parsePositiveIntegerEnv('-5', 120), 120);
   assert.equal(parsePositiveIntegerEnv('', 120), 120);
+});
+
+test('native spoken soak metrics require complete bounded release evidence', () => {
+  assert.deepEqual(
+    nativeSpokenSoakMetricViolations(validNativeSpokenMetrics, {
+      soakSeconds: 1800,
+      releaseGrade: true,
+    }),
+    [],
+  );
+});
+
+test('native spoken soak metrics reject stale, null, dropped, and growing evidence', () => {
+  const violations = nativeSpokenSoakMetricViolations(
+    {
+      ...validNativeSpokenMetrics,
+      soak_seconds: 60,
+      playback_dropped_batches: 1,
+      rss_growth_kib: 32_769,
+      last_translation_audio_age_ms: null,
+    },
+    { soakSeconds: 1800, releaseGrade: true },
+  );
+
+  assert.deepEqual(violations, [
+    'soak_seconds',
+    'playback_dropped_batches',
+    'rss_growth_kib',
+    'last_translation_audio_age_ms',
+  ]);
+});
+
+test('spoken restart stress metrics require exact lifecycle balance', () => {
+  assert.deepEqual(
+    spokenRestartStressMetricViolations(validRestartStressMetrics, {
+      expectedCycles: 25,
+    }),
+    [],
+  );
+});
+
+test('spoken restart stress metrics reject leaked sessions and RSS growth', () => {
+  const violations = spokenRestartStressMetricViolations(
+    {
+      ...validRestartStressMetrics,
+      output_closes: 24,
+      translation_sessions_dropped: 24,
+      active_websocket_high_water: 2,
+      rss_growth_kib: 16_385,
+    },
+    { expectedCycles: 25 },
+  );
+
+  assert.deepEqual(violations, [
+    'output_closes',
+    'translation_sessions_dropped',
+    'active_websocket_high_water',
+    'rss_growth_kib',
+  ]);
 });
 
 test('writeLiveAudioSummary creates deterministic machine-readable evidence', () => {

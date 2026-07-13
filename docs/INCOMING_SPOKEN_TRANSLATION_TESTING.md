@@ -192,8 +192,9 @@ cd frontend
 VOICETEXT_RUN_PAID_E2E=1 OPENAI_E2E_API_KEY="sk-..." npm run e2e:live-audio
 ```
 
-The soak runner adds the constant-memory spoken WebSocket runtime soak plus the paid outgoing and
-captions long-session checks. `LIVE_AUDIO_SOAK_SECONDS` applies to each long-running test:
+The soak runner adds the constant-memory spoken WebSocket runtime soak, a native paid spoken
+ScreenCaptureKit -> SystemDefault playback soak, plus the paid outgoing and captions long-session
+checks. `LIVE_AUDIO_SOAK_SECONDS` applies to each long-running test:
 
 ```bash
 cd frontend
@@ -206,7 +207,8 @@ Both runners reject `OPENAI_API_KEY` and do not read `.env`.
 For a GitHub release, run the manual `macOS Audio Release Gate` workflow on the labeled self-hosted
 test Mac. Pass its successful run ID to the manual `Release` workflow. Release publication verifies
 the evidence artifact belongs to the exact tagged commit and records at least a 1,800-second soak;
-a tag push alone cannot publish the feature.
+a tag push alone cannot publish the feature. The release workflow also verifies the SHA-256
+manifest for the complete paid matrix audio/transcript/metrics bundle.
 
 The full-duplex gate starts real incoming and outgoing OpenAI sessions together. It stops incoming,
 requires a second distinct outgoing phrase to reach BlackHole, restarts incoming, stops outgoing,
@@ -233,6 +235,8 @@ Do not ship macOS spoken incoming translation unless all items are recorded for 
 - default Rust, frontend, typecheck, and build suites pass;
 - local WebSocket happy path and fault matrix pass;
 - 30-minute synthetic soak passes;
+- 30-minute native spoken ScreenCaptureKit -> realtime -> SystemDefault soak passes with durable RSS/queue/drop metrics;
+- 25-cycle spoken restart stress leaves no capture, output, WebSocket, session, or task owner active;
 - native 24 kHz capture/callback stop passes;
 - native 440/880 Hz self-exclusion passes;
 - paid OpenAI text and PCM test passes with a dedicated key;

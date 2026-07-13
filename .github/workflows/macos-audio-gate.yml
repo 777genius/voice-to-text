@@ -95,7 +95,8 @@ jobs:
           set -euo pipefail
           smoke_summary="src-tauri/target/e2e-artifacts/live-audio-smoke-summary.json"
           soak_summary="src-tauri/target/e2e-artifacts/live-audio-soak-summary.json"
-          matrix_summary="src-tauri/target/e2e-artifacts/incoming-spoken-paid-matrix/matrix-summary.json"
+          matrix_artifacts="src-tauri/target/e2e-artifacts/incoming-spoken-paid-matrix"
+          matrix_summary="$matrix_artifacts/matrix-summary.json"
           required_matrix_ids='["english_to_russian","names_and_numbers","technical_terms","mixed_english_russian","already_russian","long_context","pause_and_silence","overlapping_speakers","half_volume_source"]'
           required_audio_ids='["english_to_russian","names_and_numbers","technical_terms","mixed_english_russian","long_context","pause_and_silence","overlapping_speakers","half_volume_source"]'
           test -s "$smoke_summary"
@@ -134,8 +135,49 @@ jobs:
              .soak_seconds == $expected_soak_seconds and
              (.passed_labels | index("blackhole-loopback-preflight")) != null and
              (.passed_labels | index("incoming-spoken-runtime-soak")) != null and
+             (.passed_labels | index("incoming-spoken-restart-stress")) != null and
+             (.passed_labels | index("incoming-spoken-native-soak")) != null and
              (.passed_labels | index("outgoing-long-live-translation-soak")) != null and
-             (.passed_labels | index("incoming-long-system-audio-soak")) != null' \
+             (.passed_labels | index("incoming-long-system-audio-soak")) != null and
+             .native_spoken_metrics.schema_version == 1 and
+             .native_spoken_metrics.soak_seconds == $expected_soak_seconds and
+             .native_spoken_metrics.release_grade == true and
+             .native_spoken_metrics.source_play_count == 7 and
+             .native_spoken_metrics.translated_text_chars > 0 and
+             .native_spoken_metrics.translated_audible_samples > 0 and
+             .native_spoken_metrics.playback_dropped_batches == 0 and
+             .native_spoken_metrics.playback_pending_high_water_ms <= 2000 and
+             .native_spoken_metrics.playback_pending_at_close_ms <= 30 and
+             (.native_spoken_metrics.rss_samples_kib | type) == "array" and
+             (.native_spoken_metrics.rss_samples_kib | length) >= 2 and
+             .native_spoken_metrics.rss_growth_kib <= 32768 and
+             (.native_spoken_metrics.last_translation_text_age_ms | type) == "number" and
+             .native_spoken_metrics.last_translation_text_age_ms <= 120000 and
+             (.native_spoken_metrics.last_translation_audio_age_ms | type) == "number" and
+             .native_spoken_metrics.last_translation_audio_age_ms <= 120000 and
+             (.native_spoken_metrics.errors | type) == "array" and
+             (.native_spoken_metrics.errors | length) == 0 and
+             .restart_stress_metrics.schema_version == 1 and
+             .restart_stress_metrics.cycles == 25 and
+             .restart_stress_metrics.capture_starts == 25 and
+             .restart_stress_metrics.capture_stops == 25 and
+             .restart_stress_metrics.output_opens == 25 and
+             .restart_stress_metrics.output_closes == 25 and
+             .restart_stress_metrics.translation_sessions_created == 25 and
+             .restart_stress_metrics.translation_sessions_dropped == 25 and
+             .restart_stress_metrics.translation_finishes == 25 and
+             .restart_stress_metrics.translation_aborts == 0 and
+             .restart_stress_metrics.post_stop_send_attempts == 25 and
+             .restart_stress_metrics.error_callbacks == 0 and
+             .restart_stress_metrics.active_capture_high_water == 1 and
+             .restart_stress_metrics.active_output_high_water == 1 and
+             .restart_stress_metrics.active_translation_session_high_water == 1 and
+             .restart_stress_metrics.active_translation_task_high_water == 1 and
+             .restart_stress_metrics.active_websocket_high_water == 1 and
+             .restart_stress_metrics.active_server_task_high_water == 1 and
+             (.restart_stress_metrics.rss_samples_kib | type) == "array" and
+             (.restart_stress_metrics.rss_samples_kib | length) >= 2 and
+             .restart_stress_metrics.rss_growth_kib <= 16384' \
             "$soak_summary" >/dev/null
           jq -e \
             --argjson required_ids "$required_matrix_ids" \
@@ -149,8 +191,21 @@ jobs:
              .audio_verified_scenario_ids == $required_audio_ids' \
             "$matrix_summary" >/dev/null
 
+          while IFS= read -r scenario; do
+            test -s "$matrix_artifacts/$scenario/source-primary.aiff"
+            test -s "$matrix_artifacts/$scenario/captured-input.wav"
+            test -s "$matrix_artifacts/$scenario/captured-input-transcript.txt"
+            test -e "$matrix_artifacts/$scenario/translated-transcript.txt"
+            test -s "$matrix_artifacts/$scenario/metrics.json"
+          done < <(jq -r '.[]' <<< "$required_matrix_ids")
+          while IFS= read -r scenario; do
+            test -s "$matrix_artifacts/$scenario/translated-audio.wav"
+            test -s "$matrix_artifacts/$scenario/translated-audio-transcript.txt"
+          done < <(jq -r '.[]' <<< "$required_audio_ids")
+
           mkdir -p audio-gate-evidence
           cp "$smoke_summary" "$soak_summary" "$matrix_summary" audio-gate-evidence/
+          cp -R "$matrix_artifacts" audio-gate-evidence/incoming-spoken-paid-matrix
           jq -n \
             --arg commit "$(git rev-parse HEAD)" \
             --arg ref "$EVIDENCE_REF" \
@@ -181,9 +236,19 @@ jobs:
               incoming_paid_network_interruption_passed: ($smoke[0].passed_labels | index("incoming-spoken-paid-network-interruption") != null),
               paid_matrix_complete: $matrix[0].complete_release_matrix,
               paid_matrix: $matrix[0],
+              native_spoken_soak: $soak[0].native_spoken_metrics,
+              spoken_restart_stress: $soak[0].restart_stress_metrics,
               smoke_checks: $smoke[0].passed_labels,
               soak_checks: $soak[0].passed_labels
             }' > audio-gate-evidence/evidence.json
+          (
+            cd audio-gate-evidence
+            manifest_file="$(mktemp)"
+            while IFS= read -r artifact; do
+              shasum -a 256 "$artifact"
+            done > "$manifest_file" < <(find . -type f | LC_ALL=C sort)
+            mv "$manifest_file" SHA256SUMS
+          )
 
       - name: Upload release evidence
         uses: actions/upload-artifact@v6

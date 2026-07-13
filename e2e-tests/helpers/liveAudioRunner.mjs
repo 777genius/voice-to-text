@@ -62,6 +62,94 @@ export function parsePositiveIntegerEnv(value, fallback) {
   return parsed > 0 ? parsed : fallback;
 }
 
+export function nativeSpokenSoakMetricViolations(
+  metrics,
+  { soakSeconds, releaseGrade },
+) {
+  const violations = [];
+  const finiteNumber = (value) => typeof value === 'number' && Number.isFinite(value);
+  const requireNumber = (field, predicate) => {
+    const value = metrics?.[field];
+    if (!finiteNumber(value) || !predicate(value)) violations.push(field);
+  };
+
+  if (metrics?.schema_version !== 1) violations.push('schema_version');
+  if (metrics?.soak_seconds !== soakSeconds) violations.push('soak_seconds');
+  if (metrics?.release_grade !== releaseGrade) violations.push('release_grade');
+  requireNumber('source_play_count', (value) => value === (releaseGrade ? 7 : 2));
+  requireNumber('translated_text_chars', (value) => value > 0);
+  requireNumber('translated_audible_samples', (value) => value > 0);
+  requireNumber('playback_dropped_batches', (value) => value === 0);
+  requireNumber('playback_pending_high_water_ms', (value) => value >= 0 && value <= 2000);
+  requireNumber('playback_pending_at_close_ms', (value) => value >= 0 && value <= 30);
+  requireNumber('rss_growth_kib', (value) => value >= 0 && value <= 32768);
+  requireNumber('last_translation_text_age_ms', (value) => value >= 0 && value <= 120000);
+  requireNumber('last_translation_audio_age_ms', (value) => value >= 0 && value <= 120000);
+  if (
+    !Array.isArray(metrics?.rss_samples_kib)
+    || metrics.rss_samples_kib.length < 2
+    || !metrics.rss_samples_kib.every(finiteNumber)
+  ) {
+    violations.push('rss_samples_kib');
+  }
+  if (!Array.isArray(metrics?.errors) || metrics.errors.length !== 0) {
+    violations.push('errors');
+  }
+
+  return violations;
+}
+
+export function spokenRestartStressMetricViolations(metrics, { expectedCycles }) {
+  const violations = [];
+  const finiteNumber = (value) => typeof value === 'number' && Number.isFinite(value);
+  const requireExact = (field, expected) => {
+    if (!finiteNumber(metrics?.[field]) || metrics[field] !== expected) violations.push(field);
+  };
+
+  if (metrics?.schema_version !== 1) violations.push('schema_version');
+  requireExact('cycles', expectedCycles);
+  for (const field of [
+    'capture_starts',
+    'capture_stops',
+    'output_opens',
+    'output_closes',
+    'translation_sessions_created',
+    'translation_sessions_dropped',
+    'translation_finishes',
+    'post_stop_send_attempts',
+  ]) {
+    requireExact(field, expectedCycles);
+  }
+  requireExact('translation_aborts', 0);
+  requireExact('error_callbacks', 0);
+  for (const field of [
+    'active_capture_high_water',
+    'active_output_high_water',
+    'active_translation_session_high_water',
+    'active_translation_task_high_water',
+    'active_websocket_high_water',
+    'active_server_task_high_water',
+  ]) {
+    requireExact(field, 1);
+  }
+  if (
+    !Array.isArray(metrics?.rss_samples_kib)
+    || metrics.rss_samples_kib.length < 2
+    || !metrics.rss_samples_kib.every(finiteNumber)
+  ) {
+    violations.push('rss_samples_kib');
+  }
+  if (
+    !finiteNumber(metrics?.rss_growth_kib)
+    || metrics.rss_growth_kib < 0
+    || metrics.rss_growth_kib > 16384
+  ) {
+    violations.push('rss_growth_kib');
+  }
+
+  return violations;
+}
+
 export function writeLiveAudioSummary(fileName, summary, { root = process.cwd() } = {}) {
   const artifactDirectory = join(root, 'src-tauri', 'target', 'e2e-artifacts');
   mkdirSync(artifactDirectory, { recursive: true });

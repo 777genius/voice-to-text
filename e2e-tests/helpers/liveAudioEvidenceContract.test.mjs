@@ -53,3 +53,46 @@ test('macOS gate and release verifier require semantic verification of paid audi
     assert.ok(source.includes('.audio_verified_scenario_ids == $required_audio_ids'));
   }
 });
+
+test('native spoken soak measurements are durable release evidence', () => {
+  const runner = readRepositoryFile('e2e-tests/run-live-audio-soak.mjs');
+  const gate = readRepositoryFile('.github/workflows/macos-audio-gate.yml');
+  const release = readRepositoryFile('.github/workflows/release.yml');
+
+  assert.ok(runner.includes('native_spoken_metrics: nativeSpokenMetrics'));
+  assert.ok(runner.includes('restart_stress_metrics: restartStressMetrics'));
+  assert.ok(gate.includes('native_spoken_soak: $soak[0].native_spoken_metrics'));
+  assert.ok(gate.includes('spoken_restart_stress: $soak[0].restart_stress_metrics'));
+  for (const field of [
+    'playback_dropped_batches',
+    'playback_pending_high_water_ms',
+    'playback_pending_at_close_ms',
+    'rss_growth_kib',
+    'last_translation_text_age_ms',
+    'last_translation_audio_age_ms',
+  ]) {
+    assert.ok(gate.includes(`.native_spoken_metrics.${field}`));
+    assert.ok(release.includes(`.native_spoken_soak.${field}`));
+  }
+});
+
+test('paid matrix audio artifacts are checksummed and verified before release', () => {
+  const gate = readRepositoryFile('.github/workflows/macos-audio-gate.yml');
+  const release = readRepositoryFile('.github/workflows/release.yml');
+
+  assert.ok(gate.includes('cp -R "$matrix_artifacts" audio-gate-evidence/incoming-spoken-paid-matrix'));
+  assert.ok(gate.includes('shasum -a 256 "$artifact"'));
+  assert.ok(release.includes('shasum -a 256 -c SHA256SUMS'));
+  for (const artifact of [
+    'source-primary.aiff',
+    'captured-input.wav',
+    'captured-input-transcript.txt',
+    'translated-transcript.txt',
+    'translated-audio.wav',
+    'translated-audio-transcript.txt',
+    'metrics.json',
+  ]) {
+    assert.ok(gate.includes(artifact));
+    assert.ok(release.includes(artifact));
+  }
+});

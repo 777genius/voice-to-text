@@ -109,8 +109,14 @@ VOICETEXT_RUN_PAID_E2E=1 OPENAI_E2E_API_KEY=... \
 
 The deterministic spoken runtime soak samples process RSS after warmup, enforces at most 16 MiB
 growth, checks that the translated-event backlog stays bounded throughout the run, and requires it
-to drain near real time before shutdown.
+to drain near real time before shutdown. A separate native spoken soak keeps the real
+ScreenCaptureKit -> OpenAI Realtime -> SystemDefault CPAL chain active, measures RSS and playback
+pending high-water, rejects dropped audio, and requires fresh text/audio near the end of the run.
+The same runner also performs 25 complete spoken start/stop cycles and requires balanced capture,
+output, WebSocket, translation-session, and task counters with bounded post-warmup RSS.
 
 GitHub releases require a successful manual `macOS Audio Release Gate` run on the self-hosted
 `voicetext-audio` Mac. The `Release` workflow accepts that run ID only when its evidence artifact
-matches the exact tagged commit and records a soak of at least 1,800 seconds.
+matches the exact tagged commit and records a soak of at least 1,800 seconds. The durable evidence
+bundle includes the paid matrix WAV/transcript/metrics files and a SHA-256 manifest rechecked by
+the release workflow.

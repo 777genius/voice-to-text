@@ -25,6 +25,8 @@ export const REQUIRED_LIVE_AUDIO_SMOKE_LABELS = Object.freeze([
 export const REQUIRED_LIVE_AUDIO_SOAK_LABELS = Object.freeze([
   'blackhole-loopback-preflight',
   'incoming-spoken-runtime-soak',
+  'incoming-spoken-restart-stress',
+  'incoming-spoken-native-soak',
   'outgoing-long-live-translation-soak',
   'incoming-long-system-audio-soak',
 ]);
