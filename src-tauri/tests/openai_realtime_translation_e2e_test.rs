@@ -369,6 +369,19 @@ fn audible_pcm16_segments(samples: &[i16], sample_rate: u32, channels: u16) -> V
         .collect()
 }
 
+fn transcription_segments(samples: &[i16], sample_rate: u32, channels: u16) -> Vec<&[i16]> {
+    const MAX_CONTEXT_SECONDS: usize = 30;
+
+    let max_context_samples = (sample_rate as usize)
+        .saturating_mul(usize::from(channels.max(1)))
+        .saturating_mul(MAX_CONTEXT_SECONDS);
+    if samples.len() <= max_context_samples {
+        vec![samples]
+    } else {
+        audible_pcm16_segments(samples, sample_rate, channels)
+    }
+}
+
 async fn transcribe_audible_pcm16(
     client: &reqwest::Client,
     api_key: &str,
@@ -376,7 +389,7 @@ async fn transcribe_audible_pcm16(
     channels: u16,
     samples: &[i16],
 ) -> Result<String, String> {
-    let segments = audible_pcm16_segments(samples, sample_rate, channels);
+    let segments = transcription_segments(samples, sample_rate, channels);
     let mut transcripts = Vec::with_capacity(segments.len());
     for segment in segments {
         transcripts.push(
@@ -427,6 +440,24 @@ fn audible_segments_split_long_internal_silence_and_ignore_short_clicks() {
 
     let segments = audible_pcm16_segments(&samples, 10, 1);
 
+    assert_eq!(segments.len(), 2);
+    assert!(segments[0].iter().any(|sample| *sample == 500));
+    assert!(segments[1].iter().any(|sample| *sample == -500));
+}
+
+#[test]
+fn short_transcription_keeps_full_context_while_long_capture_is_segmented() {
+    let mut short = vec![500i16; 10];
+    short.extend(vec![0i16; 20]);
+    short.extend(vec![-500i16; 10]);
+
+    assert_eq!(transcription_segments(&short, 10, 1).len(), 1);
+
+    let mut long = vec![500i16; 100];
+    long.extend(vec![0i16; 100]);
+    long.extend(vec![-500i16; 110]);
+
+    let segments = transcription_segments(&long, 10, 1);
     assert_eq!(segments.len(), 2);
     assert!(segments[0].iter().any(|sample| *sample == 500));
     assert!(segments[1].iter().any(|sample| *sample == -500));
