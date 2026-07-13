@@ -1330,6 +1330,43 @@ describe('transcription connect-retry reliability', () => {
     expect(store.incomingTranslationText).not.toContain('late synthetic leak');
   });
 
+  it('incoming translation помнит больше 128 последовательных закрытых sessions без блокировки нового меньшего id', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    for (let sessionId = 1_000; sessionId < 1_130; sessionId += 1) {
+      await handlers.get('incoming_translation:status')({
+        payload: { session_id: sessionId, status: 'Recording' },
+      });
+      await handlers.get('incoming_translation:status')({
+        payload: { session_id: sessionId, status: 'Idle' },
+      });
+    }
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 1_000, status: 'Recording' },
+    });
+    expect(store.incomingTranslationSessionId).toBeNull();
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 42, status: 'Recording' },
+    });
+    await handlers.get('incoming_translation:delta')({
+      payload: { session_id: 42, text: 'fresh lower session', timestamp: 1 },
+    });
+
+    expect(store.incomingTranslationSessionId).toBe(42);
+    expect(store.incomingTranslationText).toBe('fresh lower session');
+  });
+
   it('incoming translation не оживляет terminal Error поздними status/delta events', async () => {
     const handlers = new Map<string, any>();
 

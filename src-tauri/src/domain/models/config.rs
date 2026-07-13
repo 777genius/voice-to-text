@@ -21,6 +21,7 @@ impl Default for RecordingMode {
 #[serde(rename_all = "snake_case")]
 pub enum IncomingTranslationDelivery {
     CaptionsOnly,
+    #[serde(alias = "speech_and_captions")]
     TextAndAudio,
 }
 
@@ -522,6 +523,18 @@ mod tests {
         assert_eq!(parsed, RecordingMode::Dictation);
         let parsed: RecordingMode = serde_json::from_str("\"live_translation\"").unwrap();
         assert_eq!(parsed, RecordingMode::LiveTranslation);
+    }
+
+    #[test]
+    fn incoming_delivery_accepts_planned_legacy_spoken_alias() {
+        let delivery: IncomingTranslationDelivery =
+            serde_json::from_str("\"speech_and_captions\"").unwrap();
+
+        assert_eq!(delivery, IncomingTranslationDelivery::TextAndAudio);
+        assert_eq!(
+            serde_json::to_string(&delivery).unwrap(),
+            "\"text_and_audio\""
+        );
     }
 
     #[test]

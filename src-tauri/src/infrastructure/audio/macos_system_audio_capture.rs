@@ -16,6 +16,11 @@ const NATIVE_SAMPLE_RATE: u32 = 48_000;
 const NATIVE_CHANNELS: u16 = 2;
 const TARGET_FRAME_MS: usize = 30;
 
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGPreflightScreenCaptureAccess() -> bool;
+}
+
 /// macOS system output audio capture via ScreenCaptureKit.
 ///
 /// Captures what the user hears, excludes this process, and emits target PCM16 frames.
@@ -102,6 +107,20 @@ fn target_audio_config(target: AudioCaptureTarget) -> AudioConfig {
     }
 }
 
+fn missing_shareable_display_error(screen_capture_access_granted: bool) -> AudioError {
+    if screen_capture_access_granted {
+        AudioError::DeviceNotFound(
+            "No displays are available for system audio capture. Unlock the macOS user session and try again; headless Macs require an attached or virtual display."
+                .into(),
+        )
+    } else {
+        AudioError::AccessDenied(
+            "Screen and System Audio Recording permission is denied. Open macOS System Settings -> Privacy & Security -> Screen & System Audio Recording, enable access for VoicetextAI, then restart the app."
+                .into(),
+        )
+    }
+}
+
 fn shareable_display() -> AudioResult<SCDisplay> {
     let content = SCShareableContent::get().map_err(|error| {
         AudioError::AccessDenied(format!(
@@ -109,7 +128,8 @@ fn shareable_display() -> AudioResult<SCDisplay> {
         ))
     })?;
     content.displays().into_iter().next().ok_or_else(|| {
-        AudioError::DeviceNotFound("No displays found for system audio capture".into())
+        let permission_granted = unsafe { CGPreflightScreenCaptureAccess() };
+        missing_shareable_display_error(permission_granted)
     })
 }
 
@@ -731,6 +751,19 @@ mod tests {
         assert!(config.excludes_current_process_audio());
         assert_eq!(config.sample_rate(), NATIVE_SAMPLE_RATE as i32);
         assert_eq!(config.channel_count(), NATIVE_CHANNELS as i32);
+    }
+
+    #[test]
+    fn empty_shareable_content_distinguishes_permission_from_missing_display() {
+        assert!(matches!(
+            missing_shareable_display_error(false),
+            AudioError::AccessDenied(message)
+                if message.contains("Screen and System Audio Recording")
+        ));
+        assert!(matches!(
+            missing_shareable_display_error(true),
+            AudioError::DeviceNotFound(message) if message.contains("No displays")
+        ));
     }
 
     #[test]

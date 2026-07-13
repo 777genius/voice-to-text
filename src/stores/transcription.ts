@@ -99,7 +99,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const incomingTranslationSessionId = ref<number | null>(null);
   let incomingTranslationStatusEventVersion = 0;
   let incomingTerminalSessionId: number | null = null;
-  const incomingClosedSessionIds = ref<Set<number>>(new Set());
+  const incomingClosedSessionRanges: Array<[number, number]> = [];
   const incomingSourceText = ref<string>('');
   const incomingTranslationText = ref<string>('');
   const incomingTranslationError = ref<string | null>(null);
@@ -435,22 +435,39 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   function isIncomingTranslationSessionClosed(payloadSessionId: number): boolean {
     return (
       isValidIncomingTranslationSessionId(payloadSessionId) &&
-      incomingClosedSessionIds.value.has(payloadSessionId)
+      incomingClosedSessionRanges.some(
+        ([start, end]) => payloadSessionId >= start && payloadSessionId <= end,
+      )
     );
+  }
+
+  function rememberClosedIncomingSession(sessionIdToClose: number): void {
+    let start = sessionIdToClose;
+    let end = sessionIdToClose;
+    let insertAt = incomingClosedSessionRanges.length;
+
+    for (let index = 0; index < incomingClosedSessionRanges.length; index += 1) {
+      const [rangeStart, rangeEnd] = incomingClosedSessionRanges[index];
+      if (rangeEnd + 1 < start) continue;
+      if (end + 1 < rangeStart) {
+        insertAt = index;
+        break;
+      }
+      start = Math.min(start, rangeStart);
+      end = Math.max(end, rangeEnd);
+      incomingClosedSessionRanges.splice(index, 1);
+      index -= 1;
+      insertAt = index + 1;
+    }
+
+    incomingClosedSessionRanges.splice(insertAt, 0, [start, end]);
   }
 
   function markIncomingTranslationSessionClosed(sessionIdToClose: number, reason: string): void {
     if (!isValidIncomingTranslationSessionId(sessionIdToClose)) return;
 
-    if (!incomingClosedSessionIds.value.has(sessionIdToClose)) {
-      const next = new Set(incomingClosedSessionIds.value);
-      next.add(sessionIdToClose);
-      while (next.size > 128) {
-        const oldest = next.values().next().value;
-        if (typeof oldest !== 'number') break;
-        next.delete(oldest);
-      }
-      incomingClosedSessionIds.value = next;
+    if (!isIncomingTranslationSessionClosed(sessionIdToClose)) {
+      rememberClosedIncomingSession(sessionIdToClose);
       console.warn('[IncomingTranslation] Marked session closed', sessionIdToClose, 'reason:', reason);
     }
 
