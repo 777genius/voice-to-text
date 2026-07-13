@@ -23,12 +23,12 @@ use crate::domain::{
 };
 
 use super::{
-    abort_startup_translation, close_startup_output, initialize_startup_capture,
-    open_startup_output, spawn_realtime_interpretation_supervisor, AudioSpectrumAnalyzer,
-    RealtimeInterpretationCallbacks, RealtimeInterpretationConfig, RealtimeInterpretationError,
-    RealtimeInterpretationPorts, RealtimeInterpretationSession, RealtimeInterpretationShutdown,
-    RealtimeInterpretationStartError, RealtimeInterpretationStop, RealtimeStartupPolicy,
-    StartupCaptureError, StartupOutputError,
+    abort_startup_translation, close_startup_capture, close_startup_output,
+    initialize_startup_capture, open_startup_output, spawn_realtime_interpretation_supervisor,
+    AudioSpectrumAnalyzer, RealtimeInterpretationCallbacks, RealtimeInterpretationConfig,
+    RealtimeInterpretationError, RealtimeInterpretationPorts, RealtimeInterpretationSession,
+    RealtimeInterpretationShutdown, RealtimeInterpretationStartError, RealtimeInterpretationStop,
+    RealtimeStartupPolicy, StartupCaptureError, StartupOutputError,
 };
 
 const TRANSLATION_TARGET_LANGUAGE_DEFAULT: &str = "en";
@@ -368,6 +368,7 @@ impl LiveTranslationService {
             Ok(Ok(rx)) => rx,
             Ok(Err(error)) => {
                 abort_startup_translation(client.as_mut()).await;
+                close_startup_capture(capture).await;
                 close_startup_output(output_concrete).await;
                 let mapped: LiveTranslationError = error.into();
                 self.transition_to_error().await;
@@ -375,6 +376,7 @@ impl LiveTranslationService {
             }
             Err(_) => {
                 abort_startup_translation(client.as_mut()).await;
+                close_startup_capture(capture).await;
                 close_startup_output(output_concrete).await;
                 let error = LiveTranslationError::Timeout(format!(
                     "realtime translation connection did not become ready within {} ms",
@@ -384,6 +386,15 @@ impl LiveTranslationService {
                 return Err(error);
             }
         };
+        if openai_rx.is_closed() {
+            abort_startup_translation(client.as_mut()).await;
+            close_startup_capture(capture).await;
+            close_startup_output(output_concrete).await;
+            self.transition_to_error().await;
+            return Err(LiveTranslationError::Connection(
+                "OpenAI realtime translation session closed unexpectedly during startup".into(),
+            ));
+        }
         let spectrum = Arc::new(StdMutex::new(AudioSpectrumAnalyzer::new()));
         let on_spectrum = callbacks.on_audio_spectrum.clone();
         let core_callbacks = RealtimeInterpretationCallbacks {
@@ -1934,11 +1945,12 @@ mod tests {
         let output_state = Arc::new(SyntheticOutputState::default());
         let realtime_state = Arc::new(SyntheticRealtimeState::default());
         realtime_state.block_connect.store(true, Ordering::SeqCst);
+        let capture_stopped = Arc::new(AtomicBool::new(false));
         let mut svc = LiveTranslationService::new_with_factories(
             Arc::new(SyntheticPlatformAudioFactory {
                 output_state: output_state.clone(),
                 capture_started: Arc::new(AtomicBool::new(false)),
-                capture_stopped: Arc::new(AtomicBool::new(false)),
+                capture_stopped: capture_stopped.clone(),
                 mic_target: Arc::new(StdMutex::new(None)),
             }),
             Arc::new(SyntheticRealtimeClientFactory {
@@ -1954,6 +1966,7 @@ mod tests {
 
         assert!(matches!(error, LiveTranslationError::Timeout(_)));
         assert!(output_state.closed.load(Ordering::SeqCst));
+        assert!(capture_stopped.load(Ordering::SeqCst));
         assert_eq!(realtime_state.abort_calls.load(Ordering::SeqCst), 1);
         assert_eq!(svc.get_status().await, RecordingStatus::Error);
         assert!(svc.active_session_id().await.is_none());

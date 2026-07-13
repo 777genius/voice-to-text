@@ -189,6 +189,21 @@ pub(crate) async fn close_startup_output(mut output: Box<dyn TranslationAudioOut
     }
 }
 
+pub(crate) async fn close_startup_capture(mut capture: Box<dyn AudioCapture>) {
+    let runtime = tokio::runtime::Handle::current();
+    let cleanup = tokio::task::spawn_blocking(move || {
+        let result = runtime.block_on(capture.stop_capture());
+        capture.set_terminal_error_callback(None);
+        result
+    });
+    match tokio::time::timeout(REALTIME_STARTUP_CLEANUP_TIMEOUT, cleanup).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(error))) => log::warn!("realtime startup capture cleanup failed: {error}"),
+        Ok(Err(error)) => log::warn!("realtime startup capture cleanup worker failed: {error}"),
+        Err(_) => log::warn!("realtime startup capture cleanup timed out"),
+    }
+}
+
 pub(crate) async fn abort_startup_translation(translation: &mut dyn RealtimeTranslationSession) {
     if tokio::time::timeout(REALTIME_STARTUP_CLEANUP_TIMEOUT, translation.abort())
         .await

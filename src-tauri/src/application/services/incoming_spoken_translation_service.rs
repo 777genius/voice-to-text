@@ -13,10 +13,11 @@ use crate::domain::{
 };
 
 use super::{
-    abort_startup_translation, close_startup_output, initialize_startup_capture,
-    open_startup_output, spawn_realtime_interpretation_supervisor, RealtimeInterpretationCallbacks,
-    RealtimeInterpretationConfig, RealtimeInterpretationError, RealtimeInterpretationOutputControl,
-    RealtimeInterpretationPorts, RealtimeInterpretationSession, RealtimeInterpretationShutdown,
+    abort_startup_translation, close_startup_capture, close_startup_output,
+    initialize_startup_capture, open_startup_output, spawn_realtime_interpretation_supervisor,
+    RealtimeInterpretationCallbacks, RealtimeInterpretationConfig, RealtimeInterpretationError,
+    RealtimeInterpretationOutputControl, RealtimeInterpretationPorts,
+    RealtimeInterpretationSession, RealtimeInterpretationShutdown,
     RealtimeInterpretationStartError, RealtimeInterpretationStop, RealtimeStartupPolicy,
     StartupCaptureError, StartupOutputError,
 };
@@ -386,6 +387,7 @@ impl IncomingSpokenTranslationService {
             Ok(Ok(events)) => events,
             Ok(Err(error)) => {
                 abort_startup_translation(translation.as_mut()).await;
+                close_startup_capture(capture).await;
                 close_startup_output(output).await;
                 self.transition_to_error().await;
                 notify_playback_stopped(&callbacks);
@@ -393,6 +395,7 @@ impl IncomingSpokenTranslationService {
             }
             Err(_) => {
                 abort_startup_translation(translation.as_mut()).await;
+                close_startup_capture(capture).await;
                 close_startup_output(output).await;
                 self.transition_to_error().await;
                 notify_playback_stopped(&callbacks);
@@ -402,6 +405,16 @@ impl IncomingSpokenTranslationService {
                 )));
             }
         };
+        if translation_events.is_closed() {
+            abort_startup_translation(translation.as_mut()).await;
+            close_startup_capture(capture).await;
+            close_startup_output(output).await;
+            self.transition_to_error().await;
+            notify_playback_stopped(&callbacks);
+            return Err(IncomingSpokenTranslationError::Connection(
+                "OpenAI realtime translation session closed unexpectedly during startup".into(),
+            ));
+        }
 
         let core_callbacks = RealtimeInterpretationCallbacks {
             on_translated_text: callbacks.on_translation_delta.clone(),
@@ -744,6 +757,7 @@ mod tests {
         block_capture_initialize: AtomicBool,
         block_output_open: AtomicBool,
         block_translation_connect: AtomicBool,
+        close_translation_on_connect: AtomicBool,
         capture_error_callbacks: StdMutex<Vec<AudioCaptureErrorCallback>>,
     }
 
@@ -1022,6 +1036,13 @@ mod tests {
                 ));
             }
             let (tx, rx) = mpsc::channel(8);
+            if self
+                .state
+                .close_translation_on_connect
+                .load(Ordering::SeqCst)
+            {
+                return Ok(rx);
+            }
             self.events = Some(tx);
             Ok(rx)
         }
@@ -1280,7 +1301,39 @@ mod tests {
         assert_eq!(error.error_type(), "connection");
         assert_eq!(state.output_close_calls.load(Ordering::SeqCst), 1);
         assert_eq!(state.capture_start_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.capture_stop_calls.load(Ordering::SeqCst), 1);
         assert_eq!(state.translation_connect_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn already_closed_translation_stream_never_reports_successful_start() {
+        let state = Arc::new(FakeState::default());
+        state
+            .close_translation_on_connect
+            .store(true, Ordering::SeqCst);
+        let service = service_with_fakes(
+            state.clone(),
+            SpokenIncomingCapability::Ready,
+            false,
+            false,
+            false,
+        );
+
+        let error = service
+            .start(config(46), no_op_callbacks())
+            .await
+            .expect_err("an already closed provider stream must fail startup");
+
+        assert!(matches!(
+            error,
+            IncomingSpokenTranslationError::Connection(message)
+                if message.contains("closed unexpectedly")
+        ));
+        assert_eq!(service.get_status().await, RecordingStatus::Error);
+        assert_eq!(state.capture_start_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.capture_stop_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.output_close_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.translation_abort_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1307,6 +1360,7 @@ mod tests {
         assert_eq!(state.translation_abort_calls.load(Ordering::SeqCst), 1);
         assert_eq!(state.output_close_calls.load(Ordering::SeqCst), 1);
         assert_eq!(state.capture_start_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(state.capture_stop_calls.load(Ordering::SeqCst), 1);
         assert_eq!(service.get_status().await, RecordingStatus::Error);
     }
 
@@ -1363,6 +1417,10 @@ mod tests {
         );
         let output_config = state.output_configs.lock().unwrap()[0];
         assert_eq!(output_config.max_buffered_duration, Duration::from_secs(10));
+        assert_eq!(
+            output_config.drain_max_buffered_duration,
+            Duration::from_secs(25)
+        );
         assert_eq!(output_config.gain, 0.75);
 
         service.stop().await.unwrap();
