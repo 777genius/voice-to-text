@@ -795,10 +795,10 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
         PaidSpokenScenario {
             id: "long_context",
             primary_voice: "Samantha",
-            source: "During yesterday's incident, the first software deployment to production failed because the certificate expired. After the certificate was renewed, the second software deployment to production succeeded, so do not roll back the database migration.",
+            source: "During yesterday's incident, the first software deployment to production failed because the certificate expired. After the certificate was renewed, the second software deployment to production succeeded, so do not stop the database migration.",
             source_playback_gain: 1.0,
             secondary_source: None,
-            human_reference: "Во время вчерашнего инцидента первое развертывание не удалось из-за истекшего сертификата. После обновления сертификата второе развертывание прошло успешно, поэтому не откатывайте миграцию базы данных.",
+            human_reference: "Во время вчерашнего инцидента первое развертывание не удалось из-за истекшего сертификата. После обновления сертификата второе развертывание прошло успешно, поэтому не останавливайте миграцию базы данных.",
             required_source_markers: &[
                 &["first"],
                 &["software"],
@@ -808,7 +808,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
                 &["expired"],
                 &["second"],
                 &["succeeded", "successful"],
-                &["not roll back", "do not roll back"],
+                &["not stop", "do not stop"],
                 &["migration"],
             ],
             required_translation_facts: &[
@@ -816,8 +816,33 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
                     label: "first deployment failed",
                     marker_groups: &[
                         &["перв"],
-                        &["развертыв", "развёртыв", "деплой", "запуск"],
-                        &["не удалось", "не сработ", "провал", "ошиб", "неуспеш"],
+                        &[
+                            "развертыв",
+                            "развёртыв",
+                            "деплой",
+                            "запуск",
+                            "поставк",
+                            "релиз",
+                            "выклад",
+                            "выкат",
+                            "установ",
+                            "размещ",
+                            "внедрен",
+                            "внедрён",
+                            "развертк",
+                            "развёртк",
+                        ],
+                        &[
+                            "не удалось",
+                            "не сработ",
+                            "провал",
+                            "ошиб",
+                            "неуспеш",
+                            "сорвал",
+                            "завал",
+                            "неудач",
+                            "сбо",
+                        ],
                     ],
                 },
                 RequiredSemanticFact {
@@ -827,7 +852,7 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
                 RequiredSemanticFact {
                     label: "certificate renewed",
                     marker_groups: &[
-                        &["сертификат", "после его"],
+                        &["сертификат", "после его", "после продл"],
                         &["обнов", "продл", "возобнов", "замен"],
                     ],
                 },
@@ -835,15 +860,30 @@ fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
                     label: "second deployment succeeded",
                     marker_groups: &[
                         &["втор"],
-                        &["развертыв", "развёртыв", "деплой", "попытк"],
-                        &["успеш", "уда"],
+                        &[
+                            "развертыв",
+                            "развёртыв",
+                            "деплой",
+                            "попытк",
+                            "поставк",
+                            "релиз",
+                            "выклад",
+                            "выкат",
+                            "установ",
+                            "размещ",
+                            "внедрен",
+                            "внедрён",
+                            "развертк",
+                            "развёртк",
+                        ],
+                        &["успеш", "успех", "уда"],
                     ],
                 },
                 RequiredSemanticFact {
-                    label: "do not roll back database migration",
+                    label: "do not stop database migration",
                     marker_groups: &[
                         &["не"],
-                        &["откат", "отмен"],
+                        &["останавлив", "прерыва", "прекращ"],
                         &["миграц"],
                     ],
                 },
@@ -1043,6 +1083,27 @@ fn semantic_facts_reject_crossed_speaker_associations_and_inverted_outcomes() {
             "first deployment failed",
             "second deployment succeeded",
         ]
+    );
+}
+
+#[test]
+fn long_context_semantics_accept_contextual_synonyms_without_weakening_negation() {
+    let scenario = paid_spoken_scenarios()
+        .into_iter()
+        .find(|scenario| scenario.id == "long_context")
+        .expect("long_context scenario must exist");
+    let valid = "Во время вчерашнего инцидента первое развертывание ПО в продакшн завалилось, потому что сертификат истек. После продления второе развертывание ПО в продакшн прошло успешно. Так что не останавливайте миграцию базы данных.";
+    let installation_variant = "Во время вчерашнего происшествия первая система установки ПО в продакшн не сработала, потому что сертификат истек. После обновления сертификата вторая установка ПО в продакшн прошла успешно. Так что не останавливайте миграцию базы данных.";
+    let wrong_action = valid.replace("не останавливайте", "не откладывайте");
+
+    assert!(missing_semantic_facts(valid, scenario.required_translation_facts).is_empty());
+    assert!(
+        missing_semantic_facts(installation_variant, scenario.required_translation_facts)
+            .is_empty()
+    );
+    assert_eq!(
+        missing_semantic_facts(&wrong_action, scenario.required_translation_facts),
+        vec!["do not stop database migration"]
     );
 }
 
