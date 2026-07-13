@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use app_lib::application::{
     IncomingTranslationCallbacks, IncomingTranslationConfig, IncomingTranslationFacade,
@@ -208,18 +208,33 @@ fn start_blackhole_capture(captured: Arc<Mutex<Vec<f32>>>) -> (cpal::Stream, u32
     (stream, sample_rate, channels)
 }
 
+const BLACKHOLE_AUDIBLE_SAMPLE_FLOOR: f32 = 0.002;
+
 #[derive(Default)]
 struct AudioStats {
     samples: usize,
+    audible_samples: usize,
     sum_sq: f64,
     peak: f32,
+    last_audible_at: Option<Instant>,
 }
 
 impl AudioStats {
-    fn push_f32(&mut self, sample: f32) {
+    fn push_f32(&mut self, sample: f32) -> bool {
         self.samples += 1;
         self.sum_sq += (sample as f64) * (sample as f64);
         self.peak = self.peak.max(sample.abs());
+        let audible = sample.abs() >= BLACKHOLE_AUDIBLE_SAMPLE_FLOOR;
+        if audible {
+            self.audible_samples += 1;
+        }
+        audible
+    }
+
+    fn finish_block(&mut self, audible: bool) {
+        if audible {
+            self.last_audible_at = Some(Instant::now());
+        }
     }
 
     fn rms(&self) -> f32 {
@@ -244,9 +259,11 @@ fn start_blackhole_stats_capture(stats: Arc<Mutex<AudioStats>>) -> cpal::Stream 
                 &stream_config,
                 move |data: &[f32], _| {
                     let mut guard = stats.lock().unwrap();
+                    let mut audible = false;
                     for sample in data {
-                        guard.push_f32(*sample);
+                        audible |= guard.push_f32(*sample);
                     }
+                    guard.finish_block(audible);
                 },
                 err_fn,
                 None,
@@ -257,9 +274,11 @@ fn start_blackhole_stats_capture(stats: Arc<Mutex<AudioStats>>) -> cpal::Stream 
                 &stream_config,
                 move |data: &[i16], _| {
                     let mut guard = stats.lock().unwrap();
+                    let mut audible = false;
                     for sample in data {
-                        guard.push_f32(*sample as f32 / i16::MAX as f32);
+                        audible |= guard.push_f32(*sample as f32 / i16::MAX as f32);
                     }
+                    guard.finish_block(audible);
                 },
                 err_fn,
                 None,
@@ -270,15 +289,34 @@ fn start_blackhole_stats_capture(stats: Arc<Mutex<AudioStats>>) -> cpal::Stream 
                 &stream_config,
                 move |data: &[u16], _| {
                     let mut guard = stats.lock().unwrap();
+                    let mut audible = false;
                     for sample in data {
-                        guard.push_f32((*sample as f32 / u16::MAX as f32) * 2.0 - 1.0);
+                        audible |= guard.push_f32((*sample as f32 / u16::MAX as f32) * 2.0 - 1.0);
                     }
+                    guard.finish_block(audible);
                 },
                 err_fn,
                 None,
             )
             .expect("must build u16 stats input stream"),
         other => panic!("unsupported input sample format: {other:?}"),
+    }
+}
+
+#[derive(Default)]
+struct TranslationTextActivity {
+    chars: usize,
+    last_delta_at: Option<Instant>,
+}
+
+impl TranslationTextActivity {
+    fn observe(&mut self, text: &str) {
+        let chars = text.chars().count();
+        if chars == 0 {
+            return;
+        }
+        self.chars = self.chars.saturating_add(chars);
+        self.last_delta_at = Some(Instant::now());
     }
 }
 
@@ -457,6 +495,45 @@ fn live_audio_soak_duration() -> Duration {
         .filter(|seconds| *seconds > 0)
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(30 * 60))
+}
+
+fn soak_activity_near_end_grace(soak_duration: Duration) -> Duration {
+    Duration::from_secs_f64((soak_duration.as_secs_f64() * 0.05).clamp(5.0, 90.0))
+}
+
+#[test]
+fn outgoing_soak_activity_probe_ignores_silence_and_bounds_freshness_window() {
+    let mut audio = AudioStats::default();
+    let silent = audio.push_f32(0.0);
+    audio.finish_block(silent);
+    assert_eq!(audio.audible_samples, 0);
+    assert!(audio.last_audible_at.is_none());
+
+    let audible = audio.push_f32(BLACKHOLE_AUDIBLE_SAMPLE_FLOOR * 2.0);
+    audio.finish_block(audible);
+    assert_eq!(audio.audible_samples, 1);
+    assert!(audio.last_audible_at.is_some());
+
+    let mut text = TranslationTextActivity::default();
+    text.observe("");
+    assert_eq!(text.chars, 0);
+    assert!(text.last_delta_at.is_none());
+    text.observe("translated");
+    assert_eq!(text.chars, 10);
+    assert!(text.last_delta_at.is_some());
+
+    assert_eq!(
+        soak_activity_near_end_grace(Duration::from_secs(10)),
+        Duration::from_secs(5)
+    );
+    assert_eq!(
+        soak_activity_near_end_grace(Duration::from_secs(30 * 60)),
+        Duration::from_secs(90)
+    );
+    assert_eq!(
+        soak_activity_near_end_grace(Duration::from_secs(2 * 60 * 60)),
+        Duration::from_secs(90)
+    );
 }
 
 struct SyntheticPcmMicrophone {
@@ -1521,13 +1598,13 @@ async fn live_translation_service_long_running_synthetic_voice_soak() {
         Arc::new(OpenAIRealtimeTranslationFactory),
     );
 
-    let translated_text = Arc::new(Mutex::new(String::new()));
+    let translated_activity = Arc::new(Mutex::new(TranslationTextActivity::default()));
     let errors = Arc::new(Mutex::new(Vec::<String>::new()));
     let statuses = Arc::new(Mutex::new(Vec::<RecordingStatus>::new()));
     let callbacks = LiveTranslationCallbacks {
         on_transcript_delta: {
-            let translated_text = translated_text.clone();
-            Arc::new(move |text| translated_text.lock().unwrap().push_str(&text))
+            let translated_activity = translated_activity.clone();
+            Arc::new(move |text| translated_activity.lock().unwrap().observe(&text))
         },
         on_audio_spectrum: Arc::new(|_| {}),
         on_error: {
@@ -1586,13 +1663,27 @@ async fn live_translation_service_long_running_synthetic_voice_soak() {
     );
 
     let emitted = emitted_chunks.load(Ordering::SeqCst);
-    let translated_len = translated_text.lock().unwrap().trim().len();
+    let translated_activity = translated_activity.lock().unwrap();
+    let translated_len = translated_activity.chars;
+    let last_text_age = translated_activity
+        .last_delta_at
+        .map(|last_delta_at| last_delta_at.elapsed())
+        .expect("OpenAI did not emit translated transcript during soak");
+    drop(translated_activity);
     let stats = blackhole_stats.lock().unwrap();
     let measured_rms = stats.rms();
     let peak = stats.peak;
+    let audible_samples = stats.audible_samples;
+    let last_audio_age = stats
+        .last_audible_at
+        .map(|last_audible_at| last_audible_at.elapsed())
+        .expect("translated soak audio never reached BlackHole input");
+    let activity_grace = soak_activity_near_end_grace(soak_duration);
     println!(
-        "live_translation_soak_chunks={emitted}, translated_chars={translated_len}, blackhole_samples={}, blackhole_rms={measured_rms:.6}, blackhole_peak={peak:.6}",
-        stats.samples
+        "live_translation_soak_chunks={emitted}, translated_chars={translated_len}, blackhole_samples={}, audible_samples={audible_samples}, blackhole_rms={measured_rms:.6}, blackhole_peak={peak:.6}, last_text_age_ms={}, last_audio_age_ms={}",
+        stats.samples,
+        last_text_age.as_millis(),
+        last_audio_age.as_millis()
     );
 
     assert!(
@@ -1606,6 +1697,14 @@ async fn live_translation_service_long_running_synthetic_voice_soak() {
     assert!(
         measured_rms > 0.003 && peak > 0.02,
         "translated soak audio did not reach BlackHole input: rms={measured_rms:.6}, peak={peak:.6}"
+    );
+    assert!(
+        last_text_age <= activity_grace,
+        "outgoing translation stopped producing text near the end of the soak: last_age={last_text_age:?}, grace={activity_grace:?}"
+    );
+    assert!(
+        last_audio_age <= activity_grace,
+        "outgoing translation stopped producing BlackHole audio near the end of the soak: last_age={last_audio_age:?}, grace={activity_grace:?}"
     );
 }
 

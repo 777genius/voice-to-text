@@ -175,7 +175,9 @@ VOICETEXT_RUN_PAID_E2E=1 OPENAI_E2E_API_KEY="sk-..." LIVE_AUDIO_SOAK_SECONDS=60 
 
 Both outgoing tests reject `.env` and `OPENAI_API_KEY`; only the explicitly acknowledged dedicated
 test credential is accepted. The gate requires translated English text, nonzero translated audio
-at BlackHole input, bounded stop, and Idle after cleanup.
+at BlackHole input, bounded stop, and Idle after cleanup. The long soak keeps constant-memory text
+and audio activity counters and requires both outputs to remain active within the final 5% of the
+soak window, capped at 90 seconds.
 Each short outgoing run writes full/audible virtual-microphone WAV files, both transcripts, and
 metrics under `src-tauri/target/e2e-artifacts/outgoing-live-*`; override the directory with
 `OUTGOING_TRANSLATION_E2E_ARTIFACTS`.

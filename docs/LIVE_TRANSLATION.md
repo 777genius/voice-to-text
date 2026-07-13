@@ -41,7 +41,10 @@ translated speech on macOS.
 - Outgoing voice is fixed to English for this MVP.
 - Incoming spoken playback is enabled only on macOS. Windows contracts are kept separate for a future adapter; Linux spoken playback is not implemented.
 - Incoming spoken translation supports these targets: English, Spanish, Portuguese, French, Japanese, Russian, Chinese, German, Korean, Hindi, Indonesian, Vietnamese, and Italian.
-- The original call audio remains audible. VoicetextAI does not duck it and does not provide speaker acoustic echo cancellation.
+- The original call audio remains audible. VoicetextAI does not duck it and does not provide speaker
+  acoustic echo cancellation. Realtime translated speech can be quieter than the original; for the
+  current mix, keep incoming translated volume at 100% and set the Zoom/Meet speaker volume to about
+  40-50%. The paid incoming matrix includes a half-volume source regression case.
 - ScreenCaptureKit excludes audio produced by VoicetextAI from incoming capture. With simultaneous outgoing translation, headphones are recommended so translated speaker audio does not acoustically enter the physical microphone.
 - The first macOS version follows the system default output. Changing or disconnecting the output device can stop the session; select the new device and restart incoming translation.
 - There is no incoming output-device selector yet.
