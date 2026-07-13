@@ -1,3 +1,5 @@
+mod paid_e2e_support;
+
 use std::future::Future;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -20,18 +22,25 @@ use app_lib::infrastructure::openai::OpenAIRealtimeTranslationClient;
 use async_trait::async_trait;
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
+use http::header::AUTHORIZATION;
+use http::HeaderValue;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::accept_async;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{accept_hdr_async, WebSocketStream};
+use tokio_tungstenite::{accept_hdr_async, connect_async, WebSocketStream};
+
+use paid_e2e_support::load_paid_e2e_api_key;
 
 const TEST_CREDENTIAL: &str = "integration-placeholder";
 const TEST_TIMEOUT: Duration = Duration::from_secs(2);
 const TRANSLATED_OUTPUT_SAMPLE_RATE: usize = 24_000;
+const OPENAI_REALTIME_TRANSLATION_URL: &str =
+    "wss://api.openai.com/v1/realtime/translations?model=gpt-realtime-translate";
 
 async fn spawn_tcp_server<F, Fut>(script: F) -> (String, JoinHandle<()>)
 where
@@ -48,6 +57,77 @@ where
         format!("ws://{address}/v1/realtime/translations?model=test"),
         task,
     )
+}
+
+async fn spawn_paid_cutoff_proxy(
+    api_key: String,
+) -> (String, JoinHandle<()>, tokio::sync::oneshot::Receiver<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind paid cutoff proxy");
+    let endpoint = format!(
+        "ws://{}/v1/realtime/translations?model=gpt-realtime-translate",
+        listener.local_addr().expect("paid cutoff proxy address")
+    );
+    let (cut_tx, cut_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let (local_stream, _) = listener.accept().await.expect("accept translation client");
+        let mut local = accept_async(local_stream)
+            .await
+            .expect("accept local translation websocket");
+
+        let mut upstream_request = OPENAI_REALTIME_TRANSLATION_URL
+            .into_client_request()
+            .expect("build OpenAI translation request");
+        upstream_request.headers_mut().insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", api_key.trim()))
+                .expect("valid paid E2E authorization header"),
+        );
+        let (mut upstream, _) =
+            tokio::time::timeout(Duration::from_secs(15), connect_async(upstream_request))
+                .await
+                .expect("OpenAI translation proxy connect timed out")
+                .expect("OpenAI translation proxy connect failed");
+
+        loop {
+            tokio::select! {
+                local_message = local.next() => {
+                    let message = local_message
+                        .expect("local translation websocket ended before cutoff")
+                        .expect("local translation websocket read failed");
+                    let cuts_connection = matches!(
+                        &message,
+                        Message::Text(text)
+                            if serde_json::from_str::<Value>(text)
+                                .ok()
+                                .and_then(|value| value["type"].as_str().map(str::to_owned))
+                                .as_deref()
+                                == Some("session.input_audio_buffer.append")
+                    );
+                    upstream
+                        .send(message)
+                        .await
+                        .expect("forward client message to OpenAI");
+                    if cuts_connection {
+                        let _ = cut_tx.send(());
+                        return;
+                    }
+                }
+                upstream_message = upstream.next() => {
+                    let message = upstream_message
+                        .expect("OpenAI websocket ended before controlled cutoff")
+                        .expect("OpenAI websocket read failed before controlled cutoff");
+                    local
+                        .send(message)
+                        .await
+                        .expect("forward OpenAI event to translation client");
+                }
+            }
+        }
+    });
+
+    (endpoint, task, cut_rx)
 }
 
 async fn receive_json(ws: &mut WebSocketStream<TcpStream>) -> Value {
@@ -313,6 +393,23 @@ impl RealtimeTranslationFactory for LocalWebSocketTranslationFactory {
     }
 }
 
+struct PaidProxyTranslationFactory {
+    endpoint: String,
+}
+
+impl RealtimeTranslationFactory for PaidProxyTranslationFactory {
+    fn create(&self) -> Box<dyn RealtimeTranslationSession> {
+        Box::new(
+            OpenAIRealtimeTranslationClient::with_endpoint(self.endpoint.clone()).with_timeouts(
+                Duration::from_secs(15),
+                Duration::from_secs(15),
+                Duration::from_secs(5),
+                Duration::from_secs(1),
+            ),
+        )
+    }
+}
+
 #[derive(Default)]
 struct ServerObservation {
     authorization: Mutex<Option<String>>,
@@ -533,6 +630,74 @@ async fn spoken_facade_runs_synthetic_audio_through_local_websocket_and_playback
         &*input_samples
     );
     assert!(server_observation.close_received.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+#[ignore = "paid/manual: requires VOICETEXT_RUN_PAID_E2E=1 and a dedicated OPENAI_E2E_API_KEY"]
+async fn paid_openai_network_interruption_cleans_incoming_capture_and_output() {
+    let api_key = load_paid_e2e_api_key();
+    let (endpoint, proxy_task, cutoff) = spawn_paid_cutoff_proxy(api_key.clone()).await;
+    let flow_state = Arc::new(SyntheticFlowState::default());
+    let service = IncomingTranslationFacade::new_spoken_with_factories(
+        Arc::new(SyntheticCaptureFactory {
+            state: flow_state.clone(),
+            samples: Arc::new(vec![1_200; 4_800]),
+        }),
+        Arc::new(CollectingOutputFactory {
+            state: flow_state.clone(),
+            retain_samples: false,
+        }),
+        Arc::new(PaidProxyTranslationFactory { endpoint }),
+        Arc::new(ReadyCapability),
+    );
+    let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+    let statuses = Arc::new(Mutex::new(Vec::<RecordingStatus>::new()));
+    let callbacks = IncomingTranslationCallbacks {
+        on_source_final: Arc::new(|_| {}),
+        on_translation_delta: Arc::new(|_| {}),
+        on_error: {
+            let errors = errors.clone();
+            Arc::new(move |error| errors.lock().unwrap().push(error.to_string()))
+        },
+        on_status: {
+            let statuses = statuses.clone();
+            Arc::new(move |status| statuses.lock().unwrap().push(status))
+        },
+    };
+    let mut config = IncomingTranslationConfig::new_with_defaults(SttConfig::default(), 8_003);
+    config.openai_api_key = api_key;
+    config.target_language = "ru".into();
+
+    service
+        .start(config, callbacks)
+        .await
+        .expect("paid translation session must become ready before interruption");
+    tokio::time::timeout(Duration::from_secs(20), cutoff)
+        .await
+        .expect("proxy must interrupt the paid session after the first PCM append")
+        .expect("paid cutoff signal must be delivered");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while service.active_session_id().await.is_some()
+            || service.get_status().await != RecordingStatus::Error
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("network interruption must clean the incoming runtime");
+    proxy_task
+        .await
+        .expect("paid cutoff proxy task must stop cleanly");
+
+    assert!(flow_state.capture_started.load(Ordering::SeqCst));
+    assert!(flow_state.capture_stopped.load(Ordering::SeqCst));
+    assert!(flow_state.output_opened.load(Ordering::SeqCst));
+    assert!(flow_state.output_closed.load(Ordering::SeqCst));
+    assert!(flow_state.output_samples.lock().unwrap().is_empty());
+    assert!(
+        matches!(errors.lock().unwrap().as_slice(), [message] if message.contains("connection"))
+    );
+    assert!(statuses.lock().unwrap().contains(&RecordingStatus::Error));
 }
 
 fn local_client(endpoint: String, ready_timeout: Duration) -> OpenAIRealtimeTranslationClient {

@@ -45,6 +45,7 @@ They cover:
 - Incoming subtitles service: system output audio -> ScreenCaptureKit loopback -> OpenAI speech-to-text -> OpenAI text translation.
 - Incoming spoken service: full linguistic/volume matrix -> OpenAI realtime -> Russian text and local translated playback.
 - Mid-phrase stop preserves the accepted translated text/audio tail and emits no callbacks after terminal stop.
+- A controlled WebSocket relay interrupts a real paid translation session after the first PCM append and requires capture/output cleanup.
 - Full duplex: incoming and outgoing paid routes run together, then each direction produces fresh evidence after the other is stopped.
 
 Prerequisites:
@@ -66,6 +67,9 @@ VOICETEXT_RUN_PAID_E2E=1 OPENAI_E2E_API_KEY=... npm run e2e:live-audio
 The runner intentionally ignores `OPENAI_API_KEY` and `.env` so a normal developer credential
 cannot trigger paid audio tests accidentally. `pnpm e2e:live-audio` also works when the local pnpm
 version is compatible with the lockfile.
+
+The paid network interruption case cuts only its local relay after OpenAI confirms the session. It
+does not disable the machine network or interfere with unrelated applications.
 
 This does not launch Zoom. It proves the same local virtual audio route that Zoom/Meet use when
 BlackHole 2ch is selected as the microphone. The full-duplex gate uses real ScreenCaptureKit,

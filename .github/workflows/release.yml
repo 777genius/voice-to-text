@@ -171,6 +171,13 @@ jobs:
              .output_signal_and_service_cleanup_contracts_passed == true and
              .system_default_playback_passed == true and
              .macos_default_output_switch_detected == true and
+             .blackhole_loopback_passed == true and
+             .incoming_native_capture_format_passed == true and
+             .incoming_playback_burst_passed == true and
+             .outgoing_live_translation_passed == true and
+             .incoming_captions_regression_passed == true and
+             .incoming_stop_mid_phrase_passed == true and
+             .incoming_paid_network_interruption_passed == true and
              .paid_matrix_complete == true and
              .paid_matrix.schema_version == 1 and
              .paid_matrix.scenario_filter == "all" and
@@ -187,8 +194,15 @@ jobs:
              (.smoke_checks | index("incoming-output-terminal-service-cleanup")) != null and
              (.smoke_checks | index("incoming-system-default-playback")) != null and
              (.smoke_checks | index("macos-default-output-switch")) != null and
+             (.smoke_checks | index("blackhole-loopback")) != null and
+             (.smoke_checks | index("incoming-native-capture-format")) != null and
+             (.smoke_checks | index("incoming-playback-nine-second-burst")) != null and
              (.smoke_checks | index("incoming-native-self-exclusion")) != null and
+             (.smoke_checks | index("outgoing-live-translation-service")) != null and
+             (.smoke_checks | index("incoming-captions-regression")) != null and
              (.smoke_checks | index("incoming-spoken-paid-matrix")) != null and
+             (.smoke_checks | index("incoming-spoken-stop-mid-phrase")) != null and
+             (.smoke_checks | index("incoming-spoken-paid-network-interruption")) != null and
              (.smoke_checks | index("paid-full-duplex-independent-stop")) != null and
              (.soak_checks | index("blackhole-loopback-preflight")) != null and
              (.soak_checks | index("incoming-spoken-runtime-soak")) != null and

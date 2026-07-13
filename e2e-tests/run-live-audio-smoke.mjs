@@ -8,6 +8,10 @@ import {
   sanitizedAudioTestEnvironment,
   writeLiveAudioSummary,
 } from './helpers/liveAudioRunner.mjs';
+import {
+  REQUIRED_LIVE_AUDIO_SMOKE_LABELS,
+  sameOrderedLabels,
+} from './helpers/liveAudioEvidenceContract.mjs';
 
 const TEST_TIMEOUT_MS = 180_000;
 const PAID_MATRIX_ARTIFACT_DIRECTORY = join(
@@ -320,6 +324,23 @@ const tests = [
     timeoutMs: 240_000,
   },
   {
+    label: 'incoming-spoken-paid-network-interruption',
+    paid: true,
+    testName: 'paid_openai_network_interruption_cleans_incoming_capture_and_output',
+    command: [
+      'cargo',
+      'test',
+      '--test',
+      'realtime_translation_websocket_e2e_test',
+      'paid_openai_network_interruption_cleans_incoming_capture_and_output',
+      '--',
+      '--ignored',
+      '--exact',
+      '--nocapture',
+    ],
+    timeoutMs: 240_000,
+  },
+  {
     label: 'paid-full-duplex-independent-stop',
     paid: true,
     testName: 'simultaneous_incoming_and_outgoing_routes_translate_and_stop_independently',
@@ -340,6 +361,11 @@ const tests = [
 function fail(message) {
   console.error(`[live-audio-smoke] ${message}`);
   process.exit(1);
+}
+
+const plannedLabels = tests.map(({ label }) => label);
+if (!sameOrderedLabels(plannedLabels, REQUIRED_LIVE_AUDIO_SMOKE_LABELS)) {
+  fail('Smoke test plan does not match the release evidence contract.');
 }
 
 const paidE2e = resolvePaidE2eEnvironment();

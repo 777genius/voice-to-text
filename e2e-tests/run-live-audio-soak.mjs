@@ -7,6 +7,10 @@ import {
   sanitizedAudioTestEnvironment,
   writeLiveAudioSummary,
 } from './helpers/liveAudioRunner.mjs';
+import {
+  REQUIRED_LIVE_AUDIO_SOAK_LABELS,
+  sameOrderedLabels,
+} from './helpers/liveAudioEvidenceContract.mjs';
 
 const DEFAULT_SOAK_SECONDS = 1800;
 const soakSeconds = parsePositiveIntegerEnv(
@@ -89,6 +93,11 @@ const tests = [
 function fail(message) {
   console.error(`[live-audio-soak] ${message}`);
   process.exit(1);
+}
+
+const plannedLabels = tests.map(({ label }) => label);
+if (!sameOrderedLabels(plannedLabels, REQUIRED_LIVE_AUDIO_SOAK_LABELS)) {
+  fail('Soak test plan does not match the release evidence contract.');
 }
 
 const paidE2e = resolvePaidE2eEnvironment();

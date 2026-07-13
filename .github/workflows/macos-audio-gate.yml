@@ -114,8 +114,15 @@ jobs:
             (.passed_labels | index("incoming-output-terminal-service-cleanup")) != null and
             (.passed_labels | index("incoming-system-default-playback")) != null and
             (.passed_labels | index("macos-default-output-switch")) != null and
+            (.passed_labels | index("blackhole-loopback")) != null and
+            (.passed_labels | index("incoming-native-capture-format")) != null and
+            (.passed_labels | index("incoming-playback-nine-second-burst")) != null and
             (.passed_labels | index("incoming-native-self-exclusion")) != null and
+            (.passed_labels | index("outgoing-live-translation-service")) != null and
+            (.passed_labels | index("incoming-captions-regression")) != null and
             (.passed_labels | index("incoming-spoken-paid-matrix")) != null and
+            (.passed_labels | index("incoming-spoken-stop-mid-phrase")) != null and
+            (.passed_labels | index("incoming-spoken-paid-network-interruption")) != null and
             (.passed_labels | index("paid-full-duplex-independent-stop")) != null
           ' "$smoke_summary" >/dev/null
           jq -e \
@@ -161,6 +168,13 @@ jobs:
               output_signal_and_service_cleanup_contracts_passed: (($smoke[0].passed_labels | index("output-health-terminal-signal") != null) and ($smoke[0].passed_labels | index("incoming-output-terminal-service-cleanup") != null)),
               system_default_playback_passed: ($smoke[0].passed_labels | index("incoming-system-default-playback") != null),
               macos_default_output_switch_detected: ($smoke[0].passed_labels | index("macos-default-output-switch") != null),
+              blackhole_loopback_passed: ($smoke[0].passed_labels | index("blackhole-loopback") != null),
+              incoming_native_capture_format_passed: ($smoke[0].passed_labels | index("incoming-native-capture-format") != null),
+              incoming_playback_burst_passed: ($smoke[0].passed_labels | index("incoming-playback-nine-second-burst") != null),
+              outgoing_live_translation_passed: ($smoke[0].passed_labels | index("outgoing-live-translation-service") != null),
+              incoming_captions_regression_passed: ($smoke[0].passed_labels | index("incoming-captions-regression") != null),
+              incoming_stop_mid_phrase_passed: ($smoke[0].passed_labels | index("incoming-spoken-stop-mid-phrase") != null),
+              incoming_paid_network_interruption_passed: ($smoke[0].passed_labels | index("incoming-spoken-paid-network-interruption") != null),
               paid_matrix_complete: $matrix[0].complete_release_matrix,
               paid_matrix: $matrix[0],
               smoke_checks: $smoke[0].passed_labels,
