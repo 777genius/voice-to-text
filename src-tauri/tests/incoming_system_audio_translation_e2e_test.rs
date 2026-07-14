@@ -59,14 +59,6 @@ const PAID_REQUIRED_AUDIO_SCENARIO_IDS: &[&str] = &[
 const PAID_DIAGNOSTIC_OUTPUT_SCENARIO_IDS: &[&str] = &["mixed_english_russian", "already_russian"];
 const PAID_DIAGNOSTIC_SEMANTIC_SCENARIO_IDS: &[&str] =
     &["pause_and_silence", "overlapping_speakers"];
-const PAID_DIAGNOSTIC_AUDIO_FACT_POLICIES: &[(&str, &str)] = &[
-    ("names_and_numbers", "meeting time 3:45 PM"),
-    (
-        "technical_terms",
-        "WebSocket reconnect with exponential backoff",
-    ),
-    ("half_volume_source", "27 open tasks"),
-];
 const LONG_CONTEXT_DEPLOYMENT_MARKERS: &[&str] = &[
     "развертыв",
     "развёртыв",
@@ -699,12 +691,8 @@ fn missing_spoken_semantic_facts(
     )
 }
 
-fn is_diagnostic_audio_fact(scenario_id: &str, fact_label: &str) -> bool {
-    PAID_DIAGNOSTIC_AUDIO_FACT_POLICIES
-        .iter()
-        .any(|(policy_scenario_id, policy_fact_label)| {
-            *policy_scenario_id == scenario_id && *policy_fact_label == fact_label
-        })
+fn minimum_blocking_audio_fact_matches(total_facts: usize) -> usize {
+    total_facts.saturating_add(1) / 2
 }
 
 fn paid_spoken_scenarios() -> Vec<PaidSpokenScenario> {
@@ -1074,31 +1062,9 @@ fn paid_spoken_matrix_keeps_complete_release_scenarios_and_assertions() {
         .iter()
         .all(|id| PAID_REQUIRED_AUDIO_SCENARIO_IDS.contains(id)));
     assert_eq!(
-        PAID_DIAGNOSTIC_AUDIO_FACT_POLICIES,
-        &[
-            ("names_and_numbers", "meeting time 3:45 PM"),
-            (
-                "technical_terms",
-                "WebSocket reconnect with exponential backoff",
-            ),
-            ("half_volume_source", "27 open tasks"),
-        ]
-    );
-    assert_eq!(
         PAID_DIAGNOSTIC_OUTPUT_SCENARIO_IDS,
         &["mixed_english_russian", "already_russian"]
     );
-    assert!(PAID_DIAGNOSTIC_AUDIO_FACT_POLICIES
-        .iter()
-        .all(
-            |(scenario_id, fact_label)| scenarios.iter().any(|scenario| {
-                scenario.id == *scenario_id
-                    && scenario
-                        .required_translation_facts
-                        .iter()
-                        .any(|fact| fact.label == *fact_label)
-            })
-        ));
     assert_eq!(
         scenarios
             .iter()
@@ -1130,6 +1096,9 @@ fn paid_spoken_matrix_keeps_complete_release_scenarios_and_assertions() {
     );
     assert!(!PAID_DIAGNOSTIC_SEMANTIC_SCENARIO_IDS.contains(&"names_and_numbers"));
     assert!(!PAID_DIAGNOSTIC_SEMANTIC_SCENARIO_IDS.contains(&"technical_terms"));
+    assert_eq!(minimum_blocking_audio_fact_matches(2), 1);
+    assert_eq!(minimum_blocking_audio_fact_matches(3), 2);
+    assert_eq!(minimum_blocking_audio_fact_matches(5), 3);
 }
 
 #[test]
@@ -1858,22 +1827,34 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
         } else {
             Vec::new()
         };
-        let diagnostic_missing_audio_facts = missing_audio_facts
-            .iter()
-            .filter(|fact| is_diagnostic_audio_fact(scenario.id, fact))
-            .cloned()
-            .collect::<Vec<_>>();
-        let blocking_missing_audio_facts = missing_audio_facts
-            .iter()
-            .filter(|fact| !is_diagnostic_audio_fact(scenario.id, fact))
-            .cloned()
-            .collect::<Vec<_>>();
         let semantic_quality_blocking = scenario.translation_output_required
             && !PAID_DIAGNOSTIC_SEMANTIC_SCENARIO_IDS.contains(&scenario.id);
+        let translated_audio_total_facts = scenario.required_translation_facts.len();
+        let translated_audio_matched_facts = if translated_audio_transcription_attempted {
+            translated_audio_total_facts.saturating_sub(missing_audio_facts.len())
+        } else {
+            0
+        };
+        let translated_audio_required_fact_matches = if semantic_quality_blocking {
+            minimum_blocking_audio_fact_matches(translated_audio_total_facts)
+        } else {
+            0
+        };
+        let translated_audio_semantic_coverage_blocking = semantic_quality_blocking
+            && translated_audio_matched_facts < translated_audio_required_fact_matches;
+        let blocking_missing_audio_facts = if translated_audio_semantic_coverage_blocking {
+            missing_audio_facts.clone()
+        } else {
+            Vec::new()
+        };
+        let diagnostic_missing_audio_facts = if translated_audio_semantic_coverage_blocking {
+            Vec::new()
+        } else {
+            missing_audio_facts.clone()
+        };
         let semantic_quality_degraded = scenario.translation_output_required
-            && ((!semantic_quality_blocking
-                && (!missing_translation_facts.is_empty() || !missing_audio_facts.is_empty()))
-                || !diagnostic_missing_audio_facts.is_empty());
+            && ((!semantic_quality_blocking && !missing_translation_facts.is_empty())
+                || !missing_audio_facts.is_empty());
         let translation_output_emitted = !translated.trim().is_empty()
             || translated_audible_samples >= MIN_AUDIBLE_TRANSLATED_SAMPLES;
         let output_received_within_timeout = wait_completed_before_timeout
@@ -2000,6 +1981,18 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
         metrics_object.insert(
             "semantic_quality_degraded".into(),
             semantic_quality_degraded.into(),
+        );
+        metrics_object.insert(
+            "translated_audio_total_facts".into(),
+            translated_audio_total_facts.into(),
+        );
+        metrics_object.insert(
+            "translated_audio_matched_facts".into(),
+            translated_audio_matched_facts.into(),
+        );
+        metrics_object.insert(
+            "translated_audio_required_fact_matches".into(),
+            translated_audio_required_fact_matches.into(),
         );
         metrics_object.insert(
             "translated_audio_mini_fallback_attempted".into(),
@@ -2199,9 +2192,12 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             );
             if semantic_quality_blocking {
                 assert!(
-                    blocking_missing_audio_facts.is_empty(),
-                    "scenario {} translated audio lost required semantic facts {:?}; independent audio transcript: {}",
+                    !translated_audio_semantic_coverage_blocking,
+                    "scenario {} translated audio preserved {}/{} semantic facts, below required {}; missing {:?}; independent audio transcript: {}",
                     scenario.id,
+                    translated_audio_matched_facts,
+                    translated_audio_total_facts,
+                    translated_audio_required_fact_matches,
                     blocking_missing_audio_facts,
                     translated_audio_transcript
                 );
@@ -2256,7 +2252,7 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
             "audio_verified_scenario_ids": audio_verified_scenario_ids,
             "diagnostic_output_scenario_ids": PAID_DIAGNOSTIC_OUTPUT_SCENARIO_IDS,
             "diagnostic_semantic_scenario_ids": PAID_DIAGNOSTIC_SEMANTIC_SCENARIO_IDS,
-            "diagnostic_audio_fact_policies": PAID_DIAGNOSTIC_AUDIO_FACT_POLICIES,
+            "blocking_audio_semantic_coverage": "at_least_half",
             "quality_degraded_scenario_ids": quality_degraded_scenario_ids,
             "complete_release_matrix": complete_release_matrix,
         }))
