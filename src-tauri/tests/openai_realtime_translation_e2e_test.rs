@@ -209,6 +209,8 @@ fn start_blackhole_capture(captured: Arc<Mutex<Vec<f32>>>) -> (cpal::Stream, u32
 }
 
 const BLACKHOLE_AUDIBLE_SAMPLE_FLOOR: f32 = 0.002;
+const BLACKHOLE_ROUTE_RMS_FLOOR: f32 = 0.002;
+const BLACKHOLE_ROUTE_PEAK_FLOOR: f32 = 0.02;
 
 #[derive(Default)]
 struct AudioStats {
@@ -326,6 +328,20 @@ fn rms(samples: &[f32]) -> f32 {
     }
     let sum_sq: f32 = samples.iter().map(|v| v * v).sum();
     (sum_sq / samples.len() as f32).sqrt()
+}
+
+fn pcm16_rms(samples: &[i16]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f64 = samples
+        .iter()
+        .map(|sample| {
+            let normalized = f64::from(*sample) / 32_768.0;
+            normalized * normalized
+        })
+        .sum();
+    (sum_sq / samples.len() as f64).sqrt() as f32
 }
 
 struct OutgoingAudioTranscription {
@@ -477,6 +493,14 @@ fn audible_window_trims_outer_silence_with_channel_aligned_padding() {
     assert_eq!(window.len() % 2, 0);
     assert_eq!(window, &samples[12..30]);
     assert_eq!(audible_pcm16_window(&[0; 8], 8, 1), &[0; 8]);
+}
+
+#[test]
+fn pcm16_rms_is_normalized_and_handles_empty_audio() {
+    assert_eq!(pcm16_rms(&[]), 0.0);
+
+    let measured = pcm16_rms(&[i16::MAX, i16::MIN]);
+    assert!((measured - 1.0).abs() < 0.0001, "rms={measured}");
 }
 
 #[test]
@@ -1101,7 +1125,10 @@ async fn live_translation_service_synthetic_voice_reaches_blackhole() {
     .await
     .expect("captured virtual microphone audio must be independently transcribable");
     let virtual_mic_transcript = &virtual_mic_transcription.transcript;
-    let measured_rms = rms(&captured_samples);
+    let full_rms = rms(&captured_samples);
+    // Network/session startup adds variable outer silence. Measure route health
+    // around the actual translated signal while retaining full RMS diagnostics.
+    let audible_rms = pcm16_rms(audible_pcm16);
     let peak = captured_samples
         .iter()
         .fold(0.0f32, |acc, sample| acc.max(sample.abs()));
@@ -1135,7 +1162,8 @@ async fn live_translation_service_synthetic_voice_reaches_blackhole() {
             "capture_channels": capture_channels,
             "full_samples": captured_pcm16.len(),
             "audible_samples": audible_pcm16.len(),
-            "rms": measured_rms,
+            "full_rms": full_rms,
+            "audible_rms": audible_rms,
             "peak": peak,
             "service_transcript": &translated_text,
             "virtual_mic_transcript": virtual_mic_transcript,
@@ -1155,7 +1183,7 @@ async fn live_translation_service_synthetic_voice_reaches_blackhole() {
     println!("service_translated_text={translated_text}");
     println!("service_virtual_mic_transcript={virtual_mic_transcript}");
     println!(
-        "service_blackhole_samples={}, service_blackhole_rms={measured_rms:.6}, service_blackhole_peak={peak:.6}",
+        "service_blackhole_samples={}, service_blackhole_full_rms={full_rms:.6}, service_blackhole_audible_rms={audible_rms:.6}, service_blackhole_peak={peak:.6}",
         captured_samples.len()
     );
     println!("service_outgoing_artifacts={}", artifact_root.display());
@@ -1172,8 +1200,8 @@ async fn live_translation_service_synthetic_voice_reaches_blackhole() {
         "virtual microphone audio lost translated meaning: {virtual_mic_transcript}"
     );
     assert!(
-        measured_rms > 0.005 && peak > 0.03,
-        "service translated audio did not reach BlackHole input: rms={measured_rms:.6}, peak={peak:.6}"
+        audible_rms > BLACKHOLE_ROUTE_RMS_FLOOR && peak > BLACKHOLE_ROUTE_PEAK_FLOOR,
+        "service translated audio did not reach BlackHole input: full_rms={full_rms:.6}, audible_rms={audible_rms:.6}, peak={peak:.6}"
     );
 }
 
@@ -1764,7 +1792,8 @@ async fn openai_translation_audio_is_written_to_blackhole() {
     let _ = drain_openai_events(&mut rx, &mut translated_text, &mut pending_audio);
 
     let captured = Arc::new(Mutex::new(Vec::<f32>::new()));
-    let (input_stream, _, _) = start_blackhole_capture(captured.clone());
+    let (input_stream, capture_sample_rate, capture_channels) =
+        start_blackhole_capture(captured.clone());
     input_stream.play().expect("must start BlackHole capture");
 
     let mut output = CpalAudioOutput::new();
@@ -1819,14 +1848,23 @@ async fn openai_translation_audio_is_written_to_blackhole() {
     drop(input_stream);
 
     let captured_samples = captured.lock().unwrap().clone();
-    let measured_rms = rms(&captured_samples);
+    let full_rms = rms(&captured_samples);
+    let captured_pcm16: Vec<i16> = captured_samples
+        .iter()
+        .map(|sample| (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16)
+        .collect();
+    let audible_rms = pcm16_rms(audible_pcm16_window(
+        &captured_pcm16,
+        capture_sample_rate,
+        capture_channels,
+    ));
     let peak = captured_samples
         .iter()
         .fold(0.0f32, |acc, sample| acc.max(sample.abs()));
 
     println!("translated_text={translated_text}");
     println!(
-        "openai_audio_samples={audio_samples}, openai_audio_rms={:.6}, blackhole_samples={}, blackhole_rms={measured_rms:.6}, blackhole_peak={peak:.6}",
+        "openai_audio_samples={audio_samples}, openai_audio_rms={:.6}, blackhole_samples={}, blackhole_full_rms={full_rms:.6}, blackhole_audible_rms={audible_rms:.6}, blackhole_peak={peak:.6}",
         rms(&translated_audio_for_stats),
         captured_samples.len()
     );
@@ -1840,7 +1878,7 @@ async fn openai_translation_audio_is_written_to_blackhole() {
         "translated text looks unexpected/empty: {translated_text}"
     );
     assert!(
-        measured_rms > 0.005 && peak > 0.03,
-        "translated audio did not reach BlackHole input: rms={measured_rms:.6}, peak={peak:.6}"
+        audible_rms > BLACKHOLE_ROUTE_RMS_FLOOR && peak > BLACKHOLE_ROUTE_PEAK_FLOOR,
+        "translated audio did not reach BlackHole input: full_rms={full_rms:.6}, audible_rms={audible_rms:.6}, peak={peak:.6}"
     );
 }
