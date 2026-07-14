@@ -24,10 +24,11 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 use crate::domain::{
-    AudioCapture, AudioCaptureTarget, AudioChunk, AudioChunkCallback, AudioConfig,
-    ConnectionQualityCallback, ErrorCallback, PlatformAudioFactory, RecordingStatus, SttConfig,
-    SttConnectionCategory, SttConnectionError, SttError, SttProvider, SttProviderFactory,
-    SttResult, Transcription, TranscriptionCallback,
+    AudioCapture, AudioCaptureErrorCallback, AudioCaptureHealthProbe, AudioCaptureTarget,
+    AudioChunk, AudioChunkCallback, AudioConfig, AudioError, ConnectionQualityCallback,
+    ErrorCallback, PlatformAudioFactory, RecordingStatus, SttConfig, SttConnectionCategory,
+    SttConnectionError, SttError, SttProvider, SttProviderFactory, SttResult, Transcription,
+    TranscriptionCallback,
 };
 use crate::infrastructure::audio::DefaultPlatformAudioFactory;
 use crate::infrastructure::openai::{OpenAITextTranslationClient, OpenAITextTranslationError};
@@ -52,6 +53,10 @@ const STT_SEND_TIMEOUT: Duration = Duration::from_secs(6);
 const STT_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const STT_ABORT_TIMEOUT: Duration = Duration::from_secs(3);
 const CAPTURE_ABORT_TIMEOUT: Duration = Duration::from_secs(1);
+const CAPTURE_RECOVERY_START_TIMEOUT: Duration = Duration::from_secs(3);
+const CAPTURE_RECOVERY_ATTEMPTS: usize = 6;
+const CAPTURE_RECOVERY_RETRY_DELAY: Duration = Duration::from_millis(100);
+const CAPTURE_HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone)]
 pub struct IncomingTranslationConfig {
@@ -101,6 +106,29 @@ struct IncomingRuntimeFailureReporter {
     status: Arc<RwLock<RecordingStatus>>,
     runtime_cleanup_tx: mpsc::UnboundedSender<()>,
     startup_error: Arc<StdMutex<Option<IncomingTranslationError>>>,
+}
+
+#[derive(Clone)]
+struct CaptureRecoveryRequester {
+    tx: mpsc::UnboundedSender<AudioError>,
+    scheduled: Arc<AtomicBool>,
+    stop_requested: Arc<AtomicBool>,
+}
+
+impl CaptureRecoveryRequester {
+    fn request(&self, error: AudioError) {
+        if self.stop_requested.load(Ordering::SeqCst)
+            || self
+                .scheduled
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+        {
+            return;
+        }
+        if self.tx.send(error).is_err() {
+            self.scheduled.store(false, Ordering::SeqCst);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,7 +313,8 @@ pub(super) struct IncomingCaptionTranslationService {
 }
 
 struct RunningIncomingSession {
-    capture: Box<dyn AudioCapture>,
+    capture: Arc<Mutex<Box<dyn AudioCapture>>>,
+    capture_callback: Option<AudioChunkCallback>,
     stt_provider: Arc<Mutex<Box<dyn SttProvider>>>,
     audio_pump_task: JoinHandle<()>,
     translation_task: JoinHandle<()>,
@@ -536,6 +565,18 @@ impl IncomingCaptionTranslationService {
         };
         let running = Arc::new(AtomicBool::new(true));
         let stop_requested = Arc::new(AtomicBool::new(false));
+        let (capture_recovery_tx, capture_recovery_rx) = mpsc::unbounded_channel();
+        let capture_recovery_scheduled = Arc::new(AtomicBool::new(false));
+        let capture_recovery_requester = CaptureRecoveryRequester {
+            tx: capture_recovery_tx,
+            scheduled: capture_recovery_scheduled.clone(),
+            stop_requested: stop_requested.clone(),
+        };
+        let capture_recovery_requester_for_error = capture_recovery_requester.clone();
+        let capture_error_callback: AudioCaptureErrorCallback = Arc::new(move |error| {
+            capture_recovery_requester_for_error.request(error);
+        });
+        capture.set_terminal_error_callback(Some(capture_error_callback));
         let pending_translations = Arc::new(AtomicUsize::new(0));
         let translated_segment_keys = Arc::new(StdMutex::new(BoundedSegmentDedupe::new(
             TRANSLATED_SEGMENT_DEDUPE_CAPACITY,
@@ -658,7 +699,7 @@ impl IncomingCaptionTranslationService {
             }
         });
 
-        if let Err(e) = capture.start_capture(on_chunk).await {
+        if let Err(e) = capture.start_capture(on_chunk.clone()).await {
             cleanup_started_stt_after_capture_failure(
                 provider.clone(),
                 translation_task,
@@ -669,6 +710,7 @@ impl IncomingCaptionTranslationService {
             self.reset_failed_start().await;
             return Err(IncomingTranslationError::Configuration(e.to_string()));
         }
+        let capture_health_probe = capture.health_probe();
 
         let pump_provider = provider.clone();
         let pump_callbacks = callbacks.clone();
@@ -694,7 +736,8 @@ impl IncomingCaptionTranslationService {
         );
 
         *self.inner.lock().await = Some(RunningIncomingSession {
-            capture,
+            capture: Arc::new(Mutex::new(capture)),
+            capture_callback: Some(on_chunk),
             stt_provider: provider,
             audio_pump_task,
             translation_task,
@@ -703,6 +746,16 @@ impl IncomingCaptionTranslationService {
             stop_requested,
             session_id: config.session_id,
         });
+        spawn_capture_recovery_monitor(
+            Arc::downgrade(&self.inner),
+            capture_recovery_rx,
+            capture_recovery_scheduled,
+            runtime_failure_reporter.clone(),
+            config.session_id,
+        );
+        if let Some(probe) = capture_health_probe {
+            spawn_capture_health_watchdog(probe, capture_recovery_requester);
+        }
         spawn_runtime_cleanup_monitor(
             self.inner.clone(),
             Arc::downgrade(&self.lifecycle),
@@ -752,13 +805,17 @@ impl IncomingCaptionTranslationService {
         session.stop_requested.store(true, Ordering::SeqCst);
         *self.status.write().await = RecordingStatus::Processing;
 
-        if let Err(e) = session.capture.stop_capture().await {
+        let mut capture = session.capture.lock().await;
+        capture.set_terminal_error_callback(None);
+        if let Err(e) = capture.stop_capture().await {
             log::warn!(
                 "IncomingCaptionTranslationService: stop capture failed for session {}: {}",
                 session.session_id,
                 e
             );
         }
+        drop(capture);
+        session.capture_callback.take();
 
         let _ = wait_task_done(
             &mut session.audio_pump_task,
@@ -795,13 +852,18 @@ impl IncomingCaptionTranslationService {
 
         session.stop_requested.store(true, Ordering::SeqCst);
         session.running.store(false, Ordering::SeqCst);
+        session.capture_callback.take();
         session.audio_pump_task.abort();
         session.translation_task.abort();
 
-        if tokio::time::timeout(CAPTURE_ABORT_TIMEOUT, session.capture.stop_capture())
-            .await
-            .is_err()
-        {
+        let mut capture = session.capture.lock().await;
+        capture.set_terminal_error_callback(None);
+        let capture_stop_timed_out =
+            tokio::time::timeout(CAPTURE_ABORT_TIMEOUT, capture.stop_capture())
+                .await
+                .is_err();
+        drop(capture);
+        if capture_stop_timed_out {
             log::warn!(
                 "IncomingCaptionTranslationService: capture abort timed out for session {}",
                 session.session_id
@@ -1159,6 +1221,135 @@ async fn run_audio_pump(
     }
 }
 
+fn spawn_capture_recovery_monitor(
+    inner: Weak<Mutex<Option<RunningIncomingSession>>>,
+    mut recovery_rx: mpsc::UnboundedReceiver<AudioError>,
+    recovery_scheduled: Arc<AtomicBool>,
+    runtime_failure_reporter: IncomingRuntimeFailureReporter,
+    session_id: u64,
+) {
+    tokio::spawn(async move {
+        while let Some(initial_error) = recovery_rx.recv().await {
+            let initial_error = initial_error.to_string();
+            let Some(inner) = inner.upgrade() else {
+                return;
+            };
+            let session_parts = {
+                let guard = inner.lock().await;
+                guard
+                    .as_ref()
+                    .filter(|session| session.session_id == session_id)
+                    .and_then(|session| {
+                        session.capture_callback.as_ref().cloned().map(|on_chunk| {
+                            (
+                                session.capture.clone(),
+                                on_chunk,
+                                session.stop_requested.clone(),
+                            )
+                        })
+                    })
+            };
+            let Some((capture, on_chunk, stop_requested)) = session_parts else {
+                recovery_scheduled.store(false, Ordering::SeqCst);
+                continue;
+            };
+            if stop_requested.load(Ordering::SeqCst) {
+                recovery_scheduled.store(false, Ordering::SeqCst);
+                continue;
+            }
+
+            let mut recovered = false;
+            let mut last_error = initial_error.clone();
+            for attempt in 1..=CAPTURE_RECOVERY_ATTEMPTS {
+                if stop_requested.load(Ordering::SeqCst) {
+                    recovery_scheduled.store(false, Ordering::SeqCst);
+                    return;
+                }
+                let mut capture = capture.lock().await;
+                if stop_requested.load(Ordering::SeqCst) {
+                    recovery_scheduled.store(false, Ordering::SeqCst);
+                    return;
+                }
+                if let Err(error) =
+                    tokio::time::timeout(CAPTURE_ABORT_TIMEOUT, capture.stop_capture()).await
+                {
+                    last_error = format!("capture stop timed out before restart: {error}");
+                }
+
+                let start_result = tokio::time::timeout(
+                    CAPTURE_RECOVERY_START_TIMEOUT,
+                    capture.start_capture(on_chunk.clone()),
+                )
+                .await;
+                match start_result {
+                    Ok(Ok(())) if capture.is_capturing() => {
+                        log::warn!(
+                            "IncomingCaptionTranslationService: recovered system audio capture for session {} after {} attempt(s); initial_error={}",
+                            session_id,
+                            attempt,
+                            initial_error
+                        );
+                        recovered = true;
+                        break;
+                    }
+                    Ok(Ok(())) => {
+                        last_error =
+                            "capture restart returned success but remained inactive".into();
+                    }
+                    Ok(Err(error)) => {
+                        last_error = error.to_string();
+                    }
+                    Err(_) => {
+                        last_error = format!(
+                            "capture restart timed out after {} ms",
+                            CAPTURE_RECOVERY_START_TIMEOUT.as_millis()
+                        );
+                    }
+                }
+                drop(capture);
+
+                if attempt < CAPTURE_RECOVERY_ATTEMPTS {
+                    tokio::time::sleep(CAPTURE_RECOVERY_RETRY_DELAY).await;
+                }
+            }
+
+            recovery_scheduled.store(false, Ordering::SeqCst);
+            if recovered {
+                continue;
+            }
+
+            let _ = runtime_failure_reporter.report(
+                IncomingTranslationError::InputDeviceLost(format!(
+                    "system audio capture stopped and recovery failed after {} attempts: {}; last restart error: {}",
+                    CAPTURE_RECOVERY_ATTEMPTS, initial_error, last_error
+                )),
+            );
+            return;
+        }
+    });
+}
+
+fn spawn_capture_health_watchdog(
+    probe: AudioCaptureHealthProbe,
+    recovery_requester: CaptureRecoveryRequester,
+) {
+    tokio::spawn(async move {
+        let mut poll = tokio::time::interval(CAPTURE_HEALTH_POLL_INTERVAL);
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            poll.tick().await;
+            if recovery_requester.stop_requested.load(Ordering::SeqCst) {
+                return;
+            }
+            if !probe() {
+                recovery_requester.request(AudioError::Capture(
+                    "system audio capture health probe reported an inactive stream".into(),
+                ));
+            }
+        }
+    });
+}
+
 fn spawn_runtime_cleanup_monitor(
     inner: Arc<Mutex<Option<RunningIncomingSession>>>,
     lifecycle: Weak<Mutex<()>>,
@@ -1196,13 +1387,17 @@ async fn cleanup_session_after_runtime_error(mut session: RunningIncomingSession
     let session_id = session.session_id;
     session.stop_requested.store(true, Ordering::SeqCst);
 
-    if let Err(e) = session.capture.stop_capture().await {
+    let mut capture = session.capture.lock().await;
+    capture.set_terminal_error_callback(None);
+    if let Err(e) = capture.stop_capture().await {
         log::warn!(
             "IncomingCaptionTranslationService runtime cleanup: stop capture failed for session {}: {}",
             session_id,
             e
         );
     }
+    drop(capture);
+    session.capture_callback.take();
 
     let _ = wait_task_done(
         &mut session.audio_pump_task,
@@ -1570,9 +1765,22 @@ mod tests {
         initialized_config: StdMutex<Option<AudioConfig>>,
         started: std::sync::atomic::AtomicBool,
         stopped: std::sync::atomic::AtomicBool,
+        start_count: std::sync::atomic::AtomicUsize,
+        restart_failures_remaining: std::sync::atomic::AtomicUsize,
+        terminal_error_callback: StdMutex<Option<AudioCaptureErrorCallback>>,
         block_stop: std::sync::atomic::AtomicBool,
         stop_entered: tokio::sync::Notify,
         release_stop: tokio::sync::Notify,
+    }
+
+    impl SyntheticIncomingCaptureState {
+        fn fail_capture(&self, message: &str) {
+            self.stopped.store(true, Ordering::SeqCst);
+            let callback = self.terminal_error_callback.lock().unwrap().clone();
+            if let Some(callback) = callback {
+                callback(AudioError::Capture(message.to_string()));
+            }
+        }
     }
 
     struct SyntheticIncomingCapture {
@@ -1594,7 +1802,17 @@ mod tests {
             &mut self,
             on_chunk: AudioChunkCallback,
         ) -> crate::domain::AudioResult<()> {
+            let start_count = self.state.start_count.fetch_add(1, Ordering::SeqCst) + 1;
+            if start_count > 1 && self.state.restart_failures_remaining.load(Ordering::SeqCst) > 0 {
+                self.state
+                    .restart_failures_remaining
+                    .fetch_sub(1, Ordering::SeqCst);
+                return Err(AudioError::Capture(
+                    "simulated capture restart failure".into(),
+                ));
+            }
             self.state.started.store(true, Ordering::SeqCst);
+            self.state.stopped.store(false, Ordering::SeqCst);
             for chunk in self.chunks.clone() {
                 on_chunk(chunk);
             }
@@ -1610,6 +1828,17 @@ mod tests {
             }
             self.callback = None;
             Ok(())
+        }
+
+        fn set_terminal_error_callback(&mut self, callback: Option<AudioCaptureErrorCallback>) {
+            *self.state.terminal_error_callback.lock().unwrap() = callback;
+        }
+
+        fn health_probe(&self) -> Option<AudioCaptureHealthProbe> {
+            let state = self.state.clone();
+            Some(Arc::new(move || {
+                state.started.load(Ordering::SeqCst) && !state.stopped.load(Ordering::SeqCst)
+            }))
         }
 
         fn is_capturing(&self) -> bool {
@@ -2778,6 +3007,153 @@ mod tests {
 
         assert_eq!(service.get_status().await, RecordingStatus::Idle);
         assert!(capture_state.stopped.load(Ordering::SeqCst));
+        assert!(provider_state.stopped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn terminal_capture_error_restarts_capture_without_reconnecting_stt() {
+        let capture_state = std::sync::Arc::new(SyntheticIncomingCaptureState::default());
+        let provider_state = std::sync::Arc::new(SyntheticIncomingProviderState::default());
+        let service = IncomingCaptionTranslationService::new_with_all_factories(
+            std::sync::Arc::new(SyntheticIncomingSttFactory {
+                state: provider_state.clone(),
+            }),
+            std::sync::Arc::new(SyntheticIncomingAudioFactory {
+                capture_state: capture_state.clone(),
+                requested_target: std::sync::Arc::new(StdMutex::new(None)),
+            }),
+            std::sync::Arc::new(SyntheticTextTranslatorFactory {
+                state: std::sync::Arc::new(SyntheticTextTranslatorState::default()),
+            }),
+        );
+        let errors = std::sync::Arc::new(StdMutex::new(Vec::<String>::new()));
+        let callbacks = IncomingTranslationCallbacks {
+            on_source_final: Arc::new(|_| {}),
+            on_translation_delta: Arc::new(|_| {}),
+            on_error: {
+                let errors = errors.clone();
+                Arc::new(move |error| errors.lock().unwrap().push(error.to_string()))
+            },
+            on_status: Arc::new(|_| {}),
+        };
+        let mut config = IncomingTranslationConfig::new_with_defaults(SttConfig::default(), 109);
+        config.openai_api_key = "sk-test".into();
+        service.start(config, callbacks).await.unwrap();
+
+        capture_state.fail_capture("simulated ScreenCaptureKit system stop");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while capture_state.start_count.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("capture must restart after a terminal stream error");
+
+        assert_eq!(service.get_status().await, RecordingStatus::Recording);
+        assert_eq!(service.active_session_id().await, Some(109));
+        assert!(errors.lock().unwrap().is_empty());
+        assert!(provider_state.started.load(Ordering::SeqCst));
+        assert!(!provider_state.stopped.load(Ordering::SeqCst));
+        assert_eq!(capture_state.start_count.load(Ordering::SeqCst), 2);
+
+        service.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn inactive_capture_health_probe_triggers_recovery_without_terminal_callback() {
+        let capture_state = std::sync::Arc::new(SyntheticIncomingCaptureState::default());
+        let service = IncomingCaptionTranslationService::new_with_all_factories(
+            std::sync::Arc::new(SyntheticIncomingSttFactory {
+                state: std::sync::Arc::new(SyntheticIncomingProviderState::default()),
+            }),
+            std::sync::Arc::new(SyntheticIncomingAudioFactory {
+                capture_state: capture_state.clone(),
+                requested_target: std::sync::Arc::new(StdMutex::new(None)),
+            }),
+            std::sync::Arc::new(SyntheticTextTranslatorFactory {
+                state: std::sync::Arc::new(SyntheticTextTranslatorState::default()),
+            }),
+        );
+        let mut config = IncomingTranslationConfig::new_with_defaults(SttConfig::default(), 111);
+        config.openai_api_key = "sk-test".into();
+        service
+            .start(
+                config,
+                test_callbacks(std::sync::Arc::new(StdMutex::new(Vec::new()))),
+            )
+            .await
+            .unwrap();
+
+        capture_state.stopped.store(true, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while capture_state.start_count.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("capture health watchdog must request recovery");
+
+        assert_eq!(service.get_status().await, RecordingStatus::Recording);
+        assert!(!capture_state.stopped.load(Ordering::SeqCst));
+        service.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn capture_recovery_exhaustion_reports_device_loss_and_cleans_session() {
+        let capture_state = std::sync::Arc::new(SyntheticIncomingCaptureState::default());
+        capture_state
+            .restart_failures_remaining
+            .store(CAPTURE_RECOVERY_ATTEMPTS, Ordering::SeqCst);
+        let provider_state = std::sync::Arc::new(SyntheticIncomingProviderState::default());
+        let service = IncomingCaptionTranslationService::new_with_all_factories(
+            std::sync::Arc::new(SyntheticIncomingSttFactory {
+                state: provider_state.clone(),
+            }),
+            std::sync::Arc::new(SyntheticIncomingAudioFactory {
+                capture_state: capture_state.clone(),
+                requested_target: std::sync::Arc::new(StdMutex::new(None)),
+            }),
+            std::sync::Arc::new(SyntheticTextTranslatorFactory {
+                state: std::sync::Arc::new(SyntheticTextTranslatorState::default()),
+            }),
+        );
+        let errors = std::sync::Arc::new(StdMutex::new(Vec::<String>::new()));
+        let callbacks = IncomingTranslationCallbacks {
+            on_source_final: Arc::new(|_| {}),
+            on_translation_delta: Arc::new(|_| {}),
+            on_error: {
+                let errors = errors.clone();
+                Arc::new(move |error| errors.lock().unwrap().push(error.to_string()))
+            },
+            on_status: Arc::new(|_| {}),
+        };
+        let mut config = IncomingTranslationConfig::new_with_defaults(SttConfig::default(), 110);
+        config.openai_api_key = "sk-test".into();
+        service.start(config, callbacks).await.unwrap();
+
+        capture_state.fail_capture("simulated persistent ScreenCaptureKit failure");
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if service.inner.lock().await.is_none()
+                    && provider_state.stopped.load(Ordering::SeqCst)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal capture recovery failure must clean the session");
+
+        assert_eq!(service.get_status().await, RecordingStatus::Error);
+        assert_eq!(
+            capture_state.start_count.load(Ordering::SeqCst),
+            CAPTURE_RECOVERY_ATTEMPTS + 1
+        );
+        let errors = errors.lock().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("input_device_lost"));
+        assert!(errors[0].contains("simulated persistent ScreenCaptureKit failure"));
         assert!(provider_state.stopped.load(Ordering::SeqCst));
     }
 

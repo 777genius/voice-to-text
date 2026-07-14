@@ -2732,6 +2732,10 @@ async fn incoming_translation_service_captures_system_audio_and_emits_translated
 #[tokio::test]
 #[ignore = "paid/manual soak: requires macOS system audio permission, VOICETEXT_RUN_PAID_E2E=1, and a dedicated OPENAI_E2E_API_KEY"]
 async fn incoming_translation_service_long_running_system_audio_soak() {
+    let _ = env_logger::builder()
+        .is_test(true)
+        .filter_level(log::LevelFilter::Info)
+        .try_init();
     let api_key = load_paid_e2e_api_key();
     let soak_duration = live_audio_soak_duration();
     let fixture = generate_system_audio_fixture();
