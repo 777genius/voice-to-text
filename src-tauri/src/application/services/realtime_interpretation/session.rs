@@ -524,6 +524,7 @@ struct InputWorkerContext {
 
 pub struct RealtimeInterpretationSession {
     capture: Option<Box<dyn AudioCapture>>,
+    input_tx: Option<mpsc::Sender<AudioChunk>>,
     input_abort_tx: mpsc::UnboundedSender<()>,
     input_worker_task: Option<InputWorkerTask>,
     event_forwarder_task: Option<JoinHandle<()>>,
@@ -609,7 +610,7 @@ impl RealtimeInterpretationSession {
             config.policy.clone(),
         );
         let capture_callback = build_capture_callback(
-            input_tx,
+            input_tx.downgrade(),
             reporter.clone(),
             stop_requested.clone(),
             config.policy.clone(),
@@ -638,6 +639,7 @@ impl RealtimeInterpretationSession {
 
         let mut session = Self {
             capture: Some(capture),
+            input_tx: Some(input_tx),
             input_abort_tx,
             input_worker_task: Some(input_worker_task),
             event_forwarder_task: Some(event_forwarder_task),
@@ -767,6 +769,7 @@ impl RealtimeInterpretationSession {
             }
             capture.set_terminal_error_callback(None);
         }
+        self.input_tx.take();
 
         let stop_reason = match mode {
             RealtimeInterpretationShutdown::Graceful => {
@@ -1106,6 +1109,7 @@ impl RealtimeInterpretationSession {
 impl Drop for RealtimeInterpretationSession {
     fn drop(&mut self) {
         self.stop_requested.store(true, Ordering::SeqCst);
+        self.input_tx.take();
         let _ = self.input_abort_tx.send(());
         if let Some(task) = self.input_worker_task.take() {
             task.abort();
@@ -1685,7 +1689,7 @@ async fn wait_for_output_abort(output_abort_rx: &mut watch::Receiver<bool>) {
 }
 
 fn build_capture_callback(
-    input_tx: mpsc::Sender<AudioChunk>,
+    input_tx: mpsc::WeakSender<AudioChunk>,
     reporter: RuntimeStopReporter,
     stop_requested: Arc<AtomicBool>,
     policy: RealtimeInterpretationPolicy,
@@ -1697,6 +1701,13 @@ fn build_capture_callback(
         if stop_requested.load(Ordering::SeqCst) {
             return;
         }
+        let Some(input_tx) = input_tx.upgrade() else {
+            reporter.error(RealtimeInterpretationError::Processing(format!(
+                "{} audio processor stopped unexpectedly",
+                policy.input_source_name
+            )));
+            return;
+        };
         capture_activity.touch();
         let queue_capacity = input_tx.max_capacity();
         diagnostics.observe_input(
@@ -2048,7 +2059,7 @@ mod tests {
         policy.input_overload_drop_threshold = 2;
         let diagnostics = Arc::new(RuntimeDiagnostics::new(10, &policy));
         let callback = build_capture_callback(
-            input_tx,
+            input_tx.downgrade(),
             RuntimeStopReporter::new(stop_tx),
             Arc::new(AtomicBool::new(false)),
             policy,
@@ -2076,7 +2087,7 @@ mod tests {
         let policy = RealtimeInterpretationPolicy::incoming_spoken();
         let diagnostics = Arc::new(RuntimeDiagnostics::new(12, &policy));
         let callback = build_capture_callback(
-            input_tx,
+            input_tx.downgrade(),
             RuntimeStopReporter::new(stop_tx),
             Arc::new(AtomicBool::new(true)),
             policy,
@@ -2092,6 +2103,26 @@ mod tests {
             diagnostics.first_input_ms.load(Ordering::Relaxed),
             UNSET_DIAGNOSTIC_MS
         );
+    }
+
+    #[tokio::test]
+    async fn capture_callback_does_not_keep_input_queue_alive_after_runtime_shutdown() {
+        let (input_tx, mut input_rx) = mpsc::channel(1);
+        let (stop_tx, _stop_rx) = mpsc::unbounded_channel();
+        let policy = RealtimeInterpretationPolicy::incoming_spoken();
+        let callback = build_capture_callback(
+            input_tx.downgrade(),
+            RuntimeStopReporter::new(stop_tx),
+            Arc::new(AtomicBool::new(true)),
+            policy.clone(),
+            Arc::new(CaptureActivity::new()),
+            Arc::new(RuntimeDiagnostics::new(13, &policy)),
+        );
+
+        drop(input_tx);
+
+        assert!(input_rx.recv().await.is_none());
+        drop(callback);
     }
 
     #[test]
@@ -2343,6 +2374,7 @@ mod tests {
         capture_running: AtomicBool,
         capture_stopped: AtomicBool,
         capture_stop_entered: AtomicBool,
+        retain_capture_callback_on_stop: AtomicBool,
         append_calls: AtomicUsize,
         finish_calls: AtomicUsize,
         abort_calls: AtomicUsize,
@@ -2394,7 +2426,13 @@ mod tests {
                 .store(true, Ordering::SeqCst);
             self.state.capture_running.store(false, Ordering::SeqCst);
             self.state.capture_stopped.store(true, Ordering::SeqCst);
-            self.callback = None;
+            if !self
+                .state
+                .retain_capture_callback_on_stop
+                .load(Ordering::SeqCst)
+            {
+                self.callback = None;
+            }
             Ok(())
         }
 
@@ -2410,7 +2448,7 @@ mod tests {
         }
 
         fn is_capturing(&self) -> bool {
-            self.callback.is_some()
+            self.state.capture_running.load(Ordering::SeqCst)
         }
 
         fn config(&self) -> AudioConfig {
@@ -2961,6 +2999,9 @@ mod tests {
     #[tokio::test]
     async fn session_contract_pumps_audio_text_and_graceful_tail_end_to_end() {
         let state = Arc::new(ContractState::default());
+        state
+            .retain_capture_callback_on_stop
+            .store(true, Ordering::SeqCst);
         let translated_text = Arc::new(StdMutex::new(String::new()));
         let observed_input_samples = Arc::new(AtomicUsize::new(0));
         let (event_tx, event_rx) = mpsc::channel(8);
