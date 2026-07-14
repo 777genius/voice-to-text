@@ -197,6 +197,17 @@ watch(
 
 // Ref для элемента транскрипции (для автоскролла)
 const transcriptionTextRef = ref<HTMLElement | null>(null);
+const fullTranscriptionStackRef = ref<HTMLElement | null>(null);
+let fullTranscriptionResizeObserver: ResizeObserver | null = null;
+
+function syncFullTranscriptionResizeObserver() {
+  fullTranscriptionResizeObserver?.disconnect();
+  fullTranscriptionResizeObserver = null;
+
+  if (typeof ResizeObserver === 'undefined' || !fullTranscriptionStackRef.value) return;
+  fullTranscriptionResizeObserver = new ResizeObserver(() => adjustWindowHeight());
+  fullTranscriptionResizeObserver.observe(fullTranscriptionStackRef.value);
+}
 
 // Динамическая высота окна при росте текста
 const FULL_WINDOW_WIDTH = 460;
@@ -225,16 +236,16 @@ function adjustWindowHeight() {
     return;
   }
 
-  const el = transcriptionTextRef.value;
-  if (!el || !isTauriAvailable()) return;
+  const stack = fullTranscriptionStackRef.value;
+  if (!stack || !isTauriAvailable()) return;
 
-  const textHeight = el.scrollHeight;
-  if (textHeight <= TEXT_THRESHOLD_PX) {
+  const contentHeight = stack.scrollHeight;
+  if (contentHeight <= TEXT_THRESHOLD_PX) {
     setWindowHeight(BASE_WINDOW_HEIGHT);
     return;
   }
 
-  const needed = Math.min(NON_TEXT_HEIGHT + textHeight + 16, MAX_WINDOW_HEIGHT);
+  const needed = Math.min(NON_TEXT_HEIGHT + contentHeight + 16, MAX_WINDOW_HEIGHT);
   setWindowHeight(needed);
 }
 
@@ -504,6 +515,7 @@ watch(() => store.displayText, () => {
 
 watch([isMiniWindow, showUpdateDialog], () => {
   nextTick(() => {
+    syncFullTranscriptionResizeObserver();
     applyRecordingWindowSize();
     alignMiniTextToEnd();
   });
@@ -559,6 +571,7 @@ onMounted(async () => {
   }
   await nextTick();
   if (isComponentUnmounted) return;
+  syncFullTranscriptionResizeObserver();
   applyRecordingWindowSize();
   alignMiniTextToEnd();
   startMiniCursorPolling();
@@ -696,6 +709,8 @@ onUnmounted(() => {
     window.cancelAnimationFrame(miniTextAlignRaf);
     miniTextAlignRaf = null;
   }
+  fullTranscriptionResizeObserver?.disconnect();
+  fullTranscriptionResizeObserver = null;
   clearMiniOpeningAnimation();
   if (miniCloseResetTimer !== null) {
     window.clearTimeout(miniCloseResetTimer);
@@ -1029,6 +1044,7 @@ const minimizeWindow = async (event?: Event) => {
 
       <!-- Transcription Display -->
       <div class="transcription-area">
+        <div ref="fullTranscriptionStackRef" class="full-transcription-stack">
         <!-- UX: синий — только для распознанного текста. "Говорите..." белым (базовый цвет). Пульсация — только для "Подключение..." -->
         <p
           ref="transcriptionTextRef"
@@ -1165,6 +1181,7 @@ const minimizeWindow = async (event?: Event) => {
               <small>{{ item.message }}</small>
             </div>
           </div>
+        </div>
         </div>
       </div>
 
@@ -1607,8 +1624,20 @@ const minimizeWindow = async (event?: Event) => {
   position: relative;
   width: 100%;
   box-sizing: border-box;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   flex: 1;
+}
+
+.full-transcription-stack {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--spacing-sm);
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .recording-indicator {

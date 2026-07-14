@@ -16,6 +16,10 @@ const tauriEventMock = vi.hoisted(() => ({
 const invokeMock = vi.hoisted(() => vi.fn());
 const hideWindowMock = vi.hoisted(() => vi.fn());
 const cursorOverRecordingWindowMock = vi.hoisted(() => ({ value: false }));
+const windowInnerSizeMock = vi.hoisted(() => ({ width: 248, height: 62 }));
+const resizeObserverMock = vi.hoisted(() => ({
+  callbacks: [] as ResizeObserverCallback[],
+}));
 
 const appConfigMock = vi.hoisted(() => ({
   autoCopyToClipboard: false,
@@ -55,7 +59,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 vi.mock('@tauri-apps/api/webviewWindow', () => ({
   getCurrentWebviewWindow: () => ({
     hide: hideWindowMock,
-    innerSize: vi.fn().mockResolvedValue({ width: 248, height: 62 }),
+    innerSize: vi.fn().mockImplementation(async () => ({ ...windowInnerSizeMock })),
     outerPosition: vi.fn().mockResolvedValue({ x: 100, y: 100 }),
     outerSize: vi.fn().mockResolvedValue({ width: 248, height: 62 }),
     startDragging: vi.fn(),
@@ -155,6 +159,30 @@ async function emitTauriEvent(eventName: string, payload: any) {
   await nextTick();
 }
 
+async function emitFullContentResize() {
+  const resizeCallCount = invokeMock.mock.calls.filter(
+    ([command]) => command === 'set_recording_window_size',
+  ).length;
+  for (const callback of resizeObserverMock.callbacks) {
+    callback([], {} as ResizeObserver);
+  }
+  for (let attempt = 0; attempt < 20; attempt++) {
+    await flushMicrotasks();
+    await nextTick();
+    const nextCount = invokeMock.mock.calls.filter(
+      ([command]) => command === 'set_recording_window_size',
+    ).length;
+    if (nextCount > resizeCallCount) return;
+  }
+}
+
+function lastRecordingWindowResizeCall() {
+  const calls = invokeMock.mock.calls.filter(
+    ([command]) => command === 'set_recording_window_size',
+  );
+  return calls[calls.length - 1];
+}
+
 function mountRecordingPopover() {
   const pinia = createPinia();
   setActivePinia(pinia);
@@ -185,6 +213,7 @@ function mountRecordingPopover() {
             incomingTranslationStart: 'Start incoming translation',
             incomingTranslationStop: 'Stop incoming translation',
             healthCheckStart: 'Run health check',
+            healthCheck: 'Health check',
             hotkeyHint: 'Hotkey: {hotkey}',
           minimize: 'Minimize',
           close: 'Close',
@@ -218,6 +247,16 @@ function mountRecordingPopover() {
 describe('RecordingPopover mini auto-hide e2e', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    resizeObserverMock.callbacks.length = 0;
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback: ResizeObserverCallback) {
+        resizeObserverMock.callbacks.push(callback);
+      }
+
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    });
     tauriEventMock.handlers.clear();
     tauriEventMock.listen.mockReset();
     tauriEventMock.listen.mockImplementation(async (eventName: string, handler: TauriEventHandler) => {
@@ -245,6 +284,8 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     hideWindowMock.mockReset();
     hideWindowMock.mockResolvedValue(undefined);
     appConfigMock.showMiniRecordingWindow = true;
+    windowInnerSizeMock.width = 248;
+    windowInnerSizeMock.height = 62;
     appConfigMock.playCompletionSound = false;
     appConfigMock.recordingMode = 'dictation';
     appConfigMock.startSync.mockReset();
@@ -268,6 +309,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
     vi.useRealTimers();
     document.body.innerHTML = '';
@@ -507,6 +549,76 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     store.status = RecordingStatus.Idle;
     await nextTick();
     expect(document.querySelector('[data-testid="incoming-duplex-headset-warning"]')).toBeNull();
+    wrapper.unmount();
+  });
+
+  it('resizes full layout from the complete translation stack and caps oversized content', async () => {
+    appConfigMock.showMiniRecordingWindow = false;
+    const wrapper = mountRecordingPopover();
+    await flushMicrotasks();
+    await nextTick();
+    const store = useTranscriptionStore();
+
+    store.activeRecordingMode = 'live_translation';
+    store.translationText = 'Outgoing translation';
+    store.incomingTranslationStatus = RecordingStatus.Recording;
+    store.incomingTranslationText = 'Incoming translated sentence';
+    store.liveTranslationHealthCheck = {
+      ok: true,
+      checked_at_ms: Date.now(),
+      items: [{ id: 'route', label: 'Audio route', ok: true, required: true, message: 'Ready' }],
+    };
+    await nextTick();
+
+    const stack = document.querySelector<HTMLElement>('.full-transcription-stack');
+    expect(stack).not.toBeNull();
+    expect(document.querySelector('[data-testid="incoming-translation-panel"]')).not.toBeNull();
+    expect(document.querySelector('[data-testid="translation-health-panel"]')).not.toBeNull();
+
+    Object.defineProperty(stack!, 'scrollHeight', { configurable: true, value: 260 });
+    invokeMock.mockClear();
+    await emitFullContentResize();
+    expect(lastRecordingWindowResizeCall())
+      .toEqual(['set_recording_window_size', { width: 460, height: 476 }]);
+
+    Object.defineProperty(stack!, 'scrollHeight', { configurable: true, value: 900 });
+    await emitFullContentResize();
+    expect(lastRecordingWindowResizeCall())
+      .toEqual(['set_recording_window_size', { width: 460, height: 700 }]);
+
+    store.incomingTranslationStatus = RecordingStatus.Idle;
+    store.incomingTranslationText = '';
+    store.liveTranslationHealthCheck = null;
+    await nextTick();
+    Object.defineProperty(stack!, 'scrollHeight', { configurable: true, value: 80 });
+    await emitFullContentResize();
+    expect(lastRecordingWindowResizeCall())
+      .toEqual(['set_recording_window_size', { width: 460, height: 330 }]);
+    wrapper.unmount();
+  });
+
+  it('keeps mini layout fixed while both translation directions have content', async () => {
+    windowInnerSizeMock.width = 460;
+    windowInnerSizeMock.height = 330;
+    const wrapper = mountRecordingPopover();
+    await flushMicrotasks();
+    await nextTick();
+    const store = useTranscriptionStore();
+
+    store.activeRecordingMode = 'live_translation';
+    store.translationText = 'Outgoing translation';
+    store.incomingTranslationStatus = RecordingStatus.Recording;
+    store.incomingTranslationText = 'Incoming translation';
+    store.status = RecordingStatus.Recording;
+    await nextTick();
+    await flushMicrotasks();
+
+    const resizeCalls = invokeMock.mock.calls.filter(
+      ([command]) => command === 'set_recording_window_size',
+    );
+    expect(resizeCalls.length).toBeGreaterThan(0);
+    expect(resizeCalls.every(([, size]) => size.width === 248 && size.height === 62)).toBe(true);
+    expect(document.querySelector('.full-transcription-stack')).toBeNull();
     wrapper.unmount();
   });
 
