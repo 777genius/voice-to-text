@@ -12,6 +12,7 @@ use crate::domain::{
     AudioChunk, AudioChunkCallback, AudioEnqueueOutcome, AudioError, RealtimeTranslationError,
     RealtimeTranslationErrorKind, RealtimeTranslationEvent, RealtimeTranslationSession,
     TranslationAudioOutput, TranslationAudioOutputConfig, TranslationAudioOutputError,
+    TranslationAudioOutputMaintenance,
 };
 
 use super::frame_assembler::Pcm16FrameAssembler;
@@ -390,6 +391,7 @@ struct RuntimeDiagnostics {
     input_drop_count: AtomicU64,
     output_drop_count: AtomicU64,
     output_dropped_ms: AtomicU64,
+    output_recovery_count: AtomicU64,
     reported: AtomicBool,
 }
 
@@ -410,6 +412,7 @@ impl RuntimeDiagnostics {
             input_drop_count: AtomicU64::new(0),
             output_drop_count: AtomicU64::new(0),
             output_dropped_ms: AtomicU64::new(0),
+            output_recovery_count: AtomicU64::new(0),
             reported: AtomicBool::new(false),
         }
     }
@@ -470,6 +473,13 @@ impl RuntimeDiagnostics {
         self.observe_output_pending(pending);
     }
 
+    fn observe_output_recovery(&self, dropped_audio: Duration, pending: Duration) {
+        self.output_recovery_count.fetch_add(1, Ordering::Relaxed);
+        if !dropped_audio.is_zero() {
+            self.observe_output_drop(dropped_audio, pending);
+        }
+    }
+
     fn report(&self, stop_reason: &'static str, cleanup_ms: u64) {
         if self.reported.swap(true, Ordering::SeqCst) {
             return;
@@ -479,7 +489,7 @@ impl RuntimeDiagnostics {
             value => value.min(i64::MAX as u64) as i64,
         };
         log::info!(
-            "realtime_diagnostics session_id={} input_source={} output_route={} duration_ms={} input_audio_ms={} first_input_ms={} first_text_ms={} first_audio_ms={} input_queue_high_water={} output_queue_high_water={} output_pending_high_water_ms={} input_drops={} output_drops={} output_dropped_ms={} stop_reason={} cleanup_ms={}",
+            "realtime_diagnostics session_id={} input_source={} output_route={} duration_ms={} input_audio_ms={} first_input_ms={} first_text_ms={} first_audio_ms={} input_queue_high_water={} output_queue_high_water={} output_pending_high_water_ms={} input_drops={} output_drops={} output_dropped_ms={} output_recoveries={} stop_reason={} cleanup_ms={}",
             self.session_id,
             self.input_source_name,
             self.output_route_name,
@@ -494,6 +504,7 @@ impl RuntimeDiagnostics {
             self.input_drop_count.load(Ordering::Relaxed),
             self.output_drop_count.load(Ordering::Relaxed),
             self.output_dropped_ms.load(Ordering::Relaxed),
+            self.output_recovery_count.load(Ordering::Relaxed),
             stop_reason,
             cleanup_ms,
         );
@@ -1398,6 +1409,27 @@ fn spawn_output_worker(
     })
 }
 
+async fn maintain_output_route(
+    output: &mut dyn TranslationAudioOutput,
+    route_name: &str,
+    diagnostics: &RuntimeDiagnostics,
+) -> Result<bool, TranslationAudioOutputError> {
+    match output.maintain().await? {
+        TranslationAudioOutputMaintenance::Healthy => Ok(false),
+        TranslationAudioOutputMaintenance::Recovered { dropped_audio } => {
+            let pending = output.pending_playback_duration();
+            diagnostics.observe_output_recovery(dropped_audio, pending);
+            log::warn!(
+                "RealtimeInterpretationSession: {} output route recovered (dropped_audio_ms={}, pending_ms={})",
+                route_name,
+                dropped_audio.as_millis(),
+                pending.as_millis()
+            );
+            Ok(true)
+        }
+    }
+}
+
 async fn run_output_worker(
     mut output: Box<dyn TranslationAudioOutput>,
     mut output_rx: mpsc::Receiver<OutputCommand>,
@@ -1425,11 +1457,31 @@ async fn run_output_worker(
                 };
                 match command {
                     OutputCommand::Audio(samples) => {
-                        let enqueue_result = tokio::select! {
+                        let mut enqueue_result = tokio::select! {
                             biased;
                             _ = wait_for_output_abort(&mut output_abort_rx) => return output,
                             result = output.enqueue_pcm16(&samples) => result,
                         };
+                        if let Err(initial_error) = enqueue_result {
+                            let maintenance = tokio::select! {
+                                biased;
+                                _ = wait_for_output_abort(&mut output_abort_rx) => return output,
+                                result = maintain_output_route(
+                                    output.as_mut(),
+                                    policy.output_route_name,
+                                    diagnostics.as_ref(),
+                                ) => result,
+                            };
+                            enqueue_result = match maintenance {
+                                Ok(true) => tokio::select! {
+                                    biased;
+                                    _ = wait_for_output_abort(&mut output_abort_rx) => return output,
+                                    result = output.enqueue_pcm16(&samples) => result,
+                                },
+                                Ok(false) => Err(initial_error),
+                                Err(recovery_error) => Err(recovery_error),
+                            };
+                        }
                         match enqueue_result {
                             Ok(AudioEnqueueOutcome::Queued { pending }) => {
                                 output_drop_pressure.record_success();
@@ -1499,7 +1551,16 @@ async fn run_output_worker(
                 }
             }
             _ = health_poll.tick() => {
-                if let Err(error) = output.health_check() {
+                let maintenance = tokio::select! {
+                    biased;
+                    _ = wait_for_output_abort(&mut output_abort_rx) => return output,
+                    result = maintain_output_route(
+                        output.as_mut(),
+                        policy.output_route_name,
+                        diagnostics.as_ref(),
+                    ) => result,
+                };
+                if let Err(error) = maintenance {
                     reporter.error(map_output_error(error, policy.output_route_name));
                     return output;
                 }
@@ -2288,6 +2349,7 @@ mod tests {
         finish_audio_chunks: AtomicUsize,
         output_closed: AtomicBool,
         output_enqueue_entered: AtomicBool,
+        output_enqueue_device_failure_once: AtomicBool,
         output_enqueue_delay_ms: AtomicU64,
         output_pending_per_chunk_ms: AtomicU64,
         output_pending_ms: AtomicU64,
@@ -2295,6 +2357,8 @@ mod tests {
         output_prepare_calls: AtomicUsize,
         output_dropped: AtomicBool,
         output_should_drop_oldest: AtomicBool,
+        output_recovery_requested: AtomicBool,
+        output_recovery_count: AtomicUsize,
         capture_error_callback: StdMutex<Option<AudioCaptureErrorCallback>>,
         input_samples: StdMutex<Vec<i16>>,
         output_samples: StdMutex<Vec<i16>>,
@@ -2582,6 +2646,19 @@ mod tests {
             self.state
                 .output_enqueue_entered
                 .store(true, Ordering::SeqCst);
+            if self
+                .state
+                .output_enqueue_device_failure_once
+                .swap(false, Ordering::SeqCst)
+            {
+                self.state.output_closed.store(true, Ordering::SeqCst);
+                self.state
+                    .output_recovery_requested
+                    .store(true, Ordering::SeqCst);
+                return Err(TranslationAudioOutputError::Device(
+                    "output route changed during enqueue".into(),
+                ));
+            }
             let delay_ms = self.state.output_enqueue_delay_ms.load(Ordering::SeqCst);
             if delay_ms > 0 {
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
@@ -2621,6 +2698,26 @@ mod tests {
             Ok(())
         }
 
+        async fn maintain(
+            &mut self,
+        ) -> TranslationAudioOutputResult<TranslationAudioOutputMaintenance> {
+            if self
+                .state
+                .output_recovery_requested
+                .swap(false, Ordering::SeqCst)
+            {
+                self.state.output_closed.store(false, Ordering::SeqCst);
+                self.state
+                    .output_recovery_count
+                    .fetch_add(1, Ordering::SeqCst);
+                return Ok(TranslationAudioOutputMaintenance::Recovered {
+                    dropped_audio: Duration::from_millis(80),
+                });
+            }
+            self.health_check()?;
+            Ok(TranslationAudioOutputMaintenance::Healthy)
+        }
+
         fn is_open(&self) -> bool {
             !self.state.output_closed.load(Ordering::SeqCst)
         }
@@ -2646,7 +2743,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn output_health_failure_is_a_terminal_device_error() {
+    async fn output_maintenance_exhaustion_is_a_terminal_device_error() {
         let state = Arc::new(ContractState::default());
         state.output_closed.store(true, Ordering::SeqCst);
         let (_command_tx, command_rx) = mpsc::channel(1);
@@ -2675,6 +2772,53 @@ mod tests {
                 if message.contains("virtual microphone output failed")
         ));
         output_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn enqueue_route_failure_recovers_retries_and_keeps_worker_alive() {
+        let state = Arc::new(ContractState::default());
+        state
+            .output_enqueue_device_failure_once
+            .store(true, Ordering::SeqCst);
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let (abort_tx, abort_rx) = watch::channel(false);
+        let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
+        let mut policy = RealtimeInterpretationPolicy::incoming_spoken();
+        policy.output_health_poll_interval = Duration::from_millis(5);
+        let diagnostics = Arc::new(RuntimeDiagnostics::new(2, &policy));
+
+        let output_task = tokio::spawn(run_output_worker(
+            Box::new(ContractOutput {
+                state: state.clone(),
+            }),
+            command_rx,
+            abort_rx,
+            RuntimeStopReporter::new(stop_tx),
+            policy,
+            diagnostics.clone(),
+        ));
+
+        command_tx
+            .send(OutputCommand::Audio(vec![7, 8, 9]))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while state.output_samples.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("recovered output must retry translated audio");
+        assert_eq!(state.output_recovery_count.load(Ordering::SeqCst), 1);
+        assert!(stop_rx.try_recv().is_err());
+        assert_eq!(&*state.output_samples.lock().unwrap(), &[7, 8, 9]);
+        assert_eq!(diagnostics.output_recovery_count.load(Ordering::Relaxed), 1);
+        assert_eq!(diagnostics.output_drop_count.load(Ordering::Relaxed), 1);
+        assert_eq!(diagnostics.output_dropped_ms.load(Ordering::Relaxed), 80);
+
+        abort_tx.send(true).unwrap();
+        output_task.await.unwrap();
+        assert!(stop_rx.try_recv().is_err());
     }
 
     #[tokio::test]

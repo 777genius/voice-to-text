@@ -24,6 +24,12 @@ pub enum TranslationAudioOutputError {
 
 pub type TranslationAudioOutputResult<T> = Result<T, TranslationAudioOutputError>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranslationAudioOutputMaintenance {
+    Healthy,
+    Recovered { dropped_audio: Duration },
+}
+
 pub const INCOMING_TRANSLATION_MAX_PLAYBACK_GAIN: f32 = 2.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +119,12 @@ pub trait TranslationAudioOutput: Send + Sync {
         } else {
             Err(TranslationAudioOutputError::Closed)
         }
+    }
+    async fn maintain(
+        &mut self,
+    ) -> TranslationAudioOutputResult<TranslationAudioOutputMaintenance> {
+        self.health_check()?;
+        Ok(TranslationAudioOutputMaintenance::Healthy)
     }
     fn device_name(&self) -> Option<String>;
     fn begin_drain_mode(&self);

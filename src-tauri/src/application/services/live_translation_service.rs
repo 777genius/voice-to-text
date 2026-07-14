@@ -578,6 +578,11 @@ fn spawn_live_runtime_cleanup_monitor(
                 return;
             };
 
+            log::warn!(
+                "LiveTranslationService: session {} stopped unexpectedly: {:?}",
+                session_id,
+                stop
+            );
             let error = map_live_runtime_stop(stop);
 
             session
@@ -957,6 +962,7 @@ mod tests {
     struct SyntheticOutputState {
         opened: AtomicBool,
         closed: AtomicBool,
+        health_failed: AtomicBool,
         open_config: StdMutex<Option<TranslationAudioOutputConfig>>,
         enqueued: StdMutex<Vec<i16>>,
     }
@@ -999,6 +1005,19 @@ mod tests {
 
         fn is_open(&self) -> bool {
             self.state.opened.load(Ordering::SeqCst) && !self.state.closed.load(Ordering::SeqCst)
+        }
+
+        fn health_check(&self) -> crate::domain::TranslationAudioOutputResult<()> {
+            if self.state.health_failed.load(Ordering::SeqCst) {
+                return Err(crate::domain::TranslationAudioOutputError::Device(
+                    "synthetic output route lost".into(),
+                ));
+            }
+            if self.is_open() {
+                Ok(())
+            } else {
+                Err(crate::domain::TranslationAudioOutputError::Closed)
+            }
         }
 
         fn device_name(&self) -> Option<String> {
@@ -1472,7 +1491,7 @@ mod tests {
         let incoming_callbacks = || IncomingTranslationCallbacks {
             on_source_final: Arc::new(|_| {}),
             on_translation_delta: Arc::new(|_| {}),
-            on_error: Arc::new(|error| panic!("unexpected incoming error: {error}")),
+            on_error: Arc::new(|_| {}),
             on_status: Arc::new(|_| {}),
         };
         let incoming_config = |session_id| {
@@ -1494,10 +1513,19 @@ mod tests {
         assert_eq!(incoming.get_status().await, RecordingStatus::Recording);
         assert_eq!(outgoing.get_status().await, RecordingStatus::Recording);
 
-        incoming.stop().await.unwrap();
-        assert_eq!(incoming.get_status().await, RecordingStatus::Idle);
+        incoming_output.health_failed.store(true, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while incoming.get_status().await != RecordingStatus::Error {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("incoming route loss must stop only the incoming runtime");
+        assert_eq!(incoming.active_session_id().await, None);
         assert_eq!(outgoing.get_status().await, RecordingStatus::Recording);
+        assert_eq!(outgoing.active_session_id().await, Some(301));
 
+        incoming_output.health_failed.store(false, Ordering::SeqCst);
         incoming
             .start(incoming_config(202), incoming_callbacks())
             .await
@@ -1526,8 +1554,8 @@ mod tests {
         assert!(outgoing_capture_stopped.load(Ordering::SeqCst));
         assert!(incoming_output.closed.load(Ordering::SeqCst));
         assert!(outgoing_output.closed.load(Ordering::SeqCst));
-        assert_eq!(incoming_realtime.close_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(incoming_realtime.abort_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(incoming_realtime.close_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(incoming_realtime.abort_calls.load(Ordering::SeqCst), 2);
         assert_eq!(outgoing_realtime.close_calls.load(Ordering::SeqCst), 1);
         assert_eq!(outgoing_realtime.abort_calls.load(Ordering::SeqCst), 1);
     }

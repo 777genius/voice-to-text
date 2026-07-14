@@ -2,7 +2,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use app_lib::domain::AudioEnqueueOutcome;
+use app_lib::domain::{AudioEnqueueOutcome, TranslationAudioOutputMaintenance};
 use app_lib::infrastructure::audio::{AudioOutput, AudioOutputConfig, CpalAudioOutput};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -445,14 +445,15 @@ async fn incoming_spoken_profile_accepts_nine_second_burst_without_drop() {
 #[tokio::test]
 #[serial_test::serial]
 #[ignore = "macOS release gate: requires switchaudio-osx and at least two real output devices"]
-async fn system_default_output_switch_is_a_terminal_health_error_and_restores_route() {
+async fn system_default_output_switch_recovers_on_the_new_route_and_restores_original() {
     assert_eq!(std::env::consts::OS, "macos", "this test targets macOS");
     let original = current_output_device();
     let alternate = alternate_output_device(&original);
     let mut restore = DefaultOutputRestore::new(original.clone());
     let mut output = CpalAudioOutput::system_default();
+    let muted_config = AudioOutputConfig::incoming_spoken_translation().with_gain(0.0);
     output
-        .open(AudioOutputConfig::incoming_spoken_translation())
+        .open(muted_config)
         .await
         .expect("must open the original system default output");
     assert_eq!(output.device_name().as_deref(), Some(original.as_str()));
@@ -461,20 +462,32 @@ async fn system_default_output_switch_is_a_terminal_health_error_and_restores_ro
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if current_output_device() == alternate {
-                if let Err(error) = output.health_check() {
-                    let message = error.to_string();
-                    assert!(
-                        message.contains("System default output changed"),
-                        "route switch must produce a typed device-change error: {message}"
-                    );
-                    break;
+                match output.maintain().await {
+                    Ok(TranslationAudioOutputMaintenance::Recovered { .. }) => break,
+                    Ok(TranslationAudioOutputMaintenance::Healthy) => {}
+                    Err(error) => panic!("route switch recovery failed: {error}"),
                 }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
     .await
-    .expect("output health check must detect a default route switch");
+    .expect("output maintenance must recover a default route switch");
+
+    assert_eq!(output.device_name().as_deref(), Some(alternate.as_str()));
+    assert!(output.health_check().is_ok());
+    let translated_audio = vec![2_000; 2_400];
+    let outcome = output
+        .enqueue_pcm16(&translated_audio)
+        .await
+        .expect("recovered route must accept translated audio");
+    assert_eq!(
+        outcome,
+        AudioEnqueueOutcome::Queued {
+            pending: Duration::ZERO
+        },
+        "runtime mute/gain must survive route recovery"
+    );
 
     output
         .close()

@@ -8,7 +8,9 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::domain::{AudioDeviceId, AudioEnqueueOutcome, TranslationAudioOutput};
+use crate::domain::{
+    AudioDeviceId, AudioEnqueueOutcome, TranslationAudioOutput, TranslationAudioOutputMaintenance,
+};
 
 pub use crate::domain::{
     TranslationAudioOutput as AudioOutput, TranslationAudioOutputConfig as AudioOutputConfig,
@@ -19,6 +21,8 @@ pub use crate::domain::{
 /// Размер чанка для resampler внутри output pipeline (в source-сэмплах, mono).
 const RESAMPLER_CHUNK_SIZE: usize = 256;
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
+const DEFAULT_ROUTE_RECOVERY_ATTEMPTS: usize = 6;
+const DEFAULT_ROUTE_RECOVERY_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 #[cfg(target_os = "macos")]
 #[repr(C)]
@@ -668,6 +672,85 @@ impl CpalAudioOutput {
         Ok(())
     }
 
+    fn reset_route(&mut self, reset_diagnostics: bool) {
+        self.is_open = false;
+        if let Some(stream) = self.stream.take() {
+            drop(stream);
+        }
+        self.device = None;
+        self.device_name = None;
+        self.default_output_device_id = None;
+        self.native_config = None;
+        self.config = None;
+        self.resampler = None;
+        if let Ok(mut queue) = self.source_queue.lock() {
+            queue.clear();
+        }
+        if let Ok(mut queue) = self.output_ready.lock() {
+            queue.clear();
+        }
+        if let Ok(mut state) = self.playback_state.lock() {
+            state.prebuffering = true;
+            state.draining = false;
+            if reset_diagnostics {
+                state.underrun_count = 0;
+                state.overflow_count = 0;
+                state.dropped_audio_ms = 0;
+            }
+        }
+        if let Ok(mut stream_error) = self.stream_error.lock() {
+            *stream_error = None;
+        }
+    }
+
+    async fn recover_system_default_route(&mut self) -> AudioOutputResult<Duration> {
+        let config = self.config.ok_or(AudioOutputError::Closed)?;
+        let previous_device = self.device_name.as_deref().unwrap_or("unknown").to_string();
+        let dropped_audio = self.pending_playback_duration();
+        let was_draining = self
+            .playback_state
+            .lock()
+            .map(|state| state.draining)
+            .unwrap_or(false);
+        self.reset_route(false);
+
+        let mut last_error = None;
+        for attempt in 1..=DEFAULT_ROUTE_RECOVERY_ATTEMPTS {
+            match self.open(config).await {
+                Ok(()) => {
+                    if was_draining {
+                        self.begin_drain_mode();
+                    }
+                    log::info!(
+                        "CpalAudioOutput recovered system default route: '{}' -> '{}' after {} attempt(s), dropped_audio_ms={}",
+                        previous_device,
+                        self.device_name.as_deref().unwrap_or("unknown"),
+                        attempt,
+                        dropped_audio.as_millis()
+                    );
+                    return Ok(dropped_audio);
+                }
+                Err(error) => {
+                    let retryable = matches!(
+                        error,
+                        AudioOutputError::Configuration(_)
+                            | AudioOutputError::Device(_)
+                            | AudioOutputError::Stream(_)
+                    );
+                    last_error = Some(error);
+                    if !retryable || attempt == DEFAULT_ROUTE_RECOVERY_ATTEMPTS {
+                        break;
+                    }
+                    tokio::time::sleep(DEFAULT_ROUTE_RECOVERY_RETRY_DELAY).await;
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            AudioOutputError::Device("system default output recovery failed".into())
+        }))
+    }
+
     /// Estimated amount of audio still queued for playback.
     pub fn pending_playback_duration(&self) -> Duration {
         let Some(native) = self.native_config.as_ref() else {
@@ -891,24 +974,8 @@ impl TranslationAudioOutput for CpalAudioOutput {
     }
 
     async fn close(&mut self) -> AudioOutputResult<()> {
-        self.is_open = false;
         let closed_device_name = self.device_name.as_deref().unwrap_or("unknown").to_string();
-        if let Some(s) = self.stream.take() {
-            drop(s);
-        }
-        self.device = None;
-        self.device_name = None;
-        self.default_output_device_id = None;
-        self.native_config = None;
-        self.config = None;
-        self.resampler = None;
-        if let Ok(mut q) = self.source_queue.lock() {
-            q.clear();
-        }
-        if let Ok(mut q) = self.output_ready.lock() {
-            q.clear();
-        }
-        if let Ok(mut state) = self.playback_state.lock() {
+        if let Ok(state) = self.playback_state.lock() {
             log::info!(
                 "cpal_output_diagnostics device={} underruns={} overflows={} dropped_audio_ms={}",
                 closed_device_name,
@@ -916,15 +983,8 @@ impl TranslationAudioOutput for CpalAudioOutput {
                 state.overflow_count,
                 state.dropped_audio_ms
             );
-            state.prebuffering = true;
-            state.draining = false;
-            state.underrun_count = 0;
-            state.overflow_count = 0;
-            state.dropped_audio_ms = 0;
         }
-        if let Ok(mut stream_error) = self.stream_error.lock() {
-            *stream_error = None;
-        }
+        self.reset_route(true);
         log::info!("CpalAudioOutput closed");
         Ok(())
     }
@@ -957,6 +1017,21 @@ impl TranslationAudioOutput for CpalAudioOutput {
             return Err(AudioOutputError::Closed);
         }
         self.ensure_stream_healthy()
+    }
+
+    async fn maintain(&mut self) -> AudioOutputResult<TranslationAudioOutputMaintenance> {
+        if !self.is_open {
+            return Err(AudioOutputError::Closed);
+        }
+        match self.ensure_stream_healthy() {
+            Ok(()) => Ok(TranslationAudioOutputMaintenance::Healthy),
+            Err(error) if matches!(self.selector, OutputDeviceSelector::SystemDefault) => {
+                log::warn!("CpalAudioOutput system default route requires recovery: {error}");
+                let dropped_audio = self.recover_system_default_route().await?;
+                Ok(TranslationAudioOutputMaintenance::Recovered { dropped_audio })
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn device_name(&self) -> Option<String> {

@@ -696,6 +696,11 @@ fn spawn_spoken_runtime_cleanup_monitor(
             let Some(running) = session else {
                 return;
             };
+            log::warn!(
+                "IncomingSpokenTranslationService: session {} stopped unexpectedly: {:?}",
+                session_id,
+                stop
+            );
             let error = map_runtime_stop(stop);
             running
                 .session
