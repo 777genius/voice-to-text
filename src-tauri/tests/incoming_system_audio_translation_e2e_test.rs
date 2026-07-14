@@ -61,6 +61,10 @@ const PAID_DIAGNOSTIC_SEMANTIC_SCENARIO_IDS: &[&str] =
     &["pause_and_silence", "overlapping_speakers"];
 const PAID_DIAGNOSTIC_AUDIO_FACT_POLICIES: &[(&str, &str)] = &[
     ("names_and_numbers", "meeting time 3:45 PM"),
+    (
+        "technical_terms",
+        "WebSocket reconnect with exponential backoff",
+    ),
     ("half_volume_source", "27 open tasks"),
 ];
 const LONG_CONTEXT_DEPLOYMENT_MARKERS: &[&str] = &[
@@ -1073,6 +1077,10 @@ fn paid_spoken_matrix_keeps_complete_release_scenarios_and_assertions() {
         PAID_DIAGNOSTIC_AUDIO_FACT_POLICIES,
         &[
             ("names_and_numbers", "meeting time 3:45 PM"),
+            (
+                "technical_terms",
+                "WebSocket reconnect with exponential backoff",
+            ),
             ("half_volume_source", "27 open tasks"),
         ]
     );
@@ -2180,6 +2188,14 @@ async fn incoming_spoken_translation_returns_realtime_text_and_audio_from_system
                 !translated_audio_transcript.trim().is_empty(),
                 "scenario {} translated audio transcript is empty",
                 scenario.id
+            );
+            assert!(
+                translated_audio_transcript
+                    .chars()
+                    .any(|character| ('\u{0400}'..='\u{04ff}').contains(&character)),
+                "scenario {} translated audio transcript is not Russian: {}",
+                scenario.id,
+                translated_audio_transcript
             );
             if semantic_quality_blocking {
                 assert!(
