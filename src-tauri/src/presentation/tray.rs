@@ -100,6 +100,7 @@ async fn show_settings_window_from_tray<R: Runtime>(
                 .as_ref()
                 .map(|s| s.access_token.clone());
             saved_stt.backend_auth_token = token;
+            crate::application::apply_backend_dictation_keep_alive_policy(&mut saved_stt);
             let _ = state
                 .transcription_service
                 .update_config(saved_stt.clone())

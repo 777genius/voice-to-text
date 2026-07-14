@@ -517,8 +517,6 @@ pub fn run() {
                             let _guard = state.stt_config_guard.lock().await;
 
                             // Держим STT token синхронизированным с access token из сессии.
-                            // Backend keep-alive отключаем: после Finalize provider stream может
-                            // остаться живым, но перестать отдавать transcript для следующей записи.
                             let (mut stt, loaded_from_disk) = match crate::infrastructure::ConfigStore::load_config().await {
                                 Ok(c) => (c, true),
                                 Err(e) => {
@@ -527,12 +525,7 @@ pub fn run() {
                                 }
                             };
                             stt.backend_auth_token = store.session.as_ref().map(|s| s.access_token.clone());
-                            if stt.provider == crate::domain::SttProviderType::Backend {
-                                stt.keep_connection_alive = false;
-                                if stt.keep_alive_ttl_secs != crate::domain::BACKEND_KEEPALIVE_TTL_SECS {
-                                    stt.keep_alive_ttl_secs = crate::domain::BACKEND_KEEPALIVE_TTL_SECS;
-                                }
-                            }
+                            crate::application::apply_backend_dictation_keep_alive_policy(&mut stt);
                             // Если не смогли прочитать с диска — не перезаписываем файл дефолтами.
                             if loaded_from_disk {
                                 let _ = crate::infrastructure::ConfigStore::save_config(&stt).await;
@@ -562,29 +555,16 @@ pub fn run() {
                     if let Some(state) = app_handle.try_state::<AppState>() {
                         let _guard = state.stt_config_guard.lock().await;
 
-                        // Backend-only режим: не держим stream живым между dictation-сессиями.
-                        // Старый keep-alive мог оставлять provider stream без transcript после Finalize.
-                        let mut config_migrated = false;
-                        if saved_config.provider == crate::domain::SttProviderType::Backend
-                            && saved_config.keep_connection_alive
-                        {
-                            saved_config.keep_connection_alive = false;
-                            config_migrated = true;
-                            log::info!(
-                                "Disabled keep_connection_alive for backend provider by default (ttl={}s)",
-                                saved_config.keep_alive_ttl_secs
+                        let config_migrated =
+                            crate::application::apply_backend_dictation_keep_alive_policy(
+                                &mut saved_config,
                             );
-                        }
-
-                        // TTL оставляем предсказуемым для обратной совместимости с сохранённым конфигом.
-                        if saved_config.provider == crate::domain::SttProviderType::Backend
-                            && saved_config.keep_alive_ttl_secs != crate::domain::BACKEND_KEEPALIVE_TTL_SECS
-                        {
-                            saved_config.keep_alive_ttl_secs = crate::domain::BACKEND_KEEPALIVE_TTL_SECS;
-                            config_migrated = true;
+                        if config_migrated {
                             log::info!(
-                                "Migrated keep_alive_ttl_secs for backend provider to {}s",
-                                saved_config.keep_alive_ttl_secs
+                                "Migrated backend dictation keep-alive policy: provider={:?}, enabled={}, ttl={}s",
+                                saved_config.backend_streaming_provider,
+                                saved_config.keep_connection_alive,
+                                saved_config.keep_alive_ttl_secs,
                             );
                         }
 

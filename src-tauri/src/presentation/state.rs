@@ -661,11 +661,13 @@ impl AppState {
         // Важно: берём текущий in-memory config, чтобы не "сбрасывать" keep-alive и другие поля
         // при конкурирующих disk-write сценариях.
         let mut config = self.transcription_service.get_config().await;
-        if config.backend_auth_token == token {
+        let policy_changed =
+            crate::application::apply_backend_dictation_keep_alive_policy(&mut config);
+        if config.backend_auth_token == token && !policy_changed {
             return;
         }
         config.backend_auth_token = token;
-        self.config.write().await.stt.backend_auth_token = config.backend_auth_token.clone();
+        self.config.write().await.stt = config.clone();
         if let Err(e) = ConfigStore::save_config(&config).await {
             log::warn!("Failed to persist STT config token: {}", e);
         }

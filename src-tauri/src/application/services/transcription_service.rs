@@ -3,7 +3,7 @@ use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::{Duration, Instant};
 
 use crate::domain::{
@@ -119,7 +119,42 @@ struct PreparedAudioChunk {
 }
 
 fn keep_alive_enabled_for_config(config: &SttConfig) -> bool {
-    config.keep_connection_alive && config.provider != SttProviderType::Backend
+    config.keep_connection_alive
+}
+
+fn config_requires_new_connection(previous: &SttConfig, next: &SttConfig) -> bool {
+    previous.provider != next.provider
+        || previous.language != next.language
+        || previous.auto_detect_language != next.auto_detect_language
+        || previous.enable_punctuation != next.enable_punctuation
+        || previous.filter_profanity != next.filter_profanity
+        || previous.deepgram_api_key != next.deepgram_api_key
+        || previous.assemblyai_api_key != next.assemblyai_api_key
+        || previous.model != next.model
+        || previous.backend_auth_token != next.backend_auth_token
+        || previous.backend_url != next.backend_url
+        || previous.backend_streaming_provider != next.backend_streaming_provider
+        || previous.streaming_keyterms != next.streaming_keyterms
+}
+
+/// Applies the product policy for warm backend dictation sessions.
+///
+/// The service itself still honors an explicit `false`, which is required by other use cases
+/// such as incoming translation. Composition roots call this helper only for dictation config.
+pub(crate) fn apply_backend_dictation_keep_alive_policy(config: &mut SttConfig) -> bool {
+    if config.provider != SttProviderType::Backend {
+        return false;
+    }
+
+    let keep_connection_alive = config
+        .backend_streaming_provider
+        .supports_reliable_idle_keep_alive();
+    let changed = config.keep_connection_alive != keep_connection_alive
+        || config.keep_alive_ttl_secs != crate::domain::BACKEND_KEEPALIVE_TTL_SECS;
+
+    config.keep_connection_alive = keep_connection_alive;
+    config.keep_alive_ttl_secs = crate::domain::BACKEND_KEEPALIVE_TTL_SECS;
+    changed
 }
 
 fn prepare_audio_chunk_for_processing(chunk: &AudioChunk, sensitivity: u8) -> PreparedAudioChunk {
@@ -255,6 +290,8 @@ pub struct TranscriptionService {
     status: Arc<RwLock<RecordingStatus>>,
     config: Arc<RwLock<SttConfig>>,
     microphone_sensitivity: Arc<AtomicU8>, // 0-200, default 100
+    invalidate_keep_alive_on_stop: Arc<AtomicBool>,
+    connection_lifecycle_guard: Arc<Mutex<()>>,
     inactivity_timer_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>, // таймер для автоочистки соединения
     audio_processor_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>, // обработчик аудио-чанков → STT
 }
@@ -315,6 +352,8 @@ impl TranscriptionService {
             status: Arc::new(RwLock::new(RecordingStatus::Idle)),
             config: Arc::new(RwLock::new(SttConfig::default())),
             microphone_sensitivity,
+            invalidate_keep_alive_on_stop: Arc::new(AtomicBool::new(false)),
+            connection_lifecycle_guard: Arc::new(Mutex::new(())),
             inactivity_timer_task: Arc::new(RwLock::new(None)),
             audio_processor_task: Arc::new(RwLock::new(None)),
         }
@@ -433,6 +472,7 @@ impl TranscriptionService {
         on_error: ErrorCallback,
         on_connection_quality: ConnectionQualityCallback,
     ) -> Result<()> {
+        let connection_transition_guard = self.connection_lifecycle_guard.lock().await;
         let mut status = self.status.write().await;
 
         if *status != RecordingStatus::Idle {
@@ -443,9 +483,15 @@ impl TranscriptionService {
         *status = RecordingStatus::Starting;
         drop(status);
 
+        if self.stt_provider.read().await.is_none() {
+            self.invalidate_keep_alive_on_stop
+                .store(false, Ordering::SeqCst);
+        }
+
         // Freeze the session config before any async device/provider startup work. Settings
         // saved while status=Starting must apply to the next recording, not race this one.
         let config = self.config.read().await.clone();
+        drop(connection_transition_guard);
 
         // Отменяем таймер неактивности если он запущен
         if let Some(timer) = self.inactivity_timer_task.write().await.take() {
@@ -564,8 +610,11 @@ impl TranscriptionService {
         let (mut startup_error_gate, mut provider_on_error) =
             stt_startup_error_callback(on_error.clone());
 
+        let _connection_guard = self.connection_lifecycle_guard.lock().await;
+
         // Проверяем можно ли переиспользовать существующее соединение
         let (mut can_reuse_connection, mut reuse_decision_reason) = {
+            let keep_alive_invalidated = self.invalidate_keep_alive_on_stop.load(Ordering::SeqCst);
             let provider_opt = self.stt_provider.read().await;
             if let Some(provider) = provider_opt.as_ref() {
                 let supports_keep_alive = provider.supports_keep_alive();
@@ -582,13 +631,17 @@ impl TranscriptionService {
                     config.keep_alive_ttl_secs
                 );
                 (
-                    supports_keep_alive && is_connection_alive && keep_alive_enabled,
+                    supports_keep_alive
+                        && is_connection_alive
+                        && keep_alive_enabled
+                        && !keep_alive_invalidated,
                     format!(
-                        "provider={}, supports_keep_alive={}, is_connection_alive={}, keep_alive_enabled={}",
+                        "provider={}, supports_keep_alive={}, is_connection_alive={}, keep_alive_enabled={}, invalidated={}",
                         provider.name(),
                         supports_keep_alive,
                         is_connection_alive,
-                        keep_alive_enabled
+                        keep_alive_enabled,
+                        keep_alive_invalidated
                     ),
                 )
             } else {
@@ -648,6 +701,15 @@ impl TranscriptionService {
         }
 
         if !can_reuse_connection {
+            if let Some(mut provider) = self.stt_provider.write().await.take() {
+                let _ = abort_stt_provider(&mut provider, "stale keep-alive connection").await;
+            }
+            let latest_config = self.config.read().await.clone();
+            self.invalidate_keep_alive_on_stop.store(
+                config_requires_new_connection(&config, &latest_config),
+                Ordering::SeqCst,
+            );
+
             // Создаем новое соединение (обычный старт с задержкой)
             log::info!(
                 "[ReconnectDiag] creating new STT connection: reason={}, provider_type={:?}, config_keep_alive={}, ttl_secs={}",
@@ -1224,8 +1286,12 @@ impl TranscriptionService {
         // в очереди могли остаться последние чанки речи, и именно они дают "обрезанный хвост".
         self.drain_audio_processor_task("stopping recording").await;
 
+        // Serializes the keep-alive decision/publication with auth and endpoint updates.
+        let _connection_guard = self.connection_lifecycle_guard.lock().await;
+
         // Проверяем нужно ли держать соединение открытым (keep-alive режим)
         let config = self.config.read().await.clone();
+        let keep_alive_invalidated = self.invalidate_keep_alive_on_stop.load(Ordering::SeqCst);
         let (should_keep_alive, keep_alive_reason) = {
             let provider_opt = self.stt_provider.read().await;
             if let Some(provider) = provider_opt.as_ref() {
@@ -1243,12 +1309,13 @@ impl TranscriptionService {
                     config.keep_alive_ttl_secs
                 );
                 (
-                    supports_keep_alive && keep_alive_enabled,
+                    supports_keep_alive && keep_alive_enabled && !keep_alive_invalidated,
                     format!(
-                        "provider={}, supports_keep_alive={}, keep_alive_enabled={}, alive_before_pause={}",
+                        "provider={}, supports_keep_alive={}, keep_alive_enabled={}, invalidated={}, alive_before_pause={}",
                         provider.name(),
                         supports_keep_alive,
                         keep_alive_enabled,
+                        keep_alive_invalidated,
                         is_connection_alive_before_pause
                     ),
                 )
@@ -1295,6 +1362,8 @@ impl TranscriptionService {
 
                 // Фоллбек: закрываем соединение полностью, чтобы не держать "полуживой" провайдер.
                 let _ = abort_stt_provider(&mut provider, "pause_stream failure").await;
+                self.invalidate_keep_alive_on_stop
+                    .store(false, Ordering::SeqCst);
 
                 *self.status.write().await = RecordingStatus::Idle;
                 return Ok("Recording stopped".to_string());
@@ -1369,6 +1438,8 @@ impl TranscriptionService {
                     let _ = abort_stt_provider(&mut provider, "recording stop failure").await;
                 }
             }
+            self.invalidate_keep_alive_on_stop
+                .store(false, Ordering::SeqCst);
 
             *self.status.write().await = RecordingStatus::Idle;
 
@@ -1396,6 +1467,9 @@ impl TranscriptionService {
         if !keep_alive_enabled {
             return false;
         }
+        if self.invalidate_keep_alive_on_stop.load(Ordering::SeqCst) {
+            return false;
+        }
 
         let provider_opt = self.stt_provider.read().await;
         provider_opt
@@ -1406,10 +1480,9 @@ impl TranscriptionService {
 
     /// Update STT configuration
     pub async fn update_config(&self, config: SttConfig) -> Result<()> {
+        let _connection_guard = self.connection_lifecycle_guard.lock().await;
         let prev_config = self.config.read().await.clone();
 
-        // Не принуждаем backend к runtime keep-alive: после Finalize backend/provider stream
-        // может остаться живым, но перестать отдавать transcript для следующей записи.
         let mut config = config;
         if config.provider == SttProviderType::Backend {
             // Держим клиентский TTL ниже backend audio_idle_ttl_secs=3600, чтобы не переиспользовать
@@ -1423,17 +1496,14 @@ impl TranscriptionService {
         // смена критичных параметров (язык/кейтермы/провайдер) должна сбросить это соединение.
         // Иначе следующий старт записи может сделать resume_stream() и фактически продолжить старую сессию,
         // где язык уже "залип" на предыдущем Config message.
-        let config_requires_new_connection = prev_config.provider != config.provider
-            || prev_config.backend_streaming_provider != config.backend_streaming_provider
-            || prev_config.language != config.language
-            || prev_config.streaming_keyterms != config.streaming_keyterms;
+        let requires_new_connection = config_requires_new_connection(&prev_config, &config);
 
         // Serialize the config write and any keep-alive teardown against start_recording's
         // Idle -> Starting transition. Otherwise a new recording can resume the provider
         // between the Idle check and the teardown below.
         let status = self.status.read().await;
 
-        if config_requires_new_connection {
+        if requires_new_connection {
             if *status == RecordingStatus::Idle {
                 let has_keep_alive_connection = {
                     let provider_opt = self.stt_provider.read().await;
@@ -1463,10 +1533,14 @@ impl TranscriptionService {
                         }
                     }
                 }
+                self.invalidate_keep_alive_on_stop
+                    .store(false, Ordering::SeqCst);
             } else {
-                // Если запись идёт — не вмешиваемся. Новая конфигурация применится на следующей сессии.
+                // Не прерываем текущую запись, но запрещаем переиспользовать её connection identity.
+                self.invalidate_keep_alive_on_stop
+                    .store(true, Ordering::SeqCst);
                 log::info!(
-                    "STT config updated while status={:?}; keep-alive connection will not be reset until idle",
+                    "STT config updated while status={:?}; connection will close when recording stops",
                     *status
                 );
             }
@@ -1857,6 +1931,7 @@ mod tests {
         entered: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
         is_capturing: Arc<AtomicBool>,
+        fail_after_release: bool,
     }
 
     #[async_trait]
@@ -1873,6 +1948,12 @@ mod tests {
             self.is_capturing.store(true, Ordering::SeqCst);
             self.entered.notify_one();
             self.release.notified().await;
+            if self.fail_after_release {
+                self.is_capturing.store(false, Ordering::SeqCst);
+                return Err(crate::domain::AudioError::Capture(
+                    "simulated delayed start_capture failure".to_string(),
+                ));
+            }
             Ok(())
         }
 
@@ -2022,8 +2103,11 @@ mod tests {
 
     struct KeepAliveProvider {
         paused_count: Arc<AtomicUsize>,
+        resumed_count: Arc<AtomicUsize>,
         stopped_count: Arc<AtomicUsize>,
         aborted_count: Arc<AtomicUsize>,
+        pause_entered: Option<Arc<tokio::sync::Notify>>,
+        pause_release: Option<Arc<tokio::sync::Notify>>,
         is_paused: bool,
         is_closed: bool,
     }
@@ -2066,6 +2150,12 @@ mod tests {
 
         async fn pause_stream(&mut self) -> SttResult<()> {
             self.paused_count.fetch_add(1, Ordering::SeqCst);
+            if let Some(entered) = &self.pause_entered {
+                entered.notify_one();
+            }
+            if let Some(release) = &self.pause_release {
+                release.notified().await;
+            }
             self.is_paused = true;
             Ok(())
         }
@@ -2077,6 +2167,7 @@ mod tests {
             _on_error: ErrorCallback,
             _on_connection_quality: ConnectionQualityCallback,
         ) -> SttResult<()> {
+            self.resumed_count.fetch_add(1, Ordering::SeqCst);
             self.is_paused = false;
             Ok(())
         }
@@ -2101,8 +2192,11 @@ mod tests {
     struct KeepAliveFactory {
         selected_providers: Arc<std::sync::Mutex<Vec<crate::domain::BackendStreamingProvider>>>,
         paused_count: Arc<AtomicUsize>,
+        resumed_count: Arc<AtomicUsize>,
         stopped_count: Arc<AtomicUsize>,
         aborted_count: Arc<AtomicUsize>,
+        pause_entered: Option<Arc<tokio::sync::Notify>>,
+        pause_release: Option<Arc<tokio::sync::Notify>>,
     }
 
     impl SttProviderFactory for KeepAliveFactory {
@@ -2114,8 +2208,11 @@ mod tests {
 
             Ok(Box::new(KeepAliveProvider {
                 paused_count: self.paused_count.clone(),
+                resumed_count: self.resumed_count.clone(),
                 stopped_count: self.stopped_count.clone(),
                 aborted_count: self.aborted_count.clone(),
+                pause_entered: self.pause_entered.clone(),
+                pause_release: self.pause_release.clone(),
                 is_paused: false,
                 is_closed: false,
             }))
@@ -2159,12 +2256,53 @@ mod tests {
         assert!(!stats.looks_too_quiet_for_stt());
     }
 
+    #[test]
+    fn backend_dictation_keep_alive_policy_tracks_provider_capability() {
+        let mut deepgram = SttConfig::new(SttProviderType::Backend);
+        deepgram.backend_streaming_provider = crate::domain::BackendStreamingProvider::Deepgram;
+        deepgram.keep_connection_alive = false;
+        deepgram.keep_alive_ttl_secs = 10;
+
+        assert!(apply_backend_dictation_keep_alive_policy(&mut deepgram));
+        assert!(deepgram.keep_connection_alive);
+        assert_eq!(
+            deepgram.keep_alive_ttl_secs,
+            crate::domain::BACKEND_KEEPALIVE_TTL_SECS
+        );
+
+        let mut elevenlabs = deepgram;
+        elevenlabs.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
+
+        assert!(apply_backend_dictation_keep_alive_policy(&mut elevenlabs));
+        assert!(!elevenlabs.keep_connection_alive);
+        assert!(!apply_backend_dictation_keep_alive_policy(&mut elevenlabs));
+    }
+
+    #[test]
+    fn connection_identity_excludes_keep_alive_tuning_but_includes_auth_context() {
+        let mut previous = SttConfig::new(SttProviderType::Backend);
+        previous.backend_auth_token = Some("old-token".to_string());
+        previous.backend_url = Some("wss://old.example.test".to_string());
+        let mut next = previous.clone();
+        next.keep_connection_alive = !previous.keep_connection_alive;
+        next.keep_alive_ttl_secs = previous.keep_alive_ttl_secs.saturating_add(1);
+
+        assert!(!config_requires_new_connection(&previous, &next));
+
+        next.backend_auth_token = Some("new-token".to_string());
+        assert!(config_requires_new_connection(&previous, &next));
+        next.backend_auth_token = previous.backend_auth_token.clone();
+        next.backend_url = Some("wss://new.example.test".to_string());
+        assert!(config_requires_new_connection(&previous, &next));
+    }
+
     #[tokio::test]
-    async fn backend_provider_does_not_reuse_keep_alive_between_recordings() {
+    async fn backend_deepgram_reuses_keep_alive_between_recordings() {
         let on_chunk_slot: Arc<std::sync::Mutex<Option<crate::domain::AudioChunkCallback>>> =
             Arc::new(std::sync::Mutex::new(None));
         let selected_providers = Arc::new(std::sync::Mutex::new(Vec::new()));
         let paused_count = Arc::new(AtomicUsize::new(0));
+        let resumed_count = Arc::new(AtomicUsize::new(0));
         let stopped_count = Arc::new(AtomicUsize::new(0));
         let aborted_count = Arc::new(AtomicUsize::new(0));
 
@@ -2172,13 +2310,17 @@ mod tests {
         let factory = Arc::new(KeepAliveFactory {
             selected_providers: selected_providers.clone(),
             paused_count: paused_count.clone(),
+            resumed_count: resumed_count.clone(),
             stopped_count: stopped_count.clone(),
             aborted_count: aborted_count.clone(),
+            pause_entered: None,
+            pause_release: None,
         });
         let service = TranscriptionService::new(Box::new(audio_capture), factory);
 
         let mut initial = SttConfig::new(SttProviderType::Backend);
         initial.backend_streaming_provider = crate::domain::BackendStreamingProvider::Deepgram;
+        initial.keep_connection_alive = true;
         service.update_config(initial.clone()).await.unwrap();
 
         let on_partial: TranscriptionCallback = Arc::new(|_t| {});
@@ -2204,17 +2346,10 @@ mod tests {
             .await
             .expect("first recording must stop");
 
-        assert_eq!(paused_count.load(Ordering::SeqCst), 0);
-        assert_eq!(stopped_count.load(Ordering::SeqCst), 1);
-        assert!(!service.can_resume_keep_alive_connection().await);
-
-        let mut next = initial;
-        next.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
-        service.update_config(next).await.unwrap();
-
-        assert_eq!(stopped_count.load(Ordering::SeqCst), 1);
-        assert_eq!(aborted_count.load(Ordering::SeqCst), 0);
-        assert!(!service.can_resume_keep_alive_connection().await);
+        assert_eq!(paused_count.load(Ordering::SeqCst), 1);
+        assert_eq!(resumed_count.load(Ordering::SeqCst), 0);
+        assert_eq!(stopped_count.load(Ordering::SeqCst), 0);
+        assert!(service.can_resume_keep_alive_connection().await);
 
         service
             .start_recording(
@@ -2226,14 +2361,17 @@ mod tests {
                 on_quality,
             )
             .await
-            .expect("second recording must start with new provider");
+            .expect("second recording must resume the warm provider");
         service
             .stop_recording()
             .await
             .expect("second recording must stop");
 
-        assert_eq!(paused_count.load(Ordering::SeqCst), 0);
-        assert_eq!(stopped_count.load(Ordering::SeqCst), 2);
+        assert_eq!(paused_count.load(Ordering::SeqCst), 2);
+        assert_eq!(resumed_count.load(Ordering::SeqCst), 1);
+        assert_eq!(stopped_count.load(Ordering::SeqCst), 0);
+        assert_eq!(aborted_count.load(Ordering::SeqCst), 0);
+        assert!(service.can_resume_keep_alive_connection().await);
 
         let selected = selected_providers
             .lock()
@@ -2241,15 +2379,271 @@ mod tests {
             .clone();
         assert_eq!(
             selected,
-            vec![
-                crate::domain::BackendStreamingProvider::Deepgram,
-                crate::domain::BackendStreamingProvider::ElevenLabs
-            ]
+            vec![crate::domain::BackendStreamingProvider::Deepgram]
         );
 
-        let mut cleanup = SttConfig::new(SttProviderType::Backend);
-        cleanup.backend_streaming_provider = crate::domain::BackendStreamingProvider::Deepgram;
-        service.update_config(cleanup).await.unwrap();
+        let mut next = initial;
+        next.backend_auth_token = Some("rotated-token".to_string());
+        service.update_config(next).await.unwrap();
+
+        assert_eq!(stopped_count.load(Ordering::SeqCst), 1);
+        assert_eq!(aborted_count.load(Ordering::SeqCst), 0);
+        assert!(!service.can_resume_keep_alive_connection().await);
+    }
+
+    #[tokio::test]
+    async fn backend_auth_change_during_recording_forces_close_before_next_session() {
+        let on_chunk_slot: Arc<std::sync::Mutex<Option<crate::domain::AudioChunkCallback>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let selected_providers = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let paused_count = Arc::new(AtomicUsize::new(0));
+        let resumed_count = Arc::new(AtomicUsize::new(0));
+        let stopped_count = Arc::new(AtomicUsize::new(0));
+        let aborted_count = Arc::new(AtomicUsize::new(0));
+        let service = TranscriptionService::new(
+            Box::new(ManualAudioCapture::new(on_chunk_slot)),
+            Arc::new(KeepAliveFactory {
+                selected_providers: selected_providers.clone(),
+                paused_count: paused_count.clone(),
+                resumed_count: resumed_count.clone(),
+                stopped_count: stopped_count.clone(),
+                aborted_count: aborted_count.clone(),
+                pause_entered: None,
+                pause_release: None,
+            }),
+        );
+
+        let mut initial = SttConfig::new(SttProviderType::Backend);
+        initial.backend_streaming_provider = crate::domain::BackendStreamingProvider::Deepgram;
+        initial.backend_auth_token = Some("old-token".to_string());
+        initial.keep_connection_alive = true;
+        service.update_config(initial.clone()).await.unwrap();
+
+        service
+            .start_recording(
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .unwrap();
+        initial.backend_auth_token = Some("new-token".to_string());
+        service.update_config(initial).await.unwrap();
+        service.stop_recording().await.unwrap();
+
+        assert_eq!(paused_count.load(Ordering::SeqCst), 0);
+        assert_eq!(resumed_count.load(Ordering::SeqCst), 0);
+        assert_eq!(stopped_count.load(Ordering::SeqCst), 1);
+        assert_eq!(aborted_count.load(Ordering::SeqCst), 0);
+        assert!(!service.can_resume_keep_alive_connection().await);
+
+        service
+            .start_recording(
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .unwrap();
+        service.stop_recording().await.unwrap();
+
+        assert_eq!(paused_count.load(Ordering::SeqCst), 1);
+        assert_eq!(resumed_count.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            selected_providers
+                .lock()
+                .expect("selected providers mutex poisoned")
+                .as_slice(),
+            &[
+                crate::domain::BackendStreamingProvider::Deepgram,
+                crate::domain::BackendStreamingProvider::Deepgram,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn invalidated_warm_connection_is_not_reused_after_startup_failure() {
+        let selected_providers = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let paused_count = Arc::new(AtomicUsize::new(0));
+        let resumed_count = Arc::new(AtomicUsize::new(0));
+        let stopped_count = Arc::new(AtomicUsize::new(0));
+        let aborted_count = Arc::new(AtomicUsize::new(0));
+        let service = Arc::new(TranscriptionService::new(
+            Box::new(ManualAudioCapture::new(Arc::new(std::sync::Mutex::new(
+                None,
+            )))),
+            Arc::new(KeepAliveFactory {
+                selected_providers: selected_providers.clone(),
+                paused_count: paused_count.clone(),
+                resumed_count: resumed_count.clone(),
+                stopped_count,
+                aborted_count: aborted_count.clone(),
+                pause_entered: None,
+                pause_release: None,
+            }),
+        ));
+        let mut config = SttConfig::new(SttProviderType::Backend);
+        config.backend_auth_token = Some("old-token".to_string());
+        config.keep_connection_alive = true;
+        service.update_config(config.clone()).await.unwrap();
+
+        service
+            .start_recording(
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .unwrap();
+        service.stop_recording().await.unwrap();
+        assert!(service.can_resume_keep_alive_connection().await);
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        service
+            .replace_audio_capture(Box::new(BlockingStartAudioCapture {
+                config: AudioConfig::default(),
+                entered: entered.clone(),
+                release: release.clone(),
+                is_capturing: Arc::new(AtomicBool::new(false)),
+                fail_after_release: true,
+            }))
+            .await
+            .unwrap();
+        let start_service = service.clone();
+        let start_task = tokio::spawn(async move {
+            start_service
+                .start_recording(
+                    Arc::new(|_| {}),
+                    Arc::new(|_| {}),
+                    Arc::new(|_| {}),
+                    Arc::new(|_| {}),
+                    Arc::new(|_| {}),
+                    Arc::new(|_, _| {}),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("capture startup must reach the test gate");
+        config.backend_auth_token = Some("new-token".to_string());
+        service.update_config(config).await.unwrap();
+        release.notify_one();
+        assert!(start_task.await.unwrap().is_err());
+
+        service
+            .replace_audio_capture(Box::new(ManualAudioCapture::new(Arc::new(
+                std::sync::Mutex::new(None),
+            ))))
+            .await
+            .unwrap();
+        service
+            .start_recording(
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resumed_count.load(Ordering::SeqCst), 0);
+        assert_eq!(aborted_count.load(Ordering::SeqCst), 1);
+        assert_eq!(selected_providers.lock().unwrap().len(), 2);
+        service.stop_recording().await.unwrap();
+        assert_eq!(paused_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn auth_update_cannot_publish_a_stale_provider_during_pause() {
+        let pause_entered = Arc::new(tokio::sync::Notify::new());
+        let pause_release = Arc::new(tokio::sync::Notify::new());
+        let selected_providers = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let paused_count = Arc::new(AtomicUsize::new(0));
+        let resumed_count = Arc::new(AtomicUsize::new(0));
+        let stopped_count = Arc::new(AtomicUsize::new(0));
+        let service = Arc::new(TranscriptionService::new(
+            Box::new(ManualAudioCapture::new(Arc::new(std::sync::Mutex::new(
+                None,
+            )))),
+            Arc::new(KeepAliveFactory {
+                selected_providers: selected_providers.clone(),
+                paused_count: paused_count.clone(),
+                resumed_count: resumed_count.clone(),
+                stopped_count: stopped_count.clone(),
+                aborted_count: Arc::new(AtomicUsize::new(0)),
+                pause_entered: Some(pause_entered.clone()),
+                pause_release: Some(pause_release.clone()),
+            }),
+        ));
+        let mut config = SttConfig::new(SttProviderType::Backend);
+        config.backend_auth_token = Some("old-token".to_string());
+        config.keep_connection_alive = true;
+        service.update_config(config.clone()).await.unwrap();
+        service
+            .start_recording(
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .unwrap();
+
+        let stop_service = service.clone();
+        let stop_task = tokio::spawn(async move { stop_service.stop_recording().await });
+        tokio::time::timeout(Duration::from_secs(1), pause_entered.notified())
+            .await
+            .expect("pause must reach the test gate");
+
+        config.backend_auth_token = Some("new-token".to_string());
+        let update_service = service.clone();
+        let update_task = tokio::spawn(async move { update_service.update_config(config).await });
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(!update_task.is_finished());
+
+        let start_service = service.clone();
+        let start_task = tokio::spawn(async move {
+            start_service
+                .start_recording(
+                    Arc::new(|_| {}),
+                    Arc::new(|_| {}),
+                    Arc::new(|_| {}),
+                    Arc::new(|_| {}),
+                    Arc::new(|_| {}),
+                    Arc::new(|_, _| {}),
+                )
+                .await
+        });
+
+        pause_release.notify_one();
+        stop_task.await.unwrap().unwrap();
+        update_task.await.unwrap().unwrap();
+        start_task.await.unwrap().unwrap();
+
+        assert_eq!(paused_count.load(Ordering::SeqCst), 1);
+        assert_eq!(stopped_count.load(Ordering::SeqCst), 1);
+        assert_eq!(resumed_count.load(Ordering::SeqCst), 0);
+        assert_eq!(selected_providers.lock().unwrap().len(), 2);
+
+        let mut cleanup_config = service.get_config().await;
+        cleanup_config.keep_connection_alive = false;
+        service.update_config(cleanup_config).await.unwrap();
+        service.stop_recording().await.unwrap();
+        assert_eq!(stopped_count.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -2263,6 +2657,7 @@ mod tests {
                 entered: entered.clone(),
                 release: release.clone(),
                 is_capturing: Arc::new(AtomicBool::new(false)),
+                fail_after_release: false,
             }),
             Arc::new(ConfigRecordingFactory {
                 languages: languages.clone(),
@@ -2605,8 +3000,11 @@ mod tests {
         let factory = Arc::new(KeepAliveFactory {
             selected_providers,
             paused_count,
+            resumed_count: Arc::new(AtomicUsize::new(0)),
             stopped_count: stopped_count.clone(),
             aborted_count: aborted_count.clone(),
+            pause_entered: None,
+            pause_release: None,
         });
         let service = TranscriptionService::new(Box::new(audio_capture), factory);
 

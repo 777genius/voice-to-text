@@ -76,6 +76,11 @@ impl BackendStreamingProvider {
             Self::ElevenLabs => "elevenlabs",
         }
     }
+
+    /// Whether an idle realtime stream can be kept open reliably without sending audio.
+    pub const fn supports_reliable_idle_keep_alive(self) -> bool {
+        matches!(self, Self::Deepgram)
+    }
 }
 
 impl Default for BackendStreamingProvider {
@@ -140,15 +145,14 @@ pub struct SttConfig {
     pub backend_streaming_provider: BackendStreamingProvider,
 
     /// Keep WebSocket connection alive between recording sessions (only for providers that support it)
-    /// Deepgram: safe (bills by audio duration, not connection time)
-    /// AssemblyAI: dangerous (bills by connection time)
+    /// Backend + Deepgram: safe (bills by audio duration, not connection time)
+    /// Backend + ElevenLabs: disabled because long idle sessions may be closed for inactivity
     pub keep_connection_alive: bool,
 
     /// Сколько держать соединение живым после остановки записи (если keep_connection_alive=true).
     ///
     /// Важно: keep-alive удерживает streaming соединение на стороне провайдера и занимает слот
-    /// по лимиту параллельных соединений. Backend dictation runtime сейчас не использует keep-alive,
-    /// потому что новый stream надёжнее после Finalize.
+    /// по лимиту параллельных соединений.
     #[serde(default = "default_keep_alive_ttl_secs")]
     pub keep_alive_ttl_secs: u64,
 
@@ -378,6 +382,12 @@ mod tests {
             BackendStreamingProvider::ElevenLabs
         );
         assert!("assemblyai".parse::<BackendStreamingProvider>().is_err());
+    }
+
+    #[test]
+    fn backend_streaming_provider_idle_keep_alive_capability_is_explicit() {
+        assert!(BackendStreamingProvider::Deepgram.supports_reliable_idle_keep_alive());
+        assert!(!BackendStreamingProvider::ElevenLabs.supports_reliable_idle_keep_alive());
     }
 
     #[test]

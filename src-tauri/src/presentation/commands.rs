@@ -743,8 +743,7 @@ async fn get_hotkey_start_connection_hint(state: &AppState, config: &AppConfig) 
         .transcription_service
         .can_resume_keep_alive_connection()
         .await;
-    let keep_alive_enabled =
-        config.stt.keep_connection_alive || config.stt.provider == SttProviderType::Backend;
+    let keep_alive_enabled = config.stt.keep_connection_alive;
     let status = active_recording_status(state).await;
     let warm_start_expected = can_resume_keep_alive
         || (keep_alive_enabled
@@ -4357,12 +4356,7 @@ pub async fn update_stt_config(
     let _ = model;
     config.model = None;
 
-    // Backend keep-alive отключён: после Finalize backend/provider stream может оставаться живым,
-    // но перестать отдавать transcript для следующей dictation-записи.
-    config.keep_connection_alive = false;
-    if config.provider == crate::domain::SttProviderType::Backend {
-        config.keep_alive_ttl_secs = crate::domain::BACKEND_KEEPALIVE_TTL_SECS;
-    }
+    crate::application::apply_backend_dictation_keep_alive_policy(&mut config);
 
     log::debug!(
         "Setting keep_connection_alive={} for provider {:?}",
@@ -7687,6 +7681,7 @@ pub async fn show_settings_window(
                 .as_ref()
                 .map(|s| s.access_token.clone());
             saved_stt.backend_auth_token = token;
+            crate::application::apply_backend_dictation_keep_alive_policy(&mut saved_stt);
             let _ = state
                 .transcription_service
                 .update_config(saved_stt.clone())

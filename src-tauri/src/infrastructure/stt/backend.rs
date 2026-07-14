@@ -445,17 +445,28 @@ impl BackendProvider {
                 }
             }
             Ok(Err(_)) => {
+                let _ = self.finalize_waiter.lock().await.take();
+                self.is_closed.store(true, Ordering::SeqCst);
                 log::warn!(
                     "[ReconnectDiag] BackendProvider finalize drain waiter dropped on {}",
                     context
                 );
+                return Err(SttError::Connection(SttConnectionError::with_category(
+                    format!("Backend finalize drain waiter dropped during {context}"),
+                    SttConnectionCategory::Closed,
+                )));
             }
             Err(_) => {
                 let _ = self.finalize_waiter.lock().await.take();
+                self.is_closed.store(true, Ordering::SeqCst);
                 log::warn!(
                     "[ReconnectDiag] BackendProvider finalize drain ack timeout on {}",
                     context
                 );
+                return Err(SttError::Connection(SttConnectionError::with_category(
+                    format!("Backend finalize drain ack timed out during {context}"),
+                    SttConnectionCategory::Timeout,
+                )));
             }
         }
         Ok(())
@@ -2018,6 +2029,56 @@ mod tests {
         (format!("ws://{addr}"), task)
     }
 
+    async fn spawn_finalize_timeout_mock_backend() -> (String, JoinHandle<bool>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local websocket listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept websocket tcp");
+            let mut ws = accept_async(stream).await.expect("accept websocket");
+            let mut saw_finalize = false;
+            let mut sequence = 0usize;
+
+            while let Some(next) = ws.next().await {
+                let msg = next.expect("websocket message");
+                match msg {
+                    Message::Text(text) => {
+                        let value: serde_json::Value =
+                            serde_json::from_str(&text).expect("client json message");
+                        match value.get("type").and_then(|value| value.as_str()) {
+                            Some("config") => {
+                                ws.send(Message::Text(
+                                    r#"{"type":"ready","session_id":"mock-session"}"#.to_string(),
+                                ))
+                                .await
+                                .expect("send ready");
+                            }
+                            Some("finalize") => saw_finalize = true,
+                            Some("close") => break,
+                            _ => {}
+                        }
+                    }
+                    Message::Binary(_) => {
+                        sequence += 1;
+                        ws.send(Message::Text(format!(
+                            r#"{{"type":"ack","seq":{sequence}}}"#
+                        )))
+                        .await
+                        .expect("send ack");
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+
+            saw_finalize
+        });
+
+        (format!("ws://{addr}"), task)
+    }
+
     #[tokio::test]
     async fn test_backend_provider_sends_selected_streaming_provider_in_config_message() {
         for (selected, expected) in [
@@ -2159,6 +2220,117 @@ mod tests {
         assert_eq!(capture.binary_lengths, vec![1920, 128]);
         assert_eq!(capture.binary_lengths.iter().sum::<usize>(), 1024 * 2);
         assert!(capture.saw_finalize);
+    }
+
+    #[tokio::test]
+    async fn backend_provider_resumes_same_socket_for_second_transcription_session() {
+        let (backend_url, server_task) = spawn_lifecycle_mock_backend().await;
+        let mut config = SttConfig::new(SttProviderType::Backend);
+        config.backend_url = Some(backend_url);
+        config.backend_auth_token = Some("test-token".to_string());
+        config.backend_streaming_provider = crate::domain::BackendStreamingProvider::Deepgram;
+
+        let (first_final_tx, mut first_final_rx) =
+            tokio::sync::mpsc::unbounded_channel::<Transcription>();
+        let mut provider = BackendProvider::new();
+        provider.initialize(&config).await.unwrap();
+        provider
+            .start_stream(
+                Arc::new(|_| {}),
+                Arc::new(move |transcription| {
+                    let _ = first_final_tx.send(transcription);
+                }),
+                Arc::new(|error| panic!("unexpected first-session error: {error}")),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .unwrap();
+
+        provider
+            .send_audio(&AudioChunk::new(vec![1000; 960], 16_000, 1))
+            .await
+            .unwrap();
+        let first_final = tokio::time::timeout(Duration::from_secs(3), first_final_rx.recv())
+            .await
+            .expect("first final timeout")
+            .expect("first final callback");
+        assert_eq!(first_final.text, "hello world");
+
+        provider.pause_stream().await.unwrap();
+        assert!(provider.is_connection_alive());
+
+        let (second_final_tx, mut second_final_rx) =
+            tokio::sync::mpsc::unbounded_channel::<Transcription>();
+        provider
+            .resume_stream(
+                Arc::new(|_| {}),
+                Arc::new(move |transcription| {
+                    let _ = second_final_tx.send(transcription);
+                }),
+                Arc::new(|error| panic!("unexpected second-session error: {error}")),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .unwrap();
+        provider
+            .send_audio(&AudioChunk::new(vec![2000; 960], 16_000, 1))
+            .await
+            .unwrap();
+
+        let second_final = tokio::time::timeout(Duration::from_secs(3), second_final_rx.recv())
+            .await
+            .expect("second final timeout")
+            .expect("second final callback");
+        assert_eq!(second_final.text, "hello world");
+        assert!(first_final_rx.try_recv().is_err());
+
+        provider.pause_stream().await.unwrap();
+        assert!(provider.is_connection_alive());
+        provider.abort().await.unwrap();
+
+        let capture = tokio::time::timeout(Duration::from_secs(3), server_task)
+            .await
+            .expect("mock backend timeout")
+            .expect("mock backend task");
+        assert_eq!(capture.binary_lengths, vec![1920, 1920]);
+        assert!(capture.saw_finalize);
+    }
+
+    #[tokio::test]
+    async fn backend_provider_does_not_reuse_socket_without_finalize_ack() {
+        let (backend_url, server_task) = spawn_finalize_timeout_mock_backend().await;
+        let mut config = SttConfig::new(SttProviderType::Backend);
+        config.backend_url = Some(backend_url);
+        config.backend_auth_token = Some("test-token".to_string());
+
+        let mut provider = BackendProvider::new();
+        provider.initialize(&config).await.unwrap();
+        provider
+            .start_stream(
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .unwrap();
+        provider
+            .send_audio(&AudioChunk::new(vec![1000; 960], 16_000, 1))
+            .await
+            .unwrap();
+
+        let error = provider
+            .pause_stream()
+            .await
+            .expect_err("pause must fail closed without finalize acknowledgement");
+        assert!(error.to_string().contains("timed out"), "error={error}");
+        assert!(!provider.is_connection_alive());
+        provider.abort().await.unwrap();
+
+        assert!(tokio::time::timeout(Duration::from_secs(3), server_task)
+            .await
+            .expect("mock backend timeout")
+            .expect("mock backend task"));
     }
 
     #[tokio::test]

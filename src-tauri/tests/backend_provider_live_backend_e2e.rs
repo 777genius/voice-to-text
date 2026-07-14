@@ -21,6 +21,8 @@ async fn desktop_backend_provider_reaches_live_backend_for_all_streaming_provide
         eprintln!("VOICETEXT_LIVE_BACKEND_URL не задан, пропускаем live desktop-backend e2e");
         return;
     };
+    let backend_auth_token = std::env::var("VOICETEXT_LIVE_BACKEND_TOKEN")
+        .unwrap_or_else(|_| "dev-local-token".to_string());
 
     let audio = load_hello_fixture();
 
@@ -31,7 +33,13 @@ async fn desktop_backend_provider_reaches_live_backend_for_all_streaming_provide
     ] {
         tokio::time::timeout(
             Duration::from_secs(75),
-            run_provider_flow(&backend_url, provider, language, &audio),
+            run_provider_flow(
+                &backend_url,
+                &backend_auth_token,
+                provider,
+                language,
+                &audio,
+            ),
         )
         .await
         .unwrap_or_else(|_| {
@@ -42,13 +50,14 @@ async fn desktop_backend_provider_reaches_live_backend_for_all_streaming_provide
 
 async fn run_provider_flow(
     backend_url: &str,
+    backend_auth_token: &str,
     streaming_provider: BackendStreamingProvider,
     language: &str,
     audio: &[u8],
 ) {
     let mut config = SttConfig::new(SttProviderType::Backend);
     config.backend_url = Some(backend_url.to_string());
-    config.backend_auth_token = Some("dev-local-token".to_string());
+    config.backend_auth_token = Some(backend_auth_token.to_string());
     config.backend_streaming_provider = streaming_provider;
     config.language = language.to_string();
     config.keep_connection_alive = true;
@@ -68,6 +77,7 @@ async fn run_provider_flow(
         .await
         .unwrap_or_else(|err| panic!("initialize failed for {streaming_provider:?}: {err}"));
 
+    let first_error_tx = error_tx.clone();
     provider
         .start_stream(
             Arc::new(move |t| {
@@ -77,7 +87,7 @@ async fn run_provider_flow(
                 let _ = final_tx.send(t);
             }),
             Arc::new(move |err| {
-                let _ = error_tx.send(err);
+                let _ = first_error_tx.send(err);
             }),
             Arc::new(move |quality, _reason| {
                 let _ = quality_tx.send(quality);
@@ -96,13 +106,7 @@ async fn run_provider_flow(
     .await;
     assert_eq!(quality, "Good");
 
-    for frame in audio.chunks(FRAME_BYTES) {
-        let chunk = AudioChunk::from_bytes(frame, SAMPLE_RATE, CHANNELS);
-        provider
-            .send_audio(&chunk)
-            .await
-            .unwrap_or_else(|err| panic!("send_audio failed for {streaming_provider:?}: {err}"));
-    }
+    send_audio_fixture(&mut provider, streaming_provider, audio).await;
 
     let first_usage = recv_or_error(
         &mut usage_rx,
@@ -127,11 +131,49 @@ async fn run_provider_flow(
     );
 
     let mut partial_texts = Vec::new();
-    let final_text = wait_for_final_or_collect_partials(
+    let first_final_text = wait_for_final_or_collect_partials(
         &mut final_rx,
         &mut partial_rx,
         &mut error_rx,
         &mut partial_texts,
+        streaming_provider,
+    )
+    .await;
+
+    let (second_partial_tx, mut second_partial_rx) = mpsc::unbounded_channel::<Transcription>();
+    let (second_final_tx, mut second_final_rx) = mpsc::unbounded_channel::<Transcription>();
+    let second_error_tx = error_tx.clone();
+    provider
+        .resume_stream(
+            Arc::new(move |t| {
+                let _ = second_partial_tx.send(t);
+            }),
+            Arc::new(move |t| {
+                let _ = second_final_tx.send(t);
+            }),
+            Arc::new(move |err| {
+                let _ = second_error_tx.send(err);
+            }),
+            Arc::new(|_, _| {}),
+        )
+        .await
+        .unwrap_or_else(|err| panic!("resume_stream failed for {streaming_provider:?}: {err}"));
+
+    send_audio_fixture(&mut provider, streaming_provider, audio).await;
+    provider.pause_stream().await.unwrap_or_else(|err| {
+        panic!("second pause_stream failed for {streaming_provider:?}: {err}")
+    });
+    assert!(
+        provider.is_connection_alive(),
+        "backend connection should remain alive after second pause for {streaming_provider:?}"
+    );
+
+    let mut second_partial_texts = Vec::new();
+    let second_final_text = wait_for_final_or_collect_partials(
+        &mut second_final_rx,
+        &mut second_partial_rx,
+        &mut error_rx,
+        &mut second_partial_texts,
         streaming_provider,
     )
     .await;
@@ -141,16 +183,35 @@ async fn run_provider_flow(
         .await
         .unwrap_or_else(|err| panic!("abort failed for {streaming_provider:?}: {err}"));
 
-    let normalized = final_text.to_ascii_lowercase();
+    let first_normalized = first_final_text.to_ascii_lowercase();
     assert!(
-        normalized.contains("hello"),
-        "unexpected final transcript for {streaming_provider:?}: final={final_text:?}, partials={partial_texts:?}"
+        first_normalized.contains("hello"),
+        "unexpected first transcript for {streaming_provider:?}: final={first_final_text:?}, partials={partial_texts:?}"
+    );
+    let second_normalized = second_final_text.to_ascii_lowercase();
+    assert!(
+        second_normalized.contains("hello"),
+        "unexpected resumed transcript for {streaming_provider:?}: final={second_final_text:?}, partials={second_partial_texts:?}"
     );
 
     println!(
-        "live desktop-backend e2e passed for {:?}/{}: final={:?}, partials={:?}",
-        streaming_provider, language, final_text, partial_texts
+        "live desktop-backend resume e2e passed for {:?}/{}: first={:?}, second={:?}",
+        streaming_provider, language, first_final_text, second_final_text
     );
+}
+
+async fn send_audio_fixture(
+    provider: &mut BackendProvider,
+    streaming_provider: BackendStreamingProvider,
+    audio: &[u8],
+) {
+    for frame in audio.chunks(FRAME_BYTES) {
+        let chunk = AudioChunk::from_bytes(frame, SAMPLE_RATE, CHANNELS);
+        provider
+            .send_audio(&chunk)
+            .await
+            .unwrap_or_else(|err| panic!("send_audio failed for {streaming_provider:?}: {err}"));
+    }
 }
 
 async fn wait_for_final_or_collect_partials(
