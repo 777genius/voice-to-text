@@ -1,4 +1,5 @@
 import { readFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import process from 'node:process';
 
@@ -19,6 +20,7 @@ import {
 } from './helpers/liveAudioEvidenceContract.mjs';
 
 const DEFAULT_SOAK_SECONDS = 1800;
+const CAFFEINATED_RUN_ENV = 'VOICETEXT_LIVE_AUDIO_CAFFEINATED';
 const CARGO_PREFLIGHT_TIMEOUT_MS = 30 * 60 * 1000;
 const soakSeconds = parsePositiveIntegerEnv(
   process.env.LIVE_AUDIO_SOAK_SECONDS,
@@ -173,6 +175,22 @@ if (!paidE2e.acknowledged) {
 
 if (!paidE2e.apiKey) {
   fail('OPENAI_E2E_API_KEY is required; OPENAI_API_KEY and .env are intentionally ignored.');
+}
+
+if (process.env[CAFFEINATED_RUN_ENV] !== '1') {
+  const caffeinated = spawnSync(
+    '/usr/bin/caffeinate',
+    ['-d', '-i', '-s', process.execPath, ...process.argv.slice(1)],
+    {
+      cwd: process.cwd(),
+      env: { ...process.env, [CAFFEINATED_RUN_ENV]: '1' },
+      stdio: 'inherit',
+    },
+  );
+  if (caffeinated.error) {
+    fail(`cannot start macOS caffeinate guard: ${caffeinated.error.message}`);
+  }
+  process.exit(caffeinated.status ?? 1);
 }
 
 if (soakSeconds < 1800) {

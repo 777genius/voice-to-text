@@ -181,52 +181,83 @@ struct SyntheticFlowState {
 }
 
 struct SimulatedPlayback {
-    pending_samples: usize,
+    pending: Duration,
     updated_at: Instant,
 }
 
 impl Default for SimulatedPlayback {
     fn default() -> Self {
         Self {
-            pending_samples: 0,
+            pending: Duration::ZERO,
             updated_at: Instant::now(),
         }
     }
 }
 
+impl SimulatedPlayback {
+    fn advance(&mut self, elapsed: Duration) {
+        self.pending = self.pending.saturating_sub(elapsed);
+    }
+
+    fn enqueue(&mut self, samples: usize) {
+        self.pending = self.pending.saturating_add(Duration::from_secs_f64(
+            samples as f64 / TRANSLATED_OUTPUT_SAMPLE_RATE as f64,
+        ));
+    }
+
+    fn pending_samples(&self) -> usize {
+        (self.pending.as_secs_f64() * TRANSLATED_OUTPUT_SAMPLE_RATE as f64).ceil() as usize
+    }
+}
+
 impl SyntheticFlowState {
-    fn refresh_pending_samples(&self) -> usize {
+    fn refresh_pending_playback(&self) -> Duration {
         let mut playback = self.simulated_playback.lock().unwrap();
         let now = Instant::now();
-        let elapsed_samples = (now.duration_since(playback.updated_at).as_secs_f64()
-            * TRANSLATED_OUTPUT_SAMPLE_RATE as f64) as usize;
-        playback.pending_samples = playback.pending_samples.saturating_sub(elapsed_samples);
+        let elapsed = now.duration_since(playback.updated_at);
+        playback.advance(elapsed);
         playback.updated_at = now;
-        playback.pending_samples
+        playback.pending
+    }
+
+    fn refresh_pending_samples(&self) -> usize {
+        let pending = self.refresh_pending_playback();
+        (pending.as_secs_f64() * TRANSLATED_OUTPUT_SAMPLE_RATE as f64).ceil() as usize
     }
 
     fn enqueue_simulated_playback(&self, samples: usize) -> Duration {
         let mut playback = self.simulated_playback.lock().unwrap();
         let now = Instant::now();
-        let elapsed_samples = (now.duration_since(playback.updated_at).as_secs_f64()
-            * TRANSLATED_OUTPUT_SAMPLE_RATE as f64) as usize;
-        playback.pending_samples = playback
-            .pending_samples
-            .saturating_sub(elapsed_samples)
-            .saturating_add(samples);
+        let elapsed = now.duration_since(playback.updated_at);
+        playback.advance(elapsed);
+        playback.enqueue(samples);
         playback.updated_at = now;
         self.output_pending_high_water_samples
-            .fetch_max(playback.pending_samples, Ordering::Relaxed);
-        Duration::from_secs_f64(
-            playback.pending_samples as f64 / TRANSLATED_OUTPUT_SAMPLE_RATE as f64,
-        )
+            .fetch_max(playback.pending_samples(), Ordering::Relaxed);
+        playback.pending
     }
 
     fn pending_playback_duration(&self) -> Duration {
-        Duration::from_secs_f64(
-            self.refresh_pending_samples() as f64 / TRANSLATED_OUTPUT_SAMPLE_RATE as f64,
-        )
+        self.refresh_pending_playback()
     }
+}
+
+#[test]
+fn simulated_playback_preserves_fractional_sample_time_across_long_runs() {
+    let mut playback = SimulatedPlayback::default();
+    let event_duration = Duration::from_millis(100);
+    let scheduler_early_by = Duration::from_nanos(1);
+
+    for _ in 0..18_000 {
+        playback.advance(event_duration - scheduler_early_by);
+        playback.enqueue(TRANSLATED_OUTPUT_SAMPLE_RATE / 10);
+    }
+
+    assert_eq!(
+        playback.pending,
+        event_duration + scheduler_early_by * 17_999
+    );
+    assert!(playback.pending_samples() <= TRANSLATED_OUTPUT_SAMPLE_RATE / 10 + 1);
 }
 
 struct SyntheticCaptureFactory {

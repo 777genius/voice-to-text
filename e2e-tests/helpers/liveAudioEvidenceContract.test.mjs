@@ -30,6 +30,14 @@ test('live audio runners execute the complete ordered evidence contract', () => 
   assert.deepEqual(runnerLabels(soakRunner), REQUIRED_LIVE_AUDIO_SOAK_LABELS);
 });
 
+test('release soak prevents macOS display and system idle sleep', () => {
+  const soakRunner = readRepositoryFile('e2e-tests/run-live-audio-soak.mjs');
+
+  assert.ok(soakRunner.includes("'/usr/bin/caffeinate'"));
+  assert.ok(soakRunner.includes("['-d', '-i', '-s', process.execPath"));
+  assert.ok(soakRunner.includes("VOICETEXT_LIVE_AUDIO_CAFFEINATED"));
+});
+
 test('macOS gate and release verifier require every live audio evidence label', () => {
   const gate = readRepositoryFile('.github/workflows/macos-audio-gate.yml');
   const release = readRepositoryFile('.github/workflows/release.yml');
