@@ -236,6 +236,8 @@ Application core при этом не меняется.
 - корректно принимать PCM заявленного формата;
 - быть bounded;
 - сообщать device/stream failure;
+- выполнять adapter-owned `maintain` без знания platform API в application core;
+- сообщать `Healthy` или `Recovered { dropped_audio }`, если конкретный route допускает безопасный rebind;
 - поддерживать drain и idempotent close;
 - не скрывать overflow только в логах.
 
@@ -532,7 +534,10 @@ PCM16 little-endian semantics
 - сохранить `excludesCurrentProcessAudio(true)`;
 - сделать capture health flag shared/atomic, чтобы native error менял `is_capturing()`;
 - не выдавать callbacks после stop/generation change;
-- terminal native error должен доходить до supervisor, а не только логироваться.
+- terminal native error должен доходить до application recovery monitor, а не только логироваться;
+- для уже опубликованной captions session выполнить bounded local restart ScreenCaptureKit без
+  переподключения STT/OpenAI и без закрытия audio queue;
+- после шести неудачных restart attempts опубликовать точный terminal `input_device_lost`.
 
 Существующий captions target 16 kHz обязан остаться без изменений.
 
@@ -605,7 +610,7 @@ Translation client принадлежит одному input worker. `append_pcm
 - API key и raw audio никогда не логируются;
 - transcript logging разрешён только на debug и с truncate, либо полностью выключен.
 
-### 9.4. No automatic reconnect in first release
+### 9.4. No automatic network reconnect in first release
 
 Не переподключаться автоматически внутри активной фразы:
 
@@ -615,6 +620,11 @@ Translation client принадлежит одному input worker. `append_pcm
 - новая session теряет контекст.
 
 При network failure выполнить controlled cleanup и показать retry. Reconnect можно добавить позже только с отдельной, измеренной policy.
+
+Это ограничение не относится к локальному `SystemDefault` playback rebind. Смена macOS output не
+переподключает OpenAI, не replay-ит input и не меняет `session_id`: output adapter bounded-переоткрывает
+только CPAL stream, сохраняет gain/mute и drain mode, а уже подготовленный для старого native route
+короткий хвост учитывает как `dropped_audio`. Explicit/virtual routes не восстанавливаются автоматически.
 
 ## 10. Local playback adapter
 
@@ -680,10 +690,13 @@ Policy:
 
 Первая версия:
 
-- CPAL stream error -> terminal `output_device_lost`;
-- capture и OpenAI session очищаются;
+- смена system-default output или recoverable CPAL stream error запускает bounded adapter rebind;
+- ScreenCaptureKit terminal callback или inactive health probe запускает bounded local capture restart;
+- local output/capture recovery не переподключает OpenAI/STT и не повторяет старое аудио;
+- исчерпание recovery переводит только затронутое направление в terminal device error;
+- длительный lock/display-off без shareable display завершается terminal cleanup; после unlock
+  пользователь запускает направление заново;
 - UI сохраняет уже показанный текст;
-- пользователь может restart после выбора нового system default;
 - никаких бесконечных reopen loops.
 
 ## 11. Incoming application facade
@@ -798,7 +811,7 @@ Service не читает `SttConfig` напрямую. Он получает у
 - translated text отображается текущим panel;
 - добавить familiar speaker/mute icon для локального translated playback;
 - mute доступен только в spoken runtime;
-- terminal playback error не очищает уже полученный translated text;
+- исчерпавший bounded recovery terminal playback error не очищает уже полученный translated text;
 - stale events фильтруются по `session_id`;
 - renderer reload восстанавливает backend status и delivery mode snapshot.
 
@@ -937,17 +950,18 @@ processing
 4. capability failure не создаёт OpenAI session;
 5. capture permission failure не создаёт OpenAI session;
 6. network failure очищает capture/output;
-7. output device loss закрывает translator;
-8. capture loss закрывает translator/output;
-9. input overload terminal;
-10. output overload terminal after policy threshold;
-11. graceful stop drains final audio and transcript;
-12. emergency stop does not wait full drain;
-13. old session events cannot affect restarted session;
-14. incoming stop does not stop outgoing fake session;
-15. outgoing stop does not stop incoming fake session;
-16. renderer reload snapshot restores spoken status;
-17. unsupported language leaves captions-only available.
+7. output route loss восстанавливается локально без остановки translator;
+8. transient capture loss перезапускает capture без переподключения STT/OpenAI;
+9. capture recovery exhaustion закрывает translator/output с `input_device_lost`;
+10. input overload terminal;
+11. output overload terminal after policy threshold;
+12. graceful stop drains final audio and transcript;
+13. emergency stop does not wait full drain;
+14. old session events cannot affect restarted session;
+15. incoming stop does not stop outgoing fake session;
+16. outgoing stop does not stop incoming fake session;
+17. renderer reload snapshot restores spoken status;
+18. unsupported language leaves captions-only available.
 
 ### 18.3. Synthetic WebSocket integration test
 
@@ -1045,12 +1059,12 @@ app translated output: 880 Hz
 | Shared core refactor ломает outgoing translation | Critical | Phase 1-2 не меняют behavior; весь старый outgoing suite и synthetic E2E зелёные до feature wiring |
 | Собственный playback всё же попадает в capture | Critical | 440/880 Hz native self-exclusion test обязателен; без него capability остаётся disabled |
 | Output queue создаёт растущую задержку | High | latency metrics + measured threshold + 30-60 minute soak |
-| Capture молчит после native stream error | High | truthful atomic health/error signal и supervisor test |
+| Capture молчит после native stream error | High | terminal callback + 250 ms health probe + bounded local restart + exhaustion test |
 | Renderer принимает late audio/text от старой session | High | session-scoped events, closed floor и restart race tests |
 | Mixed/same-language speech приводит к тишине | Medium | original audio не mute; documented limitation; eval cases |
 | Speaker playback попадает акустически в outgoing mic | High для duplex speakers | headset warning; AEC не обещать; duplex speaker scenario в manual test |
 | Permission prompt возникает после paid connect | Medium | permission spike/preflight до OpenAI connect |
-| macOS device switch оставляет stream на старом output | Medium | terminal device error + explicit restart в первой версии |
+| macOS device switch оставляет stream на старом output | Medium | bounded adapter rebind без OpenAI reconnect; terminal error только после исчерпания recovery |
 
 ### 19.2. Release gate
 
@@ -1064,12 +1078,15 @@ Feature нельзя считать enabled на macOS, пока не выпол
 - app exit cleanup test;
 - real Zoom bidirectional check with Zoom Speaker Volume at 50%;
 - physical output disconnect/recovery check;
+- physical ScreenCaptureKit stop/recovery check;
 - sleep/wake cleanup and recovery check.
 
 Три hardware/Zoom проверки выполняются вручную на том же commit перед `macOS Audio Release Gate`.
 Workflow требует явные boolean attestations, сохраняет actor/run ID в checksummed evidence, а
 `Release` повторно проверяет эти поля. Обычный push/PR использует общий keyless quality workflow и
 не требует OpenAI key, ScreenCaptureKit permission или физических audio devices.
+Двухчасовой local soak запускается под `caffeinate -d -i -s`, чтобы сам test harness не переводил
+macOS в lock/display-off state и не создавал ложный ScreenCaptureKit device-loss result.
 
 ### 19.3. Rollback strategy
 
