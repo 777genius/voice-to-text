@@ -247,6 +247,7 @@ pub struct IncomingTranslationTextPayload {
     pub session_id: u64,
     pub text: String,
     pub timestamp: u64,
+    pub delivery: crate::domain::IncomingTranslationDelivery,
 }
 
 #[derive(Debug, Clone, Serialize)]

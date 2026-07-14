@@ -1332,6 +1332,7 @@ async fn start_incoming_translation_inner(
     cfg.openai_api_key = resolve_openai_api_key(&app_config);
     cfg.target_language = resolve_incoming_translation_target_language(&app_config);
     cfg.playback_gain = incoming_translation_volume_gain(app_config.incoming_translation_volume);
+    let delivery = app_config.incoming_translation_delivery;
 
     let source_handle = app_handle.clone();
     let on_source_final: std::sync::Arc<dyn Fn(String) + Send + Sync> =
@@ -1342,6 +1343,7 @@ async fn start_incoming_translation_inner(
                     session_id,
                     text,
                     timestamp: now_ms_u64(),
+                    delivery,
                 },
             );
         });
@@ -1355,6 +1357,7 @@ async fn start_incoming_translation_inner(
                     session_id,
                     text,
                     timestamp: now_ms_u64(),
+                    delivery,
                 },
             );
         });

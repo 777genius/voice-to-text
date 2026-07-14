@@ -1169,6 +1169,47 @@ describe('transcription connect-retry reliability', () => {
     expect(store.incomingTranslationError).toBeNull();
   });
 
+  it('склеивает realtime incoming translation без пробелов внутри слов и перед пунктуацией', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('incoming_translation:status')({
+      payload: { session_id: 202, status: 'Recording' },
+    });
+    for (const text of ['Она об', 'ер', 'нулась', ', мол', ', ей нравится', '.']) {
+      await handlers.get('incoming_translation:delta')({
+        payload: {
+          session_id: 202,
+          text,
+          timestamp: 1,
+          delivery: 'text_and_audio',
+        },
+      });
+    }
+
+    for (const text of ['The call', 'er stopped', ' speaking.']) {
+      await handlers.get('incoming_translation:source-final')({
+        payload: {
+          session_id: 202,
+          text,
+          timestamp: 1,
+          delivery: 'text_and_audio',
+        },
+      });
+    }
+
+    expect(store.incomingTranslationText).toBe('Она обернулась, мол, ей нравится.');
+    expect(store.incomingSourceText).toBe('The caller stopped speaking.');
+  });
+
   it('запускает live translation health-check и сохраняет checklist', async () => {
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'run_live_translation_health_check') {

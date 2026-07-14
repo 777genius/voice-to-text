@@ -78,6 +78,7 @@ export interface IncomingTranslationTextPayload {
   session_id: number;
   text: string;
   timestamp: number;
+  delivery?: 'captions_only' | 'text_and_audio';
 }
 
 export interface IncomingTranslationErrorPayload {

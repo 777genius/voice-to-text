@@ -21,6 +21,17 @@ function keepRecentStreamingText(value: string): string {
 function appendStreamingTranscriptText(current: string, next: string): string {
   return keepRecentStreamingText(appendTranscriptText(current, next));
 }
+
+function appendIncomingTranslationText(
+  current: string,
+  next: string,
+  delivery: IncomingTranslationTextPayload['delivery']
+): string {
+  if (delivery === 'text_and_audio') {
+    return keepRecentStreamingText(current + next);
+  }
+  return appendStreamingTranscriptText(current, next);
+}
 import { api } from '../features/auth/infrastructure/api/apiClient';
 import { useAuthStore } from '../features/auth/store/authStore';
 import { useAppConfigStore } from './appConfig';
@@ -2134,9 +2145,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           if (payloadSessionId !== incomingTranslationSessionId.value) return;
           if (incomingTranslationStatus.value === RecordingStatus.Error) return;
           if (event.payload.text) {
-            incomingSourceText.value = appendStreamingTranscriptText(
+            incomingSourceText.value = appendIncomingTranslationText(
               incomingSourceText.value,
-              event.payload.text
+              event.payload.text,
+              event.payload.delivery ?? incomingTranslationDelivery.value
             );
           }
         }
@@ -2155,9 +2167,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           if (incomingTranslationStatus.value === RecordingStatus.Error) return;
           if (event.payload.text) {
             incomingTranslationError.value = null;
-            incomingTranslationText.value = appendStreamingTranscriptText(
+            incomingTranslationText.value = appendIncomingTranslationText(
               incomingTranslationText.value,
-              event.payload.text
+              event.payload.text,
+              event.payload.delivery ?? incomingTranslationDelivery.value
             );
           }
         }
