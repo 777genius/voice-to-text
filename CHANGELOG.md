@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.16.0] - 2026-07-16
+
+### Added
+- Added incoming spoken translation on macOS with isolated system-audio capture and local translated-speech playback.
+- Added settings for incoming spoken delivery, output volume, session mute, and duplex speaker-feedback guidance.
+- Added a release-grade macOS audio evidence gate with full-duplex smoke checks, measured soaks, semantic coverage, and recovery attestations.
+
+### Changed
+- Separated incoming captions and spoken-audio delivery behind a shared supervised realtime interpretation lifecycle.
+- Expanded CI and end-to-end coverage for audio routing, long sessions, restart stress, network faults, and app shutdown.
+- Improved incoming playback gain, native route health detection, and warm dictation connection reuse.
+
+### Fixed
+- Recovered macOS system capture and local playback after output-route changes without leaking active sessions.
+- Bounded STT, realtime translation, and audio queues and cleanup across failures, stop, suspend, and unexpected connection close.
+- Preserved graceful audio drain and realtime transcript spacing while rejecting silent provider output and playback overflow.
+- Restored prior clipboard contents for verified native macOS paste targets while keeping delayed-reader and unknown targets race-safe.
+- Resized the duplex translation popover and restored reliable warm dictation connections.
+
 ## [0.15.0] - 2026-07-09
 
 ### Added

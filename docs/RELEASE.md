@@ -8,58 +8,73 @@
 1. Определить тип релиза (major / minor / patch)
 2. Обновить версию во всех файлах
 3. Обновить CHANGELOG.md
-4. Закоммитить изменения
-5. Создать git tag
-6. Запушить tag → GitHub Actions соберёт билды
-7. Отредактировать GitHub Release
+4. Закоммитить и запушить изменения
+5. Создать и запушить git tag
+6. Запустить macOS Audio Release Gate с подтверждёнными ручными проверками
+7. Передать успешный gate run в Release workflow, который соберёт и опубликует релиз
 ```
 
 ---
 
-## Текущий релиз: v0.15.0
+## Текущий релиз: v0.16.0
 
-Minor-релиз для стабилизации live translation/audio pipeline, восстановления recording state после сбоев и более аккуратного закрытия failed sessions после `v0.14.0`.
+Minor-релиз с incoming spoken translation на macOS, более устойчивым full-duplex audio lifecycle и безопасным восстановлением clipboard после native auto-paste.
 
 ### Что говорить в статье
 
 - Скачать приложение можно с [voicetext.site](https://voicetext.site).
-- Live translation стал устойчивее к failed sessions, realtime translation errors и некорректным language/model/API key настройкам.
-- Recording state восстанавливается после failed starts и не конфликтует с keep-alive resume активной сессии.
-- Terminal transcription и live translation failures закрывают session lifecycle точнее.
-- Добавлены live audio smoke/e2e regression checks для поздних session events.
+- Приложение умеет переводить системный звук на macOS и воспроизводить переведённую речь через выбранный output device.
+- Incoming spoken translation получил настройки delivery mode, громкости и mute без перезапуска активной сессии.
+- System capture и local playback восстанавливаются после смены audio route, а failed/suspended sessions освобождают ресурсы точнее.
+- Auto-paste восстанавливает clipboard для проверенного native TextEdit flow и не возвращает delayed paste race в browser/editor/terminal targets.
+- Релиз защищён full-duplex smoke, long soak, restart stress, semantic audio и hardware recovery checks.
 
 ### Ссылки на код для статьи
 
-- Live translation pipeline: `src-tauri/src/`
-- Recording session handling: `src/`
-- Live audio smoke checks: `e2e-tests/`
+- Incoming spoken translation: `src-tauri/src/application/services/incoming_spoken_translation_service.rs`
+- Realtime interpretation lifecycle: `src-tauri/src/application/services/realtime_interpretation/`
+- Incoming translation settings: `src/features/settings/presentation/components/sections/IncomingTranslationSection.vue`
+- Live audio release evidence: `e2e-tests/` и `.github/workflows/macos-audio-gate.yml`
 
 ### Release notes для GitHub
 
 ```markdown
 ## What changed
 
-- Stabilized live translation sessions across audio, frontend state, and OpenAI text/translation settings.
-- Hardened async listeners, settings persistence, auth URL opening, and live audio runner parsing.
-- Added live audio smoke coverage and late session event regression tests.
+- Added incoming spoken translation on macOS with isolated system-audio capture and local translated-speech playback.
+- Added incoming delivery, volume, mute, and duplex feedback settings.
+- Added full-duplex release evidence with measured soaks, restart stress, semantic checks, and recovery attestations.
 
 ## What is fixed
 
-- Failed live translation and terminal transcription sessions now close more precisely.
-- Recording state is restored after failed starts.
-- Keep-alive resume is guarded while a recording session is already active.
-- Realtime translation failures, target language values, model overrides, and API keys are handled more defensively.
+- System capture and local playback recover after output-route changes.
+- STT, realtime translation, and audio sessions clean up more reliably after failures, stop, suspend, and network close.
+- Graceful audio drain, transcript spacing, and warm dictation connections are preserved.
+- Native TextEdit auto-paste restores the previous clipboard without weakening delayed-reader protections for other targets.
 ```
 
 ### Команды релиза
 
 ```bash
-pnpm release:notes v0.15.0
+pnpm release:notes v0.16.0
 git add CHANGELOG.md docs package.json src-tauri src
-git commit -m "release: v0.15.0"
-git tag v0.15.0
+git commit -m "release: v0.16.0"
+git tag v0.16.0
 git push origin HEAD
-git push origin v0.15.0
+git push origin v0.16.0
+
+# Только после реальных Zoom/output-disconnect/sleep-wake проверок
+gh workflow run "macOS Audio Release Gate" \
+  -f ref=v0.16.0 \
+  -f soak_seconds=1800 \
+  -f zoom_half_volume_bidirectional_verified=true \
+  -f output_disconnect_recovery_verified=true \
+  -f sleep_wake_recovery_verified=true
+
+# После успешного audio gate
+gh workflow run Release \
+  -f tag=v0.16.0 \
+  -f macos_audio_gate_run_id=<SUCCESSFUL_GATE_RUN_ID>
 ```
 
 ---
@@ -78,12 +93,13 @@ git push origin v0.15.0
 
 ## 2. Обновить версию
 
-Версия указана в **3 файлах** — все должны совпадать:
+Версия указана в **4 местах** - manifest versions должны совпадать, а project entry в `Cargo.lock` должен быть обновлён:
 
 ```bash
 # Проверить текущую версию
 grep '"version"' package.json src-tauri/tauri.conf.json
 grep '^version' src-tauri/Cargo.toml
+sed -n '/name = "voice-to-text"/,+1p' src-tauri/Cargo.lock
 ```
 
 ### Файлы для обновления
@@ -93,6 +109,7 @@ grep '^version' src-tauri/Cargo.toml
 | `package.json` | `"version"` | `"0.9.4"` |
 | `src-tauri/tauri.conf.json` | `"version"` | `"0.9.4"` |
 | `src-tauri/Cargo.toml` | `version` | `"0.9.4"` |
+| `src-tauri/Cargo.lock` | project package `version` | `"0.9.4"` |
 
 ```bash
 # Быстрая замена (пример: 0.9.3 → 0.9.4)
@@ -101,6 +118,7 @@ NEW="0.9.4"
 
 sed -i '' "s/\"version\": \"$OLD\"/\"version\": \"$NEW\"/" package.json src-tauri/tauri.conf.json
 sed -i '' "s/^version = \"$OLD\"/version = \"$NEW\"/" src-tauri/Cargo.toml
+cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
 ### Проверка
@@ -109,6 +127,7 @@ sed -i '' "s/^version = \"$OLD\"/version = \"$NEW\"/" src-tauri/Cargo.toml
 # Убедиться что версии совпадают
 grep '"version"' package.json src-tauri/tauri.conf.json
 grep '^version' src-tauri/Cargo.toml
+sed -n '/name = "voice-to-text"/,+1p' src-tauri/Cargo.lock
 ```
 
 ---
@@ -168,7 +187,7 @@ pnpm release:notes v0.9.4
 ## 4. Закоммитить
 
 ```bash
-git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml CHANGELOG.md
+git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock CHANGELOG.md docs
 git commit -m "release: v0.9.4"
 ```
 
@@ -179,7 +198,7 @@ git commit -m "release: v0.9.4"
 ## 5. Создать tag и запушить
 
 ```bash
-# Создать аннотированный tag
+# Создать tag
 git tag v0.9.4
 
 # Запушить коммит и tag
@@ -187,122 +206,80 @@ git push origin HEAD
 git push origin v0.9.4
 ```
 
-> После пуша тега GitHub Actions автоматически запустит сборку на всех платформах
-> (macOS Intel, macOS ARM, Windows, Linux). Это занимает ~15-20 минут.
+> Push тега сам по себе не запускает сборку. Тег фиксирует commit для audio evidence и последующего Release workflow.
 
 ---
 
-## 6. Дождаться сборки
+## 6. Запустить macOS Audio Release Gate
+
+Перед запуском нужно реально проверить:
+
+- Zoom call в обе стороны при 50% speaker volume;
+- cleanup и restart после отключения output device;
+- cleanup и restart после sleep/wake.
+
+Нельзя выставлять attestations в `true` без фактической проверки.
 
 ```bash
-# Следить за прогрессом
-gh run list --limit 3
-gh run watch
+gh workflow run "macOS Audio Release Gate" \
+  -f ref=v0.9.4 \
+  -f soak_seconds=1800 \
+  -f zoom_half_volume_bidirectional_verified=true \
+  -f output_disconnect_recovery_verified=true \
+  -f sleep_wake_recovery_verified=true
+
+gh run list --workflow "macOS Audio Release Gate" --limit 3
+gh run watch <AUDIO_GATE_RUN_ID>
 ```
 
-Если сборка упала:
-```bash
-# Посмотреть логи
-gh run view <run-id> --log-failed
-```
+Gate запускается на self-hosted macOS runner с unlocked GUI, выполняет paid smoke checks и 30-минутные measured soaks, затем сохраняет checksummed evidence.
 
----
-
-## 7. Отредактировать GitHub Release
-
-После успешной сборки GitHub Actions создаст драфт релиза с артефактами.
-Нужно обновить описание:
+Если gate упал:
 
 ```bash
-gh release edit v0.9.4 \
-  --title "v0.9.4 — Краткое описание" \
-  --notes "$(cat <<'EOF'
-## Что нового
-
-### Название фичи 1
-- Описание
-
-### Название фичи 2
-- Описание
-
----
-
-## Исправления
-- Что починили
-
----
-
-## Установка
-
-**macOS:**
-- Скачать `.dmg` — Intel (`x64`) или Apple Silicon (`aarch64`)
-- Перетащить в Applications
-
-**Windows:**
-- Скачать `.msi` и запустить установщик
-
-**Linux:**
-- `.deb` для Debian/Ubuntu: `sudo dpkg -i voicetextai_*.deb`
-- `.AppImage` для остальных: сделать исполняемым и запустить
-
----
-
-**Полный список изменений:** https://github.com/777genius/voice-to-text/compare/v0.9.3...v0.9.4
-EOF
-)"
+gh run view <AUDIO_GATE_RUN_ID> --log-failed
 ```
 
-### Шаблон описания релиза
-
-```markdown
-## Что нового
-
-### <Главная фича>
-- Пункт 1
-- Пункт 2
-
-### <Ещё фича>
-- Пункт
-
 ---
 
-## Исправления
-- Пункт
+## 7. Запустить Release workflow
 
----
+Release workflow принимает успешный audio gate для того же tagged commit, повторяет keyless quality gates, создаёт draft, последовательно собирает все платформы, проверяет assets и `latest.json`, затем публикует релиз.
 
-## Установка
+```bash
+gh workflow run Release \
+  -f tag=v0.9.4 \
+  -f macos_audio_gate_run_id=<SUCCESSFUL_GATE_RUN_ID>
 
-**macOS:**
-- Скачать `.dmg` — Intel (`x64`) или Apple Silicon (`aarch64`)
-- Перетащить в Applications
+gh run list --workflow Release --limit 3
+gh run watch <RELEASE_RUN_ID>
+```
 
-**Windows:**
-- Скачать `.msi` и запустить установщик
+Проверка опубликованного релиза:
 
-**Linux:**
-- `.deb` для Debian/Ubuntu: `sudo dpkg -i voicetextai_*.deb`
-- `.AppImage` для остальных: сделать исполняемым и запустить
-
----
-
-**Полный список изменений:** https://github.com/777genius/voice-to-text/compare/vПРЕДЫДУЩАЯ...vНОВАЯ
+```bash
+gh release view v0.9.4 --json tagName,isDraft,isPrerelease,url,assets
 ```
 
 ---
 
 ## Чеклист перед релизом
 
-- [ ] Версия обновлена в `package.json`, `tauri.conf.json`, `Cargo.toml`
-- [ ] Все три версии совпадают
+- [ ] Версия обновлена в `package.json`, `tauri.conf.json`, `Cargo.toml`, project entry `Cargo.lock`
+- [ ] Все manifest versions совпадают
 - [ ] `CHANGELOG.md` обновлён
 - [ ] `git status` чистый (нет незакоммиченных файлов)
+- [ ] Typecheck проходит: `pnpm typecheck`
 - [ ] Тесты проходят: `pnpm test:run`
 - [ ] Билд проходит локально: `pnpm build`
-- [ ] (Опционально) Rust-тесты проходят: `cargo test` (в `src-tauri/`)
+- [ ] Rust format проходит: `cargo fmt --manifest-path src-tauri/Cargo.toml --check`
+- [ ] Rust-тесты проходят: `cargo test --manifest-path src-tauri/Cargo.toml`
+- [ ] Clippy release lint проходит: `cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D clippy::await_holding_lock`
 - [ ] Tag создан и запушен
-- [ ] GitHub Actions сборка прошла
-- [ ] Описание релиза на GitHub обновлено
+- [ ] Три ручные hardware/Zoom проверки реально выполнены
+- [ ] macOS Audio Release Gate прошёл для tagged commit
+- [ ] Release workflow прошёл и опубликовал релиз
+- [ ] `latest.json` содержит новую версию и все platform signatures
 - [ ] Артефакты доступны для скачивания
 
 ---
@@ -317,21 +294,29 @@ OLD_VERSION="0.9.3"
 # 1. Обновить версии
 sed -i '' "s/\"version\": \"$OLD_VERSION\"/\"version\": \"$VERSION\"/" package.json src-tauri/tauri.conf.json
 sed -i '' "s/^version = \"$OLD_VERSION\"/version = \"$VERSION\"/" src-tauri/Cargo.toml
+cargo check --manifest-path src-tauri/Cargo.toml
 
 # 2. Обновить CHANGELOG.md (вручную)
 
 # 3. Коммит + tag + push
-git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml CHANGELOG.md
+git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock CHANGELOG.md docs
 git commit -m "release: v$VERSION"
 git tag "v$VERSION"
 git push origin HEAD
 git push origin "v$VERSION"
 
-# 4. Следить за сборкой
-gh run watch
+# 4. После реальных Zoom/output-disconnect/sleep-wake проверок запустить audio gate
+gh workflow run "macOS Audio Release Gate" \
+  -f ref="v$VERSION" \
+  -f soak_seconds=1800 \
+  -f zoom_half_volume_bidirectional_verified=true \
+  -f output_disconnect_recovery_verified=true \
+  -f sleep_wake_recovery_verified=true
 
-# 5. Обновить описание релиза (после успешной сборки)
-gh release edit "v$VERSION" --title "v$VERSION — Описание" --notes-file release-notes.md
+# 5. После успешного audio gate запустить Release workflow
+gh workflow run Release \
+  -f tag="v$VERSION" \
+  -f macos_audio_gate_run_id=<SUCCESSFUL_GATE_RUN_ID>
 ```
 
 ---
@@ -346,15 +331,17 @@ git add .
 git commit -m "fix: описание бага"
 
 # 2. Поднять patch-версию (0.6.0 → 0.6.1)
-# Обновить все 3 файла (см. шаг 2)
+# Обновить все 4 version references (см. шаг 2)
 
 # 3. Коммит + tag + push
-git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml CHANGELOG.md
+git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock CHANGELOG.md docs
 git commit -m "release: v0.6.1"
 git tag v0.6.1
 git push origin master
 git push origin v0.6.1
 ```
+
+Даже для hotfix обязательны успешный macOS Audio Release Gate и последующий Release workflow из шагов 6-7.
 
 ---
 
