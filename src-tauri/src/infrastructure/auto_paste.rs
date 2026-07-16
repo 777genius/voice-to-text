@@ -28,6 +28,9 @@ const VOICETEXT_BUNDLE_IDS: &[&str] = &[VOICETEXT_PROD_BUNDLE_ID, VOICETEXT_DEV_
 const AUTO_PASTE_PRE_PASTE_DELAY_MS: u64 = 80;
 #[cfg(any(target_os = "macos", test))]
 const AUTO_PASTE_POST_PASTE_COMMIT_DELAY_MS: u64 = 250;
+#[cfg(target_os = "macos")]
+const AUTO_PASTE_MACOS_RESTORE_CLIPBOARD_DELAY_MS: u64 = 500;
+#[cfg(not(target_os = "macos"))]
 const AUTO_PASTE_RESTORE_CLIPBOARD_DELAY_MS: u64 = 2_500;
 #[cfg(target_os = "macos")]
 const MACOS_ANSI_V_KEY_CODE: u16 = 9;
@@ -73,6 +76,8 @@ const MACOS_CLIPBOARD_FIRST_BUNDLE_ID_PARTS: &[&str] = &[
     "wezterm",
     "tabby",
 ];
+#[cfg(target_os = "macos")]
+const MACOS_SAFE_CLIPBOARD_RESTORE_BUNDLE_IDS: &[&str] = &["com.apple.TextEdit"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AutoPasteMethod {
@@ -1014,6 +1019,13 @@ fn target_prefers_clipboard_paste(target: &AutoPasteTarget) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+fn target_can_safely_restore_clipboard(target: &AutoPasteTarget) -> bool {
+    MACOS_SAFE_CLIPBOARD_RESTORE_BUNDLE_IDS
+        .iter()
+        .any(|bundle_id| target.bundle_id.eq_ignore_ascii_case(bundle_id))
+}
+
+#[cfg(target_os = "macos")]
 fn target_has_unreliable_ax_paste_menu(target: &AutoPasteTarget) -> bool {
     target_prefers_clipboard_paste(target)
 }
@@ -1068,6 +1080,9 @@ trait ClipboardAccess {
 trait TextInjector {
     fn type_text(&mut self, text: &str) -> Result<()>;
     fn paste_shortcut(&mut self) -> Result<()>;
+    fn restore_clipboard_after_successful_paste(&self) -> bool {
+        true
+    }
 }
 
 trait DelayProvider {
@@ -1133,6 +1148,10 @@ where
     fn paste_shortcut(&mut self) -> Result<()> {
         (self.paste_command)(&self.target)
     }
+
+    fn restore_clipboard_after_successful_paste(&self) -> bool {
+        target_can_safely_restore_clipboard(&self.target)
+    }
 }
 
 struct ThreadDelay;
@@ -1148,16 +1167,20 @@ fn pre_paste_delay() -> Duration {
 }
 
 fn restore_clipboard_delay() -> Duration {
-    Duration::from_millis(AUTO_PASTE_RESTORE_CLIPBOARD_DELAY_MS)
+    #[cfg(target_os = "macos")]
+    {
+        Duration::from_millis(AUTO_PASTE_MACOS_RESTORE_CLIPBOARD_DELAY_MS)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Duration::from_millis(AUTO_PASTE_RESTORE_CLIPBOARD_DELAY_MS)
+    }
 }
 
 #[cfg(target_os = "macos")]
 fn post_paste_commit_delay() -> Duration {
     Duration::from_millis(AUTO_PASTE_POST_PASTE_COMMIT_DELAY_MS)
-}
-
-fn restore_clipboard_after_successful_paste_enabled() -> bool {
-    !cfg!(target_os = "macos")
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1669,9 +1692,9 @@ where
         return Err(error);
     }
 
-    if !restore_clipboard_after_successful_paste_enabled() {
+    if !injector.restore_clipboard_after_successful_paste() {
         log::info!(
-            "Keeping auto-paste text in clipboard after successful paste command on macOS to avoid delayed paste races"
+            "Keeping auto-paste text in clipboard after successful paste command to avoid delayed paste races"
         );
         #[cfg(target_os = "macos")]
         delay.sleep(post_paste_commit_delay());
@@ -1774,8 +1797,7 @@ mod tests {
         focused_element_likely_accepts_text, normalize_auto_paste_target, paste_text_hybrid_with,
         should_use_clipboard_backend, target_matches_bundle_and_pid, AutoPasteMethod,
         ClipboardAccess, DelayProvider, TextInjector, AUTO_PASTE_CLIPBOARD_THRESHOLD_CHARS,
-        AUTO_PASTE_RESTORE_CLIPBOARD_DELAY_MS, VOICETEXT_BUNDLE_ID, VOICETEXT_DEV_BUNDLE_ID,
-        VOICETEXT_PROD_BUNDLE_ID,
+        VOICETEXT_BUNDLE_ID, VOICETEXT_DEV_BUNDLE_ID, VOICETEXT_PROD_BUNDLE_ID,
     };
     use anyhow::{bail, Context, Result};
     use std::cell::RefCell;
@@ -1885,23 +1907,26 @@ mod tests {
     }
 
     fn expected_successful_clipboard_events(text: &str) -> Vec<String> {
-        let mut events = vec![
+        vec![
             "get:1".to_string(),
             format!("set:{}", text),
             "sleep:80".to_string(),
             "paste".to_string(),
-        ];
-        if !super::restore_clipboard_after_successful_paste_enabled() {
-            events.push(format!(
-                "sleep:{}",
-                super::AUTO_PASTE_POST_PASTE_COMMIT_DELAY_MS
-            ));
-        } else {
-            events.push(format!("sleep:{}", AUTO_PASTE_RESTORE_CLIPBOARD_DELAY_MS));
-            events.push("get:2".to_string());
-            events.push("set:previous".to_string());
-        }
-        events
+            format!("sleep:{}", super::restore_clipboard_delay().as_millis()),
+            "get:2".to_string(),
+            "set:previous".to_string(),
+        ]
+    }
+
+    #[cfg(target_os = "macos")]
+    fn expected_successful_clipboard_first_target_events(text: &str) -> Vec<String> {
+        vec![
+            "get:1".to_string(),
+            format!("set:{}", text),
+            "sleep:80".to_string(),
+            "paste".to_string(),
+            format!("sleep:{}", super::AUTO_PASTE_POST_PASTE_COMMIT_DELAY_MS),
+        ]
     }
 
     #[cfg(target_os = "macos")]
@@ -2283,6 +2308,43 @@ end tell"#
         })
     }
 
+    #[cfg(target_os = "macos")]
+    struct TextClipboardGuard {
+        original: String,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl TextClipboardGuard {
+        fn replace_with(marker: &str) -> Result<Self> {
+            let mut clipboard = super::SystemClipboard::new()
+                .context("clipboard must be available for macOS auto-paste e2e")?;
+            let original = clipboard
+                .get_text()
+                .context("macOS auto-paste e2e requires a readable text clipboard")?;
+            clipboard
+                .set_text(marker)
+                .context("failed to set e2e clipboard marker")?;
+            Ok(Self { original })
+        }
+
+        fn current_text(&self) -> Result<String> {
+            let mut clipboard = super::SystemClipboard::new()
+                .context("clipboard must be available for macOS auto-paste e2e")?;
+            clipboard
+                .get_text()
+                .context("failed to read e2e clipboard text")
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Drop for TextClipboardGuard {
+        fn drop(&mut self) {
+            if let Ok(mut clipboard) = super::SystemClipboard::new() {
+                let _ = clipboard.set_text(&self.original);
+            }
+        }
+    }
+
     #[test]
     fn normalize_auto_paste_target_rejects_voicetext_bundles() {
         for bundle_id in [
@@ -2371,7 +2433,7 @@ end tell"#
             paste_text_hybrid_with(&text, &mut clipboard, &mut injector, &mut delay).unwrap();
 
         assert_eq!(method, AutoPasteMethod::Clipboard);
-        assert_eq!(clipboard.text, text);
+        assert_eq!(clipboard.text, "previous");
         assert!(injector.typed_texts.is_empty());
         assert_eq!(injector.paste_shortcut_calls, 1);
         assert_eq!(
@@ -2382,7 +2444,7 @@ end tell"#
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_target_clipboard_paste_uses_saved_target_for_paste_command() {
+    fn macos_clipboard_first_target_keeps_auto_paste_text_after_saved_target_paste() {
         let target = normalize_auto_paste_target("com.openai.codex".to_string(), 123)
             .expect("target must be valid");
         let events = Rc::new(RefCell::new(Vec::new()));
@@ -2396,8 +2458,10 @@ end tell"#
 
         let method =
             super::paste_text_hybrid_for_target_with(&text, &target, &mut clipboard, &mut delay, {
+                let events = events.clone();
                 let seen_targets = seen_targets.clone();
                 move |target| {
+                    events.borrow_mut().push("paste".to_string());
                     seen_targets.borrow_mut().push(target.clone());
                     Ok(())
                 }
@@ -2407,28 +2471,127 @@ end tell"#
         assert_eq!(method, AutoPasteMethod::Clipboard);
         assert_eq!(seen_targets.borrow().as_slice(), [target]);
         assert_eq!(clipboard.text, text);
-    }
-
-    #[test]
-    fn clipboard_restore_delay_leaves_time_for_async_paste_handlers() {
-        assert!(AUTO_PASTE_RESTORE_CLIPBOARD_DELAY_MS >= 2_500);
+        assert_eq!(
+            *events.borrow(),
+            expected_successful_clipboard_first_target_events(&text)
+        );
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn clipboard_success_waits_for_macos_paste_commit_before_returning_focus() {
-        assert!(super::AUTO_PASTE_POST_PASTE_COMMIT_DELAY_MS >= 250);
-        assert!(
-            super::AUTO_PASTE_POST_PASTE_COMMIT_DELAY_MS < AUTO_PASTE_RESTORE_CLIPBOARD_DELAY_MS
+    fn macos_clipboard_first_target_does_not_restore_previous_clipboard_into_late_paste_reader() {
+        let target = normalize_auto_paste_target("com.openai.codex".to_string(), 123)
+            .expect("target must be valid");
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let previous_clipboard = "4874100030141942";
+        let text = "привет из диктовки".to_string();
+        let mut clipboard = FakeClipboard::new(previous_clipboard, events.clone());
+        let mut delay = FakeDelay {
+            events: events.clone(),
+            ..Default::default()
+        };
+
+        let method =
+            super::paste_text_hybrid_for_target_with(&text, &target, &mut clipboard, &mut delay, {
+                let events = events.clone();
+                move |_| {
+                    events.borrow_mut().push("paste".to_string());
+                    Ok(())
+                }
+            })
+            .unwrap();
+
+        assert_eq!(method, AutoPasteMethod::Clipboard);
+        assert_eq!(clipboard.text, text);
+        assert!(!events
+            .borrow()
+            .iter()
+            .any(|event| event == &format!("set:{previous_clipboard}")));
+        assert_eq!(
+            *events.borrow(),
+            expected_successful_clipboard_first_target_events(&text)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_known_native_target_restores_previous_clipboard_after_paste() {
+        let target = normalize_auto_paste_target("com.apple.TextEdit".to_string(), 123)
+            .expect("target must be valid");
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let text = "привет из диктовки".to_string();
+        let mut clipboard = FakeClipboard::new("previous", events.clone());
+        let mut delay = FakeDelay {
+            events: events.clone(),
+            ..Default::default()
+        };
+
+        let method =
+            super::paste_text_hybrid_for_target_with(&text, &target, &mut clipboard, &mut delay, {
+                let events = events.clone();
+                move |_| {
+                    events.borrow_mut().push("paste".to_string());
+                    Ok(())
+                }
+            })
+            .unwrap();
+
+        assert_eq!(method, AutoPasteMethod::Clipboard);
+        assert_eq!(clipboard.text, "previous");
+        assert_eq!(
+            *events.borrow(),
+            expected_successful_clipboard_events(&text)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_unknown_target_keeps_auto_paste_text_after_paste() {
+        let target = normalize_auto_paste_target("com.example.UnknownEditor".to_string(), 123)
+            .expect("target must be valid");
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let text = "привет из диктовки".to_string();
+        let mut clipboard = FakeClipboard::new("previous", events.clone());
+        let mut delay = FakeDelay {
+            events: events.clone(),
+            ..Default::default()
+        };
+
+        let method =
+            super::paste_text_hybrid_for_target_with(&text, &target, &mut clipboard, &mut delay, {
+                let events = events.clone();
+                move |_| {
+                    events.borrow_mut().push("paste".to_string());
+                    Ok(())
+                }
+            })
+            .unwrap();
+
+        assert_eq!(method, AutoPasteMethod::Clipboard);
+        assert_eq!(clipboard.text, text);
+        assert_eq!(
+            *events.borrow(),
+            expected_successful_clipboard_first_target_events(&text)
         );
     }
 
     #[test]
-    fn successful_clipboard_restore_policy_keeps_text_on_macos() {
-        assert_eq!(
-            super::restore_clipboard_after_successful_paste_enabled(),
-            !cfg!(target_os = "macos")
+    fn clipboard_restore_delay_leaves_time_for_async_paste_handlers() {
+        #[cfg(target_os = "macos")]
+        assert!(
+            super::restore_clipboard_delay() >= super::post_paste_commit_delay(),
+            "macOS restore must wait at least through the paste commit window"
         );
+
+        #[cfg(not(target_os = "macos"))]
+        assert!(super::AUTO_PASTE_RESTORE_CLIPBOARD_DELAY_MS >= 2_500);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn clipboard_success_waits_for_macos_paste_commit_before_restore() {
+        assert!(super::AUTO_PASTE_POST_PASTE_COMMIT_DELAY_MS >= 250);
+        assert!(super::restore_clipboard_delay() >= super::post_paste_commit_delay());
     }
 
     #[cfg(target_os = "macos")]
@@ -2962,6 +3125,8 @@ end tell"#
             .context("system clock is before unix epoch")?
             .as_nanos();
         let marker = format!("voicetext e2e {stamp} привет");
+        let clipboard_marker = format!("voicetext clipboard restore e2e {stamp}");
+        let clipboard_guard = TextClipboardGuard::replace_with(&clipboard_marker)?;
         let method = super::paste_text_for_target(&marker, &target)?;
         let pasted_value =
             wait_for_focused_ax_value_containing(&target, &marker).with_context(|| {
@@ -2971,6 +3136,11 @@ end tell"#
         assert!(
             pasted_value.contains(&marker),
             "focused TextEdit AXValue must contain marker after {method:?} paste"
+        );
+        assert_eq!(
+            clipboard_guard.current_text()?,
+            clipboard_marker,
+            "clipboard text must be restored after {method:?} paste"
         );
         Ok(())
     }
@@ -3020,6 +3190,8 @@ end tell"#
             .context("system clock is before unix epoch")?
             .as_nanos();
         let marker = format!("voicetext browser e2e {stamp}");
+        let clipboard_marker = format!("voicetext browser clipboard restore e2e {stamp}");
+        let clipboard_guard = TextClipboardGuard::replace_with(&clipboard_marker)?;
         let method = super::paste_text_for_target(&marker, &target)?;
         let title =
             wait_for_front_window_title_containing(target.pid, &marker).with_context(|| {
@@ -3029,6 +3201,11 @@ end tell"#
         assert!(
             title.contains(&marker),
             "controlled browser textarea must commit marker through DOM input event after {method:?} paste"
+        );
+        assert_eq!(
+            clipboard_guard.current_text()?,
+            marker,
+            "clipboard-first browser target must keep auto-paste text after {method:?} paste to avoid delayed reader races"
         );
         Ok(())
     }
@@ -3078,11 +3255,7 @@ end tell"#
             paste_text_hybrid_with(&text, &mut clipboard, &mut injector, &mut delay).unwrap();
 
         assert_eq!(method, AutoPasteMethod::Clipboard);
-        if super::restore_clipboard_after_successful_paste_enabled() {
-            assert_eq!(clipboard.text, "previous");
-        } else {
-            assert_eq!(clipboard.text, text);
-        }
+        assert_eq!(clipboard.text, "previous");
         assert!(injector.typed_texts.is_empty());
         assert_eq!(injector.paste_shortcut_calls, 1);
         assert_eq!(*events.borrow(), expected_events);
@@ -3093,9 +3266,7 @@ end tell"#
         let events = Rc::new(RefCell::new(Vec::new()));
         let text = long_text();
         let mut clipboard = FakeClipboard::new("previous", events.clone());
-        if super::restore_clipboard_after_successful_paste_enabled() {
-            clipboard.change_on_get = Some((2, "user copy".to_string()));
-        }
+        clipboard.change_on_get = Some((2, "user copy".to_string()));
         let mut injector = FakeTextInjector {
             events: events.clone(),
             ..Default::default()
@@ -3109,11 +3280,7 @@ end tell"#
             paste_text_hybrid_with(&text, &mut clipboard, &mut injector, &mut delay).unwrap();
 
         assert_eq!(method, AutoPasteMethod::Clipboard);
-        if super::restore_clipboard_after_successful_paste_enabled() {
-            assert_eq!(clipboard.text, "user copy");
-        } else {
-            assert_eq!(clipboard.text, text);
-        }
+        assert_eq!(clipboard.text, "user copy");
         assert_eq!(injector.paste_shortcut_calls, 1);
         assert!(!events.borrow().iter().any(|event| event == "set:previous"));
     }
@@ -3147,14 +3314,10 @@ end tell"#
                 "sleep:80".to_string(),
                 "paste".to_string(),
             ];
-            if super::restore_clipboard_after_successful_paste_enabled() {
-                expected.push(format!("sleep:{}", AUTO_PASTE_RESTORE_CLIPBOARD_DELAY_MS));
-            } else {
-                expected.push(format!(
-                    "sleep:{}",
-                    super::AUTO_PASTE_POST_PASTE_COMMIT_DELAY_MS
-                ));
-            }
+            expected.push(format!(
+                "sleep:{}",
+                super::restore_clipboard_delay().as_millis()
+            ));
             expected
         });
     }
