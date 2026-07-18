@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.16.1] - 2026-07-18
+
+### Fixed
+- Restored email and Google sign-in in production builds by preventing local development API URLs from leaking into release assets.
+- Kept localhost API routing available for dev and debug builds while requiring a secure HTTPS backend in production.
+- Prevented the Google sign-in button from submitting the email form and showing unrelated validation errors.
+
 ## [0.16.0] - 2026-07-16
 
 ### Added

@@ -129,10 +129,20 @@ async function loginWithGoogle() {
     </v-alert>
 
     <div v-if="showExistingAccountActions" class="d-flex flex-column ga-2 mb-4">
-      <v-btn variant="outlined" color="primary" @click="switchToLoginAndFocusPassword">
+      <v-btn
+        type="button"
+        variant="outlined"
+        color="primary"
+        @click="switchToLoginAndFocusPassword"
+      >
         {{ t('auth.login') }}
       </v-btn>
-      <v-btn variant="text" color="primary" @click="emit('forgot-password', email)">
+      <v-btn
+        type="button"
+        variant="text"
+        color="primary"
+        @click="emit('forgot-password', email)"
+      >
         {{ t('auth.forgotPassword') }}
       </v-btn>
     </div>
@@ -177,6 +187,7 @@ async function loginWithGoogle() {
 
     <div v-if="!isRegister" class="text-right mb-4">
       <v-btn
+        type="button"
         variant="text"
         size="small"
         color="primary"
@@ -205,6 +216,7 @@ async function loginWithGoogle() {
     </div>
 
     <v-btn
+      type="button"
       variant="outlined"
       size="large"
       block
@@ -222,6 +234,7 @@ async function loginWithGoogle() {
         {{ isRegister ? t('auth.hasAccount') : t('auth.noAccount') }}
       </span>
       <v-btn
+        type="button"
         variant="text"
         color="primary"
         @click="isRegister ? emit('switch-to-login') : emit('switch-to-register')"

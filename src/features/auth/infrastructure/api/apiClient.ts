@@ -5,8 +5,8 @@ import { createUser } from '../../domain/entities/User';
 import { AuthError, AuthErrorCode } from '../../domain/errors';
 import { runRefreshSingleFlight } from '../../application/services/refreshSingleFlight';
 import { useAuthStore } from '../../store/authStore';
+import { API_BASE_URL } from '@/config/runtimeApiBase';
 
-const API_BASE = import.meta.env.VITE_API_URL || 'https://api.voicetext.site';
 const REQUEST_TIMEOUT_MS = 30000;
 
 function trySyncAuthStoreSession(session: ReturnType<typeof createSession> | null): void {
@@ -42,7 +42,7 @@ async function refreshToken(): Promise<void> {
 
     let response: Response;
     try {
-      response = await fetch(`${API_BASE}/api/v1/auth/refresh`, {
+      response = await fetch(`${API_BASE_URL}/api/v1/auth/refresh`, {
         method: 'POST',
         signal: controller.signal,
         headers: {
@@ -200,7 +200,7 @@ export async function apiRequest<T>(
   path: string,
   options: RequestInit = {}
 ): Promise<T> {
-  const url = `${API_BASE}${path}`;
+  const url = `${API_BASE_URL}${path}`;
 
   try {
     const response = await refreshFetch(url, options);
