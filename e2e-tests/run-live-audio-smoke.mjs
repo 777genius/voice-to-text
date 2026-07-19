@@ -358,6 +358,7 @@ const tests = [
       '--exact',
       '--nocapture',
     ],
+    timeoutMs: 300_000,
   },
 ];
 
