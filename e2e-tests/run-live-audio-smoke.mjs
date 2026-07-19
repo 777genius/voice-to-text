@@ -134,12 +134,12 @@ const tests = [
     label: 'output-health-terminal-signal',
     paid: false,
     testName:
-      'application::services::realtime_interpretation::session::tests::output_health_failure_is_a_terminal_device_error',
+      'application::services::realtime_interpretation::session::tests::output_maintenance_exhaustion_is_a_terminal_device_error',
     command: [
       'cargo',
       'test',
       '--lib',
-      'application::services::realtime_interpretation::session::tests::output_health_failure_is_a_terminal_device_error',
+      'application::services::realtime_interpretation::session::tests::output_maintenance_exhaustion_is_a_terminal_device_error',
       '--',
       '--exact',
       '--nocapture',
@@ -179,13 +179,13 @@ const tests = [
   {
     label: 'macos-default-output-switch',
     paid: false,
-    testName: 'system_default_output_switch_is_a_terminal_health_error_and_restores_route',
+    testName: 'system_default_output_switch_recovers_on_the_new_route_and_restores_original',
     command: [
       'cargo',
       'test',
       '--test',
       'blackhole_loopback_test',
-      'system_default_output_switch_is_a_terminal_health_error_and_restores_route',
+      'system_default_output_switch_recovers_on_the_new_route_and_restores_original',
       '--',
       '--ignored',
       '--exact',
