@@ -11,6 +11,11 @@ on:
         description: 'Successful macOS Audio Release Gate run ID for the same tagged commit'
         required: true
         type: string
+      skip_macos_audio_gate:
+        description: 'Explicitly skip the local macOS audio evidence check for this release'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -29,6 +34,7 @@ jobs:
       ref: ${{ inputs.tag }}
 
   verify-macos-audio-gate:
+    if: ${{ !inputs.skip_macos_audio_gate }}
     runs-on: ubuntu-24.04
 
     steps:
@@ -226,6 +232,7 @@ jobs:
     needs:
       - quality-gates
       - verify-macos-audio-gate
+    if: ${{ always() && needs.quality-gates.result == 'success' && (needs.verify-macos-audio-gate.result == 'success' || inputs.skip_macos_audio_gate) }}
     runs-on: ubuntu-24.04
     outputs:
       release_id: ${{ steps.release.outputs.release_id }}
