@@ -319,6 +319,7 @@ jobs:
 
   build-release:
     needs: create-release
+    if: ${{ always() && needs.create-release.result == 'success' }}
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -450,6 +451,7 @@ jobs:
     needs:
       - create-release
       - build-release
+    if: ${{ always() && needs.create-release.result == 'success' && needs.build-release.result == 'success' }}
     runs-on: ubuntu-24.04
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -521,6 +523,7 @@ jobs:
     needs:
       - create-release
       - verify-release
+    if: ${{ always() && needs.create-release.result == 'success' && needs.verify-release.result == 'success' }}
     runs-on: ubuntu-24.04
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
