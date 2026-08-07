@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import { useTranscriptionStore } from './transcription';
+import { reconcilePartialAnimation } from './transcriptionReconciliation';
 
 const invokeMock = vi.fn();
 const listenMock = vi.fn();
@@ -136,6 +137,15 @@ describe('transcription connect-retry reliability', () => {
 
     authContainerMock.refreshTokensUseCase.execute.mockResolvedValue({
       accessToken: 'access_new',
+    });
+  });
+
+  it('reconciles a corrected suffix without blanking its stable animated prefix', () => {
+    expect(
+      reconcilePartialAnimation('The quick brown fax', 'The quick brown fox')
+    ).toEqual({
+      renderedText: 'The quick brown fox',
+      textToAnimate: '',
     });
   });
 
@@ -2069,6 +2079,113 @@ describe('transcription connect-retry reliability', () => {
       ['auto_paste_text', { text: ' фокусироваться и не сломается?' }],
     ]);
     expect(store.finalText).toBe('Ты уверен, что так будет надёжно, фокусироваться и не сломается?');
+  });
+
+  it('provider-neutral partial correction commits immutable history and pastes each segment once', async () => {
+    vi.useFakeTimers();
+    try {
+      const handlers = new Map<string, any>();
+      appConfigMock.autoPasteText = true;
+
+      listenMock.mockImplementation(async (eventName: string, handler: any) => {
+        handlers.set(eventName, handler);
+        return () => {};
+      });
+      invokeMock.mockImplementation((command: string) => {
+        if (command === 'get_recording_status') return Promise.resolve('Recording');
+        return Promise.resolve(null);
+      });
+
+      const store = useTranscriptionStore();
+      await store.initialize();
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 19, status: 'Recording', stopped_via_hotkey: false },
+      });
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 19,
+          text: 'The quick brown fax',
+          timestamp: 1,
+          is_segment_final: false,
+          start: 0,
+          duration: 0.8,
+        },
+      });
+      await vi.advanceTimersByTimeAsync(200);
+
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 19,
+          text: 'The quick brown fox',
+          timestamp: 2,
+          is_segment_final: false,
+          start: 0,
+          duration: 1,
+        },
+      });
+
+      expect(store.partialText).toBe('The quick brown fox');
+      expect(store.visiblePartialText).toBe('The quick brown fox');
+      expect(store.accumulatedText).toBe('');
+
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 19,
+          text: 'The quick brown fox',
+          timestamp: 3,
+          is_segment_final: true,
+          start: 0,
+          duration: 1,
+        },
+      });
+
+      expect(store.accumulatedText).toBe('The quick brown fox');
+      expect(store.partialText).toBe('');
+
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 19,
+          text: 'The quick brown fox jumps over',
+          timestamp: 4,
+          is_segment_final: false,
+          start: 1,
+          duration: 0.6,
+        },
+      });
+
+      expect(store.accumulatedText).toBe('The quick brown fox');
+      expect(store.partialText).toBe('The quick brown fox jumps over');
+      expect(store.displayText).toBe('The quick brown fox jumps over');
+
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 19,
+          text: 'jumps over',
+          timestamp: 5,
+          is_segment_final: true,
+          start: 1,
+          duration: 0.6,
+        },
+      });
+      await handlers.get('transcription:final')({
+        payload: { session_id: 19, text: '', timestamp: 6 },
+      });
+
+      await store.stopRecording('manual_test');
+      await handlers.get('recording:status')({
+        payload: { session_id: 19, status: 'Idle', stopped_via_hotkey: false },
+      });
+      await vi.advanceTimersByTimeAsync(500);
+      await flushMicrotasks();
+
+      expect(invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text')).toEqual([
+        ['auto_paste_text', { text: 'The quick brown fox' }],
+        ['auto_paste_text', { text: ' jumps over' }],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('append-ит finalized chunks по Deepgram, даже если слова повторяются на границе', async () => {
