@@ -477,9 +477,9 @@ function scheduleHideRecordingWindow(reason: string) {
     }
 
     try {
-      store.suppressPreviousTranscriptionDisplay(`auto_hide:${reason}`);
       const window = getCurrentWebviewWindow();
       await window.hide();
+      store.suppressPreviousTranscriptionDisplay(`auto_hide:${reason}`);
       console.log(`[AutoHide] Window hidden successfully (${reason})`);
     } catch (err) {
       console.error('[AutoHide] Failed to hide window:', err);
