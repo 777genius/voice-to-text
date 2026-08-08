@@ -3504,8 +3504,8 @@ mod snapshot_contract_tests {
     }
 
     #[test]
-    fn auto_paste_restores_recording_window_when_it_was_visible() {
-        assert!(should_restore_recording_window_after_auto_paste(
+    fn auto_paste_restores_recording_window_only_while_processing() {
+        assert!(!should_restore_recording_window_after_auto_paste(
             true,
             RecordingStatus::Idle
         ));
@@ -3513,13 +3513,17 @@ mod snapshot_contract_tests {
             true,
             RecordingStatus::Processing
         ));
-        assert!(should_restore_recording_window_after_auto_paste(
+        assert!(!should_restore_recording_window_after_auto_paste(
             true,
             RecordingStatus::Starting
         ));
-        assert!(should_restore_recording_window_after_auto_paste(
+        assert!(!should_restore_recording_window_after_auto_paste(
             true,
             RecordingStatus::Recording
+        ));
+        assert!(!should_restore_recording_window_after_auto_paste(
+            true,
+            RecordingStatus::Error
         ));
         assert!(!should_restore_recording_window_after_auto_paste(
             false,
@@ -3537,7 +3541,7 @@ mod snapshot_contract_tests {
             },
             RecordingStatus::Recording
         ));
-        assert!(should_restore_recording_window_after_suppression(
+        assert!(!should_restore_recording_window_after_suppression(
             AutoPasteWindowSuppression {
                 was_visible: true,
                 lowered: true,
@@ -5727,9 +5731,9 @@ fn should_hide_recording_window_for_auto_paste(
 
 fn should_restore_recording_window_after_auto_paste(
     window_was_visible: bool,
-    _recording_status: RecordingStatus,
+    recording_status: RecordingStatus,
 ) -> bool {
-    window_was_visible
+    window_was_visible && recording_status == RecordingStatus::Processing
 }
 
 fn should_restore_recording_window_after_suppression(
