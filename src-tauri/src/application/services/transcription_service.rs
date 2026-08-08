@@ -27,7 +27,11 @@ const AUDIO_SENT_SPEECH_LIKELY_AMPLITUDE: i32 = 1500;
 const MAX_AUDIO_STALL_RESTARTS: u32 = 3;
 const STT_START_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
 const STT_SEND_OPERATION_TIMEOUT: Duration = Duration::from_secs(6);
-const STT_STOP_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
+// Pause covers pending-audio flush, Finalize write, the provider-bounded 12s
+// acknowledgement, and post-ack text grace. A full stop additionally sends
+// both the protocol close and WebSocket close frame.
+const STT_PAUSE_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
+const STT_STOP_OPERATION_TIMEOUT: Duration = Duration::from_secs(26);
 const STT_ABORT_OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Default)]
@@ -1350,7 +1354,7 @@ impl TranscriptionService {
 
             let pause_result = await_stt_operation(
                 provider.pause_stream(),
-                STT_STOP_OPERATION_TIMEOUT,
+                STT_PAUSE_OPERATION_TIMEOUT,
                 "STT pause_stream",
             )
             .await;

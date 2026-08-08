@@ -404,10 +404,11 @@ fn load_hello_fixture() -> Vec<u8> {
 
 fn load_long_ru_fixture() -> Vec<u8> {
     let mut audio = load_fixture("hello_ru");
+    // A deliberate natural pause verifies that provider VAD emits a stable
+    // segment before explicit stop. Without this gap the fixture is continuous
+    // speech and no provider can infer a safe utterance boundary.
+    audio.extend(vec![0; (SAMPLE_RATE as usize * 650 / 1_000) * 2]);
     audio.extend(load_fixture("numbers"));
-    audio.extend(load_fixture("hello_en"));
-    audio.extend(load_fixture("numbers"));
-    audio.extend(load_fixture("short"));
     audio
 }
 
