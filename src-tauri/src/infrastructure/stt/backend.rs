@@ -35,7 +35,11 @@ const DEV_BACKEND_URL: &str = "ws://localhost:8080";
 // Без них connect/send могут "подвиснуть" и UI будет бесконечно ждать.
 const WS_CONNECT_TIMEOUT_SECS: u64 = 8;
 const WS_SEND_TIMEOUT_SECS: u64 = 3;
-const FINALIZE_DRAIN_ACK_TIMEOUT_MS: u64 = 1800;
+// The backend can spend up to 5s waiting for an ElevenLabs VAD commit and then
+// perform one bounded manual fallback. Keep the desktop deadline above that
+// provider-side contract so a valid stop tail is not mistaken for a dead
+// connection. Fast acknowledgements still return immediately.
+const FINALIZE_DRAIN_ACK_TIMEOUT: Duration = Duration::from_secs(12);
 const FINALIZE_POST_ACK_TEXT_GRACE_MS: u64 = 350;
 const CAPABILITY_FINALIZE_ACK: &str = "finalize_ack";
 
@@ -129,6 +133,8 @@ pub struct BackendProvider {
 
     next_send_at: Option<std::time::Instant>,
     batch_started_at: Option<std::time::Instant>,
+
+    finalize_drain_ack_timeout: Duration,
 }
 
 #[derive(Clone)]
@@ -264,6 +270,7 @@ impl BackendProvider {
             audio_batch: Vec::new(),
             next_send_at: None,
             batch_started_at: None,
+            finalize_drain_ack_timeout: FINALIZE_DRAIN_ACK_TIMEOUT,
         }
     }
 
@@ -420,12 +427,7 @@ impl BackendProvider {
             return Err(e);
         }
 
-        match tokio::time::timeout(
-            Duration::from_millis(FINALIZE_DRAIN_ACK_TIMEOUT_MS),
-            finalize_rx,
-        )
-        .await
-        {
+        match tokio::time::timeout(self.finalize_drain_ack_timeout, finalize_rx).await {
             Ok(Ok(done)) => {
                 log::info!(
                     "[ReconnectDiag] BackendProvider finalize drain ack received on {}: status={}, saw_result={}, text_results_seen={}",
@@ -1255,11 +1257,21 @@ impl SttProvider for BackendProvider {
                 }
             }
 
+            // Terminal server errors were already reported above, but they
+            // must still close the transport fence before finalize cleanup.
+            // For an unexpected EOF, report_backend_unexpected_eof performs
+            // the same atomic close before its first await.
+            if server_error_reported {
+                is_closed_flag.store(true, Ordering::SeqCst);
+            }
             report_backend_unexpected_eof(&callbacks_state, &is_closed_flag, server_error_reported)
                 .await;
 
-            // На выходе из loop всегда помечаем соединение закрытым
-            is_closed_flag.store(true, Ordering::SeqCst);
+            // Wake an in-flight pause/stop immediately when transport dies.
+            // Dropping the sender makes the oneshot receiver fail closed
+            // instead of sleeping until the provider acknowledgement timeout.
+            let _ = finalize_waiter.lock().await.take();
+
             log::info!("[ReconnectDiag] Backend receiver task finished, marking connection closed");
             log::info!("Backend receiver task finished");
         });
@@ -1809,6 +1821,12 @@ mod tests {
     }
 
     async fn spawn_lifecycle_mock_backend() -> (String, JoinHandle<LifecycleCapture>) {
+        spawn_lifecycle_mock_backend_with_finalize_delay(Duration::ZERO).await
+    }
+
+    async fn spawn_lifecycle_mock_backend_with_finalize_delay(
+        finalize_delay: Duration,
+    ) -> (String, JoinHandle<LifecycleCapture>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind local websocket listener");
@@ -1838,6 +1856,7 @@ mod tests {
                             }
                             Some("finalize") => {
                                 saw_finalize = true;
+                                tokio::time::sleep(finalize_delay).await;
                                 ws.send(Message::Text(
                                     r#"{"type":"finalize_complete","status":"drained","saw_result":true}"#
                                         .to_string(),
@@ -2079,6 +2098,62 @@ mod tests {
         (format!("ws://{addr}"), task)
     }
 
+    async fn spawn_finalize_disconnect_mock_backend() -> (String, JoinHandle<bool>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local websocket listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept websocket tcp");
+            let mut ws = accept_async(stream).await.expect("accept websocket");
+            let mut saw_finalize = false;
+            let mut sequence = 0usize;
+
+            while let Some(next) = ws.next().await {
+                let msg = next.expect("websocket message");
+                match msg {
+                    Message::Text(text) => {
+                        let value: serde_json::Value =
+                            serde_json::from_str(&text).expect("client json message");
+                        match value.get("type").and_then(|value| value.as_str()) {
+                            Some("config") => {
+                                ws.send(Message::Text(
+                                    r#"{"type":"ready","session_id":"mock-session"}"#.to_string(),
+                                ))
+                                .await
+                                .expect("send ready");
+                            }
+                            Some("finalize") => {
+                                saw_finalize = true;
+                                ws.close(None)
+                                    .await
+                                    .expect("close websocket during finalize");
+                                break;
+                            }
+                            Some("close") => break,
+                            _ => {}
+                        }
+                    }
+                    Message::Binary(_) => {
+                        sequence += 1;
+                        ws.send(Message::Text(format!(
+                            r#"{{"type":"ack","seq":{sequence}}}"#
+                        )))
+                        .await
+                        .expect("send ack");
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+
+            saw_finalize
+        });
+
+        (format!("ws://{addr}"), task)
+    }
+
     #[tokio::test]
     async fn test_backend_provider_sends_selected_streaming_provider_in_config_message() {
         for (selected, expected) in [
@@ -2297,6 +2372,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn backend_provider_accepts_provider_bounded_delayed_finalize_ack() {
+        let (backend_url, server_task) =
+            spawn_lifecycle_mock_backend_with_finalize_delay(Duration::from_millis(2_100)).await;
+        let mut config = SttConfig::new(SttProviderType::Backend);
+        config.backend_url = Some(backend_url);
+        config.backend_auth_token = Some("test-token".to_string());
+        config.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
+
+        let mut provider = BackendProvider::new();
+        provider.initialize(&config).await.unwrap();
+        provider
+            .start_stream(
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|error| panic!("unexpected provider error: {error}")),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .unwrap();
+        provider
+            .send_audio(&AudioChunk::new(vec![1000; 960], 16_000, 1))
+            .await
+            .unwrap();
+
+        provider.pause_stream().await.unwrap();
+        assert!(provider.is_connection_alive());
+        provider.abort().await.unwrap();
+
+        let capture = server_task.await.unwrap();
+        assert!(capture.saw_finalize);
+    }
+
+    #[tokio::test]
     async fn backend_provider_does_not_reuse_socket_without_finalize_ack() {
         let (backend_url, server_task) = spawn_finalize_timeout_mock_backend().await;
         let mut config = SttConfig::new(SttProviderType::Backend);
@@ -2304,6 +2412,7 @@ mod tests {
         config.backend_auth_token = Some("test-token".to_string());
 
         let mut provider = BackendProvider::new();
+        provider.finalize_drain_ack_timeout = Duration::from_millis(50);
         provider.initialize(&config).await.unwrap();
         provider
             .start_stream(
@@ -2331,6 +2440,43 @@ mod tests {
             .await
             .expect("mock backend timeout")
             .expect("mock backend task"));
+    }
+
+    #[tokio::test]
+    async fn backend_provider_fails_immediately_when_transport_closes_during_finalize() {
+        let (backend_url, server_task) = spawn_finalize_disconnect_mock_backend().await;
+        let mut config = SttConfig::new(SttProviderType::Backend);
+        config.backend_url = Some(backend_url);
+        config.backend_auth_token = Some("test-token".to_string());
+
+        let mut provider = BackendProvider::new();
+        provider.initialize(&config).await.unwrap();
+        provider
+            .start_stream(
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .unwrap();
+        provider
+            .send_audio(&AudioChunk::new(vec![1000; 960], 16_000, 1))
+            .await
+            .unwrap();
+
+        let error = tokio::time::timeout(Duration::from_millis(500), provider.pause_stream())
+            .await
+            .expect("transport close must wake finalize waiter")
+            .expect_err("pause must fail closed after transport close");
+        assert!(
+            error.to_string().contains("waiter dropped"),
+            "error={error}"
+        );
+        assert!(!provider.is_connection_alive());
+        provider.abort().await.unwrap();
+
+        assert!(server_task.await.unwrap());
     }
 
     #[tokio::test]
