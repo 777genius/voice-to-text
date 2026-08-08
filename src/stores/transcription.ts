@@ -5,6 +5,7 @@ import { listen } from '@tauri-apps/api/event';
 import { isTauriAvailable } from '../utils/tauri';
 import { i18n } from '../i18n';
 import { appendTranscriptText, mergeTranscriptText } from '../utils/transcriptionText';
+import { reconcilePartialAnimation } from './transcriptionReconciliation';
 
 const MAX_STREAMING_TRANSLATION_TEXT_CHARS = 32_000;
 
@@ -901,27 +902,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       partialAnimationTimer = null;
     }
 
-    // Если новый текст короче текущего - просто обновляем мгновенно
-    if (targetText.length < animatedPartialText.value.length) {
-      animatedPartialText.value = targetText;
-      return;
-    }
-
-    // Если текст не изменился - ничего не делаем
-    if (targetText === animatedPartialText.value) {
-      return;
-    }
-
-    // Если текст полностью новый - начинаем с нуля
-    if (!targetText.startsWith(animatedPartialText.value)) {
-      animatedPartialText.value = '';
-    }
-
-    // Находим добавленную часть текста
-    const addedText = targetText.slice(animatedPartialText.value.length);
+    const transition = reconcilePartialAnimation(animatedPartialText.value, targetText);
+    animatedPartialText.value = transition.renderedText;
+    if (!transition.textToAnimate) return;
 
     // Разбиваем добавленный текст на слова (сохраняя пробелы)
-    const words = addedText.split(/(\s+)/);
+    const words = transition.textToAnimate.split(/(\s+)/);
     let wordIndex = 0;
 
     // Пословная анимация каждые 15мс (быстрее и без дерганий)

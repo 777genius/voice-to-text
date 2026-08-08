@@ -798,6 +798,40 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     wrapper.unmount();
   });
 
+  it('hides the mini window before suppressing completed text', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:status', 2);
+
+    const store = useTranscriptionStore();
+    const suppressSpy = vi.spyOn(store, 'suppressPreviousTranscriptionDisplay');
+    store.finalText = 'Completed phrase that must stay visible until the window is hidden.';
+
+    await emitTauriEvent('recording:status', {
+      session_id: 42,
+      status: RecordingStatus.Recording,
+      stopped_via_hotkey: false,
+      mode: 'dictation',
+    });
+
+    hideWindowMock.mockClear();
+    suppressSpy.mockClear();
+
+    await emitTauriEvent('recording:status', {
+      session_id: 42,
+      status: RecordingStatus.Idle,
+      stopped_via_hotkey: false,
+      mode: null,
+    });
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(hideWindowMock).toHaveBeenCalledTimes(1);
+    expect(suppressSpy).toHaveBeenCalledWith('auto_hide:mini window recording stopped');
+    expect(hideWindowMock.mock.invocationCallOrder[0]).toBeLessThan(
+      suppressSpy.mock.invocationCallOrder[0],
+    );
+    wrapper.unmount();
+  });
+
   it('does not hide the mini window from an Idle event without a valid session id', async () => {
     const wrapper = mountRecordingPopover();
     await waitForListenerCount('recording:status', 2);
