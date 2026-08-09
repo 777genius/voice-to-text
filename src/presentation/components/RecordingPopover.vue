@@ -285,6 +285,9 @@ let miniCloseResetTimer: number | null = null;
 let miniCursorPollTimer: number | null = null;
 let isMiniCursorPollInFlight = false;
 let hotkeyStartIntentUntilMs = 0;
+let latestAutoHideSessionId = 0;
+let pendingAutoHideSessionId: number | null = null;
+let completedAutoHideSessionId: number | null = null;
 const HOTKEY_START_INTENT_SUPPRESS_HIDE_MS = 5_000;
 
 function hasRecentHotkeyStartIntent() {
@@ -300,6 +303,7 @@ function cancelPendingHideRecordingWindow() {
     window.clearTimeout(miniCloseResetTimer);
     miniCloseResetTimer = null;
   }
+  pendingAutoHideSessionId = null;
   isMiniClosing.value = false;
 }
 
@@ -453,8 +457,11 @@ async function playMiniOpenAnimation() {
   });
 }
 
-function scheduleHideRecordingWindow(reason: string) {
+function scheduleHideRecordingWindow(reason: string, sessionId: number | null = null) {
   if (hasVisibleIncomingTranslation.value) {
+    if (pendingAutoHideSessionId === sessionId) {
+      pendingAutoHideSessionId = null;
+    }
     console.log(`[AutoHide] Keeping window visible because incoming subtitles are visible (${reason})`);
     return;
   }
@@ -462,6 +469,7 @@ function scheduleHideRecordingWindow(reason: string) {
   if (hideRecordingWindowTimeout !== null) {
     window.clearTimeout(hideRecordingWindowTimeout);
   }
+  pendingAutoHideSessionId = sessionId;
 
   const delay = useMiniLayout.value ? MINI_CLOSE_ANIMATION_MS : 50;
   if (useMiniLayout.value) {
@@ -471,6 +479,9 @@ function scheduleHideRecordingWindow(reason: string) {
   hideRecordingWindowTimeout = window.setTimeout(async () => {
     hideRecordingWindowTimeout = null;
     if (hasVisibleIncomingTranslation.value) {
+      if (pendingAutoHideSessionId === sessionId) {
+        pendingAutoHideSessionId = null;
+      }
       isMiniClosing.value = false;
       console.log(`[AutoHide] Cancelled hide because incoming subtitles became visible (${reason})`);
       return;
@@ -479,11 +490,17 @@ function scheduleHideRecordingWindow(reason: string) {
     try {
       const window = getCurrentWebviewWindow();
       await window.hide();
+      if (sessionId !== null) {
+        completedAutoHideSessionId = sessionId;
+      }
       store.suppressPreviousTranscriptionDisplay(`auto_hide:${reason}`);
       console.log(`[AutoHide] Window hidden successfully (${reason})`);
     } catch (err) {
       console.error('[AutoHide] Failed to hide window:', err);
     } finally {
+      if (pendingAutoHideSessionId === sessionId) {
+        pendingAutoHideSessionId = null;
+      }
       isMiniClosing.value = false;
     }
   }, delay);
@@ -639,34 +656,72 @@ onMounted(async () => {
 
   // Слушаем статус для звука и автоскрытия окна при остановке
   unlistenAutoHide = await registerRecordingListener<RecordingStatusPayload>('recording:status', async (event) => {
-    if (event.payload.status !== 'Idle') {
+    const nextStatus = event.payload.status;
+    const payloadSessionId = Number(event.payload.session_id ?? 0);
+
+    if (!Number.isSafeInteger(payloadSessionId) || payloadSessionId <= 0) {
+      console.warn('[AutoHide] Ignoring status without a valid session:', event.payload);
+      return;
+    }
+
+    if (payloadSessionId < latestAutoHideSessionId) {
+      console.warn('[AutoHide] Ignoring status from an older session:', {
+        payloadSessionId,
+        latestSessionId: latestAutoHideSessionId,
+        nextStatus,
+      });
+      return;
+    }
+
+    if (payloadSessionId <= store.closedSessionIdFloor) {
+      console.warn('[AutoHide] Ignoring status from a closed session:', {
+        payloadSessionId,
+        closedFloor: store.closedSessionIdFloor,
+        nextStatus,
+      });
+      return;
+    }
+
+    if (store.sessionId !== null && payloadSessionId !== store.sessionId) {
+      console.warn('[AutoHide] Ignoring status from a stale session:', {
+        payloadSessionId,
+        activeSessionId: store.sessionId,
+        nextStatus,
+      });
+      return;
+    }
+
+    latestAutoHideSessionId = Math.max(latestAutoHideSessionId, payloadSessionId);
+
+    if (nextStatus === 'Starting' || nextStatus === 'Recording') {
       hotkeyStartIntentUntilMs = 0;
+      pendingAutoHideSessionId = null;
+      completedAutoHideSessionId = null;
       cancelPendingHideRecordingWindow();
       return;
     }
 
-    if (hasRecentHotkeyStartIntent()) {
+    if (nextStatus !== 'Processing' && nextStatus !== 'Idle') {
+      pendingAutoHideSessionId = null;
+      completedAutoHideSessionId = null;
+      cancelPendingHideRecordingWindow();
+      return;
+    }
+
+    if (nextStatus === 'Idle' && hasRecentHotkeyStartIntent()) {
       console.warn('[AutoHide] Ignoring Idle while Rust-owned hotkey start is pending:', event.payload);
       return;
     }
 
-    const payloadSessionId = Number(event.payload.session_id ?? 0);
-    if (payloadSessionId <= store.closedSessionIdFloor) {
-      console.warn('[AutoHide] Ignoring Idle from closed or missing session:', {
-        payloadSessionId,
-        closedFloor: store.closedSessionIdFloor,
-      });
-      return;
-    }
-
-    if (
-      store.sessionId !== null &&
-      payloadSessionId !== store.sessionId
-    ) {
-      console.warn('[AutoHide] Ignoring Idle from stale session:', {
-        payloadSessionId,
-        activeSessionId: store.sessionId,
-      });
+    if (nextStatus === 'Processing') {
+      hotkeyStartIntentUntilMs = 0;
+      if (
+        appConfigStore.showMiniRecordingWindow &&
+        pendingAutoHideSessionId !== payloadSessionId &&
+        completedAutoHideSessionId !== payloadSessionId
+      ) {
+        scheduleHideRecordingWindow('mini window recording finalizing', payloadSessionId);
+      }
       return;
     }
 
@@ -677,7 +732,9 @@ onMounted(async () => {
     }
 
     if (appConfigStore.showMiniRecordingWindow) {
-      scheduleHideRecordingWindow('mini window recording stopped');
+      if (completedAutoHideSessionId !== payloadSessionId) {
+        scheduleHideRecordingWindow('mini window recording stopped', payloadSessionId);
+      }
     } else if (event.payload.stopped_via_hotkey) {
       scheduleHideRecordingWindow('stopped via hotkey');
     }

@@ -1107,13 +1107,32 @@ impl AppState {
                     continue;
                 }
 
-                // Останавливаем запись
+                // Processing is the provider-neutral irreversible-stop boundary. Emit it for
+                // the claimed session before stop_recording turns capture off, so UI cannot
+                // remain in Listening while the microphone is already stopped.
+                use tauri::Emitter;
+                let mode = *active_recording_mode.read().await;
+                if let Err(error) = app_handle.emit(
+                    crate::presentation::events::EVENT_RECORDING_STATUS,
+                    crate::presentation::RecordingStatusPayload {
+                        session_id: timeout_session_id,
+                        status: crate::domain::RecordingStatus::Processing,
+                        stopped_via_hotkey: false,
+                        mode,
+                    },
+                ) {
+                    log::warn!(
+                        "Failed to emit Processing before VAD capture stop (session_id={}): {}",
+                        timeout_session_id,
+                        error
+                    );
+                }
+
                 match service.stop_recording().await {
                     Ok(_) => {
                         log::info!("Recording stopped successfully by VAD timeout");
 
                         // Эмитим событие в UI
-                        use tauri::Emitter;
                         *active_recording_mode.write().await = None;
                         let _ = app_handle.emit(
                             crate::presentation::events::EVENT_RECORDING_STATUS,

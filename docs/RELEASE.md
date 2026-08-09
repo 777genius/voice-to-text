@@ -16,60 +16,56 @@
 
 ---
 
-## Текущий релиз: v0.16.1
+## Текущий релиз: v0.16.2
 
-Minor-релиз с incoming spoken translation на macOS, более устойчивым full-duplex audio lifecycle, безопасным восстановлением clipboard и hotfix входа в production build.
+Patch-релиз со стабильной потоковой диктовкой ElevenLabs, безопасной финализацией последней фразы и исправленным lifecycle мини-окна.
 
 ### Что говорить в статье
 
 - Скачать приложение можно с [voicetext.site](https://voicetext.site).
-- Приложение умеет переводить системный звук на macOS и воспроизводить переведённую речь через выбранный output device.
-- Incoming spoken translation получил настройки delivery mode, громкости и mute без перезапуска активной сессии.
-- System capture и local playback восстанавливаются после смены audio route, а failed/suspended sessions освобождают ресурсы точнее.
-- Auto-paste восстанавливает clipboard для проверенного native TextEdit flow и не возвращает delayed paste race в browser/editor/terminal targets.
-- Production build снова корректно выполняет вход через email и Google и не может случайно подключиться к localhost API из локального `.env`.
-- Релиз защищён full-duplex smoke, long soak, restart stress, semantic audio и hardware recovery checks.
+- ElevenLabs теперь постепенно обновляет текст во время длинной фразы и вставляет каждый подтверждённый фрагмент ровно один раз.
+- Финализация ждёт clean committed transcript в ограниченном окне и не теряет последние слова.
+- Короткая VAD grace отменяет остановку, если пользователь продолжил говорить после паузы.
+- Мини-окно переходит в finalizing до остановки микрофона, закрывается один раз и не появляется снова с подсказкой hotkey.
+- Deepgram остаётся доступен как альтернативный streaming provider.
 
 ### Ссылки на код для статьи
 
-- Incoming spoken translation: `src-tauri/src/application/services/incoming_spoken_translation_service.rs`
-- Realtime interpretation lifecycle: `src-tauri/src/application/services/realtime_interpretation/`
-- Incoming translation settings: `src/features/settings/presentation/components/sections/IncomingTranslationSection.vue`
-- Live audio release evidence: `e2e-tests/` и `.github/workflows/macos-audio-gate.yml`
+- Streaming transcription lifecycle: `src-tauri/src/application/services/transcription_service.rs`
+- VAD stop grace: `src-tauri/src/infrastructure/audio/vad_capture_wrapper.rs`
+- Mini-window finalization UX: `src/presentation/components/RecordingPopover.vue`
+- Release evidence: `e2e-tests/` и `.github/workflows/macos-audio-gate.yml`
 
 ### Release notes для GitHub
 
 ```markdown
 ## What changed
 
-- Added incoming spoken translation on macOS with isolated system-audio capture and local translated-speech playback.
-- Added incoming delivery, volume, mute, and duplex feedback settings.
-- Added full-duplex release evidence with measured soaks, restart stress, semantic checks, and recovery attestations.
-- Kept localhost API routing isolated to dev/debug builds and enforced the secure production backend in release assets.
+- ElevenLabs dictation now updates focused applications progressively while reconciling corrected live text.
+- A short cancellable VAD grace keeps resumed speech in the same recording.
 
 ## What is fixed
 
-- System capture and local playback recover after output-route changes.
-- STT, realtime translation, and audio sessions clean up more reliably after failures, stop, suspend, and network close.
-- Graceful audio drain, transcript spacing, and warm dictation connections are preserved.
-- Native TextEdit auto-paste restores the previous clipboard without weakening delayed-reader protections for other targets.
-- Email and Google sign-in work in production builds even when the local build environment contains a localhost API URL.
-- Google sign-in no longer submits the email form or shows an unrelated required-email error.
+- Bounded ElevenLabs finalization preserves the clean committed transcript and final words.
+- Progressive auto-paste remains exactly once when the provider corrects an interim segment.
+- The recording window enters finalizing before capture stops and still accepts the late final transcript.
+- The mini window closes cleanly without reopening on the idle hotkey prompt.
+- Stale session events and a failed early hide attempt no longer block the final window close.
 ```
 
 ### Команды релиза
 
 ```bash
-pnpm release:notes v0.16.1
+pnpm release:notes v0.16.2
 git add CHANGELOG.md docs package.json src-tauri src
-git commit -m "release: v0.16.1"
-git tag v0.16.1
+git commit -m "release: v0.16.2"
+git tag v0.16.2
 git push origin HEAD
-git push origin v0.16.1
+git push origin v0.16.2
 
 # Только после реальных Zoom/output-disconnect/sleep-wake проверок
 gh workflow run "macOS Audio Release Gate" \
-  -f ref=v0.16.1 \
+  -f ref=v0.16.2 \
   -f soak_seconds=1800 \
   -f zoom_half_volume_bidirectional_verified=true \
   -f output_disconnect_recovery_verified=true \
@@ -77,7 +73,7 @@ gh workflow run "macOS Audio Release Gate" \
 
 # После успешного audio gate
 gh workflow run Release \
-  -f tag=v0.16.1 \
+  -f tag=v0.16.2 \
   -f macos_audio_gate_run_id=<SUCCESSFUL_GATE_RUN_ID>
 ```
 

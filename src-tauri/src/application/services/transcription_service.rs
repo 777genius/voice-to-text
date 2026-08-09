@@ -3231,6 +3231,92 @@ mod tests {
         assert!(!provider_aborted.load(Ordering::SeqCst));
     }
 
+    struct BlockingStopAudioCapture {
+        config: AudioConfig,
+        is_capturing: Arc<AtomicBool>,
+        stop_started: Arc<tokio::sync::Notify>,
+        allow_stop: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl AudioCapture for BlockingStopAudioCapture {
+        async fn initialize(&mut self, config: AudioConfig) -> AudioResult<()> {
+            self.config = config;
+            Ok(())
+        }
+
+        async fn start_capture(
+            &mut self,
+            _on_chunk: crate::domain::AudioChunkCallback,
+        ) -> AudioResult<()> {
+            self.is_capturing.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn stop_capture(&mut self) -> AudioResult<()> {
+            self.stop_started.notify_one();
+            self.allow_stop.notified().await;
+            self.is_capturing.store(false, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_capturing(&self) -> bool {
+            self.is_capturing.load(Ordering::SeqCst)
+        }
+
+        fn config(&self) -> AudioConfig {
+            self.config
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_recording_enters_processing_before_capture_is_stopped() {
+        let is_capturing = Arc::new(AtomicBool::new(false));
+        let stop_started = Arc::new(tokio::sync::Notify::new());
+        let allow_stop = Arc::new(tokio::sync::Notify::new());
+        let service = Arc::new(TranscriptionService::new(
+            Box::new(BlockingStopAudioCapture {
+                config: AudioConfig::default(),
+                is_capturing: is_capturing.clone(),
+                stop_started: stop_started.clone(),
+                allow_stop: allow_stop.clone(),
+            }),
+            Arc::new(TestFactory {
+                aborted: Arc::new(AtomicBool::new(false)),
+            }),
+        ));
+
+        service
+            .start_recording(
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .expect("recording must start");
+
+        let service_for_stop = service.clone();
+        let stop_task = tokio::spawn(async move { service_for_stop.stop_recording().await });
+        tokio::time::timeout(Duration::from_secs(1), stop_started.notified())
+            .await
+            .expect("stop_capture must be reached");
+
+        assert_eq!(service.get_status().await, RecordingStatus::Processing);
+        assert!(
+            is_capturing.load(Ordering::SeqCst),
+            "capture must still be on when Processing becomes observable"
+        );
+
+        allow_stop.notify_one();
+        stop_task
+            .await
+            .expect("stop task must not panic")
+            .expect("recording must stop");
+    }
+
     struct FailingStopAudioCapture {
         config: AudioConfig,
         is_capturing: Arc<AtomicBool>,
