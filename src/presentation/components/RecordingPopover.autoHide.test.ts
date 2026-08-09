@@ -798,6 +798,149 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     wrapper.unmount();
   });
 
+  it('starts finalizing and hides only for Processing from the current session', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:status', 2);
+
+    await emitTauriEvent('recording:status', {
+      session_id: 42,
+      status: RecordingStatus.Recording,
+      stopped_via_hotkey: false,
+      mode: 'dictation',
+    });
+    hideWindowMock.mockClear();
+
+    await emitTauriEvent('recording:status', {
+      session_id: 41,
+      status: RecordingStatus.Processing,
+      stopped_via_hotkey: false,
+      mode: 'dictation',
+    });
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(hideWindowMock).not.toHaveBeenCalled();
+    expect(useTranscriptionStore().status).toBe(RecordingStatus.Recording);
+
+    await emitTauriEvent('recording:status', {
+      session_id: 42,
+      status: RecordingStatus.Processing,
+      stopped_via_hotkey: false,
+      mode: 'dictation',
+    });
+
+    expect(useTranscriptionStore().isProcessing).toBe(true);
+    expect(document.querySelector('.mini-status-dot')?.classList.contains('processing')).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(500);
+    expect(hideWindowMock).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it('does not let stale start-like events cancel the current session hide', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:status', 2);
+
+    await emitTauriEvent('recording:status', {
+      session_id: 42,
+      status: RecordingStatus.Recording,
+      stopped_via_hotkey: false,
+      mode: 'dictation',
+    });
+    await emitTauriEvent('recording:status', {
+      session_id: 42,
+      status: RecordingStatus.Processing,
+      stopped_via_hotkey: false,
+      mode: 'dictation',
+    });
+
+    await emitTauriEvent('recording:status', {
+      session_id: 41,
+      status: RecordingStatus.Recording,
+      stopped_via_hotkey: false,
+      mode: 'dictation',
+    });
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(hideWindowMock).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it('retries on Idle when the Processing hide failed', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:status', 2);
+    hideWindowMock.mockRejectedValueOnce(new Error('temporary hide failure'));
+
+    await emitTauriEvent('recording:status', {
+      session_id: 62,
+      status: RecordingStatus.Recording,
+      stopped_via_hotkey: false,
+      mode: 'dictation',
+    });
+    await emitTauriEvent('recording:status', {
+      session_id: 62,
+      status: RecordingStatus.Processing,
+      stopped_via_hotkey: false,
+      mode: 'dictation',
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(hideWindowMock).toHaveBeenCalledTimes(1);
+
+    await emitTauriEvent('recording:status', {
+      session_id: 62,
+      status: RecordingStatus.Idle,
+      stopped_via_hotkey: false,
+      mode: null,
+    });
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(hideWindowMock).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+
+  it('accepts one late final during Processing and does not hide again on Idle', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:status', 2);
+    await waitForListenerCount('transcription:final', 1);
+
+    await emitTauriEvent('recording:status', {
+      session_id: 52,
+      status: RecordingStatus.Recording,
+      stopped_via_hotkey: false,
+      mode: 'dictation',
+    });
+    await emitTauriEvent('recording:status', {
+      session_id: 52,
+      status: RecordingStatus.Processing,
+      stopped_via_hotkey: false,
+      mode: 'dictation',
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(hideWindowMock).toHaveBeenCalledTimes(1);
+
+    const lateFinal = {
+      session_id: 52,
+      text: 'late clean final',
+      timestamp: 3,
+      start: 1,
+      duration: 0.8,
+    };
+    await emitTauriEvent('transcription:final', lateFinal);
+    await emitTauriEvent('transcription:final', { ...lateFinal, timestamp: 4 });
+
+    expect(useTranscriptionStore().finalText).toBe('late clean final');
+
+    await emitTauriEvent('recording:status', {
+      session_id: 52,
+      status: RecordingStatus.Idle,
+      stopped_via_hotkey: false,
+      mode: null,
+    });
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(hideWindowMock).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
   it('hides the mini window before suppressing completed text', async () => {
     const wrapper = mountRecordingPopover();
     await waitForListenerCount('recording:status', 2);

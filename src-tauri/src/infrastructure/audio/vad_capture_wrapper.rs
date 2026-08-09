@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::domain::{
     amplify_i16_samples, limited_microphone_gain, AudioCapture, AudioChunk, AudioChunkCallback,
@@ -10,6 +11,99 @@ use crate::infrastructure::audio::{VadProcessor, VadResult};
 
 /// Callback type for silence timeout events
 pub type SilenceTimeoutCallback = Arc<dyn Fn() + Send + Sync>;
+
+const PENDING_STOP_GRACE: Duration = Duration::from_millis(300);
+
+#[derive(Default)]
+struct SilenceStopState {
+    next_token: u64,
+    pending_token: Option<u64>,
+    committed: bool,
+}
+
+#[derive(Clone, Copy)]
+enum SilenceTimerSignal {
+    Arm { token: u64, generation: u64 },
+    StateChanged,
+}
+
+async fn run_silence_timer_worker(
+    mut signal_rx: tokio::sync::mpsc::Receiver<SilenceTimerSignal>,
+    silence_stop_state: Arc<Mutex<SilenceStopState>>,
+    running: Arc<AtomicBool>,
+    active_generation: Arc<AtomicU64>,
+    silence_callback: Option<SilenceTimeoutCallback>,
+) {
+    let mut armed: Option<(u64, u64)> = None;
+
+    loop {
+        let Some((token, generation)) = armed else {
+            match signal_rx.recv().await {
+                Some(SilenceTimerSignal::Arm { token, generation }) => {
+                    armed = Some((token, generation));
+                }
+                Some(SilenceTimerSignal::StateChanged) => {}
+                None => break,
+            }
+            continue;
+        };
+
+        tokio::select! {
+            signal = signal_rx.recv() => {
+                match signal {
+                    Some(SilenceTimerSignal::Arm { token, generation }) => {
+                        armed = Some((token, generation));
+                    }
+                    Some(SilenceTimerSignal::StateChanged) => {
+                        let still_pending = match silence_stop_state.lock() {
+                            Ok(state) => {
+                                running.load(Ordering::Acquire)
+                                    && active_generation.load(Ordering::Acquire) == generation
+                                    && state.pending_token == Some(token)
+                            }
+                            Err(error) => {
+                                log::error!("VAD pending-stop state poisoned: {}", error);
+                                false
+                            }
+                        };
+                        if !still_pending {
+                            armed = None;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            _ = tokio::time::sleep(PENDING_STOP_GRACE) => {
+                let should_commit = match silence_stop_state.lock() {
+                    Ok(mut state) => {
+                        if running.load(Ordering::Acquire)
+                            && active_generation.load(Ordering::Acquire) == generation
+                            && state.pending_token == Some(token)
+                        {
+                            state.pending_token = None;
+                            state.committed = true;
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    Err(error) => {
+                        log::error!("VAD pending-stop commit state poisoned: {}", error);
+                        false
+                    }
+                };
+
+                armed = None;
+                if should_commit {
+                    log::info!("VAD: pending stop committed after speech grace");
+                    if let Some(callback) = silence_callback.as_ref() {
+                        callback();
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// VAD-aware audio capture wrapper
 ///
@@ -27,9 +121,10 @@ pub struct VadCaptureWrapper {
     vad: Arc<Mutex<VadProcessor>>,
     on_silence_timeout: Option<SilenceTimeoutCallback>,
     audio_config: AudioConfig,
-    silence_timeout_triggered: Arc<Mutex<bool>>, // Флаг для одноразового вызова callback
-    running: Arc<AtomicBool>,                    // Защита от "хвостов" callback после stop_capture
-    capture_generation: Arc<AtomicU64>,          // Инвалидирует callback-и от прошлых start_capture
+    silence_stop_state: Arc<Mutex<SilenceStopState>>,
+    running: Arc<AtomicBool>, // Защита от "хвостов" callback после stop_capture
+    capture_generation: Arc<AtomicU64>, // Инвалидирует callback-и от прошлых start_capture
+    silence_timer_task: Option<tokio::task::JoinHandle<()>>,
     microphone_sensitivity: Arc<AtomicU8>,
 }
 
@@ -53,9 +148,10 @@ impl VadCaptureWrapper {
             vad: Arc::new(Mutex::new(vad)),
             on_silence_timeout: None,
             audio_config: AudioConfig::default(),
-            silence_timeout_triggered: Arc::new(Mutex::new(false)),
+            silence_stop_state: Arc::new(Mutex::new(SilenceStopState::default())),
             running: Arc::new(AtomicBool::new(false)),
             capture_generation: Arc::new(AtomicU64::new(0)),
+            silence_timer_task: None,
             microphone_sensitivity,
         }
     }
@@ -76,12 +172,20 @@ impl AudioCapture for VadCaptureWrapper {
     }
 
     async fn start_capture(&mut self, on_chunk: AudioChunkCallback) -> AudioResult<()> {
+        if let Some(task) = self.silence_timer_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+
         let capture_generation = self.capture_generation.fetch_add(1, Ordering::SeqCst) + 1;
         self.running.store(true, Ordering::SeqCst);
 
-        // Сбрасываем флаг при старте новой записи
-        if let Ok(mut flag) = self.silence_timeout_triggered.lock() {
-            *flag = false;
+        if let Ok(mut state) = self.silence_stop_state.lock() {
+            // Keep tokens monotonic across capture generations. An old timer signal must never
+            // clear a numerically reused pending token from a newer recording.
+            state.next_token = state.next_token.wrapping_add(1).max(1);
+            state.pending_token = None;
+            state.committed = false;
         }
 
         // Сбрасываем состояние VAD при старте новой записи.
@@ -93,10 +197,18 @@ impl AudioCapture for VadCaptureWrapper {
 
         let vad = self.vad.clone();
         let silence_callback = self.on_silence_timeout.clone();
-        let timeout_flag = self.silence_timeout_triggered.clone();
+        let silence_stop_state = self.silence_stop_state.clone();
         let running = self.running.clone();
         let active_generation = self.capture_generation.clone();
         let microphone_sensitivity = self.microphone_sensitivity.clone();
+        let (silence_timer_tx, silence_timer_rx) = tokio::sync::mpsc::channel(4);
+        self.silence_timer_task = Some(tokio::spawn(run_silence_timer_worker(
+            silence_timer_rx,
+            silence_stop_state.clone(),
+            running.clone(),
+            active_generation.clone(),
+            silence_callback,
+        )));
 
         // Frame buffer for accumulating exactly 480 samples (30ms @ 16kHz)
         // Shared between callback invocations via Arc<Mutex<>>
@@ -192,7 +304,14 @@ impl AudioCapture for VadCaptureWrapper {
 
                 match vad_result {
                     VadResult::Speech => {
-                        // Speech detected - pass chunk through
+                        // Speech and the pending-stop commit share one lock. If speech wins,
+                        // the delayed stop is cancelled before this frame is delivered.
+                        if let Ok(mut state) = silence_stop_state.lock() {
+                            if state.pending_token.take().is_some() {
+                                log::info!("VAD: resumed speech cancelled pending stop");
+                                let _ = silence_timer_tx.try_send(SilenceTimerSignal::StateChanged);
+                            }
+                        }
                         log::trace!("VAD: Speech detected");
                         on_chunk(AudioChunk::new(frame, 16000, 1));
                     }
@@ -202,18 +321,25 @@ impl AudioCapture for VadCaptureWrapper {
                         on_chunk(AudioChunk::new(frame, 16000, 1));
                     }
                     VadResult::SilenceTimeout => {
-                        // Silence timeout reached - trigger callback (только один раз)
-                        let mut already_triggered = match timeout_flag.lock() {
-                            Ok(f) => f,
+                        let pending_token = match silence_stop_state.lock() {
+                            Ok(mut state) => {
+                                if state.committed || state.pending_token.is_some() {
+                                    None
+                                } else {
+                                    state.next_token = state.next_token.wrapping_add(1).max(1);
+                                    let token = state.next_token;
+                                    state.pending_token = Some(token);
+                                    Some(token)
+                                }
+                            }
                             Err(e) => {
-                                log::error!("VAD timeout flag poisoned: {}", e);
-                                // Все равно передаем аудио
+                                log::error!("VAD pending-stop state poisoned: {}", e);
                                 on_chunk(AudioChunk::new(frame, 16000, 1));
                                 continue;
                             }
                         };
 
-                        if !*already_triggered {
+                        if let Some(pending_token) = pending_token {
                             // Получаем настоящий timeout из VAD для логирования
                             let timeout_ms = {
                                 match vad.lock() {
@@ -223,7 +349,8 @@ impl AudioCapture for VadCaptureWrapper {
                             };
 
                             log::info!(
-                                "VAD: Silence timeout reached ({}ms, sensitivity={}%, vad_gain={:.2}x, raw_max={}, vad_max={})",
+                                "VAD: Silence timeout reached; pending stop for {}ms (timeout={}ms, sensitivity={}%, vad_gain={:.2}x, raw_max={}, vad_max={})",
+                                PENDING_STOP_GRACE.as_millis(),
                                 timeout_ms,
                                 sensitivity,
                                 vad_gain,
@@ -231,12 +358,17 @@ impl AudioCapture for VadCaptureWrapper {
                                 vad_max
                             );
 
-                            // Emit silence timeout event ОДИН РАЗ
-                            if let Some(ref callback) = silence_callback {
-                                callback();
+                            if let Err(error) = silence_timer_tx.try_send(SilenceTimerSignal::Arm {
+                                token: pending_token,
+                                generation: capture_generation,
+                            }) {
+                                log::warn!("VAD pending-stop signal dropped: {}", error);
+                                if let Ok(mut state) = silence_stop_state.lock() {
+                                    if state.pending_token == Some(pending_token) {
+                                        state.pending_token = None;
+                                    }
+                                }
                             }
-
-                            *already_triggered = true;
                         }
 
                         // Продолжаем пропускать аудио (для финализации)
@@ -256,6 +388,10 @@ impl AudioCapture for VadCaptureWrapper {
             Err(err) => {
                 self.running.store(false, Ordering::SeqCst);
                 self.capture_generation.fetch_add(1, Ordering::SeqCst);
+                if let Some(task) = self.silence_timer_task.take() {
+                    task.abort();
+                    let _ = task.await;
+                }
                 Err(err)
             }
         }
@@ -264,6 +400,13 @@ impl AudioCapture for VadCaptureWrapper {
     async fn stop_capture(&mut self) -> AudioResult<()> {
         self.running.store(false, Ordering::SeqCst);
         self.capture_generation.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut state) = self.silence_stop_state.lock() {
+            state.pending_token = None;
+        }
+        if let Some(task) = self.silence_timer_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
 
         // Reset VAD state on stop
         if let Ok(mut vad) = self.vad.lock() {
@@ -279,6 +422,14 @@ impl AudioCapture for VadCaptureWrapper {
 
     fn config(&self) -> AudioConfig {
         self.audio_config.clone()
+    }
+}
+
+impl Drop for VadCaptureWrapper {
+    fn drop(&mut self) {
+        if let Some(task) = self.silence_timer_task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -487,16 +638,93 @@ mod tests {
         wrapper.initialize(AudioConfig::default()).await.unwrap();
         wrapper.start_capture(on_chunk.clone()).await.unwrap();
         let stale_callback = callback_slot.lock().unwrap().clone().unwrap();
+        stale_callback(activity_then_silence_chunk());
 
         wrapper.stop_capture().await.unwrap();
         wrapper.start_capture(on_chunk).await.unwrap();
         let current_callback = callback_slot.lock().unwrap().clone().unwrap();
 
         stale_callback(activity_then_silence_chunk());
-        assert_eq!(silence_timeouts.load(AtomicOrdering::SeqCst), 0);
-
         current_callback(activity_then_silence_chunk());
+        tokio::time::sleep(PENDING_STOP_GRACE + Duration::from_millis(50)).await;
         assert_eq!(silence_timeouts.load(AtomicOrdering::SeqCst), 1);
         assert!(forwarded_chunks.load(AtomicOrdering::SeqCst) > 0);
+    }
+
+    #[tokio::test]
+    async fn resumed_speech_cancels_pending_stop_and_is_forwarded() {
+        let callback_slot = Arc::new(Mutex::new(None));
+        let manual_capture = Box::new(ManualCallbackCapture::new(callback_slot.clone()));
+        let vad = VadProcessor::new(Some(90), None).expect("Failed to create VAD");
+        let mut wrapper = VadCaptureWrapper::new(manual_capture, vad);
+
+        let silence_timeouts = Arc::new(AtomicUsize::new(0));
+        let timeout_counter = silence_timeouts.clone();
+        wrapper.set_silence_timeout_callback(Arc::new(move || {
+            timeout_counter.fetch_add(1, AtomicOrdering::SeqCst);
+        }));
+
+        let forwarded_chunks = Arc::new(AtomicUsize::new(0));
+        let forwarded_counter = forwarded_chunks.clone();
+        wrapper.initialize(AudioConfig::default()).await.unwrap();
+        wrapper
+            .start_capture(Arc::new(move |_| {
+                forwarded_counter.fetch_add(1, AtomicOrdering::SeqCst);
+            }))
+            .await
+            .unwrap();
+
+        let callback = callback_slot.lock().unwrap().clone().unwrap();
+        callback(activity_then_silence_chunk());
+        let forwarded_before_resume = forwarded_chunks.load(AtomicOrdering::SeqCst);
+
+        callback(AudioChunk::new(vec![3_000; 480], 16_000, 1));
+        tokio::time::sleep(PENDING_STOP_GRACE + Duration::from_millis(50)).await;
+
+        assert_eq!(silence_timeouts.load(AtomicOrdering::SeqCst), 0);
+        assert!(
+            forwarded_chunks.load(AtomicOrdering::SeqCst) > forwarded_before_resume,
+            "resumed speech frame must reach downstream before stop commit"
+        );
+        assert!(wrapper.is_capturing());
+    }
+
+    #[tokio::test]
+    async fn second_timeout_after_resume_uses_a_fresh_grace_and_commits_once() {
+        let callback_slot = Arc::new(Mutex::new(None));
+        let manual_capture = Box::new(ManualCallbackCapture::new(callback_slot.clone()));
+        let vad = VadProcessor::new(Some(90), None).expect("Failed to create VAD");
+        let mut wrapper = VadCaptureWrapper::new(manual_capture, vad);
+
+        let silence_timeouts = Arc::new(AtomicUsize::new(0));
+        let timeout_counter = silence_timeouts.clone();
+        wrapper.set_silence_timeout_callback(Arc::new(move || {
+            timeout_counter.fetch_add(1, AtomicOrdering::SeqCst);
+        }));
+
+        wrapper.initialize(AudioConfig::default()).await.unwrap();
+        wrapper.start_capture(Arc::new(|_| {})).await.unwrap();
+        let callback = callback_slot.lock().unwrap().clone().unwrap();
+
+        callback(activity_then_silence_chunk());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        callback(AudioChunk::new(vec![3_000; 480], 16_000, 1));
+        callback(activity_then_silence_chunk());
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(
+            silence_timeouts.load(AtomicOrdering::SeqCst),
+            0,
+            "the cancelled timer must not shorten the fresh grace"
+        );
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(silence_timeouts.load(AtomicOrdering::SeqCst), 1);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            silence_timeouts.load(AtomicOrdering::SeqCst),
+            1,
+            "the accepted timeout must commit exactly once"
+        );
     }
 }
