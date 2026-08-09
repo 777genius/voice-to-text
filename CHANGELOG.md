@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.16.2] - 2026-08-09
+
+### Changed
+- Made ElevenLabs streaming dictation update focused applications progressively while preserving corrected provider text and exactly-once auto-paste.
+- Added a short cancellable VAD stop grace so speech resumed at the end of a pause stays in the active recording.
+
+### Fixed
+- Preserved committed ElevenLabs transcript text through bounded finalization instead of waiting indefinitely or dropping the final words.
+- Moved the recording window into finalizing state before microphone capture stops and kept late final transcript events attached to the correct session.
+- Kept the mini recording window closed after completion without reopening on the idle hotkey prompt.
+- Prevented stale recording events and failed early hide attempts from suppressing the final window close.
+
 ## [0.16.1] - 2026-07-18
 
 ### Fixed
