@@ -15,7 +15,9 @@ import {
   sameOrderedLabels,
 } from './helpers/liveAudioEvidenceContract.mjs';
 
-const TEST_TIMEOUT_MS = 180_000;
+// This bounds the complete Cargo process, including scheduling, fingerprinting, and linking.
+// Individual synthetic lifecycle tests keep their own much tighter runtime deadlines.
+const TEST_TIMEOUT_MS = 600_000;
 const CARGO_PREFLIGHT_TIMEOUT_MS = 30 * 60 * 1000;
 const PAID_MATRIX_ARTIFACT_DIRECTORY = join(
   process.cwd(),
