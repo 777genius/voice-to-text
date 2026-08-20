@@ -147,3 +147,13 @@ test('normal CI and release share the same keyless quality gate workflow', () =>
   assert.ok(!quality.includes('OPENAI_E2E_API_KEY'));
   assert.ok(!quality.includes('VOICETEXT_RUN_PAID_E2E'));
 });
+
+test('audio gate waiver is explicit, off by default, and keeps quality gates mandatory', () => {
+  const release = readRepositoryFile('.github/workflows/release.yml');
+
+  assert.match(release, /waive_macos_audio_gate:\n\s+description:[^\n]+\n\s+required: true\n\s+default: false/);
+  assert.ok(release.includes("if: ${{ !inputs.waive_macos_audio_gate }}"));
+  assert.ok(release.includes("needs.quality-gates.result == 'success'"));
+  assert.ok(release.includes("inputs.waive_macos_audio_gate && needs.verify-macos-audio-gate.result == 'skipped'"));
+  assert.ok(release.includes('Record macOS audio gate waiver'));
+});
