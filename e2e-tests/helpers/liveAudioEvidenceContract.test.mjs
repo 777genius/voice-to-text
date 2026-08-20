@@ -165,3 +165,11 @@ test('release notes use the workflow revision while binaries stay pinned to the 
   assert.ok(release.includes('ref: ${{ env.RELEASE_TAG }}'));
   assert.ok(release.includes('release_commit="$(git rev-list -n 1 "$tag")"') || release.includes('commit="$(git rev-list -n 1 "$tag")"'));
 });
+
+test('audio waiver does not transitively skip release builds or publication', () => {
+  const release = readRepositoryFile('.github/workflows/release.yml');
+
+  assert.ok(release.includes("needs.create-release.result == 'success'"));
+  assert.ok(release.includes("needs.build-release.result == 'success'"));
+  assert.ok(release.includes("needs.verify-release.result == 'success'"));
+});
