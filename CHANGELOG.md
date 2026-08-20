@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.16.4] - 2026-08-20
+
+### Changed
+- Allowed slower macOS audio smoke-test compilation while retaining the existing runtime cleanup deadlines.
+- Aligned release audio checks with their exact native test targets.
+
+### Fixed
+- Kept the bidirectional shutdown lifecycle test synthetic so unresponsive CoreAudio devices cannot block the release gate.
+
 ## [0.16.2] - 2026-08-09
 
 ### Changed

@@ -157,3 +157,11 @@ test('audio gate waiver is explicit, off by default, and keeps quality gates man
   assert.ok(release.includes("inputs.waive_macos_audio_gate && needs.verify-macos-audio-gate.result == 'skipped'"));
   assert.ok(release.includes('Record macOS audio gate waiver'));
 });
+
+test('release notes use the workflow revision while binaries stay pinned to the tag', () => {
+  const release = readRepositoryFile('.github/workflows/release.yml');
+
+  assert.ok(release.includes('ref: ${{ github.sha }}'));
+  assert.ok(release.includes('ref: ${{ env.RELEASE_TAG }}'));
+  assert.ok(release.includes('release_commit="$(git rev-list -n 1 "$tag")"') || release.includes('commit="$(git rev-list -n 1 "$tag")"'));
+});
