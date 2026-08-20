@@ -509,6 +509,24 @@ jobs:
 
           jq -e --arg version "$version" '.version == $version' latest.json >/dev/null
 
+          release_notes="$(gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json body \
+            --jq .body)"
+          if [[ -z "${release_notes//[[:space:]]/}" ]]; then
+            echo "::error::GitHub release notes are empty for $RELEASE_TAG."
+            exit 1
+          fi
+
+          updated_manifest="$(mktemp)"
+          jq --arg notes "$release_notes" '.notes = $notes' latest.json > "$updated_manifest"
+          mv "$updated_manifest" latest.json
+          jq -e '(.notes | type) == "string" and (.notes | length) > 0' latest.json >/dev/null
+
+          gh release upload "$RELEASE_TAG" latest.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
           required_platforms=(
             darwin-aarch64
             darwin-aarch64-app
