@@ -1,4 +1,6 @@
-# VoicetextAI
+# [VoicetextAI](https://voicetext.site)
+
+<img width="301" height="74" alt="image" src="https://github.com/user-attachments/assets/013ef457-2b6d-4c6f-bc54-f419fd6a185a" />
 
 Modern voice-to-text desktop application using AI, built with Tauri 2.0, Rust, and Vue 3.
 
@@ -8,8 +10,6 @@ Modern voice-to-text desktop application using AI, built with Tauri 2.0, Rust, a
 **Website:** [voicetext.site](https://voicetext.site)
 
 ## Features
-
-- **45+ Languages** — Full Deepgram Nova-3 support with real-time multilingual detection
 - **Real-time Transcription** — Instant partial and final results via WebSocket streaming
 - **Global Hotkey** — Quick access with customizable hotkeys (default: Cmd+Shift+X / Ctrl+Shift+X)
 - **System Tray** — Runs in background, accessible from tray icon
@@ -19,6 +19,8 @@ Modern voice-to-text desktop application using AI, built with Tauri 2.0, Rust, a
 - **Beautiful UI** — Minimal design with glass morphism effects, dark/light/system themes
 - **Multi-window Sync** — State synchronization between app windows
 - **OAuth Authentication** — Google sign-in support
+- **90+/45+ Languages** — Full Deepgram Nova-3 support with real-time multilingual detection or use ElevenLabs (90+ languages)
+- **Provider-agnostic** — ElevenLabs/Deepgram
 
 ## Architecture
 
