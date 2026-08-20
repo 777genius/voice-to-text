@@ -606,7 +606,6 @@ mod tests {
         SpokenIncomingCapability, SpokenTranslationCapability, SttConfig,
         SystemAudioCaptureFactory, SystemAudioCaptureRequest, TranslationAudioOutput,
     };
-    use crate::presentation::state::AppState;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
@@ -1538,11 +1537,13 @@ mod tests {
             .start_translation(valid_config(302), test_callbacks())
             .await
             .unwrap();
-        let app_state = AppState::new();
-        *app_state.incoming_translation_facade.write().await = Some(incoming.clone());
-        *app_state.live_translation_service.write().await = Some(outgoing.clone());
+        // Keep the lifecycle test synthetic: AppState::new probes host audio devices and can
+        // block indefinitely inside CoreAudio when a device or driver is unresponsive.
         let shutdown = crate::handle_translation_shutdown_run_event(&tauri::RunEvent::Exit, || {
-            app_state.shutdown_translation_runtimes()
+            crate::application::services::abort_translation_runtimes(
+                Some(incoming.clone()),
+                Some(outgoing.clone()),
+            )
         })
         .expect("Tauri Exit must schedule translation cleanup");
         shutdown.await;
