@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.16.6] - 2026-08-30
+
+### Fixed
+- Show accurate retry guidance for internal transcription failures instead of incorrectly reporting a server restart.
+
 ## [0.16.4] - 2026-08-20
 
 ### Changed
