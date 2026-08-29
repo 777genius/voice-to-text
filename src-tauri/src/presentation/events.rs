@@ -192,6 +192,7 @@ fn stt_category_to_string(cat: SttConnectionCategory) -> String {
         SttConnectionCategory::LimitExceeded => "limit_exceeded",
         SttConnectionCategory::ProviderQuotaExceeded => "provider_quota_exceeded",
         SttConnectionCategory::ServerUnavailable => "server_unavailable",
+        SttConnectionCategory::ServerError => "server_error",
         SttConnectionCategory::Closed => "closed",
         SttConnectionCategory::Unknown => "unknown",
     }

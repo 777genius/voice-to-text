@@ -131,6 +131,7 @@ export interface TranscriptionErrorDetailsPayload {
     | 'timeout'
     | 'http'
     | 'server_unavailable'
+    | 'server_error'
     | 'closed'
     | 'rate_limited'
     | 'limit_exceeded'

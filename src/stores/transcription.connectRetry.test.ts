@@ -513,6 +513,38 @@ describe('transcription connect-retry reliability', () => {
     expect(store.errorType).toBe('provider_quota_exceeded');
   });
 
+  it('показывает INTERNAL_ERROR как ошибку обработки, а не как перезапуск сервера', async () => {
+    const handlers = new Map<string, any>();
+
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 702, status: 'Recording', stopped_via_hotkey: false },
+    });
+    await handlers.get('transcription:error')({
+      payload: {
+        session_id: 702,
+        error: 'Connection error: Внутренняя ошибка сервера',
+        error_type: 'connection',
+        error_details: {
+          category: 'server_error',
+          serverCode: 'INTERNAL_ERROR',
+        },
+      },
+    });
+
+    expect(store.status).toBe('Error');
+    expect(store.error).toBe('Сервер не смог обработать аудио. Запустите запись ещё раз.');
+    expect(store.error).not.toContain('перезапускается');
+  });
+
   it('terminal error новой failed session не закрывает восстановленную меньшую session', async () => {
     const handlers = new Map<string, any>();
 

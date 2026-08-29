@@ -2381,6 +2381,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       if (category === 'timeout') return i18n.global.t('errors.timeout');
       if (category === 'limit_exceeded') return i18n.global.t('errors.limitExceeded');
       if (category === 'rate_limited') return i18n.global.t('errors.rateLimited');
+      if (category === 'server_error') return i18n.global.t('errors.serverProcessing');
       if (category === 'http') {
         return details?.httpStatus
           ? i18n.global.t('errors.connectionHttp', { status: details.httpStatus })

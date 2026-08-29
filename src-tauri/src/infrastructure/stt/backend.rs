@@ -191,9 +191,8 @@ fn category_for_server_error(code: &str) -> SttConnectionCategory {
         }
         "LIMIT_EXCEEDED" => SttConnectionCategory::LimitExceeded,
         "PROVIDER_QUOTA_EXCEEDED" => SttConnectionCategory::ProviderQuotaExceeded,
-        "PROVIDER_UNAVAILABLE" | "PROVIDER_ERROR" | "INTERNAL_ERROR" => {
-            SttConnectionCategory::ServerUnavailable
-        }
+        "PROVIDER_UNAVAILABLE" | "PROVIDER_ERROR" => SttConnectionCategory::ServerUnavailable,
+        "INTERNAL_ERROR" => SttConnectionCategory::ServerError,
         _ => SttConnectionCategory::Unknown,
     }
 }
@@ -2623,6 +2622,10 @@ mod tests {
         assert_eq!(
             category_for_server_error("PROVIDER_UNAVAILABLE"),
             SttConnectionCategory::ServerUnavailable
+        );
+        assert_eq!(
+            category_for_server_error("INTERNAL_ERROR"),
+            SttConnectionCategory::ServerError
         );
         assert_eq!(
             category_for_server_error("PROVIDER_QUOTA_EXCEEDED"),

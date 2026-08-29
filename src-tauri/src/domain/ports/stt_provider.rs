@@ -59,6 +59,7 @@ pub enum SttConnectionCategory {
     LimitExceeded,
     ProviderQuotaExceeded,
     ServerUnavailable,
+    ServerError,
     Closed,
     Unknown,
 }
