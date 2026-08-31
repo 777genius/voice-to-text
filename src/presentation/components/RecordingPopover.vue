@@ -301,6 +301,10 @@ async function acceptWindowEvent(payload: { windowEpoch?: number } | undefined):
   try {
     const current = await invoke<number>('get_recording_window_epoch');
     if (isComponentUnmounted || epoch !== current || (currentWindowEpoch !== null && current < currentWindowEpoch)) return false;
+    if (currentWindowEpoch !== null && current > currentWindowEpoch) {
+      clearMiniOpeningAnimation();
+      closeAnimationGeneration += 1;
+    }
     currentWindowEpoch = current;
     return true;
   } catch {
@@ -308,13 +312,14 @@ async function acceptWindowEvent(payload: { windowEpoch?: number } | undefined):
   }
 }
 let animationGeneration = 0;
+let closeAnimationGeneration = 0;
 let pendingAutoHideSessionId: number | null = null;
 let completedAutoHideSessionId: number | null = null;
 
 function cancelPendingHideRecordingWindow() {
   hideGeneration += 1;
-  clearMiniOpeningAnimation();
-  isMiniAnimationReset.value = false;
+  // Starting/Recording revoke a pending close, not the current show's opening.
+  closeAnimationGeneration += 1;
   if (hideRecordingWindowTimeout !== null) {
     window.clearTimeout(hideRecordingWindowTimeout);
     hideRecordingWindowTimeout = null;
@@ -337,6 +342,7 @@ function clearHotkeyDebounceTimeout() {
 
 function clearMiniOpeningAnimation() {
   animationGeneration += 1;
+  isMiniAnimationReset.value = false;
   if (miniOpeningRaf !== null) {
     window.cancelAnimationFrame(miniOpeningRaf);
     miniOpeningRaf = null;
@@ -436,9 +442,9 @@ async function beginMiniCloseAnimation() {
   closingWindowEpoch = currentWindowEpoch;
   resetMiniActionState();
   clearMiniOpeningAnimation();
-  const generation = animationGeneration;
+  const generation = ++closeAnimationGeneration;
   const side = await resolveMiniHideSide();
-  if (generation !== animationGeneration || isComponentUnmounted || !useMiniLayout.value) return;
+  if (generation !== closeAnimationGeneration || isComponentUnmounted || !useMiniLayout.value) return;
   miniHideSide.value = side;
   if (miniCloseResetTimer !== null) {
     window.clearTimeout(miniCloseResetTimer);
@@ -457,6 +463,7 @@ async function playMiniOpenAnimation() {
   if (!useMiniLayout.value || isComponentUnmounted) return;
 
   resetMiniActionState();
+  closeAnimationGeneration += 1;
 
   clearMiniOpeningAnimation();
   const generation = animationGeneration;
@@ -575,6 +582,8 @@ watch(useMiniLayout, (enabled) => {
     startMiniCursorPolling();
   } else {
     stopMiniCursorPolling();
+    clearMiniOpeningAnimation();
+    closeAnimationGeneration += 1;
   }
 });
 

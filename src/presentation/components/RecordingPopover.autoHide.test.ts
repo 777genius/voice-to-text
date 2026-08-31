@@ -1350,7 +1350,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     wrapper.unmount();
   });
 
-  it('leaves a visible stable animation state when Starting supersedes an opening frame', async () => {
+  it('keeps the current opening frame when local Starting cancels only pending hide', async () => {
     const wrapper = mountRecordingPopover();
     await waitForListenerCount('hotkey:toggle-recording', 1);
     await emitTauriEvent('recording:window-shown', {});
@@ -1358,7 +1358,67 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     await vi.advanceTimersByTimeAsync(1);
     await nextTick();
     expect(document.querySelector('.mini-animation-reset')).toBeNull();
+    expect(document.querySelector('.mini-opening')).not.toBeNull();
+    wrapper.unmount();
+  });
+
+  it.each(['Starting', 'Recording', 'same-epoch-start'])(
+    'preserves the current shown opening through %s before its animation frame', async (event) => {
+      const wrapper = mountRecordingPopover();
+      await waitForListenerCount('hotkey:toggle-recording', 1);
+      await emitTauriEvent('recording:window-shown', {});
+      expect(document.querySelector('.mini-animation-reset')).not.toBeNull();
+      if (event === 'same-epoch-start') {
+        await emitTauriEvent('recording:start-requested', {});
+      } else {
+        await emitTauriEvent('recording:status', { session_id: 90, status: event });
+      }
+      await vi.advanceTimersByTimeAsync(1);
+      await nextTick();
+      expect(document.querySelector('.mini-animation-reset')).toBeNull();
+      expect(document.querySelector('.mini-opening')).not.toBeNull();
+      await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
+      await nextTick();
+      expect(document.querySelector('.mini-opening')).not.toBeNull();
+      expect(document.querySelector('.mini-closing')).toBeNull();
+      expect(hideWindowMock).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(520);
+      expect(document.querySelector('.mini-opening')).toBeNull();
+      wrapper.unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it('discards old close geometry when a newer visibility epoch arrives without a start', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('hotkey:toggle-recording', 1);
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
+    const geometry = deferred<{ x: number; y: number }>();
+    outerPositionMock.mockReturnValueOnce(geometry.promise);
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Processing' });
+    nativeWindowEpoch.value = 2;
+    await emitTauriEvent('recording:start-cancelled', { startWindowEpoch: 0, windowEpoch: 2 });
+    geometry.resolve({ x: 100, y: 100 });
+    await flushMicrotasks();
+    await nextTick();
+    expect(document.querySelector('.mini-closing')).toBeNull();
+    wrapper.unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('invalidates an older opening frame when a newer native start epoch is accepted', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('hotkey:toggle-recording', 1);
+    await emitTauriEvent('recording:window-shown', {});
+    nativeWindowEpoch.value = 2;
+    await emitTauriEvent('recording:start-requested', {});
+    await vi.advanceTimersByTimeAsync(1);
     expect(document.querySelector('.mini-opening')).toBeNull();
+    expect(document.querySelector('.mini-animation-reset')).toBeNull();
+    await emitTauriEvent('recording:window-shown', {});
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(document.querySelector('.mini-opening')).not.toBeNull();
     wrapper.unmount();
   });
 
