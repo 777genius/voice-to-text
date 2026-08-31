@@ -8,6 +8,7 @@ import { useTranscriptionStore } from '@/stores/transcription';
 import { useAppConfigStore } from '@/stores/appConfig';
 import { useAuthStore } from '@/features/auth/store/authStore';
 import { createSession } from '@/features/auth/domain/entities/Session';
+import { startNativeSampler } from './nativeSampler';
 
 interface NativeState {
   ready: boolean;
@@ -115,8 +116,8 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
       isConnecting: store.isConnecting, lastAcceptedRecordingStatus: store.lastAcceptedRecordingStatus,
       popoverClass: document.querySelector('.popover')?.className,
       textClass: document.querySelector('.mini-transcription-text, .transcription-text')?.className });
-    const progress = async (name: string) => {
-      report.lastProgress = { scenario: name, completedCycles: report.completedCycles, elapsedMs: Date.now() - now };
+    const progress = async (name: string, details: Record<string, unknown> = {}) => {
+      report.lastProgress = { scenario: name, completedCycles: report.completedCycles, elapsedMs: Date.now() - now, ...details };
       console.info('[native-e2e]', name, JSON.stringify(report));
       await invoke('native_e2e_progress', { report: report.lastProgress });
     };
@@ -206,6 +207,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     };
 
     // Positive current-epoch close, then stale real native hide refusal after reopen.
+    await progress('current-and-stale-close-starting');
     let current = await start();
     check(await observe(300, () => emit('recording:window-will-hide-for-hotkey-stop', { windowEpoch: current.windowEpoch }), current.expected, true),
       'Positive control: current close event never animated the real Vue mini panel');
@@ -221,6 +223,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     await stop();
     report.scenarios.push('current-and-stale-native-close');
 
+    await progress('duplicate-direct-start-starting');
     current = await start();
     const beforeDuplicate = await state();
     check(await invoke('start_recording') === 'Recording already active', 'Duplicate direct start was not rejected as busy');
@@ -237,6 +240,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     await stop();
     report.scenarios.push('duplicate-direct-start-syncs-epoch-and-ui-minimize');
 
+    await progress('recording-cycles-starting');
     for (let cycle = 0; cycle < 22; cycle += 1) {
       if (cycle === 11) await configure({ keepAlive: true });
       current = await start();
@@ -251,6 +255,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     await configure({ keepAlive: false });
 
     // Toggle ownership supports replacement intent while the previous stop is still closing.
+    await progress('replacement-during-close-starting');
     await invoke('update_app_config', { holdToRecord: false });
     holdMode = false;
     current = await start();
@@ -269,19 +274,44 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
       replacementSeen ||= isNew;
     });
     replacementObserver.observe(document.documentElement, { subtree: true, attributes: true, attributeFilter: ['class'], attributeOldValue: true });
-    let sampling = true;
-    const sampleReplacement = async () => {
-      let seenEpoch = false;
-      while (sampling) {
-        const snapshot = await state();
-        seenEpoch ||= snapshot.windowEpoch > old.windowEpoch && snapshot.sessionId > old.sessionId;
-        if (seenEpoch && !snapshot.visible) replacementError ||= 'Replacement native panel hid during start';
-        await delay(10);
+    let seenEpoch = false;
+    let replacementSampleCount = 0;
+    let lastReplacementSampleMs = 0;
+    const replacementSamples = startNativeSampler(async () => {
+      const snapshot = await state();
+      replacementSampleCount += 1;
+      lastReplacementSampleMs = Date.now() - runStarted;
+      seenEpoch ||= snapshot.windowEpoch > old.windowEpoch && snapshot.sessionId > old.sessionId;
+      if (seenEpoch && !snapshot.visible) replacementError ||= 'Replacement native panel hid during start';
+    });
+    let replacementStartReturned = false;
+    try { current = await start(); replacementStartReturned = true; }
+    catch (error) {
+      // Cleanup can fail independently; retain the first failure in the report.
+      report.failureContext = { scenario: 'replacement-start',
+        startError: error instanceof Error ? error.stack || error.message : String(error), ui: uiSnapshot() };
+      throw error;
+    }
+    finally {
+      // Diagnostic IPC failures must not replace the original start failure or
+      // prevent sampler/observer cleanup. A real pending IPC still hits the watchdog.
+      await progress('replacement-sampler-joining', { startReturned: replacementStartReturned,
+        sampleCount: replacementSampleCount, lastSampleMs: lastReplacementSampleMs })
+        .catch((error) => console.warn('[native-e2e] cleanup progress failed', error));
+      const joinStarted = Date.now();
+      try { await replacementSamples.stop(); }
+      catch (error) {
+        report.failureContext = { scenario: 'replacement-sampler-cleanup', startFailure: report.failureContext,
+          cleanupError: error instanceof Error ? error.stack || error.message : String(error) };
+        throw error;
       }
-    };
-    const replacementSamples = sampleReplacement();
-    try { current = await start(); }
-    finally { sampling = false; await replacementSamples; replacementObserver.disconnect(); }
+      finally { replacementObserver.disconnect(); }
+      report.observations.push({ scenario: 'replacement-sampler-joined', sampleCount: replacementSampleCount,
+        lastSampleMs: lastReplacementSampleMs, joinElapsedMs: Date.now() - joinStarted });
+      await progress('replacement-sampler-joined', { startReturned: replacementStartReturned,
+        sampleCount: replacementSampleCount, lastSampleMs: lastReplacementSampleMs, joinElapsedMs: Date.now() - joinStarted })
+        .catch((error) => console.warn('[native-e2e] cleanup progress failed', error));
+    }
     check(!replacementError, replacementError);
     await observe(800, async () => {
       await invoke('stop_recording', { expectedSessionId: old.sessionId });
@@ -295,6 +325,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     await invoke('update_app_config', { holdToRecord: true });
     holdMode = true;
 
+    await progress('stop-during-starting-starting');
     await configure({ startDelayMs: 650, audioDelayMs: 1400 });
     const queuedBefore = await state();
     await Promise.all([hotkey('press'), hotkey('press'), hotkey('press')]);
@@ -310,6 +341,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     await stop();
     report.scenarios.push('duplicate-press-release-stop-during-starting');
 
+    await progress('early-hold-release-starting');
     await mode(false);
     await invoke('show_recording_window');
     const beforeEarlyRelease = await state();
@@ -335,6 +367,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     report.scenarios.push('early-hold-release-cancels-visible-provisional-start');
 
     // Hold press while a real UI stop finalizes creates pending start, released hold cancels it.
+    await progress('processing-pending-hold-starting');
     await configure({ stopDelayMs: 1000 });
     current = await start();
     const uiStop = store.stopRecording('native-e2e-processing');
@@ -391,6 +424,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
 
     // A failed first connection emits Starting with a session, then clears native
     // ownership to zero. Retrying must treat that scoped stop as already stopped.
+    await progress('failed-scoped-start-auto-retry-starting');
     await configure({ failNextStart: true, startDelayMs: 300 });
     await invoke('show_recording_window');
     const beforeRetryFailure = await state();
@@ -425,6 +459,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     report.scenarios.push('failed-scoped-start-clears-native-session-and-auto-retries-with-fresh-audio');
 
     // UI retry backoff must lose ownership to a newer native hotkey session.
+    await progress('ui-retry-native-replacement-starting');
     await configure({ failNextStart: true });
     const beforeUiFailure = await state();
     const failedUi = store.startRecording();
@@ -442,6 +477,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     await stop();
     report.scenarios.push('ui-retry-cancelled-by-new-native-hotkey');
 
+    await progress('manual-stop-during-backoff-starting');
     await configure({ failNextStart: true });
     const beforeManualFailure = await state();
     const cancelledUi = store.startRecording();
@@ -462,6 +498,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     await cancelledUi;
     report.scenarios.push('manual-stop-cancels-ui-backoff');
 
+    await progress('full-and-mini-layouts-starting');
     await mode(false);
     current = await start();
     await stop();
@@ -470,6 +507,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     await stop();
     report.scenarios.push('full-and-mini-close-modes');
 
+    await progress('hidden-idle-and-wake-starting');
     // Native monotonic time/heartbeats continue even when hidden WKWebView JS suspends.
     // Observe before issuing the command: native wake may precede IPC resolution by >1.2s.
     let wakeOpeningSeen = false;
