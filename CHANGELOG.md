@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.16.7] - 2026-08-31
+
+### Fixed
+- Kept the recording window responsive during rapid repeated hotkey presses by isolating each window lifecycle.
+- Prevented stale hide requests, auto-paste window restoration, and connection retries from disrupting a newer recording session.
+- Restored retries after failed connections and settled cancelled hold-to-record starts without leaving recording stuck in Starting.
+- Kept visible transcript text from shrinking during the first-transcript animation.
+- Preserved dictated text on the clipboard for delayed-reading applications even when the paste command fails.
+
+### Added
+- Added isolated native recording-window end-to-end scenarios and expanded regression coverage for session races, retry handling, transcript animation, and clipboard recovery.
+
 ## [0.16.6] - 2026-08-30
 
 ### Fixed

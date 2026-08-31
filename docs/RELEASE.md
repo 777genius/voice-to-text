@@ -10,62 +10,52 @@
 3. Обновить CHANGELOG.md
 4. Закоммитить и запушить изменения
 5. Создать и запушить git tag
-6. Запустить macOS Audio Release Gate с подтверждёнными ручными проверками
-7. Передать успешный gate run в Release workflow, который соберёт и опубликует релиз
+6. Запустить обязательный по умолчанию macOS Audio Release Gate с подтверждёнными ручными проверками
+7. Передать успешный gate run в Release workflow (явное исключение через waiver описано в шаге 7)
 ```
 
 ---
 
-## Текущий релиз: v0.16.2
+## Текущий релиз: v0.16.7
 
-Patch-релиз со стабильной потоковой диктовкой ElevenLabs, безопасной финализацией последней фразы и исправленным lifecycle мини-окна.
+Patch-релиз с устойчивым мини-окном при быстрых повторных hotkey, защитой новой записи от старых hide/auto-paste/retry операций и сохранением текста в UI и clipboard.
 
 ### Что говорить в статье
 
 - Скачать приложение можно с [voicetext.site](https://voicetext.site).
-- ElevenLabs теперь постепенно обновляет текст во время длинной фразы и вставляет каждый подтверждённый фрагмент ровно один раз.
-- Финализация ждёт clean committed transcript в ограниченном окне и не теряет последние слова.
-- Короткая VAD grace отменяет остановку, если пользователь продолжил говорить после паузы.
-- Мини-окно переходит в finalizing до остановки микрофона, закрывается один раз и не появляется снова с подсказкой hotkey.
-- Deepgram остаётся доступен как альтернативный streaming provider.
+- Быстрые повторные нажатия hotkey больше не смешивают lifecycle разных открытий мини-окна.
+- Старые hide-запросы, восстановление окна после auto-paste и connection retry не нарушают новую запись.
+- Первая анимация транскрипта больше не уменьшает уже видимый текст.
+- Приложения с отложенным чтением clipboard сохраняют доступ к диктовке даже при ошибке команды вставки.
+- Добавлены изолированные native E2E и регрессионные проверки этих сценариев.
 
 ### Ссылки на код для статьи
 
-- Streaming transcription lifecycle: `src-tauri/src/application/services/transcription_service.rs`
-- VAD stop grace: `src-tauri/src/infrastructure/audio/vad_capture_wrapper.rs`
-- Mini-window finalization UX: `src/presentation/components/RecordingPopover.vue`
-- Release evidence: `e2e-tests/` и `.github/workflows/macos-audio-gate.yml`
+- Recording-window lifecycle: `src-tauri/src/presentation/recording_window_lifecycle.rs`
+- Auto-paste clipboard recovery: `src-tauri/src/infrastructure/auto_paste.rs`
+- Transcript animation: `src/presentation/components/RecordingPopover.vue`
+- Native-window scenarios на macOS: `src/e2e/nativeWindowScenarios.ts`
+- Native-window scenarios на Linux/Windows: `e2e-tests/specs/recordingWindowLifecycle.e2e.mjs`
 
 ### Release notes для GitHub
 
-```markdown
-## What changed
+Источник release notes - секция `0.16.7` в `CHANGELOG.md`; получить её можно командой ниже.
 
-- ElevenLabs dictation now updates focused applications progressively while reconciling corrected live text.
-- A short cancellable VAD grace keeps resumed speech in the same recording.
-
-## What is fixed
-
-- Bounded ElevenLabs finalization preserves the clean committed transcript and final words.
-- Progressive auto-paste remains exactly once when the provider corrects an interim segment.
-- The recording window enters finalizing before capture stops and still accepts the late final transcript.
-- The mini window closes cleanly without reopening on the idle hotkey prompt.
-- Stale session events and a failed early hide attempt no longer block the final window close.
-```
+Изолированные native-window E2E используют синтетические PCM/STT. Эти сценарии и idle-проверки не заменяют hardware/Zoom audio gate и не подтверждают ручные проверки устройств.
 
 ### Команды релиза
 
 ```bash
-pnpm release:notes v0.16.2
-git add CHANGELOG.md docs package.json src-tauri src
-git commit -m "release: v0.16.2"
-git tag v0.16.2
+pnpm release:notes v0.16.7
+git add CHANGELOG.md docs package.json src-tauri src e2e-tests
+git commit -m "release: v0.16.7"
+git tag v0.16.7
 git push origin HEAD
-git push origin v0.16.2
+git push origin v0.16.7
 
 # Только после реальных Zoom/output-disconnect/sleep-wake проверок
 gh workflow run "macOS Audio Release Gate" \
-  -f ref=v0.16.2 \
+  -f ref=v0.16.7 \
   -f soak_seconds=1800 \
   -f zoom_half_volume_bidirectional_verified=true \
   -f output_disconnect_recovery_verified=true \
@@ -73,7 +63,7 @@ gh workflow run "macOS Audio Release Gate" \
 
 # После успешного audio gate
 gh workflow run Release \
-  -f tag=v0.16.2 \
+  -f tag=v0.16.7 \
   -f macos_audio_gate_run_id=<SUCCESSFUL_GATE_RUN_ID>
 ```
 
@@ -244,7 +234,7 @@ gh run view <AUDIO_GATE_RUN_ID> --log-failed
 
 ## 7. Запустить Release workflow
 
-Release workflow принимает успешный audio gate для того же tagged commit, повторяет keyless quality gates, создаёт draft, последовательно собирает все платформы, проверяет assets и `latest.json`, затем публикует релиз.
+Release workflow по умолчанию требует успешный audio gate для того же tagged commit, повторяет keyless quality gates, создаёт draft, последовательно собирает все платформы, проверяет assets и `latest.json`, затем публикует релиз.
 
 ```bash
 gh workflow run Release \
@@ -254,6 +244,20 @@ gh workflow run Release \
 gh run list --workflow Release --limit 3
 gh run watch <RELEASE_RUN_ID>
 ```
+
+### Исключение из audio gate
+
+Существующий input `waive_macos_audio_gate` по умолчанию равен `false`. Значение `true` - явное решение выпускающего owner/operator воспользоваться исключением. Workflow записывает actor и tag в warning и job summary; остальные quality gates и проверки релиза остаются обязательными.
+
+```bash
+# Явный выбор выпускающего owner/operator: исключение из audio gate
+# Это исключение, а не подтверждение hardware/Zoom проверок
+gh workflow run Release \
+  -f tag=v0.16.7 \
+  -f waive_macos_audio_gate=true
+```
+
+Этот пример не означает, что waiver уже выбран или ручные проверки выполнены.
 
 Проверка опубликованного релиза:
 
@@ -276,8 +280,8 @@ gh release view v0.9.4 --json tagName,isDraft,isPrerelease,url,assets
 - [ ] Rust-тесты проходят: `cargo test --manifest-path src-tauri/Cargo.toml`
 - [ ] Clippy release lint проходит: `cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D clippy::await_holding_lock`
 - [ ] Tag создан и запушен
-- [ ] Три ручные hardware/Zoom проверки реально выполнены
-- [ ] macOS Audio Release Gate прошёл для tagged commit
+- [ ] Три ручные hardware/Zoom проверки реально выполнены и macOS Audio Release Gate прошёл для tagged commit; либо выпускающий owner/operator явно выбрал waiver
+- [ ] При waiver проверены actor/tag в Release workflow warning и job summary
 - [ ] Release workflow прошёл и опубликовал релиз
 - [ ] `latest.json` содержит новую версию и все platform signatures
 - [ ] Артефакты доступны для скачивания
@@ -341,7 +345,7 @@ git push origin master
 git push origin v0.6.1
 ```
 
-Даже для hotfix обязательны успешный macOS Audio Release Gate и последующий Release workflow из шагов 6-7.
+Для hotfix audio gate также обязателен по умолчанию; выпускающий owner/operator может явно выбрать waiver по шагу 7. Release workflow и остальные quality gates обязательны в обоих случаях.
 
 ---
 

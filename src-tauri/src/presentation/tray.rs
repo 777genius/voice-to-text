@@ -8,9 +8,7 @@ use crate::infrastructure::config_store::ConfigStore;
 use crate::presentation::commands::{
     show_webview_window_on_active_monitor, show_webview_window_with_recording_config,
 };
-use crate::presentation::events::{
-    EVENT_RECORDING_WINDOW_SHOWN, EVENT_SETTINGS_FOCUS_UPDATES, EVENT_SETTINGS_WINDOW_OPENED,
-};
+use crate::presentation::events::{EVENT_SETTINGS_FOCUS_UPDATES, EVENT_SETTINGS_WINDOW_OPENED};
 
 async fn show_main_window_from_tray<R: Runtime>(app: &AppHandle<R>) {
     if let Some(state) = app.try_state::<crate::presentation::state::AppState>() {
@@ -41,7 +39,6 @@ async fn show_main_window_from_tray<R: Runtime>(app: &AppHandle<R>) {
         if let Err(e) = show_result {
             log::error!("Failed to show window: {}", e);
         }
-        let _ = window.emit(EVENT_RECORDING_WINDOW_SHOWN, ());
         if let Err(e) = window.set_focus() {
             log::error!("Failed to focus window: {}", e);
         }
@@ -55,7 +52,7 @@ async fn show_main_window_from_tray<R: Runtime>(app: &AppHandle<R>) {
 async fn show_auth_window_from_tray<R: Runtime>(app: &AppHandle<R>) {
     if let Some(main) = app.get_webview_window("main") {
         let _ = main.set_always_on_top(false);
-        let _ = main.hide();
+        let _ = crate::presentation::commands::hide_recording_webview(&main);
     }
     if let Some(settings) = app.get_webview_window("settings") {
         let _ = settings.hide();
@@ -115,7 +112,7 @@ async fn show_settings_window_from_tray<R: Runtime>(
 
     if let Some(main) = app.get_webview_window("main") {
         let _ = main.set_always_on_top(false);
-        let _ = main.hide();
+        let _ = crate::presentation::commands::hide_recording_webview(&main);
     }
     if let Some(auth) = app.get_webview_window("auth") {
         let _ = auth.hide();
@@ -226,7 +223,7 @@ pub fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                         if let Some(profile) = app_clone.get_webview_window("profile") {
                             if let Some(main) = app_clone.get_webview_window("main") {
                                 let _ = main.set_always_on_top(false);
-                                let _ = main.hide();
+                                let _ = crate::presentation::commands::hide_recording_webview(&main);
                             }
                             if let Some(settings) = app_clone.get_webview_window("settings") {
                                 let _ = settings.hide();
@@ -266,7 +263,7 @@ pub fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
                     // При клике левой кнопкой - показываем/скрываем окно
                     match window.is_visible() {
                         Ok(true) => {
-                            let _ = window.hide();
+                            let _ = crate::presentation::commands::hide_recording_webview(&window);
                         }
                         Ok(false) => {
                             let app_clone = app.clone();

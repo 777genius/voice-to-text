@@ -5,7 +5,7 @@
 ## Важно про macOS
 
 По текущей документации Tauri v2 WebDriver **не поддерживается на macOS** (нет WKWebView driver).
-Поэтому локально на macOS эти тесты не запускаются — их нужно гонять в CI на Linux/Windows.
+Поэтому WebDriver suite запускается на Linux/Windows. Для macOS ниже есть отдельный native self-runner без WebDriver.
 
 ## Как запустить (Linux)
 
@@ -30,6 +30,79 @@ cargo install tauri-driver --version 2.0.6 --locked
 cd frontend
 pnpm e2e:tauri
 ```
+
+## Native macOS recording-window regression
+
+```bash
+npm run e2e:native-window
+```
+
+The launcher creates a **new disposable source snapshot** under the system temporary directory,
+reuses only installed dependencies, builds bundled assets and the debug-only `native-window-e2e`
+Cargo feature, then launches its own executable. It never launches the installed application or
+uses a real project as the native runtime workspace. Every WKWebView uses a nonpersistent data
+store; the test has a unique application identifier, HOME and config directory. The inherited
+environment is allowlisted: API credentials, tokens, `.env` files and runtime overrides are not
+forwarded. No microphone, clipboard, paste, physical global hotkey registration or paid API is used.
+The fixture pins `TAURI_DEBUG=true` so both build-time and runtime API validation retain its
+dummy loopback endpoint. Production builds keep their normal HTTPS-only policy.
+
+The actual NSPanel, WKWebView, Vue components, Pinia state, Tauri IPC/events, hotkey acceptance and
+`TranscriptionService` execute normally. Only audio capture and STT provider adapters are deterministic.
+A transcript appears only after the service sends captured test audio to the provider. This does
+not prove physical key delivery, microphone permission, provider/network behavior, hardware sleep. It does include **180 seconds of real elapsed hidden idle** while WKWebView
+JavaScript may naturally suspend. A native monotonic timer checks idle/resource invariants, writes
+15-second heartbeats and sends one production hotkey press to wake the real panel. The resumed Vue
+UI must show that new recording and fresh audio-derived text; no second JS press or fake clock is used.
+
+Scenarios cover 22 complete record/transcript/stop/hide/reopen cycles, cold and keepalive sessions,
+current/stale real native closes, a replacement press during the 220 ms close interval, stale status
+and window events, session-scoped stop ownership, duplicate key callbacks, stop during slow Starting,
+queued hold cancellation during Processing, failed start/retry, UI retry cancellation by a newer
+native hotkey or manual stop, and mini/full layouts. It also proves automatic retry after a real
+scoped Starting failure clears native ownership, provisional hold cancellation before session
+allocation leaves the visible UI Idle, and duplicate direct starts preserve working UI minimize.
+Mutation observers retain brief closing-class
+transitions, while IPC samples check native visibility throughout protected intervals. Listening,
+Recording, real UI-stop Processing, unique transcripts and balanced capture are positive controls.
+
+Artifacts remain in the printed temporary directory: build logs, source/binary checksum manifest,
+`native-progress.jsonl` (including native window number for screenshots), runtime log and final JSON.
+App execution is bounded to 8 minutes (build has a separate deadline), with missing-progress deadlines.
+Only the process started by this launcher is terminated; unsupported platforms and skips fail.
+A failed app exit still prints its structured scenario failure. There is no arbitrary binary or
+config-directory override. To repeat an already built, checksummed fixture only:
+
+```bash
+node e2e-tests/run-native-window-e2e.mjs --no-build /absolute/system/tmp/voicetext-native-e2e-ABC123
+```
+
+The existing disposable directory must be canonical and owned by the current user; the executable
+must match its manifest and contain the native feature marker. A repeat gets a fresh result filename.
+The unique application identifier must also be embedded in the binary; a concurrent unrelated
+build in the shared Cargo cache fails closed instead of being attributed to this source snapshot.
+`--no-build` repeats the recorded snapshot, not later workspace edits. Do not claim a native pass
+from helper unit tests or a macOS WebDriver skip.
+
+## Recording window lifecycle regression
+
+`specs/recordingWindowLifecycle.e2e.mjs` uses the real native window, Vue component,
+Tauri IPC and event bridge in the `webdriver-e2e` build. Run it only with disposable
+test application data, never against a normal user profile.
+
+It checks that a current epoch really hides the native window, an older epoch
+cannot hide it after reopen, and a delayed old `recording:window-will-hide-for-hotkey-stop`
+event cannot close the mini UI or suppress its transcript. A current event is a
+positive control for the real Vue listener. Five hide/show cycles exercise pending
+close animations; the final reopened window is observed for 800 ms, beyond the
+220 ms native delay and 260 ms animation reset. Assertions cover the entire interval,
+including short closing-class transitions, rather than only eventual visibility.
+
+The transcript is an idle UI fixture, not microphone output. This test does not
+exercise real recording start/stop, physical hotkeys, STT providers, audio devices,
+long OS sleep, or macOS WebView suspension. It restores the changed configuration
+and the harness's full recording layout in `finally`. A macOS runner skip is not
+evidence that this native regression passed; run the supported Linux/Windows gate.
 
 ## Live audio smoke tests (macOS)
 

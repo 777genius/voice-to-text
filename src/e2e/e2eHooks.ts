@@ -6,15 +6,19 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 
 import { useAppConfigStore } from '@/stores/appConfig';
 import { useSttConfigStore } from '@/stores/sttConfig';
+import { useTranscriptionStore } from '@/stores/transcription';
 import { useAuthStore } from '@/features/auth/store/authStore';
 import { readUiPreferencesFromStorage } from '@/windowing/stateSync';
 import { createSession } from '@/features/auth/domain/entities/Session';
 
 type E2eApi = {
   getWindowLabel: () => string;
+  getWindowVisibility: () => Promise<boolean>;
   invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
   emitEvent: (event: string, payload?: unknown) => Promise<void>;
   useFullRecordingLayout: () => void;
+  useMiniRecordingLayout: () => void;
+  seedRecordingTranscript: (text: string) => void;
 
   getAppConfig: () => {
     revision: string;
@@ -58,7 +62,10 @@ declare global {
  *
  * Важно: включается только когда VITE_E2E=1.
  */
-export function installE2eHooks(pinia: Pinia): void {
+export function installE2eHooks(pinia: Pinia): void | Promise<void> {
+  if (import.meta.env.VITE_NATIVE_WINDOW_E2E === '1') {
+    return import('./nativeWindowScenarios').then(({ installNativeWindowHooks }) => installNativeWindowHooks(pinia));
+  }
   // Vite всегда кладёт env в строки.
   const enabled = import.meta.env.VITE_E2E === '1';
   if (!enabled) return;
@@ -101,10 +108,23 @@ export function installE2eHooks(pinia: Pinia): void {
 
   window.__E2E__ = {
     getWindowLabel: () => String(getCurrentWindow().label),
+    getWindowVisibility: () => getCurrentWindow().isVisible(),
     invoke: (command, args) => invoke(command, args as any),
     emitEvent: (event, payload) => emit(event, payload),
     useFullRecordingLayout: () => {
       appConfig.showMiniRecordingWindow = false;
+    },
+    useMiniRecordingLayout: () => {
+      appConfig.showMiniRecordingWindow = true;
+    },
+    seedRecordingTranscript: (text) => {
+      const transcription = useTranscriptionStore(pinia);
+      if (!transcription.isIdle) {
+        throw new Error('The window lifecycle fixture requires idle transcription');
+      }
+      // UI text only: do not create a session or start an audio service.
+      transcription.clearText();
+      transcription.finalText = text;
     },
     getAppConfig: () => ({
       revision: appConfig.revision,

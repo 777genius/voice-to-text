@@ -1681,13 +1681,18 @@ where
         .paste_shortcut()
         .context("Failed to send paste shortcut")
     {
-        if let Some(previous_text) = previous_text.as_deref() {
-            if let Err(restore_error) = clipboard
-                .set_text(previous_text)
-                .context("Failed to restore previous clipboard text after paste shortcut failure")
-            {
-                log::warn!("{}", restore_error);
+        if injector.restore_clipboard_after_successful_paste() {
+            if let Some(previous_text) = previous_text.as_deref() {
+                if let Err(restore_error) = clipboard.set_text(previous_text).context(
+                    "Failed to restore previous clipboard text after paste shortcut failure",
+                ) {
+                    log::warn!("{}", restore_error);
+                }
             }
+        } else {
+            log::warn!(
+                "Keeping auto-paste text in clipboard after paste command failure because target may read clipboard asynchronously"
+            );
         }
         return Err(error);
     }
@@ -2515,6 +2520,49 @@ end tell"#
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn macos_clipboard_first_target_keeps_auto_paste_text_when_paste_command_reports_failure() {
+        let target = normalize_auto_paste_target("com.openai.codex".to_string(), 123)
+            .expect("target must be valid");
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let previous_clipboard = "secret clipboard";
+        let text = "привет из диктовки".to_string();
+        let mut clipboard = FakeClipboard::new(previous_clipboard, events.clone());
+        let mut delay = FakeDelay {
+            events: events.clone(),
+            ..Default::default()
+        };
+
+        let error =
+            super::paste_text_hybrid_for_target_with(&text, &target, &mut clipboard, &mut delay, {
+                let events = events.clone();
+                move |_| {
+                    events.borrow_mut().push("paste".to_string());
+                    bail!("paste command reported failure after dispatch")
+                }
+            })
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("keyboard typing fallback is disabled"));
+        assert_eq!(clipboard.text, text);
+        assert!(!events
+            .borrow()
+            .iter()
+            .any(|event| event == &format!("set:{previous_clipboard}")));
+        assert_eq!(
+            *events.borrow(),
+            vec![
+                "get:1".to_string(),
+                format!("set:{}", text),
+                "sleep:80".to_string(),
+                "paste".to_string(),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn macos_known_native_target_restores_previous_clipboard_after_paste() {
         let target = normalize_auto_paste_target("com.apple.TextEdit".to_string(), 123)
             .expect("target must be valid");
@@ -2541,6 +2589,45 @@ end tell"#
         assert_eq!(
             *events.borrow(),
             expected_successful_clipboard_events(&text)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_known_native_target_restores_previous_clipboard_when_paste_command_fails() {
+        let target = normalize_auto_paste_target("com.apple.TextEdit".to_string(), 123)
+            .expect("target must be valid");
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let text = "привет из диктовки".to_string();
+        let mut clipboard = FakeClipboard::new("previous", events.clone());
+        let mut delay = FakeDelay {
+            events: events.clone(),
+            ..Default::default()
+        };
+
+        let error =
+            super::paste_text_hybrid_for_target_with(&text, &target, &mut clipboard, &mut delay, {
+                let events = events.clone();
+                move |_| {
+                    events.borrow_mut().push("paste".to_string());
+                    bail!("paste command failed before target consumed clipboard")
+                }
+            })
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("keyboard typing fallback is disabled"));
+        assert_eq!(clipboard.text, "previous");
+        assert_eq!(
+            *events.borrow(),
+            vec![
+                "get:1".to_string(),
+                format!("set:{}", text),
+                "sleep:80".to_string(),
+                "paste".to_string(),
+                "set:previous".to_string(),
+            ]
         );
     }
 

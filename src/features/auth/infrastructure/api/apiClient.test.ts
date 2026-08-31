@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 import type { Session } from '../../domain/entities/Session';
 import { createSession } from '../../domain/entities/Session';
+// Load dependencies during test collection, outside the request scenario timeout.
+import { apiRequest } from './apiClient';
 
 const oldSession: Session = createSession({
   accessToken: 'old-access',
@@ -68,13 +70,9 @@ describe('apiClient (refresh-fetch integration)', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
-    vi.resetModules();
   });
 
   it('не очищает токены, если refresh получил 401 со старым refresh_token, но сессия уже обновлена другим окном', async () => {
-    // Импортируем после установки моков (важно для vi.mock).
-    const { apiRequest } = await import('./apiClient');
-
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
 

@@ -247,7 +247,13 @@ pub struct AppState {
 
     /// Пользователь нажал hotkey ещё раз, пока предыдущая запись завершалась.
     /// После перехода Recording -> Processing -> Idle стартуем новую запись автоматически.
-    pub recording_start_pending_after_stop: AtomicBool,
+    pub recording_start_pending_after_stop:
+        super::recording_window_lifecycle::PendingRecordingStart,
+
+    pub recording_hotkey_intents: super::recording_window_lifecycle::RecordingHotkeyIntents,
+
+    pub recording_window_lifecycle:
+        Arc<super::recording_window_lifecycle::RecordingWindowLifecycle>,
 
     /// Сериализует hotkey toggle, чтобы stop и следующий start не выполнялись параллельно.
     pub recording_hotkey_toggle_guard: Arc<tokio::sync::Mutex<()>>,
@@ -315,6 +321,9 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Self {
+        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+        return Self::native_e2e();
+
         // Initialize real audio capture with VAD
         let system_audio = match SystemAudioCapture::new() {
             Ok(capture) => capture,
@@ -370,7 +379,9 @@ impl AppState {
                     recording_hotkey_suppressed_until_ms: AtomicU64::new(0),
                     recording_hotkey_stop_suppressed_until_ms: AtomicU64::new(0),
                     recording_hotkey_stop_suppression_press_seq: AtomicU64::new(0),
-                    recording_start_pending_after_stop: AtomicBool::new(false),
+                    recording_start_pending_after_stop: Default::default(),
+                    recording_window_lifecycle: Arc::new(Default::default()),
+                    recording_hotkey_intents: Default::default(),
                     recording_hotkey_toggle_guard: Arc::new(tokio::sync::Mutex::new(())),
                     recording_lifecycle_guard: Arc::new(tokio::sync::Mutex::new(())),
                     audio_start_guard: Arc::new(tokio::sync::Mutex::new(())),
@@ -448,7 +459,9 @@ impl AppState {
                     recording_hotkey_suppressed_until_ms: AtomicU64::new(0),
                     recording_hotkey_stop_suppressed_until_ms: AtomicU64::new(0),
                     recording_hotkey_stop_suppression_press_seq: AtomicU64::new(0),
-                    recording_start_pending_after_stop: AtomicBool::new(false),
+                    recording_start_pending_after_stop: Default::default(),
+                    recording_window_lifecycle: Arc::new(Default::default()),
+                    recording_hotkey_intents: Default::default(),
                     recording_hotkey_toggle_guard: Arc::new(tokio::sync::Mutex::new(())),
                     recording_lifecycle_guard: Arc::new(tokio::sync::Mutex::new(())),
                     audio_start_guard: Arc::new(tokio::sync::Mutex::new(())),
@@ -509,6 +522,22 @@ impl AppState {
             app_config.vad_silence_timeout_ms
         );
 
+        Self::from_recording_ports(
+            transcription_service,
+            app_config,
+            vad_tx,
+            vad_rx,
+            active_transcription_session_id,
+        )
+    }
+
+    fn from_recording_ports(
+        transcription_service: Arc<TranscriptionService>,
+        app_config: AppConfig,
+        vad_tx: tokio::sync::mpsc::UnboundedSender<u64>,
+        vad_rx: tokio::sync::mpsc::UnboundedReceiver<u64>,
+        active_transcription_session_id: Arc<AtomicU64>,
+    ) -> Self {
         Self {
             transcription_service,
             config: Arc::new(RwLock::new(app_config)),
@@ -546,7 +575,9 @@ impl AppState {
             recording_hotkey_suppressed_until_ms: AtomicU64::new(0),
             recording_hotkey_stop_suppressed_until_ms: AtomicU64::new(0),
             recording_hotkey_stop_suppression_press_seq: AtomicU64::new(0),
-            recording_start_pending_after_stop: AtomicBool::new(false),
+            recording_start_pending_after_stop: Default::default(),
+            recording_window_lifecycle: Arc::new(Default::default()),
+            recording_hotkey_intents: Default::default(),
             recording_hotkey_toggle_guard: Arc::new(tokio::sync::Mutex::new(())),
             recording_lifecycle_guard: Arc::new(tokio::sync::Mutex::new(())),
             audio_start_guard: Arc::new(tokio::sync::Mutex::new(())),
@@ -566,6 +597,24 @@ impl AppState {
             translation_shutdown_started: AtomicBool::new(false),
             recording_window_position_save_suppressed_until_ms: AtomicI64::new(0),
         }
+    }
+
+    #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+    fn native_e2e() -> Self {
+        let fixture = super::native_e2e::fixture();
+        let service = Arc::new(TranscriptionService::new(
+            Box::new(super::native_e2e::FixtureCapture::new(fixture.clone())),
+            Arc::new(super::native_e2e::FixtureFactory(fixture)),
+        ));
+        let config = AppConfig {
+            auto_copy_to_clipboard: false,
+            auto_paste_text: false,
+            show_mini_recording_window: false,
+            keep_recording_until_manual_stop: true,
+            ..AppConfig::default()
+        };
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        Self::from_recording_ports(service, config, tx, rx, Arc::new(AtomicU64::new(0)))
     }
 
     pub async fn shutdown_translation_runtimes(&self) {
@@ -699,6 +748,8 @@ impl AppState {
     /// - после загрузки auth_store на старте приложения
     /// - после любых изменений сессии (login/logout/refresh) через `set_auth_session`
     pub async fn restart_auth_refresh_task(&self, app_handle: AppHandle) {
+        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+        return;
         // Сериализуем рестарт, чтобы не плодить конкурентные refresh-loop задачи.
         let _guard = self.auth_refresh_task_guard.lock().await;
 
@@ -1249,6 +1300,12 @@ impl AppState {
         device_name: Option<String>,
         app_handle: tauri::AppHandle,
     ) -> Result<(), String> {
+        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+        {
+            // Retain deterministic capture; never enumerate/open a real audio device.
+            let _ = (device_name, app_handle);
+            return Ok(());
+        }
         let normalized_device_name = normalize_audio_capture_device_name(device_name);
 
         log::info!(

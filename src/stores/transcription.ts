@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { ref, computed, watch } from 'vue';
+import { ref, shallowRef, computed, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { isTauriAvailable } from '../utils/tauri';
@@ -87,6 +87,16 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   // Флаг "ждём старт новой сессии": пока он true — игнорируем любые статусы/события,
   // которые не относятся к запуску новой записи (защита от поздних событий старого сокета).
   const awaitingSessionStart = ref<boolean>(false);
+  // UI effects consume only statuses accepted by this store's session guards.
+  const lastAcceptedRecordingStatus = shallowRef<RecordingStatusPayload | null>(null);
+  let recordingStateRevision = 0;
+  let recordingStartRevision = 0;
+  let reconcileRequestId = 0;
+  watch(
+    [status, sessionId, awaitingSessionStart, closedSessionIdFloor, closedSessionIds],
+    () => { recordingStateRevision += 1; },
+    { flush: 'sync' },
+  );
   const partialText = ref<string>(''); // текущий промежуточный сегмент
   const accumulatedText = ref<string>(''); // накопленные финализированные сегменты
   const finalText = ref<string>(''); // полный финальный результат (для копирования)
@@ -127,6 +137,35 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   // Retry логика подключения (когда запись ещё не стартанула и мы пытаемся подключиться к STT)
   const isConnecting = ref<boolean>(false);
+  type ConnectOperation = {
+    id: string;
+    controller: AbortController;
+    sessionId: number | null;
+    phase: 'preparing' | 'starting' | 'backoff';
+    validations: Set<{ promise: Promise<void>; resolve: () => void }>;
+  };
+  let connectOperation: ConnectOperation | null = null;
+  const connectClientId = crypto.randomUUID();
+  let connectSequence = 0;
+
+  function resetConnectProgress(): void {
+    isConnecting.value = false;
+    connectAttempt.value = 0;
+    connectMaxAttempts.value = 0;
+    lastConnectFailure.value = null;
+    lastConnectFailureRaw.value = '';
+    lastConnectFailureDetails.value = null;
+  }
+
+  function cancelConnectOperation(): void {
+    const operation = connectOperation;
+    if (!operation) return;
+    connectOperation = null;
+    operation.controller.abort();
+    for (const validation of operation.validations) validation.resolve();
+    operation.validations.clear();
+    resetConnectProgress();
+  }
   const connectAttempt = ref<number>(0);
   const connectMaxAttempts = ref<number>(0);
   const lastConnectFailure = ref<TranscriptionErrorPayload['error_type'] | null>(null);
@@ -597,20 +636,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
-  function isStartOrActiveFlow(): boolean {
-    return (
-      awaitingSessionStart.value ||
-      isConnecting.value ||
-      status.value === RecordingStatus.Starting ||
-      status.value === RecordingStatus.Recording ||
-      status.value === RecordingStatus.Processing
-    );
-  }
-
-  function shouldPreserveActiveFlowOnIdleReconcile(reason: string): boolean {
-    return reason === 'window_shown' || reason === 'start_requested';
-  }
-
   function ensureActiveSessionForIncomingEvent(payloadSessionId: number, source: string): boolean {
     bumpLastSeenSessionId(payloadSessionId);
     const isTranslationEvent = source.startsWith('translation:');
@@ -662,6 +687,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       }
 
       sessionId.value = payloadSessionId;
+      if (connectOperation && connectOperation.sessionId === null) connectOperation.sessionId = payloadSessionId;
       awaitingSessionStart.value = false;
 
       // Если мы "залипли" в Starting из-за пропущенного recording:status=Recording,
@@ -682,15 +708,22 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   async function reconcileBackendStatus(reason: string): Promise<RecordingStatus | null> {
     if (!isTauriAvailable()) return null;
 
+    const requestId = ++reconcileRequestId;
+    const revision = recordingStateRevision;
+    const generation = listenerGeneration;
     try {
       const backendStatus = await invoke<RecordingStatus>('get_recording_status');
+      // A status snapshot has no session id. It cannot supersede events or start
+      // intent received while the IPC was pending, even if status changed back.
+      if (revision !== recordingStateRevision || requestId !== reconcileRequestId || generation !== listenerGeneration) {
+        return null;
+      }
       const uiLooksLikeStartRace =
         status.value === RecordingStatus.Starting &&
         (awaitingSessionStart.value || isConnecting.value || sessionId.value !== null);
       const preserveActiveFlowOnIdle =
         backendStatus === RecordingStatus.Idle &&
-        (uiLooksLikeStartRace ||
-          (shouldPreserveActiveFlowOnIdleReconcile(reason) && isStartOrActiveFlow()));
+        (uiLooksLikeStartRace || awaitingSessionStart.value || isConnecting.value);
 
       if (backendStatus === RecordingStatus.Idle) {
         // ВАЖНО: иногда get_recording_status может на короткое время вернуть Idle
@@ -902,6 +935,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       partialAnimationTimer = null;
     }
 
+    // Empty animated text already exposes the full raw segment in the UI.
+    // Seed it atomically so the first timer tick cannot truncate visible text.
+    if (!animatedPartialText.value) {
+      animatedPartialText.value = targetText;
+      return;
+    }
+
     const transition = reconcilePartialAnimation(animatedPartialText.value, targetText);
     animatedPartialText.value = transition.renderedText;
     if (!transition.textToAnimate) return;
@@ -947,6 +987,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     // Если текст полностью новый - начинаем с нуля
     if (!targetText.startsWith(animatedAccumulatedText.value)) {
       animatedAccumulatedText.value = '';
+    }
+
+    // As with partials, do not replay a segment the raw fallback already shows.
+    if (!animatedAccumulatedText.value) {
+      animatedAccumulatedText.value = targetText;
+      return;
     }
 
     // Находим добавленную часть текста
@@ -1130,6 +1176,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       status: status.value,
       textLength: buildCurrentTranscriptionText().length,
     }, 'debug');
+  }
+
+  function restoreCurrentTranscriptionDisplay(): void {
+    if (status.value !== RecordingStatus.Recording || awaitingSessionStart.value ||
+        sessionId.value === null || sessionId.value !== suppressedPreviousSessionId.value) return;
+    previousTranscriptionDisplaySuppressed.value = false;
+    suppressedPreviousSessionId.value = null;
+    animatedPartialText.value = partialText.value;
+    animatedAccumulatedText.value = accumulatedText.value;
   }
 
   async function processCurrentTextAfterStop(reason: string): Promise<boolean> {
@@ -1580,6 +1635,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             closedSessionIdFloor: closedSessionIdFloor.value,
           }, 'info');
 
+          if (!Number.isSafeInteger(payloadSessionId) || payloadSessionId <= 0) return;
+          // A failed newer start may restore an older session when no session is
+          // active. Do not use lastSeenSessionId as a permanent high-water mark.
+          if (sessionId.value !== null && payloadSessionId < sessionId.value) return;
           bumpLastSeenSessionId(payloadSessionId);
 
           // Если сессия уже помечена как "закрытая" — игнорируем любые её статусы,
@@ -1652,6 +1711,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
           // Начало новой сессии: фиксируем sessionId и чистим текст/ошибки.
           const prevSessionId = sessionId.value;
+          if (isStartLike && connectOperation) {
+            if ((connectOperation.phase !== 'starting' &&
+                 (nextStatus === RecordingStatus.Recording || connectOperation.sessionId !== payloadSessionId)) ||
+                (connectOperation.sessionId !== null && connectOperation.sessionId !== payloadSessionId)) {
+              cancelConnectOperation();
+            } else {
+              connectOperation.sessionId = payloadSessionId;
+            }
+          }
           if (isStartLike && payloadSessionId !== prevSessionId) {
             sessionId.value = payloadSessionId;
           }
@@ -1674,6 +1742,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           // Если статус стал Starting или Recording - очищаем весь текст
           // Это работает и для кнопки, и для hotkey (Ctrl+X)
           const isNewSession = isStartLike && payloadSessionId !== prevSessionId;
+          if (isStartLike && (isNewSession || (previousStatus !== RecordingStatus.Starting && previousStatus !== RecordingStatus.Recording))) {
+            recordingStartRevision += 1;
+          }
           if (
             isStartLike &&
             (isNewSession ||
@@ -1775,6 +1846,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             markSessionsClosed(payloadSessionId, 'status:error');
             awaitingSessionStart.value = false;
           }
+          recordingStateRevision += 1;
+          lastAcceptedRecordingStatus.value = { ...event.payload };
         }
       );
       if (!statusUnlisten) return;
@@ -1818,9 +1891,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             // попробуем тихо обновить токен. Если не получилось — тогда уже разлогиниваем.
             if (!isConnecting.value) {
               const wasStarting = status.value === RecordingStatus.Starting;
+              const startRevision = recordingStartRevision;
               const ok = await tryRefreshAuthForStt();
+              if (startRevision !== recordingStartRevision) return;
               if (!ok) {
-                void forceLogoutFromSttAuthError();
+                void forceLogoutFromSttAuthError(() => startRevision === recordingStartRevision);
               } else if (wasStarting) {
                 // Запись была инициирована (хоткей/кнопка), но токен протух.
                 // Токен обновлён — перезапускаем автоматически.
@@ -2515,8 +2590,17 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     return i18n.global.t('errors.processing');
   }
 
-  function sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+  function sleep(ms: number, signal: AbortSignal): Promise<void> {
+    return new Promise((resolve) => {
+      if (signal.aborted) return resolve();
+      const finish = () => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, ms);
+      signal.addEventListener('abort', finish, { once: true });
+    });
   }
 
   function currentConnectFailureDetails(): TranscriptionErrorPayload['error_details'] | null {
@@ -2531,7 +2615,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     return base + jitter;
   }
 
-  async function waitForConnectOutcome(timeoutMs: number): Promise<void> {
+  async function waitForConnectOutcome(timeoutMs: number, signal: AbortSignal): Promise<void> {
     return new Promise((resolve, reject) => {
       let finished = false;
       let stop: (() => void) | null = null;
@@ -2542,6 +2626,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         finished = true;
         if (timer) clearTimeout(timer);
         if (stop) stop();
+        signal.removeEventListener('abort', onAbort);
         resolve();
       };
 
@@ -2550,8 +2635,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         finished = true;
         if (timer) clearTimeout(timer);
         if (stop) stop();
+        signal.removeEventListener('abort', onAbort);
         reject(type);
       };
+
+      const onAbort = () => finishErr('connection');
+      if (signal.aborted) return onAbort();
+      signal.addEventListener('abort', onAbort, { once: true });
 
       // Мгновенные проверки перед подпиской, чтобы избежать гонок с immediate-watch
       if (status.value === RecordingStatus.Recording) {
@@ -2584,8 +2674,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     });
   }
 
-  async function forceLogoutFromSttAuthError(): Promise<void> {
-    if (isForcingLogout) return;
+  async function forceLogoutFromSttAuthError(isCurrent: () => boolean = () => true): Promise<void> {
+    if (isForcingLogout || !isCurrent()) return;
     isForcingLogout = true;
 
     try {
@@ -2594,6 +2684,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         await getTokenRepository().clear();
       } catch {}
 
+      if (!isCurrent()) return;
       // 2) Сбрасываем auth store (это переключит окно на auth через watcher в App.vue)
       try {
         const authStore = useAuthStore();
@@ -2606,8 +2697,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       } catch {}
     } finally {
       // Важно: не оставляем UI в error состоянии.
-      status.value = RecordingStatus.Idle;
-      clearRecordingErrorState();
+      if (isCurrent()) {
+        status.value = RecordingStatus.Idle;
+        clearRecordingErrorState();
+      }
       isForcingLogout = false;
     }
   }
@@ -2656,7 +2749,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     resetTranscriptionBuffersForNewSession();
   }
 
-  async function startRecordingOnce(): Promise<void> {
+  async function startRecordingOnce(operation: ConnectOperation): Promise<void> {
+    operation.sessionId = null;
+    operation.phase = 'starting';
     // Начинаем новую сессию "с чистого листа": пока не получим Starting/Recording с новым session_id,
     // игнорируем любые поздние события от прошлых запусков.
     awaitingSessionStart.value = true;
@@ -2676,7 +2771,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       connectMaxAttempts: connectMaxAttempts.value,
       awaitingSessionStart: awaitingSessionStart.value,
     }, 'info');
-    await invoke<string>('start_recording');
+    await invoke<string>('start_recording', { clientStartId: operation.id });
   }
 
   async function startRecordingWithRetry(maxAttempts = 3): Promise<void> {
@@ -2686,6 +2781,18 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       return;
     }
 
+    const operation: ConnectOperation = {
+      id: `${connectClientId}:${++connectSequence}`, controller: new AbortController(),
+      sessionId: null, phase: 'preparing', validations: new Set(),
+    };
+    connectOperation = operation;
+    const isCurrent = () => connectOperation === operation && !operation.controller.signal.aborted;
+    const waitForValidation = async () => {
+      while (isCurrent() && operation.validations.size) {
+        await Promise.all([...operation.validations].map(({ promise }) => promise));
+      }
+    };
+    recordingStartRevision += 1;
     const requestedRecordingMode = appConfig.recordingMode ?? 'dictation';
     const isLiveTranslationAttempt = requestedRecordingMode === 'live_translation';
 
@@ -2696,6 +2803,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
     try {
       for (let attempt = 1; attempt <= connectMaxAttempts.value; attempt++) {
+        if (operation.validations.size) await waitForValidation();
+        if (!isCurrent()) return;
+        operation.phase = 'preparing';
         connectAttempt.value = attempt;
         lastConnectFailure.value = null;
         lastConnectFailureRaw.value = '';
@@ -2708,23 +2818,38 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           if (attempt === 1 && !isLiveTranslationAttempt) {
             const tokenRepo = getTokenRepository();
             const session = await tokenRepo.get();
+            if (!isCurrent()) return;
             if (session && isAccessTokenExpired(session)) {
               await tryRefreshAuthForStt();
+              if (!isCurrent()) return;
             }
           }
 
+          if (operation.validations.size) await waitForValidation();
+          if (!isCurrent()) return;
           // Перед ретраем аккуратно пробуем остановить возможный "полузапущенный" поток.
           // Если он не стартанул — просто игнорируем ошибку.
-          if (attempt > 1) {
+          if (attempt > 1 && operation.sessionId !== null) {
             try {
-              await invoke('stop_recording');
+              const stopped = await invoke<string>('stop_recording', { expectedSessionId: operation.sessionId });
+              // Native reports an absent owner as 'Recording already stopped'.
+              // Only a different active owner revokes this operation's retry.
+              if (stopped === 'Stale recording stop ignored') {
+                if (isCurrent()) cancelConnectOperation();
+                return;
+              }
             } catch {}
+            if (!isCurrent()) return;
           }
 
-          await startRecordingOnce();
+          if (operation.validations.size) await waitForValidation();
+          if (!isCurrent()) return;
+          await startRecordingOnce(operation);
+          if (!isCurrent()) return;
 
           // Ждём пока backend реально переведёт нас в Recording или пришлёт ошибку
-          await waitForConnectOutcome(12_000);
+          await waitForConnectOutcome(12_000, operation.controller.signal);
+          if (!isCurrent()) return;
 
           console.log('[ConnectRetry] Connected successfully');
           clientLog('recording_connect_success', {
@@ -2735,7 +2860,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }, 'info');
           rateLimitRetryCount = 0;
           return;
-    } catch (err) {
+        } catch (err) {
+          operation.phase = 'backoff';
+          if (operation.validations.size) await waitForValidation();
+          if (!isCurrent()) return;
+          // An accepted Recording is stronger evidence than a late command error.
+          if (status.value === RecordingStatus.Recording && sessionId.value !== null) return;
           // ВАЖНО: err может быть либо "типом" (timeout/connection/...) из waitForConnectOutcome,
           // либо сырой строкой ошибки из invoke('start_recording').
           // Нельзя интерпретировать любую строку как error_type.
@@ -2777,11 +2907,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               errorRaw.value = raw;
               errorDetails.value = details;
               suppressNextErrorStatus = true;
-              await forceLogoutFromSttAuthError();
+              await forceLogoutFromSttAuthError(isCurrent);
               return;
             }
 
             const ok = await tryRefreshAuthForStt();
+            if (operation.validations.size) await waitForValidation();
+            if (!isCurrent()) return;
             if (ok) {
               authRefreshUsed = true;
               console.warn('[ConnectRetry] Auth refreshed, retrying connection');
@@ -2794,7 +2926,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             errorRaw.value = raw;
             errorDetails.value = details;
             suppressNextErrorStatus = true;
-            await forceLogoutFromSttAuthError();
+            await forceLogoutFromSttAuthError(isCurrent);
             return;
           }
 
@@ -2853,24 +2985,24 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               backoffMs = 4000 + jitter;
             }
           }
-          await sleep(backoffMs);
+          await sleep(backoffMs, operation.controller.signal);
+          if (!isCurrent()) return;
         }
       }
 
       // Защита: на всякий случай не оставляем UI в Starting без исхода.
       // Это может случиться, если все попытки завершились continue (например, серия auth refresh),
       // или если события от backend потерялись/были отфильтрованы.
+      if (!isCurrent()) return;
       const fallbackType = lastConnectFailure.value ?? 'connection';
       const fallbackRaw = lastConnectFailureRaw.value || 'Unknown connection error';
       setRecordingError(fallbackType, fallbackRaw, lastConnectFailureDetails.value);
       status.value = RecordingStatus.Error;
     } finally {
-      isConnecting.value = false;
-      connectAttempt.value = 0;
-      connectMaxAttempts.value = 0;
-      lastConnectFailure.value = null;
-      lastConnectFailureRaw.value = '';
-      lastConnectFailureDetails.value = null;
+      if (isCurrent()) {
+        connectOperation = null;
+        resetConnectProgress();
+      }
     }
   }
 
@@ -2882,7 +3014,27 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     await startRecordingWithRetry(3);
   }
 
-  function prepareForRustHotkeyStart(warmStartExpected = false): void {
+  function pausePendingConnectForStart(clientStartId?: string): (accepted?: boolean) => void {
+    const operation = connectOperation;
+    if (!operation || clientStartId?.startsWith(`${connectClientId}:`)) return () => {};
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => { resolve = done; });
+    const validation = { promise, resolve };
+    operation.validations.add(validation);
+    return (accepted = false) => {
+      if (accepted && connectOperation === operation) cancelConnectOperation();
+      operation.validations.delete(validation);
+      resolve();
+    };
+  }
+
+  function prepareForRustHotkeyStart(warmStartExpected = false, clientStartId?: string): void {
+    // Native echoes this operation's own command. Its state was already prepared
+    // by startRecordingOnce; only an independent start supersedes the retry loop.
+    if (clientStartId?.startsWith(`${connectClientId}:`)) return;
+    cancelConnectOperation();
+    recordingStateRevision += 1;
+    recordingStartRevision += 1;
     clearRateLimitRetryTimer();
     flushPendingHotkeyStopTailBeforeReset('rust_hotkey_start');
 
@@ -2897,6 +3049,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     lastConnectFailureDetails.value = null;
   }
 
+  function cancelPendingRustHotkeyStart(expectedRevision: number): boolean {
+    if (expectedRevision !== recordingStartRevision || !awaitingSessionStart.value ||
+        sessionId.value !== null || connectOperation !== null) return false;
+    recordingStateRevision += 1;
+    awaitingSessionStart.value = false;
+    status.value = RecordingStatus.Idle;
+    return true;
+  }
+
   async function reconnect(): Promise<void> {
     clearRateLimitRetryTimer();
     rateLimitRetryCount = 0;
@@ -2904,6 +3065,16 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   }
 
   async function stopRecording(reason = 'manual') {
+    const expectedSessionId = sessionId.value ?? connectOperation?.sessionId ?? null;
+    cancelConnectOperation();
+    awaitingSessionStart.value = false;
+    const startRevision = recordingStartRevision;
+    const generation = listenerGeneration;
+    // Same-session Processing/Idle updates are expected while stop completes.
+    // A new start invalidates this command's continuation, including an ABA restart.
+    const isCurrentStop = () => startRevision === recordingStartRevision &&
+      generation === listenerGeneration &&
+      (sessionId.value === expectedSessionId || sessionId.value === null);
     clearRateLimitRetryTimer();
     try {
       clientLog('recording_stop_requested', {
@@ -2914,9 +3085,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         isConnecting: isConnecting.value,
       }, 'warn');
       status.value = RecordingStatus.Processing;
-      const result = await invoke<string>('stop_recording');
+      const result = await invoke<string>('stop_recording', { expectedSessionId: expectedSessionId ?? undefined });
+      if (!isCurrentStop()) return;
       console.log('Recording stopped:', result);
       const backendStatus = await reconcileBackendStatus('stop_recording_success');
+      if (!isCurrentStop()) return;
       clientLog('recording_stop_completed', {
         reason,
         result,
@@ -2928,8 +3101,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         clearRecordingErrorState();
       }
     } catch (err) {
+      if (!isCurrentStop()) return;
       console.error('Failed to stop recording:', err);
       const backendStatus = await reconcileBackendStatus('stop_recording_error');
+      if (!isCurrentStop()) return;
       clientLog('recording_stop_failed', {
         reason,
         error: String(err),
@@ -3067,6 +3242,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   }
 
   function cleanup() {
+    cancelConnectOperation();
     listenerGeneration++;
     clearRateLimitRetryTimer();
 
@@ -3137,6 +3313,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     status,
     sessionId,
     closedSessionIdFloor,
+    lastAcceptedRecordingStatus,
+    getRecordingStartRevision: () => recordingStartRevision,
     partialText,
     accumulatedText,
     finalText,
@@ -3201,7 +3379,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     startRecording,
     reconnect,
     prepareForRustHotkeyStart,
+    cancelPendingRustHotkeyStart,
+    pausePendingConnectForStart,
     suppressPreviousTranscriptionDisplay,
+    restoreCurrentTranscriptionDisplay,
     openLicenseActivation,
     stopRecording,
     clearText,

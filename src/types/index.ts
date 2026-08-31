@@ -244,3 +244,7 @@ export const EVENT_UPDATE_INSTALLING = 'update:installing';
 
 // Settings focus events (между окнами)
 export const EVENT_SETTINGS_FOCUS_UPDATES = 'settings:focus-updates';
+
+export interface RecordingWindowLifecyclePayload {
+  windowEpoch: number;
+}

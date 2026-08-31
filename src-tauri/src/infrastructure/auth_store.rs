@@ -284,6 +284,8 @@ impl AuthStore {
     }
 
     async fn migrate_legacy_plugin_store_once(store_path: &Path) -> Result<()> {
+        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+        return Ok(());
         let legacy_plugin_store_path = Self::legacy_plugin_store_path()?;
         Self::migrate_legacy_plugin_store_once_for_paths(store_path, &legacy_plugin_store_path)
             .await

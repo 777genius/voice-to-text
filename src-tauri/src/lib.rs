@@ -114,11 +114,16 @@ fn schedule_recording_window_position_save(
 pub fn run() {
     // Загружаем переменные окружения из .env файла (если есть) для dev режима
     // API ключи теперь встроены в build через embedded_keys.rs
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, not(feature = "native-window-e2e")))]
     match dotenv::dotenv() {
         Ok(path) => println!("✅ Loaded .env file from: {:?}", path),
         Err(e) => println!("ℹ️  No .env file loaded: {}", e),
     }
+
+    let context = tauri::generate_context!();
+    #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+    presentation::native_e2e::validate_launch(&context.config().identifier)
+        .expect("Refusing unsafe native E2E launch");
 
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -178,6 +183,18 @@ pub fn run() {
         .manage(AppState::default())
         .manage(demo::DemoAppState::default())
         .invoke_handler(tauri::generate_handler![
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            presentation::native_e2e::native_e2e_state,
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            presentation::native_e2e::native_e2e_hotkey,
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            presentation::native_e2e::native_e2e_configure,
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            presentation::native_e2e::native_e2e_finish,
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            presentation::native_e2e::native_e2e_progress,
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            presentation::native_e2e::native_e2e_idle_then_press,
             commands::start_recording,
             commands::stop_recording,
             commands::get_recording_status,
@@ -225,6 +242,8 @@ pub fn run() {
             commands::copy_to_clipboard_native,
             commands::show_auth_window,
             commands::show_recording_window,
+            commands::get_recording_window_epoch,
+            commands::hide_recording_window_if_current,
             commands::show_settings_window,
             commands::show_profile_window,
             commands::set_authenticated,
@@ -289,6 +308,7 @@ pub fn run() {
             // app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             // Создаем system tray иконку
+            #[cfg(not(all(debug_assertions, feature = "native-window-e2e")))]
             if let Err(e) = presentation::tray::create_tray(app.handle()) {
                 log::error!("Failed to create system tray: {}", e);
             }
@@ -340,9 +360,9 @@ pub fn run() {
                 }
 
                 if is_e2e {
-                    let _ = window.show();
+                    let _ = commands::show_recording_webview(&window);
                 } else {
-                    let _ = window.hide();
+                    let _ = commands::hide_recording_webview(&window);
                 }
 
                 // Настраиваем обработчик закрытия окна
@@ -355,7 +375,7 @@ pub fn run() {
                             // Отменяем закрытие
                             api.prevent_close();
                             // Скрываем окно
-                            let _ = window_clone.hide();
+                            let _ = commands::hide_recording_webview(&window_clone);
                             log::debug!("Window hidden instead of closed (app still running in tray)");
                         }
                         tauri::WindowEvent::Moved(position) => {
@@ -431,7 +451,6 @@ pub fn run() {
                         } else if let Err(e) = commands::show_webview_window_on_active_monitor(&window) {
                             log::error!("Failed to show main window after update: {}", e);
                         }
-                        let _ = window.emit(crate::presentation::events::EVENT_RECORDING_WINDOW_SHOWN, ());
                         // Важно: не форсим focus, чтобы не выдёргивать пользователя из текущего приложения.
                     }
                 });
@@ -500,6 +519,14 @@ pub fn run() {
                 });
 
                 log::info!("Error details window configured");
+            }
+
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            {
+                presentation::native_e2e::setup(app.handle())?;
+                // Native window hooks above remain real. No auth migration/refresh,
+                // provider config, global keyboard registration or deep-link startup.
+                return Ok(());
             }
 
             // Загружаем сохраненные конфигурации
@@ -789,7 +816,7 @@ pub fn run() {
                         log::info!("Received deep link: {}", url);
                         if let Some(window) = handle.get_webview_window("main") {
                             let _ = window.emit("deep-link", url.to_string());
-                            let _ = window.show();
+                            let _ = commands::show_recording_webview(&window);
                             let _ = window.set_focus();
                         }
                     }
@@ -798,7 +825,7 @@ pub fn run() {
 
             Ok(())
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|_app, _event| {
             if handle_translation_shutdown_run_event(&_event, || {
@@ -830,9 +857,10 @@ pub fn run() {
                         };
                         if let Err(e) = show_result {
                             log::error!("Failed to show window on Dock click: {}", e);
-                            let _ = window.show();
+                            let _ = commands::show_recording_webview(&window);
                         }
                         let _ = window.set_focus();
+                        #[cfg(not(all(debug_assertions, feature = "native-window-e2e")))]
                         crate::infrastructure::updater::request_interactive_update_check(
                             _app.clone(),
                             "macos_dock_reopen",

@@ -24,7 +24,7 @@ import { formatHotkeyForDisplay } from '../../utils/hotkeyDisplay';
 import {
   EVENT_RECORDING_WINDOW_SHOWN,
   EVENT_RECORDING_WINDOW_WILL_HIDE_FOR_HOTKEY_STOP,
-  type RecordingStatusPayload,
+  type RecordingWindowLifecyclePayload,
 } from '@/types';
 
 // Простая поддержка перетаскивания мышью по шапке
@@ -55,6 +55,7 @@ const showSettings = ref(false);
 const showProfile = ref(false);
 const showUpdateDialog = ref(false);
 const appVersion = ref('');
+const isRecordingUiReady = ref(false);
 const glowColor = ref<'blue' | 'red' | null>(null);
 const isMiniOpening = ref(false);
 const isMiniClosing = ref(false);
@@ -166,8 +167,8 @@ let isHotkeyProcessing = false;
 let isComponentUnmounted = false;
 
 let unlistenHotkey: UnlistenFn | null = null;
-let unlistenAutoHide: UnlistenFn | null = null;
 let unlistenStartRequested: UnlistenFn | null = null;
+let unlistenStartCancelled: UnlistenFn | null = null;
 let unlistenWindowShown: UnlistenFn | null = null;
 let unlistenWindowWillHideForHotkeyStop: UnlistenFn | null = null;
 
@@ -284,17 +285,36 @@ let miniOpeningTimer: number | null = null;
 let miniCloseResetTimer: number | null = null;
 let miniCursorPollTimer: number | null = null;
 let isMiniCursorPollInFlight = false;
-let hotkeyStartIntentUntilMs = 0;
-let latestAutoHideSessionId = 0;
+let hideGeneration = 0;
+let closeRevision = 0;
+let closingWindowEpoch: number | null = null;
+let currentWindowEpoch: number | null = null;
+let handledStartEpoch: number | null = null;
+let cancelledStartEpoch = -1;
+let pendingRustStart: { epoch: number; revision: number } | null = null;
+const pendingStartValidations = new Set<{ epoch: number }>();
+const hasPendingCurrentStart = () => [...pendingStartValidations].some(({ epoch }) => epoch === currentWindowEpoch);
+
+async function acceptWindowEvent(payload: { windowEpoch?: number } | undefined): Promise<boolean> {
+  const epoch = payload?.windowEpoch;
+  if (typeof epoch !== 'number' || !Number.isSafeInteger(epoch) || epoch < 0 || isComponentUnmounted) return false;
+  try {
+    const current = await invoke<number>('get_recording_window_epoch');
+    if (isComponentUnmounted || epoch !== current || (currentWindowEpoch !== null && current < currentWindowEpoch)) return false;
+    currentWindowEpoch = current;
+    return true;
+  } catch {
+    return false;
+  }
+}
+let animationGeneration = 0;
 let pendingAutoHideSessionId: number | null = null;
 let completedAutoHideSessionId: number | null = null;
-const HOTKEY_START_INTENT_SUPPRESS_HIDE_MS = 5_000;
-
-function hasRecentHotkeyStartIntent() {
-  return Date.now() <= hotkeyStartIntentUntilMs;
-}
 
 function cancelPendingHideRecordingWindow() {
+  hideGeneration += 1;
+  clearMiniOpeningAnimation();
+  isMiniAnimationReset.value = false;
   if (hideRecordingWindowTimeout !== null) {
     window.clearTimeout(hideRecordingWindowTimeout);
     hideRecordingWindowTimeout = null;
@@ -316,6 +336,7 @@ function clearHotkeyDebounceTimeout() {
 }
 
 function clearMiniOpeningAnimation() {
+  animationGeneration += 1;
   if (miniOpeningRaf !== null) {
     window.cancelAnimationFrame(miniOpeningRaf);
     miniOpeningRaf = null;
@@ -411,9 +432,14 @@ async function resolveMiniHideSide(): Promise<'left' | 'right'> {
 }
 
 async function beginMiniCloseAnimation() {
+  closeRevision += 1;
+  closingWindowEpoch = currentWindowEpoch;
   resetMiniActionState();
-  miniHideSide.value = await resolveMiniHideSide();
   clearMiniOpeningAnimation();
+  const generation = animationGeneration;
+  const side = await resolveMiniHideSide();
+  if (generation !== animationGeneration || isComponentUnmounted || !useMiniLayout.value) return;
+  miniHideSide.value = side;
   if (miniCloseResetTimer !== null) {
     window.clearTimeout(miniCloseResetTimer);
     miniCloseResetTimer = null;
@@ -433,6 +459,7 @@ async function playMiniOpenAnimation() {
   resetMiniActionState();
 
   clearMiniOpeningAnimation();
+  const generation = animationGeneration;
   if (miniCloseResetTimer !== null) {
     window.clearTimeout(miniCloseResetTimer);
     miniCloseResetTimer = null;
@@ -442,12 +469,12 @@ async function playMiniOpenAnimation() {
   isMiniClosing.value = false;
   isMiniAnimationReset.value = true;
   await nextTick();
-  if (!useMiniLayout.value || isComponentUnmounted) return;
+  if (!useMiniLayout.value || isComponentUnmounted || generation !== animationGeneration) return;
 
   void document.querySelector<HTMLElement>('.popover.mini')?.offsetHeight;
   miniOpeningRaf = window.requestAnimationFrame(() => {
     miniOpeningRaf = null;
-    if (!useMiniLayout.value || isComponentUnmounted) return;
+    if (!useMiniLayout.value || isComponentUnmounted || generation !== animationGeneration) return;
     isMiniAnimationReset.value = false;
     isMiniOpening.value = true;
     miniOpeningTimer = window.setTimeout(() => {
@@ -458,6 +485,7 @@ async function playMiniOpenAnimation() {
 }
 
 function scheduleHideRecordingWindow(reason: string, sessionId: number | null = null) {
+  if (hasPendingCurrentStart()) return;
   if (hasVisibleIncomingTranslation.value) {
     if (pendingAutoHideSessionId === sessionId) {
       pendingAutoHideSessionId = null;
@@ -470,6 +498,11 @@ function scheduleHideRecordingWindow(reason: string, sessionId: number | null = 
     window.clearTimeout(hideRecordingWindowTimeout);
   }
   pendingAutoHideSessionId = sessionId;
+  const generation = ++hideGeneration;
+  closeRevision += 1;
+  closingWindowEpoch = currentWindowEpoch;
+  const windowEpoch = currentWindowEpoch;
+  const isCurrentHide = () => generation === hideGeneration && !isComponentUnmounted;
 
   const delay = useMiniLayout.value ? MINI_CLOSE_ANIMATION_MS : 50;
   if (useMiniLayout.value) {
@@ -477,8 +510,9 @@ function scheduleHideRecordingWindow(reason: string, sessionId: number | null = 
   }
 
   hideRecordingWindowTimeout = window.setTimeout(async () => {
+    if (!isCurrentHide()) return;
     hideRecordingWindowTimeout = null;
-    if (hasVisibleIncomingTranslation.value) {
+    if (hasVisibleIncomingTranslation.value || hasPendingCurrentStart()) {
       if (pendingAutoHideSessionId === sessionId) {
         pendingAutoHideSessionId = null;
       }
@@ -488,8 +522,9 @@ function scheduleHideRecordingWindow(reason: string, sessionId: number | null = 
     }
 
     try {
-      const window = getCurrentWebviewWindow();
-      await window.hide();
+      if (windowEpoch === null) return;
+      const hidden = await invoke<boolean>('hide_recording_window_if_current', { windowEpoch });
+      if (!hidden || !isCurrentHide()) return;
       if (sessionId !== null) {
         completedAutoHideSessionId = sessionId;
       }
@@ -498,10 +533,7 @@ function scheduleHideRecordingWindow(reason: string, sessionId: number | null = 
     } catch (err) {
       console.error('[AutoHide] Failed to hide window:', err);
     } finally {
-      if (pendingAutoHideSessionId === sessionId) {
-        pendingAutoHideSessionId = null;
-      }
-      isMiniClosing.value = false;
+      if (isCurrentHide()) cancelPendingHideRecordingWindow();
     }
   }, delay);
 }
@@ -568,11 +600,77 @@ onMounted(async () => {
     return;
   }
 
+  unlistenStartCancelled = await registerRecordingListener<{
+    startWindowEpoch: number;
+    windowEpoch: number;
+  }>('recording:start-cancelled', async (event) => {
+    const epoch = event.payload?.startWindowEpoch;
+    if (!Number.isSafeInteger(epoch) || epoch < 0) return;
+    // Record cancellation before IPC validation so a delayed start handler cannot
+    // recreate a provisional start that native admission already rejected.
+    cancelledStartEpoch = Math.max(cancelledStartEpoch, epoch);
+    const pending = pendingRustStart;
+    if (pending?.epoch === epoch && store.cancelPendingRustHotkeyStart(pending.revision)) {
+      pendingRustStart = null;
+      cancelPendingHideRecordingWindow();
+    }
+    // A tray re-show changes visibility without replacing this start intent.
+    // Cancellation ownership is the original start epoch/revision; IPC only syncs visibility.
+    await acceptWindowEvent(event.payload);
+  });
+  if (isComponentUnmounted || !unlistenStartCancelled) return;
+
+  // Rust сам запускает запись по hotkey. Это событие только отменяет старый auto-hide
+  // и защищает окно от позднего Idle предыдущей сессии во время быстрого restart.
+  unlistenStartRequested = await registerRecordingListener<{
+    windowEpoch: number;
+    source?: string;
+    clientStartId?: string;
+    canResumeKeepAlive?: boolean;
+    warmStartExpected?: boolean;
+  }>('recording:start-requested', async (event) => {
+    const pending = { epoch: event.payload?.windowEpoch };
+    if (!Number.isSafeInteger(pending.epoch) || pending.epoch < 0 || pending.epoch === handledStartEpoch || pending.epoch <= cancelledStartEpoch) return;
+    if (currentWindowEpoch !== null && pending.epoch < currentWindowEpoch) return;
+    // Pause retry dispatch until native ownership is known. A stale event must
+    // release the pause without cancelling the current operation.
+    const resumeConnect = store.pausePendingConnectForStart(event.payload.clientStartId);
+    pendingStartValidations.add(pending);
+    if (pending.epoch === currentWindowEpoch) cancelPendingHideRecordingWindow();
+    const startRevision = store.getRecordingStartRevision();
+    try {
+      if (!await acceptWindowEvent(event.payload) || pending.epoch === handledStartEpoch || pending.epoch <= cancelledStartEpoch) return;
+      handledStartEpoch = pending.epoch;
+      // Accepted external ownership retires the captured retry even if a newer
+      // status already made the destructive display reset unnecessary.
+      resumeConnect(true);
+      if (startRevision !== store.getRecordingStartRevision()) return;
+      cancelPendingHideRecordingWindow();
+      store.prepareForRustHotkeyStart(
+        Boolean(event.payload?.warmStartExpected ?? event.payload?.canResumeKeepAlive),
+        event.payload.clientStartId,
+      );
+      pendingRustStart = { epoch: pending.epoch, revision: store.getRecordingStartRevision() };
+      console.log('[Hotkey] Rust-owned start requested:', event.payload);
+      applyRecordingWindowSize();
+      alignMiniTextToEnd();
+    } finally {
+      pendingStartValidations.delete(pending);
+      resumeConnect();
+    }
+  });
+  if (isComponentUnmounted || !unlistenStartRequested) return;
+
   // Загружаем версию приложения
   try {
     appVersion.value = await getVersion();
   } catch {}
 
+  try {
+    const epoch = await invoke<number>('get_recording_window_epoch');
+    if (currentWindowEpoch === null || epoch > currentWindowEpoch) currentWindowEpoch = epoch;
+  } catch {}
+  if (isComponentUnmounted) return;
   await store.initialize();
   if (isComponentUnmounted) return;
   await appConfigStore.startSync();
@@ -595,11 +693,18 @@ onMounted(async () => {
 
   // Очищаем UI при фактическом показе окна (НЕ через focus: main может быть nonactivating NSPanel).
   // Важно: не очищаем посреди активной записи — иначе можно потерять текст если пользователь скрыл и снова показал окно.
-  unlistenWindowShown = await registerRecordingListener(EVENT_RECORDING_WINDOW_SHOWN, async () => {
+  unlistenWindowShown = await registerRecordingListener<RecordingWindowLifecyclePayload>(EVENT_RECORDING_WINDOW_SHOWN, async (event) => {
+    const closeAtRequest = closeRevision;
+    if (!await acceptWindowEvent(event.payload)) return;
+    if (closeAtRequest !== closeRevision && (closingWindowEpoch === null || closingWindowEpoch >= event.payload.windowEpoch)) return;
     resetMiniActionState();
     cancelPendingHideRecordingWindow();
+    store.restoreCurrentTranscriptionDisplay();
+    const generation = hideGeneration;
+    const acceptedCloseRevision = closeRevision;
     await nextTick();
-    playMiniOpenAnimation();
+    if (acceptedCloseRevision !== closeRevision || currentWindowEpoch !== event.payload.windowEpoch || isComponentUnmounted) return;
+    void playMiniOpenAnimation();
     alignMiniTextToEnd();
     // Подтягиваем актуальную auth session из Rust SoT (important when WebView was "frozen").
     // Best-effort: не блокируем UI на сетевых/IPC проблемах.
@@ -610,6 +715,7 @@ onMounted(async () => {
     // Если UI рассинхронизировался (например окно было скрыто и JS "заморозили"),
     // сначала сверяемся с backend: он источник правды по статусу записи.
     const backendStatus = await store.reconcileBackendStatus('window_shown');
+    if (generation !== hideGeneration || isComponentUnmounted) return;
     if (backendStatus === 'Idle' || backendStatus === null) {
       // После reconcile UI должен быть не в Recording — тогда смело чистим.
       if (!store.isRecording && !store.isStarting && !store.isProcessing) {
@@ -621,9 +727,11 @@ onMounted(async () => {
     }
   });
 
-  unlistenWindowWillHideForHotkeyStop = await registerRecordingListener(
+  unlistenWindowWillHideForHotkeyStop = await registerRecordingListener<RecordingWindowLifecyclePayload>(
     EVENT_RECORDING_WINDOW_WILL_HIDE_FOR_HOTKEY_STOP,
-    () => {
+    async (event) => {
+      const generation = hideGeneration;
+      if (!await acceptWindowEvent(event.payload) || generation !== hideGeneration) return;
       resetMiniActionState();
       if (useMiniLayout.value) {
         void beginMiniCloseAnimation();
@@ -636,111 +744,46 @@ onMounted(async () => {
   unlistenHotkey = await registerRecordingListener('hotkey:toggle-recording', async () => {
     await handleHotkeyToggle();
   });
+  if (!isComponentUnmounted && unlistenHotkey) isRecordingUiReady.value = true;
 
-  // Rust сам запускает запись по hotkey. Это событие только отменяет старый auto-hide
-  // и защищает окно от позднего Idle предыдущей сессии во время быстрого restart.
-  unlistenStartRequested = await registerRecordingListener<{
-    source?: string;
-    canResumeKeepAlive?: boolean;
-    warmStartExpected?: boolean;
-  }>('recording:start-requested', async (event) => {
-    hotkeyStartIntentUntilMs = Date.now() + HOTKEY_START_INTENT_SUPPRESS_HIDE_MS;
-    cancelPendingHideRecordingWindow();
-    store.prepareForRustHotkeyStart(
-      Boolean(event.payload?.warmStartExpected ?? event.payload?.canResumeKeepAlive),
-    );
-    console.log('[Hotkey] Rust-owned start requested:', event.payload);
-    applyRecordingWindowSize();
-    alignMiniTextToEnd();
-  });
-
-  // Слушаем статус для звука и автоскрытия окна при остановке
-  unlistenAutoHide = await registerRecordingListener<RecordingStatusPayload>('recording:status', async (event) => {
-    const nextStatus = event.payload.status;
-    const payloadSessionId = Number(event.payload.session_id ?? 0);
-
-    if (!Number.isSafeInteger(payloadSessionId) || payloadSessionId <= 0) {
-      console.warn('[AutoHide] Ignoring status without a valid session:', event.payload);
-      return;
-    }
-
-    if (payloadSessionId < latestAutoHideSessionId) {
-      console.warn('[AutoHide] Ignoring status from an older session:', {
-        payloadSessionId,
-        latestSessionId: latestAutoHideSessionId,
-        nextStatus,
-      });
-      return;
-    }
-
-    if (payloadSessionId <= store.closedSessionIdFloor) {
-      console.warn('[AutoHide] Ignoring status from a closed session:', {
-        payloadSessionId,
-        closedFloor: store.closedSessionIdFloor,
-        nextStatus,
-      });
-      return;
-    }
-
-    if (store.sessionId !== null && payloadSessionId !== store.sessionId) {
-      console.warn('[AutoHide] Ignoring status from a stale session:', {
-        payloadSessionId,
-        activeSessionId: store.sessionId,
-        nextStatus,
-      });
-      return;
-    }
-
-    latestAutoHideSessionId = Math.max(latestAutoHideSessionId, payloadSessionId);
-
-    if (nextStatus === 'Starting' || nextStatus === 'Recording') {
-      hotkeyStartIntentUntilMs = 0;
-      pendingAutoHideSessionId = null;
-      completedAutoHideSessionId = null;
-      cancelPendingHideRecordingWindow();
-      return;
-    }
-
-    if (nextStatus !== 'Processing' && nextStatus !== 'Idle') {
-      pendingAutoHideSessionId = null;
-      completedAutoHideSessionId = null;
-      cancelPendingHideRecordingWindow();
-      return;
-    }
-
-    if (nextStatus === 'Idle' && hasRecentHotkeyStartIntent()) {
-      console.warn('[AutoHide] Ignoring Idle while Rust-owned hotkey start is pending:', event.payload);
-      return;
-    }
-
-    if (nextStatus === 'Processing') {
-      hotkeyStartIntentUntilMs = 0;
-      if (
-        appConfigStore.showMiniRecordingWindow &&
-        pendingAutoHideSessionId !== payloadSessionId &&
-        completedAutoHideSessionId !== payloadSessionId
-      ) {
-        scheduleHideRecordingWindow('mini window recording finalizing', payloadSessionId);
-      }
-      return;
-    }
-
-    // Проигрываем звук при ЛЮБОЙ остановке записи (через hotkey, кнопку, или автоматически)
-    if (appConfigStore.playCompletionSound) {
-      console.log('[Sound] Recording stopped, playing done sound');
-      playDoneSound();
-    }
-
-    if (appConfigStore.showMiniRecordingWindow) {
-      if (completedAutoHideSessionId !== payloadSessionId) {
-        scheduleHideRecordingWindow('mini window recording stopped', payloadSessionId);
-      }
-    } else if (event.payload.stopped_via_hotkey) {
-      scheduleHideRecordingWindow('stopped via hotkey');
-    }
-  });
 
 });
+
+// Status acceptance belongs to the store. Synchronous effects cancel old work
+// before another native event or IPC continuation can act on it.
+watch(() => store.lastAcceptedRecordingStatus, (payload) => {
+  if (!payload || isComponentUnmounted) return;
+  const nextStatus = payload.status;
+  const payloadSessionId = payload.session_id;
+  if (nextStatus !== 'Processing' && nextStatus !== 'Idle') {
+    completedAutoHideSessionId = null;
+    cancelPendingHideRecordingWindow();
+    return;
+  }
+  if (nextStatus === 'Processing') {
+    if (appConfigStore.showMiniRecordingWindow &&
+        pendingAutoHideSessionId !== payloadSessionId &&
+        completedAutoHideSessionId !== payloadSessionId) {
+      scheduleHideRecordingWindow('mini window recording finalizing', payloadSessionId);
+    }
+    return;
+  }
+  if (appConfigStore.playCompletionSound) playDoneSound();
+  if (appConfigStore.showMiniRecordingWindow) {
+    if (completedAutoHideSessionId !== payloadSessionId) {
+      scheduleHideRecordingWindow('mini window recording stopped', payloadSessionId);
+    }
+  } else if (payload.stopped_via_hotkey) {
+    scheduleHideRecordingWindow('stopped via hotkey', payloadSessionId);
+  }
+}, { flush: 'sync' });
+
+// Local button starts and terminal errors can change state without a status event.
+watch([() => store.status, () => store.sessionId, hasVisibleIncomingTranslation], () => {
+  if (store.isStarting || store.isRecording || store.hasError || hasVisibleIncomingTranslation.value) {
+    cancelPendingHideRecordingWindow();
+  }
+}, { flush: 'sync' });
 
 onUnmounted(() => {
   isComponentUnmounted = true;
@@ -750,11 +793,11 @@ onUnmounted(() => {
   if (unlistenHotkey) {
     unlistenHotkey();
   }
-  if (unlistenAutoHide) {
-    unlistenAutoHide();
-  }
   if (unlistenStartRequested) {
     unlistenStartRequested();
+  }
+  if (unlistenStartCancelled) {
+    unlistenStartCancelled();
   }
   if (unlistenWindowShown) {
     unlistenWindowShown();
@@ -779,6 +822,7 @@ onUnmounted(() => {
 });
 
 const handleToggle = async () => {
+  if (!isRecordingUiReady.value) return;
   // Воспроизводим звук сразу при клике на кнопку Start
   if (store.isIdle) {
     console.log('Playing show sound on button click');
@@ -884,6 +928,7 @@ const openUpdateDialog = async (event?: Event) => {
 };
 
 const retryMiniError = async (event?: Event) => {
+  if (!isRecordingUiReady.value) return;
   resetMiniActionState(event);
   cancelPendingHideRecordingWindow();
 
@@ -929,7 +974,9 @@ const closeSettings = async () => {
 const minimizeWindow = async (event?: Event) => {
   resetMiniActionState(event);
   try {
-    await invoke('toggle_window');
+    if (currentWindowEpoch !== null) {
+      await invoke('hide_recording_window_if_current', { windowEpoch: currentWindowEpoch });
+    }
   } catch (err) {
     console.error('Failed to minimize window:', err);
   }
@@ -996,7 +1043,7 @@ const minimizeWindow = async (event?: Event) => {
                 v-if="store.canReconnect"
                 class="mini-icon-button"
                 data-testid="mini-error-retry"
-                :disabled="store.isStarting || store.isProcessing || store.isConnecting"
+                :disabled="!isRecordingUiReady || store.isStarting || store.isProcessing || store.isConnecting"
                 @click="retryMiniError"
                 :title="t('errors.actions.reconnect')"
               >
@@ -1128,7 +1175,7 @@ const minimizeWindow = async (event?: Event) => {
           <button
             v-if="store.canReconnect"
             class="error-action-button no-drag"
-            :disabled="store.isStarting || store.isProcessing || store.isConnecting"
+            :disabled="!isRecordingUiReady || store.isStarting || store.isProcessing || store.isConnecting"
             @click="store.reconnect()"
           >
             {{ t('errors.actions.reconnect') }}
@@ -1254,7 +1301,7 @@ const minimizeWindow = async (event?: Event) => {
             'glow-blue': glowColor === 'blue',
             'glow-red': glowColor === 'red',
           }"
-          :disabled="store.isProcessing || store.isStarting"
+          :disabled="!isRecordingUiReady || store.isProcessing || store.isStarting"
           @click="onRecordClick"
         >
           <span v-if="store.isRecording" class="mdi mdi-stop"></span>

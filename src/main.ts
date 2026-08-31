@@ -24,6 +24,10 @@ app.use(i18n);
 app.use(vuetify);
 
 // Для e2e: даём WebDriver тестам безопасный доступ к состоянию store'ов.
-installE2eHooks(pinia);
-
-app.mount('#app');
+const hooksReady = installE2eHooks(pinia);
+if (import.meta.env.VITE_NATIVE_WINDOW_E2E === '1') {
+  // Native test auth is installed only after the explicit test-build handshake.
+  void Promise.resolve(hooksReady).then(() => app.mount('#app'));
+} else {
+  app.mount('#app');
+}

@@ -29,12 +29,23 @@ fn main() {
     }
 
     // Загружаем .env файл если он существует
-    let _ = dotenv::dotenv();
+    let native_fixture = env::var_os("CARGO_FEATURE_NATIVE_WINDOW_E2E").is_some();
+    if !native_fixture {
+        let _ = dotenv::dotenv();
+    }
 
     // Читаем API ключи из переменных окружения
-    let deepgram_key = env::var("DEEPGRAM_API_KEY").unwrap_or_else(|_| String::new());
+    let deepgram_key = if native_fixture {
+        String::new()
+    } else {
+        env::var("DEEPGRAM_API_KEY").unwrap_or_default()
+    };
 
-    let assemblyai_key = env::var("ASSEMBLYAI_API_KEY").unwrap_or_else(|_| String::new());
+    let assemblyai_key = if native_fixture {
+        String::new()
+    } else {
+        env::var("ASSEMBLYAI_API_KEY").unwrap_or_default()
+    };
 
     // Генерируем Rust код с встроенными ключами
     let embedded_keys_code = format!(

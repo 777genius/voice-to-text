@@ -35,6 +35,12 @@ pub const EVENT_SETTINGS_FOCUS_UPDATES: &str = "settings:focus-updates";
 pub const EVENT_UPDATE_AVAILABLE: &str = "update:available";
 pub const EVENT_ERROR_DETAILS_WINDOW_OPENED: &str = "error-details-window-opened";
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingWindowLifecyclePayload {
+    pub window_epoch: u64,
+}
+
 // State-sync протокол: invalidation event для синхронизации между окнами
 pub const EVENT_STATE_SYNC_INVALIDATION: &str = "state-sync:invalidation";
 
@@ -276,4 +282,16 @@ pub struct ConnectionQualityPayload {
     pub quality: ConnectionQuality,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>, // дополнительная информация о причине
+}
+
+#[cfg(test)]
+mod recording_window_payload_tests {
+    use super::*;
+
+    #[test]
+    fn recording_window_lifetime_uses_camel_case_epoch_without_session_id() {
+        let payload =
+            serde_json::to_value(RecordingWindowLifecyclePayload { window_epoch: 17 }).unwrap();
+        assert_eq!(payload, serde_json::json!({"windowEpoch": 17}));
+    }
 }

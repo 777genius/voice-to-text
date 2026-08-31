@@ -1300,7 +1300,7 @@ describe('transcription connect-retry reliability', () => {
 
     await store.startRecording();
 
-    expect(invokeMock).toHaveBeenCalledWith('start_recording');
+    expect(invokeMock).toHaveBeenCalledWith('start_recording', { clientStartId: expect.any(String) });
     expect(invokeMock).not.toHaveBeenCalledWith('run_live_translation_health_check');
     expect(store.status).toBe('Error');
     expect(store.errorType).toBe('configuration');
@@ -3021,7 +3021,7 @@ describe('transcription connect-retry reliability', () => {
     expect(store.status).toBe('Recording');
   });
 
-  it('window_shown reconcile не закрывает новую сессию, если get_recording_status вернул устаревший Idle', async () => {
+  it('window_shown reconcile closes a stale active session when backend is authoritatively Idle', async () => {
     const handlers = new Map<string, any>();
 
     listenMock.mockImplementation(async (eventName: string, handler: any) => {
@@ -3043,9 +3043,9 @@ describe('transcription connect-retry reliability', () => {
 
     await store.reconcileBackendStatus('window_shown');
 
-    expect(store.sessionId).toBe(51);
-    expect(store.closedSessionIdFloor).toBeLessThan(51);
-    expect(store.status).toBe('Recording');
+    expect(store.sessionId).toBeNull();
+    expect(store.closedSessionIdFloor).toBeGreaterThanOrEqual(51);
+    expect(store.status).toBe('Idle');
   });
 
   it('ограничивает потоковые тексты перевода в длинной сессии', async () => {
@@ -3092,4 +3092,348 @@ describe('transcription connect-retry reliability', () => {
     expect(store.translationText).not.toContain('old-prefix');
     expect(store.translationText).toContain('latest-tail');
   });
+  it.each(['Starting', 'Recording'])('rejects older %s while a newer session is active', async (status) => {
+    const handlers = new Map<string, any>();
+    listenMock.mockImplementation(async (name, handler) => { handlers.set(name, handler); return () => {}; });
+    invokeMock.mockResolvedValue(null);
+    const store = useTranscriptionStore();
+    await store.initialize();
+    await handlers.get('recording:status')({ payload: { session_id: 90, status: 'Recording' } });
+    store.finalText = 'Current speech';
+    await handlers.get('recording:status')({ payload: { session_id: 89, status } });
+    expect(store.sessionId).toBe(90);
+    expect(store.status).toBe('Recording');
+    expect(store.finalText).toBe('Current speech');
+    store.cleanup();
+  });
+
+  it.each(['Idle', 'Starting', 'Processing', 'Error'])('discards late reconcile %s after a newer recording event', async (snapshot) => {
+    const handlers = new Map<string, any>();
+    listenMock.mockImplementation(async (name, handler) => { handlers.set(name, handler); return () => {}; });
+    invokeMock.mockResolvedValue(null);
+    const store = useTranscriptionStore();
+    await store.initialize();
+    const pending = deferred<string>();
+    invokeMock.mockImplementation((cmd) => cmd === 'get_recording_status' ? pending.promise : Promise.resolve(null));
+    const reconciliation = store.reconcileBackendStatus('stop_recording_success');
+    await handlers.get('recording:status')({ payload: { session_id: 90, status: 'Recording' } });
+    pending.resolve(snapshot);
+    expect(await reconciliation).toBeNull();
+    expect(store.status).toBe('Recording');
+    expect(store.sessionId).toBe(90);
+    expect(store.closedSessionIdFloor).toBeLessThan(90);
+    store.cleanup();
+  });
+
+  it('discards reconcile after cleanup even when the visible state did not change', async () => {
+    invokeMock.mockResolvedValue(null);
+    const store = useTranscriptionStore();
+    await store.initialize();
+    const pending = deferred<string>();
+    invokeMock.mockImplementation((cmd) => cmd === 'get_recording_status' ? pending.promise : Promise.resolve(null));
+    const reconciliation = store.reconcileBackendStatus('window_shown');
+    store.cleanup();
+    pending.resolve('Recording');
+    expect(await reconciliation).toBeNull();
+    expect(store.status).toBe('Idle');
+  });
+
+  it('discards an older reconcile request after a newer snapshot completes', async () => {
+    const store = useTranscriptionStore();
+    const oldQuery = deferred<string>();
+    const newQuery = deferred<string>();
+    invokeMock.mockReturnValueOnce(oldQuery.promise).mockReturnValueOnce(newQuery.promise);
+    const oldReconcile = store.reconcileBackendStatus('window_shown');
+    const newReconcile = store.reconcileBackendStatus('window_shown');
+    newQuery.resolve('Idle');
+    expect(await newReconcile).toBe('Idle');
+    oldQuery.resolve('Recording');
+    expect(await oldReconcile).toBeNull();
+    expect(store.status).toBe('Idle');
+  });
+
+  it.each(['resolve', 'reject'])('ignores a stale stop %s after another session starts', async (outcome) => {
+    const handlers = new Map<string, any>();
+    listenMock.mockImplementation(async (name, handler) => { handlers.set(name, handler); return () => {}; });
+    invokeMock.mockResolvedValue(null);
+    const store = useTranscriptionStore();
+    await store.initialize();
+    await handlers.get('recording:status')({ payload: { session_id: 90, status: 'Recording' } });
+    const pending = deferred<string>();
+    invokeMock.mockImplementation((cmd) => {
+      if (cmd === 'stop_recording') return pending.promise.then((value) => {
+        if (outcome === 'reject') throw new Error('Old stop failed');
+        return value;
+      });
+      if (cmd === 'get_recording_status') return Promise.resolve('Idle');
+      return Promise.resolve(null);
+    });
+    const stop = store.stopRecording();
+    expect(invokeMock).toHaveBeenCalledWith('stop_recording', { expectedSessionId: 90 });
+    await handlers.get('recording:status')({ payload: { session_id: 91, status: 'Recording' } });
+    store.finalText = 'New speech';
+    store.error = 'New session diagnostic';
+    pending.resolve('stopped');
+    await stop;
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'get_recording_status')).toBe(false);
+    expect(store.status).toBe('Recording');
+    expect(store.sessionId).toBe(91);
+    expect(store.finalText).toBe('New speech');
+    expect(store.error).toBe('New session diagnostic');
+    store.cleanup();
+  });
+
+  it.each(['hotkey', 'stop', 'cleanup'])('cancels a UI retry backoff on %s without resurrecting recording', async (cancellation) => {
+    vi.useFakeTimers();
+    try {
+      const handlers = new Map<string, any>();
+      listenMock.mockImplementation(async (name, handler) => { handlers.set(name, handler); return () => {}; });
+      invokeMock.mockResolvedValue(null);
+      const store = useTranscriptionStore();
+      await store.initialize();
+      invokeMock.mockImplementation((cmd) => {
+        if (cmd === 'start_recording') return Promise.reject('Connection error: network unavailable');
+        if (cmd === 'get_recording_status') return Promise.resolve('Idle');
+        return Promise.resolve(null);
+      });
+      const firstStart = store.startRecording();
+      await flushMicrotasks();
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'start_recording')).toHaveLength(1);
+      if (cancellation === 'hotkey') {
+        store.prepareForRustHotkeyStart(false);
+        await handlers.get('recording:status')({ payload: { session_id: 202, status: 'Recording' } });
+        store.finalText = 'Fresh speech';
+      } else if (cancellation === 'stop') {
+        await store.stopRecording();
+      } else {
+        store.cleanup();
+      }
+      const stops = invokeMock.mock.calls.filter(([cmd]) => cmd === 'stop_recording').length;
+      await vi.advanceTimersByTimeAsync(40_000);
+      await firstStart;
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'start_recording')).toHaveLength(1);
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'stop_recording')).toHaveLength(stops);
+      expect(store.isConnecting).toBe(false);
+      if (cancellation === 'hotkey') {
+        expect(store.status).toBe('Recording');
+        expect(store.sessionId).toBe(202);
+        expect(store.finalText).toBe('Fresh speech');
+      } else if (cancellation === 'stop') {
+        expect(store.status).toBe('Idle');
+      }
+      store.cleanup();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(['resolve', 'reject'])('ignores a late old start %s after a Rust-owned session starts', async (outcome) => {
+    vi.useFakeTimers();
+    try {
+      const handlers = new Map<string, any>();
+      listenMock.mockImplementation(async (name, handler) => { handlers.set(name, handler); return () => {}; });
+      invokeMock.mockResolvedValue(null);
+      const store = useTranscriptionStore();
+      await store.initialize();
+      const pending = deferred<void>();
+      invokeMock.mockImplementation((cmd) => cmd === 'start_recording' ? pending.promise.then(() => {
+        if (outcome === 'reject') throw new Error('Invalid STT configuration');
+        return 'started';
+      }) : Promise.resolve(null));
+      const oldStart = store.startRecording();
+      await flushMicrotasks();
+      store.prepareForRustHotkeyStart(false);
+      await handlers.get('recording:status')({ payload: { session_id: 202, status: 'Recording' } });
+      store.finalText = 'Fresh speech';
+      store.error = 'New session diagnostic';
+      pending.resolve();
+      await vi.advanceTimersByTimeAsync(40_000);
+      await oldStart;
+      expect(store.status).toBe('Recording');
+      expect(store.sessionId).toBe(202);
+      expect(store.error).toBe('New session diagnostic');
+      expect(store.finalText).toBe('Fresh speech');
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'start_recording')).toHaveLength(1);
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'stop_recording')).toHaveLength(0);
+      store.cleanup();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('keeps its own native start echo and retries with exactly one session-scoped cleanup', async () => {
+    vi.useFakeTimers();
+    try {
+      const handlers = new Map<string, any>();
+      listenMock.mockImplementation(async (name, handler) => { handlers.set(name, handler); return () => {}; });
+      invokeMock.mockResolvedValue(null);
+      const store = useTranscriptionStore();
+      await store.initialize();
+      let starts = 0;
+      invokeMock.mockImplementation(async (cmd, args) => {
+        if (cmd === 'start_recording') {
+          starts++;
+          store.prepareForRustHotkeyStart(false, args.clientStartId);
+          await handlers.get('recording:status')({ payload: { session_id: 300 + starts, status: starts === 1 ? 'Starting' : 'Recording' } });
+          if (starts === 1) throw new Error('Connection error: network unavailable');
+          return 'started';
+        }
+        if (cmd === 'stop_recording') {
+          expect(args).toEqual({ expectedSessionId: 301 });
+          return 'stopped';
+        }
+        return null;
+      });
+      const start = store.startRecording();
+      await vi.advanceTimersByTimeAsync(2_000);
+      await start;
+      expect(starts).toBe(2);
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'stop_recording')).toHaveLength(1);
+      expect(store.status).toBe('Recording');
+      expect(store.sessionId).toBe(302);
+      expect(store.isConnecting).toBe(false);
+      const ownId = invokeMock.mock.calls.find(([cmd]) => cmd === 'start_recording')![1].clientStartId;
+      store.prepareForRustHotkeyStart(false, ownId);
+      expect(store.sessionId).toBe(302);
+      store.cleanup();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each([0, 402])('handles failed-start cleanup with native active owner %s', async (replacementOwner) => {
+    vi.useFakeTimers();
+    try {
+      const handlers = new Map<string, any>();
+      listenMock.mockImplementation(async (name, handler) => { handlers.set(name, handler); return () => {}; });
+      invokeMock.mockResolvedValue(null);
+      const store = useTranscriptionStore();
+      await store.initialize();
+      let starts = 0;
+      let activeOwner = 0;
+      invokeMock.mockImplementation(async (cmd, args) => {
+        if (cmd === 'start_recording') {
+          starts++;
+          activeOwner = 400 + starts;
+          store.prepareForRustHotkeyStart(false, args.clientStartId);
+          await handlers.get('recording:status')({ payload: { session_id: activeOwner, status: 'Starting' } });
+          if (starts === 1) {
+            // Native restores the displaced owner before publishing the start failure.
+            activeOwner = replacementOwner;
+            await handlers.get('transcription:error')({ payload: {
+              session_id: 401, error: 'Connection error: network unavailable', error_type: 'connection',
+            } });
+            await handlers.get('recording:status')({ payload: { session_id: 401, status: 'Error' } });
+            throw new Error('Connection error: network unavailable');
+          }
+          await handlers.get('recording:status')({ payload: { session_id: activeOwner, status: 'Recording' } });
+          return 'started';
+        }
+        if (cmd === 'stop_recording') {
+          expect(args).toEqual({ expectedSessionId: 401 });
+          return activeOwner === 0 ? 'Recording already stopped' : 'Stale recording stop ignored';
+        }
+        return null;
+      });
+      const start = store.startRecording();
+      await vi.advanceTimersByTimeAsync(2_000);
+      await start;
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'stop_recording')).toHaveLength(1);
+      expect(starts).toBe(replacementOwner === 0 ? 2 : 1);
+      expect(store.isConnecting).toBe(false);
+      if (replacementOwner === 0) {
+        expect(store.status).toBe('Recording');
+        expect(store.sessionId).toBe(402);
+      } else {
+        expect(activeOwner).toBe(replacementOwner);
+      }
+      store.cleanup();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('cancels an outcome wait immediately when cleaned up', async () => {
+    vi.useFakeTimers();
+    try {
+      invokeMock.mockResolvedValue('started');
+      const store = useTranscriptionStore();
+      const start = store.startRecording();
+      await flushMicrotasks();
+      await flushMicrotasks();
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      store.cleanup();
+      await start;
+      expect(vi.getTimerCount()).toBe(0);
+      expect(store.isConnecting).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('does not logout or retry when auth refresh completes after a new hotkey start', async () => {
+    const handlers = new Map<string, any>();
+    listenMock.mockImplementation(async (name, handler) => { handlers.set(name, handler); return () => {}; });
+    invokeMock.mockResolvedValue(null);
+    const store = useTranscriptionStore();
+    await store.initialize();
+    const refresh = deferred<null>();
+    authContainerMock.refreshTokensUseCase.execute.mockReturnValue(refresh.promise);
+    invokeMock.mockImplementation((cmd) => cmd === 'start_recording' ? Promise.reject('Authentication: HTTP 401') : Promise.resolve(null));
+    const oldStart = store.startRecording();
+    for (let i = 0; i < 20 && !authContainerMock.refreshTokensUseCase.execute.mock.calls.length; i++) await flushMicrotasks();
+    expect(authContainerMock.refreshTokensUseCase.execute).toHaveBeenCalledTimes(1);
+    store.prepareForRustHotkeyStart(false);
+    await handlers.get('recording:status')({ payload: { session_id: 302, status: 'Recording' } });
+    refresh.resolve(null);
+    await oldStart;
+    expect(store.status).toBe('Recording');
+    expect(store.sessionId).toBe(302);
+    expect(authStoreMock.reset).not.toHaveBeenCalled();
+    expect(tokenRepoMock.clear).not.toHaveBeenCalled();
+    store.cleanup();
+  });
+
+  it('preserves an actual pending warm start when shown sees backend Idle', async () => {
+    invokeMock.mockResolvedValue('Idle');
+    const store = useTranscriptionStore();
+    store.prepareForRustHotkeyStart(true);
+    await store.reconcileBackendStatus('window_shown');
+    expect(store.status).toBe('Recording');
+    expect(store.sessionId).toBeNull();
+  });
+
+  it.each([false, true])('does not replace the first visible transcript with a shorter animation prefix (segmentFinal=%s)', async (isSegmentFinal) => {
+    vi.useFakeTimers();
+    try {
+      const handlers = new Map<string, any>();
+      listenMock.mockImplementation(async (name, handler) => { handlers.set(name, handler); return () => {}; });
+      invokeMock.mockResolvedValue(null);
+      const store = useTranscriptionStore();
+      await store.initialize();
+      await handlers.get('recording:status')({ payload: { session_id: 2, status: 'Recording' } });
+      await handlers.get('transcription:partial')({ payload: {
+        session_id: 2, text: 'Native fixture session 2', timestamp: 1,
+        start: 0, duration: 0.5, is_segment_final: isSegmentFinal,
+      } });
+      expect(store.displayText).toBe('Native fixture session 2');
+      await vi.advanceTimersByTimeAsync(15);
+      expect(store.displayText).toBe('Native fixture session 2');
+      await vi.advanceTimersByTimeAsync(200);
+      expect(store.displayText).toBe('Native fixture session 2');
+      store.cleanup();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('still animates later partial suffixes after the initial segment is seeded', async () => {
+    vi.useFakeTimers();
+    try {
+      const handlers = new Map<string, any>();
+      listenMock.mockImplementation(async (name, handler) => { handlers.set(name, handler); return () => {}; });
+      invokeMock.mockResolvedValue(null);
+      const store = useTranscriptionStore();
+      await store.initialize();
+      await handlers.get('recording:status')({ payload: { session_id: 2, status: 'Recording' } });
+      const partial = (text: string) => handlers.get('transcription:partial')({ payload: {
+        session_id: 2, text, timestamp: 1, start: 0, duration: 0.5, is_segment_final: false,
+      } });
+      await partial('Native');
+      await partial('Native fixture session 2');
+      expect(store.displayText).toBe('Native');
+      await vi.advanceTimersByTimeAsync(200);
+      expect(store.displayText).toBe('Native fixture session 2');
+      store.cleanup();
+    } finally { vi.useRealTimers(); }
+  });
+
 });

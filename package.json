@@ -1,6 +1,6 @@
 {
   "name": "voice-to-text",
-  "version": "0.16.6",
+  "version": "0.16.7",
   "type": "module",
   "description": "Privacy-focused voice-to-text application with offline support",
   "scripts": {
@@ -10,7 +10,7 @@
     "test": "vitest",
     "test:run": "vitest run && npm run --silent test:e2e-helpers",
     "test:coverage": "vitest run --coverage",
-    "test:e2e-helpers": "node --test e2e-tests/helpers/liveAudioEvidenceContract.test.mjs e2e-tests/helpers/liveAudioRunner.test.mjs e2e-tests/helpers/processUtils.test.mjs e2e-tests/helpers/tauriE2e.test.mjs",
+    "test:e2e-helpers": "node --test e2e-tests/helpers/liveAudioEvidenceContract.test.mjs e2e-tests/helpers/liveAudioRunner.test.mjs e2e-tests/helpers/processUtils.test.mjs e2e-tests/helpers/tauriE2e.test.mjs e2e-tests/helpers/nativeWindowRunner.test.mjs",
     "typecheck": "vue-tsc --noEmit",
     "release:notes": "node scripts/prepare-release-notes.mjs",
     "tauri": "tauri",
@@ -21,7 +21,8 @@
     "tauri:build:whisper": "tauri build --features whisper",
     "e2e:tauri": "node e2e-tests/run-e2e.mjs",
     "e2e:live-audio": "node e2e-tests/run-live-audio-smoke.mjs",
-    "e2e:live-audio-soak": "node e2e-tests/run-live-audio-soak.mjs"
+    "e2e:live-audio-soak": "node e2e-tests/run-live-audio-soak.mjs",
+    "e2e:native-window": "node e2e-tests/run-native-window-e2e.mjs"
   },
   "dependencies": {
     "@mdi/font": "^7.4.47",
