@@ -714,8 +714,11 @@ onMounted(async () => {
 
     // Если UI рассинхронизировался (например окно было скрыто и JS "заморозили"),
     // сначала сверяемся с backend: он источник правды по статусу записи.
+    // Idle means capture stopped, not that the current error was acknowledged.
+    // A delayed show must not replace a terminal failed-start error with Idle.
+    if (store.hasError || store.error) return;
     const backendStatus = await store.reconcileBackendStatus('window_shown');
-    if (generation !== hideGeneration || isComponentUnmounted) return;
+    if (generation !== hideGeneration || isComponentUnmounted || store.hasError || store.error) return;
     if (backendStatus === 'Idle' || backendStatus === null) {
       // После reconcile UI должен быть не в Recording — тогда смело чистим.
       if (!store.isRecording && !store.isStarting && !store.isProcessing) {

@@ -1,6 +1,6 @@
 /** Real NSPanel/WKWebView/Vue/IPC scenarios; only native audio/STT adapters are fake. */
 import type { Pinia } from 'pinia';
-import { nextTick } from 'vue';
+import { nextTick, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -108,6 +108,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
       document.querySelector('.transcription-text')?.textContent?.trim() || '';
     const transcriptMatches = (actual: string, expected: string) => actual.replace(/\s+/g, ' ').trim() === expected;
     const uiSnapshot = () => ({ status: store.status, sessionId: store.sessionId,
+      error: store.error, errorType: store.errorType, hasError: store.hasError,
       displayText: store.displayText, partialText: store.partialText, accumulatedText: store.accumulatedText,
       finalText: store.finalText, visiblePartialText: store.visiblePartialText,
       visibleAccumulatedText: store.visibleAccumulatedText, visibleFinalText: store.visibleFinalText,
@@ -359,9 +360,30 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     report.scenarios.push('processing-ui-and-cancelled-pending-hold-start');
 
     await configure({ failNextStart: true });
-    await hotkey('press');
-    await until(async () => ({ backend: await state(), error: !!document.querySelector('.mini-status-dot.error, .error-message') }),
-      (s) => s.backend.fixture.activeCaptures === 0 && s.error, 'Failed start did not expose UI error and release capture');
+    await progress('start-failure-ui-error');
+    const failureUiStarted = Date.now();
+    const failureUiTransitions: unknown[] = [];
+    const captureFailureUi = () => ({ elapsedMs: Date.now() - failureUiStarted, ui: uiSnapshot(),
+      statusDotClass: document.querySelector('.mini-status-dot')?.className,
+      errorText: document.querySelector('.error-message')?.textContent,
+      error: !!document.querySelector('.mini-status-dot.error, .error-message') });
+    const stopFailureTrace = watch(() => [store.status, store.error, store.sessionId], () => {
+      if (failureUiTransitions.length < 64) failureUiTransitions.push(captureFailureUi());
+    }, { flush: 'sync' });
+    let lastFailureSample: unknown;
+    try {
+      await hotkey('press');
+      await until(async () => {
+        const sample = { backend: await state(), ...captureFailureUi() };
+        lastFailureSample = sample;
+        return sample;
+      }, (s) => s.backend.fixture.activeCaptures === 0 && s.error,
+      'Failed start did not expose UI error and release capture');
+      report.observations.push({ scenario: 'start-failure-ui-error', transitions: failureUiTransitions, last: lastFailureSample });
+    } catch (error) {
+      report.failureContext = { scenario: 'start-failure-ui-error', transitions: failureUiTransitions, last: lastFailureSample };
+      throw error;
+    } finally { stopFailureTrace(); }
     await hotkey('release');
     current = await start();
     await stop();

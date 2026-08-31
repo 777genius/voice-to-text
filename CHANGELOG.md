@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Kept the recording window responsive during rapid repeated hotkey presses by isolating each window lifecycle.
 - Prevented stale hide requests, auto-paste window restoration, and connection retries from disrupting a newer recording session.
 - Restored retries after failed connections and settled cancelled hold-to-record starts without leaving recording stuck in Starting.
+- Preserved connection failure messages when the recording window finishes showing.
 - Kept visible transcript text from shrinking during the first-transcript animation.
 - Preserved dictated text on the clipboard for delayed-reading applications even when the paste command fails.
 

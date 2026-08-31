@@ -1129,6 +1129,68 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     wrapper.unmount();
   });
 
+  it.each(['before-shown', 'during-epoch-validation', 'during-status-snapshot'])(
+    'keeps the current failed-start error visible when it arrives %s', async (order) => {
+      const wrapper = mountRecordingPopover();
+      await waitForListenerCount('hotkey:toggle-recording', 1);
+      const store = useTranscriptionStore();
+      const epoch = deferred<number>();
+      const snapshot = deferred<string>();
+      const defaultInvoke = invokeMock.getMockImplementation()!;
+      let statusRequested = false;
+      invokeMock.mockImplementation((command: string, ...args: any[]) => {
+        if (command === 'get_recording_window_epoch' && order === 'during-epoch-validation') return epoch.promise;
+        if (command === 'get_recording_status') {
+          statusRequested = true;
+          return order === 'during-status-snapshot' ? snapshot.promise : Promise.resolve('Idle');
+        }
+        return defaultInvoke(command, ...args);
+      });
+      const failStart = async () => {
+        await emitTauriEvent('recording:status', { session_id: 31, status: 'Starting' });
+        await emitTauriEvent('transcription:error', {
+          session_id: 31, error: 'Connection error: Native fixture failed start', error_type: 'connection',
+        });
+        expect(store.status).toBe('Error');
+        expect(store.errorFullText).toContain('Connection error: Native fixture failed start');
+      };
+      if (order === 'before-shown') await failStart();
+      const shown = tauriEventMock.handlers.get('recording:window-shown')![0]({ payload: { windowEpoch: 1 } });
+      if (order === 'during-status-snapshot') {
+        for (let i = 0; i < 20 && !statusRequested; i++) await flushMicrotasks();
+        expect(statusRequested).toBe(true);
+      }
+      if (order !== 'before-shown') await failStart();
+      epoch.resolve(1);
+      snapshot.resolve('Idle');
+      await shown;
+      await nextTick();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(store.status).toBe('Error');
+      expect(store.errorFullText).toContain('Connection error: Native fixture failed start');
+      expect(document.querySelector('[data-testid="mini-error-retry"]')).not.toBeNull();
+      expect(hideWindowMock).not.toHaveBeenCalled();
+      wrapper.unmount();
+    },
+  );
+
+  it('clears a previous error when the next native recording actually starts', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('hotkey:toggle-recording', 1);
+    await emitTauriEvent('recording:status', { session_id: 31, status: 'Starting' });
+    await emitTauriEvent('transcription:error', {
+      session_id: 31, error: 'Connection error: Native fixture failed start', error_type: 'connection',
+    });
+    expect(useTranscriptionStore().hasError).toBe(true);
+    nativeWindowEpoch.value = 2;
+    await emitTauriEvent('recording:start-requested', {});
+    await emitTauriEvent('recording:status', { session_id: 32, status: 'Recording' });
+    expect(useTranscriptionStore().status).toBe('Recording');
+    expect(useTranscriptionStore().error).toBeNull();
+    expect(document.querySelector('[data-testid="mini-error-retry"]')).toBeNull();
+    wrapper.unmount();
+  });
+
   it('does not run an opening frame after a stop supersedes window shown', async () => {
     const wrapper = mountRecordingPopover();
     await waitForListenerCount('hotkey:toggle-recording', 1);
