@@ -7,6 +7,7 @@ use crate::domain::{SttConnectionCategory, SttConnectionDetails};
 pub const EVENT_TRANSCRIPTION_PARTIAL: &str = "transcription:partial";
 pub const EVENT_TRANSCRIPTION_FINAL: &str = "transcription:final";
 pub const EVENT_RECORDING_STATUS: &str = "recording:status";
+pub const EVENT_RECORDING_INTENT_PROJECTION: &str = "recording:intent-projection";
 pub const EVENT_AUDIO_LEVEL: &str = "audio:level";
 pub const EVENT_AUDIO_SPECTRUM: &str = "audio:spectrum";
 pub const EVENT_MICROPHONE_TEST_LEVEL: &str = "microphone_test:level";
@@ -121,6 +122,18 @@ pub struct RecordingStatusPayload {
     /// мог продолжать работать — если поля нет, фронт считает `dictation`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<RecordingMode>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingIntentProjectionPayload {
+    pub run_id: Option<u64>,
+    pub intent_revision: Option<u64>,
+    pub status: RecordingStatus,
+    pub desired_on: bool,
+    pub pending_start: bool,
+    pub processing_jobs: usize,
+    pub shutdown_requested: bool,
 }
 
 /// Payload for audio level event

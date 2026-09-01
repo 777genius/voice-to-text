@@ -1261,6 +1261,29 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     wrapper.unmount();
   });
 
+  it('cancels an old run hide while the backend owns a pending replacement start', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:intent-projection', 1);
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Processing' });
+    expect(document.querySelector('.mini-closing')).not.toBeNull();
+
+    await emitTauriEvent('recording:intent-projection', {
+      runId: 90,
+      intentRevision: 91,
+      status: 'Processing',
+      desiredOn: true,
+      pendingStart: true,
+      processingJobs: 0,
+      shutdownRequested: false,
+    });
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(document.querySelector('.mini-closing')).toBeNull();
+    expect(hideWindowMock).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
   it('retains the current native epoch when Recording arrives before the start event query resolves', async () => {
     const wrapper = mountRecordingPopover();
     await waitForListenerCount('hotkey:toggle-recording', 1);

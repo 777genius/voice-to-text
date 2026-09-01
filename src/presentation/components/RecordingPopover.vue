@@ -293,7 +293,9 @@ let handledStartEpoch: number | null = null;
 let cancelledStartEpoch = -1;
 let pendingRustStart: { epoch: number; revision: number } | null = null;
 const pendingStartValidations = new Set<{ epoch: number }>();
-const hasPendingCurrentStart = () => [...pendingStartValidations].some(({ epoch }) => epoch === currentWindowEpoch);
+const hasPendingCurrentStart = () =>
+  (store.recordingDesiredOn && store.recordingStartPending) ||
+  [...pendingStartValidations].some(({ epoch }) => epoch === currentWindowEpoch);
 
 async function acceptWindowEvent(payload: { windowEpoch?: number } | undefined): Promise<boolean> {
   const epoch = payload?.windowEpoch;
@@ -791,8 +793,14 @@ watch(() => store.lastAcceptedRecordingStatus, (payload) => {
 }, { flush: 'sync' });
 
 // Local button starts and terminal errors can change state without a status event.
-watch([() => store.status, () => store.sessionId, hasVisibleIncomingTranslation], () => {
-  if (store.isStarting || store.isRecording || store.hasError || hasVisibleIncomingTranslation.value) {
+watch([
+  () => store.status,
+  () => store.sessionId,
+  () => store.recordingDesiredOn,
+  () => store.recordingStartPending,
+  hasVisibleIncomingTranslation,
+], () => {
+  if (store.isStarting || store.isRecording || store.hasError || hasVisibleIncomingTranslation.value || hasPendingCurrentStart()) {
     cancelPendingHideRecordingWindow();
   }
 }, { flush: 'sync' });

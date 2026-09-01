@@ -390,8 +390,8 @@ pub async fn native_e2e_configure(
     .into_iter()
     .flatten()
     {
-        if value > 3000 {
-            return Err("fixture delays must be <= 3000ms".into());
+        if value > 65_000 {
+            return Err("fixture delays must be <= 65000ms".into());
         }
     }
     if let Some(keep_alive) = config.keep_alive {
@@ -438,6 +438,44 @@ pub async fn native_e2e_hotkey(
         // Block admission, not hotkey preparation. The real UI observes the pending
         // start and releases the hold before any service/session is allocated.
         let _guard = state.recording_lifecycle_guard.lock().await;
+        if state.recording_intent_coordinator_mode
+            == super::state::RecordingIntentCoordinatorMode::Desired
+        {
+            dispatch_hotkey(&app, true);
+            let accepted = {
+                let coordinator = state
+                    .recording_intent_coordinator
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                coordinator.desired_recording.is_on()
+                    && matches!(
+                        coordinator.capture,
+                        super::recording_intent_coordinator::CaptureState::Starting { .. }
+                    )
+            };
+            if !accepted {
+                return Err("gated desired-state fixture press was not accepted".into());
+            }
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let released = state
+                        .recording_hotkey_gestures
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .active_press()
+                        .is_none();
+                    if released {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .map_err(|_| {
+                "gated desired-state fixture press was not released within 3000ms".to_string()
+            })?;
+            return Ok(());
+        }
         let previous = state
             .recording_hotkey_accepted_press_seq
             .load(std::sync::atomic::Ordering::SeqCst);

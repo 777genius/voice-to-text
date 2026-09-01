@@ -301,6 +301,14 @@ pub fn run() {
                 }
             }
 
+            if let Err(error) =
+                presentation::system_lifecycle::register_recording_power_observer(
+                    app.handle().clone(),
+                )
+            {
+                log::error!("Failed to register recording power lifecycle: {error}");
+            }
+
             // ЗАПАСНОЙ ВАРИАНТ: Если NSPanel с StyleMask не работает поверх fullscreen,
             // раскомментируйте строку ниже. Окно гарантированно появится поверх ВСЕГО,
             // но иконка исчезнет из Dock (app станет фоновым сервисом).
@@ -713,6 +721,11 @@ pub fn run() {
 
                         // Аналогично STT: после асинхронной загрузки пинаем invalidation.
                         let revision = AppState::bump_revision(&state.app_config_revision).await;
+                        commands::sync_recording_intent_runtime(
+                            app_handle.clone(),
+                            &saved_app_config,
+                            revision.parse::<u64>().unwrap_or(0),
+                        );
                         let _ = app_handle.emit(
                             crate::presentation::EVENT_STATE_SYNC_INVALIDATION,
                             crate::presentation::StateSyncInvalidationPayload {
@@ -830,7 +843,10 @@ pub fn run() {
         .run(|_app, _event| {
             if handle_translation_shutdown_run_event(&_event, || {
                 if let Some(state) = _app.try_state::<AppState>() {
-                    tauri::async_runtime::block_on(state.shutdown_translation_runtimes());
+                    tauri::async_runtime::block_on(async {
+                        commands::shutdown_recording_intent(_app.clone()).await;
+                        state.shutdown_translation_runtimes().await;
+                    });
                 }
             })
             .is_some()

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
@@ -26,6 +27,38 @@ use crate::infrastructure::{
 
 const RECORDING_WINDOW_POSITION_SAVE_SUPPRESSION_MS: i64 = 800;
 const TRANSLATION_APP_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(4_500);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecordingIntentCoordinatorMode {
+    Legacy,
+    Desired,
+}
+
+impl RecordingIntentCoordinatorMode {
+    fn from_startup_env() -> Self {
+        let value = std::env::var("VOICETEXT_HOTKEY_INTENT_COORDINATOR").ok();
+        match value.as_deref() {
+            Some(value) => {
+                let parsed = Self::parse(value);
+                if parsed.is_none() {
+                    log::warn!(
+                        "Unknown VOICETEXT_HOTKEY_INTENT_COORDINATOR={value}; using legacy rollback path"
+                    );
+                }
+                parsed.unwrap_or(Self::Legacy)
+            }
+            None => Self::Desired,
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "legacy" => Some(Self::Legacy),
+            "desired" => Some(Self::Desired),
+            _ => None,
+        }
+    }
+}
 
 fn default_incoming_translation_factory() -> IncomingTranslationFacadeFactory {
     let audio_factory = Arc::new(DefaultPlatformAudioFactory::new());
@@ -57,6 +90,32 @@ fn default_live_translation_ports() -> LiveTranslationPorts {
         Arc::new(DefaultPlatformAudioFactory::new()),
         Arc::new(OpenAIRealtimeTranslationFactory),
     )
+}
+
+pub(super) fn recording_intent_policy(
+    config: &AppConfig,
+    version: u64,
+) -> super::recording_intent_coordinator::RuntimePolicySnapshot {
+    super::recording_intent_coordinator::RuntimePolicySnapshot {
+        version,
+        capture_mode: match config.recording_mode {
+            RecordingMode::Dictation => super::recording_intent_coordinator::CaptureMode::Dictation,
+            RecordingMode::LiveTranslation => {
+                super::recording_intent_coordinator::CaptureMode::LiveTranslation
+            }
+        },
+        recording_mode: if config.hold_to_record {
+            super::recording_intent_coordinator::RecordingMode::Hold
+        } else {
+            super::recording_intent_coordinator::RecordingMode::Toggle
+        },
+        show_panel_on_start: true,
+        show_mini_panel: config.show_mini_recording_window,
+        hide_panel_on_hotkey_stop: config.hide_recording_window_on_hotkey,
+        hide_panel_on_force_off: true,
+        max_stop_attempts: 3,
+        max_finalize_attempts: 2,
+    }
 }
 
 /// State for microphone testing
@@ -252,6 +311,44 @@ pub struct AppState {
 
     pub recording_hotkey_intents: super::recording_window_lifecycle::RecordingHotkeyIntents,
 
+    /// Startup-only rollout selector. It is intentionally immutable so one process
+    /// cannot split input sources between two lifecycle owners.
+    pub recording_intent_coordinator_mode: RecordingIntentCoordinatorMode,
+
+    /// Pure reducer state. This synchronous mutex is held only for `reduce`; async
+    /// audio, provider, filesystem, and AppKit effects run after it is released.
+    pub recording_intent_coordinator:
+        Arc<std::sync::Mutex<super::recording_intent_coordinator::CoordinatorState>>,
+
+    /// Physical input identity is independent from recording lifecycle timing.
+    pub recording_hotkey_gestures:
+        Arc<std::sync::Mutex<super::recording_hotkey_gestures::RecordingHotkeyGestureNormalizer>>,
+
+    /// Exact AppConfig snapshots referenced by `RunContext.policy.version`.
+    /// Effects read these synchronously before doing async work, so an in-flight
+    /// start cannot silently adopt settings changed by a newer intent.
+    pub recording_intent_policy_snapshots: Arc<std::sync::Mutex<BTreeMap<u64, AppConfig>>>,
+
+    /// Transcript delivery is independently queued from provider stop. A run is
+    /// finalized only after its barrier reaches the queue consumer.
+    pub transcript_delivery_barriers:
+        Arc<std::sync::Mutex<BTreeMap<u64, super::commands::TranscriptDeliveryBarrierPort>>>,
+
+    /// `notify_one` retains a permit if shutdown reaches Idle before the waiter
+    /// is registered.
+    pub recording_shutdown_ready: Arc<tokio::sync::Notify>,
+
+    /// Accepted On intent timestamp keyed by revision. Used only for one
+    /// aggregate accepted-to-panel-applied latency record.
+    pub recording_panel_intent_started_at: Arc<std::sync::Mutex<BTreeMap<u64, std::time::Instant>>>,
+
+    /// Cooperative cancellation token per start effect. Providers without a
+    /// cancellation API still report late success for run-scoped cleanup.
+    pub recording_start_cancellations: Arc<std::sync::Mutex<BTreeMap<u64, Arc<AtomicBool>>>>,
+
+    /// Callback-safe mirror; the async config lock is never acquired in an OS callback.
+    pub hold_to_record_runtime: AtomicBool,
+
     pub recording_window_lifecycle:
         Arc<super::recording_window_lifecycle::RecordingWindowLifecycle>,
 
@@ -341,10 +438,12 @@ impl AppState {
 
                 // Создаем dummy channel для VAD (не будет использоваться с mock)
                 let (vad_tx, vad_rx) = tokio::sync::mpsc::unbounded_channel();
+                let app_config = AppConfig::default();
+                let coordinator_policy = recording_intent_policy(&app_config, 0);
 
                 return Self {
                     transcription_service: service,
-                    config: Arc::new(RwLock::new(AppConfig::default())),
+                    config: Arc::new(RwLock::new(app_config.clone())),
                     app_config_revision: Arc::new(RwLock::new(0)),
                     stt_config_revision: Arc::new(RwLock::new(0)),
                     auth_state_revision: Arc::new(RwLock::new(0)),
@@ -382,6 +481,24 @@ impl AppState {
                     recording_start_pending_after_stop: Default::default(),
                     recording_window_lifecycle: Arc::new(Default::default()),
                     recording_hotkey_intents: Default::default(),
+                    recording_intent_coordinator_mode:
+                        RecordingIntentCoordinatorMode::from_startup_env(),
+                    recording_intent_coordinator: Arc::new(std::sync::Mutex::new(
+                        super::recording_intent_coordinator::CoordinatorState::new(
+                            coordinator_policy,
+                        ),
+                    )),
+                    recording_hotkey_gestures: Arc::new(std::sync::Mutex::new(Default::default())),
+                    recording_intent_policy_snapshots: Arc::new(std::sync::Mutex::new(
+                        BTreeMap::from([(0, app_config)]),
+                    )),
+                    transcript_delivery_barriers: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+                    recording_shutdown_ready: Arc::new(tokio::sync::Notify::new()),
+                    recording_panel_intent_started_at: Arc::new(std::sync::Mutex::new(
+                        BTreeMap::new(),
+                    )),
+                    recording_start_cancellations: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+                    hold_to_record_runtime: AtomicBool::new(false),
                     recording_hotkey_toggle_guard: Arc::new(tokio::sync::Mutex::new(())),
                     recording_lifecycle_guard: Arc::new(tokio::sync::Mutex::new(())),
                     audio_start_guard: Arc::new(tokio::sync::Mutex::new(())),
@@ -421,10 +538,12 @@ impl AppState {
 
                 // Создаем dummy channel для VAD (не будет использоваться без VAD)
                 let (vad_tx, vad_rx) = tokio::sync::mpsc::unbounded_channel();
+                let hold_to_record_runtime = app_config.hold_to_record;
+                let coordinator_policy = recording_intent_policy(&app_config, 0);
 
                 return Self {
                     transcription_service: service,
-                    config: Arc::new(RwLock::new(app_config)),
+                    config: Arc::new(RwLock::new(app_config.clone())),
                     app_config_revision: Arc::new(RwLock::new(0)),
                     stt_config_revision: Arc::new(RwLock::new(0)),
                     auth_state_revision: Arc::new(RwLock::new(0)),
@@ -462,6 +581,24 @@ impl AppState {
                     recording_start_pending_after_stop: Default::default(),
                     recording_window_lifecycle: Arc::new(Default::default()),
                     recording_hotkey_intents: Default::default(),
+                    recording_intent_coordinator_mode:
+                        RecordingIntentCoordinatorMode::from_startup_env(),
+                    recording_intent_coordinator: Arc::new(std::sync::Mutex::new(
+                        super::recording_intent_coordinator::CoordinatorState::new(
+                            coordinator_policy,
+                        ),
+                    )),
+                    recording_hotkey_gestures: Arc::new(std::sync::Mutex::new(Default::default())),
+                    recording_intent_policy_snapshots: Arc::new(std::sync::Mutex::new(
+                        BTreeMap::from([(0, app_config)]),
+                    )),
+                    transcript_delivery_barriers: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+                    recording_shutdown_ready: Arc::new(tokio::sync::Notify::new()),
+                    recording_panel_intent_started_at: Arc::new(std::sync::Mutex::new(
+                        BTreeMap::new(),
+                    )),
+                    recording_start_cancellations: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+                    hold_to_record_runtime: AtomicBool::new(hold_to_record_runtime),
                     recording_hotkey_toggle_guard: Arc::new(tokio::sync::Mutex::new(())),
                     recording_lifecycle_guard: Arc::new(tokio::sync::Mutex::new(())),
                     audio_start_guard: Arc::new(tokio::sync::Mutex::new(())),
@@ -538,9 +675,11 @@ impl AppState {
         vad_rx: tokio::sync::mpsc::UnboundedReceiver<u64>,
         active_transcription_session_id: Arc<AtomicU64>,
     ) -> Self {
+        let hold_to_record_runtime = app_config.hold_to_record;
+        let coordinator_policy = recording_intent_policy(&app_config, 0);
         Self {
             transcription_service,
-            config: Arc::new(RwLock::new(app_config)),
+            config: Arc::new(RwLock::new(app_config.clone())),
             app_config_revision: Arc::new(RwLock::new(0)),
             stt_config_revision: Arc::new(RwLock::new(0)),
             auth_state_revision: Arc::new(RwLock::new(0)),
@@ -578,6 +717,19 @@ impl AppState {
             recording_start_pending_after_stop: Default::default(),
             recording_window_lifecycle: Arc::new(Default::default()),
             recording_hotkey_intents: Default::default(),
+            recording_intent_coordinator_mode: RecordingIntentCoordinatorMode::from_startup_env(),
+            recording_intent_coordinator: Arc::new(std::sync::Mutex::new(
+                super::recording_intent_coordinator::CoordinatorState::new(coordinator_policy),
+            )),
+            recording_hotkey_gestures: Arc::new(std::sync::Mutex::new(Default::default())),
+            recording_intent_policy_snapshots: Arc::new(std::sync::Mutex::new(BTreeMap::from([(
+                0, app_config,
+            )]))),
+            transcript_delivery_barriers: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            recording_shutdown_ready: Arc::new(tokio::sync::Notify::new()),
+            recording_panel_intent_started_at: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            recording_start_cancellations: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            hold_to_record_runtime: AtomicBool::new(hold_to_record_runtime),
             recording_hotkey_toggle_guard: Arc::new(tokio::sync::Mutex::new(())),
             recording_lifecycle_guard: Arc::new(tokio::sync::Mutex::new(())),
             audio_start_guard: Arc::new(tokio::sync::Mutex::new(())),
@@ -1147,6 +1299,19 @@ impl AppState {
                     continue;
                 }
 
+                if state.recording_intent_coordinator_mode
+                    == RecordingIntentCoordinatorMode::Desired
+                {
+                    drop(_lifecycle_guard);
+                    super::commands::dispatch_recording_coordinator_event(
+                        app_handle.clone(),
+                        super::recording_intent_coordinator::CoordinatorEvent::ForceOff(
+                            super::recording_intent_coordinator::StopReason::VadTimeout,
+                        ),
+                    );
+                    continue;
+                }
+
                 if let Err(active) =
                     claim_vad_timeout_session(active_session_id.as_ref(), timeout_session_id)
                 {
@@ -1402,7 +1567,7 @@ mod tests {
     use super::{
         audio_capture_device_cache_matches, claim_translation_shutdown, claim_vad_timeout_session,
         is_current_vad_timeout_session, normalize_audio_capture_device_name,
-        restore_vad_timeout_session_claim_if_unclaimed,
+        restore_vad_timeout_session_claim_if_unclaimed, RecordingIntentCoordinatorMode,
     };
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -1413,6 +1578,20 @@ mod tests {
         assert!(claim_translation_shutdown(&started));
         assert!(!claim_translation_shutdown(&started));
         assert!(started.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn recording_intent_rollout_values_are_explicit_and_reversible() {
+        assert_eq!(
+            RecordingIntentCoordinatorMode::parse("desired"),
+            Some(RecordingIntentCoordinatorMode::Desired)
+        );
+        assert_eq!(
+            RecordingIntentCoordinatorMode::parse("legacy"),
+            Some(RecordingIntentCoordinatorMode::Legacy)
+        );
+        assert_eq!(RecordingIntentCoordinatorMode::parse("DESIRED"), None);
+        assert_eq!(RecordingIntentCoordinatorMode::parse(""), None);
     }
 
     #[test]

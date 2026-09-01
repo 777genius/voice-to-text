@@ -1,4 +1,7 @@
 use super::recording_window_lifecycle::{recording_stop_is_current, RecordingHotkeyAction};
+use super::{
+    recording_intent_coordinator as recording_intent, state::RecordingIntentCoordinatorMode,
+};
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -60,6 +63,7 @@ const MAX_TRANSCRIPT_EVENT_TEXT_BYTES: usize = 64 * 1024;
 enum TranscriptEvent {
     Partial(Transcription),
     Final(Transcription),
+    Barrier(tokio::sync::oneshot::Sender<()>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +129,13 @@ impl TranscriptEventQueue {
 
         self.items.push_back(TranscriptEvent::Final(transcription));
         Ok(())
+    }
+
+    fn push_barrier(&mut self, completion: tokio::sync::oneshot::Sender<()>) {
+        // A barrier is an internal terminal marker, not untrusted producer data.
+        // It may temporarily exceed the data capacity by one so a full queue of
+        // final transcripts cannot deadlock finalization.
+        self.items.push_back(TranscriptEvent::Barrier(completion));
     }
 
     fn pop_front(&mut self) -> Option<TranscriptEvent> {
@@ -217,6 +228,31 @@ impl TranscriptEventSender {
         }
         result
     }
+
+    fn send_barrier(&self, completion: tokio::sync::oneshot::Sender<()>) {
+        {
+            let mut queue = lock_transcript_event_queue(&self.inner);
+            queue.push_barrier(completion);
+        }
+        self.inner.notify.notify_one();
+    }
+}
+
+/// Run-scoped port retained until all transcript callbacks enqueued before stop
+/// have been applied to history and emitted to the frontend.
+#[derive(Debug, Clone)]
+pub(crate) struct TranscriptDeliveryBarrierPort {
+    sender: TranscriptEventSender,
+}
+
+impl TranscriptDeliveryBarrierPort {
+    async fn flush(&self) -> Result<(), String> {
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        self.sender.send_barrier(completion_tx);
+        completion_rx
+            .await
+            .map_err(|_| "transcript delivery consumer closed before barrier".to_string())
+    }
 }
 
 impl TranscriptEventReceiver {
@@ -255,6 +291,12 @@ fn clear_active_transcription_session_id_if_current(state: &AppState, session_id
         .active_transcription_session_id
         .compare_exchange(session_id, 0, Ordering::Relaxed, Ordering::Relaxed)
         .is_ok()
+}
+
+fn desired_recording_coordinator_enabled(app_handle: &AppHandle) -> bool {
+    app_handle.try_state::<AppState>().is_some_and(|state| {
+        state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired
+    })
 }
 
 fn should_clear_active_mode_after_session_cleanup(
@@ -318,18 +360,29 @@ fn dispatch_transcription_error(app_handle: AppHandle, session_id: u64, err: Stt
             log::error!("Failed to emit transcription error event: {}", e);
         }
 
-        let _ = app_handle.emit(
-            EVENT_RECORDING_STATUS,
-            RecordingStatusPayload {
-                session_id,
-                status: RecordingStatus::Error,
-                stopped_via_hotkey: false,
-                mode: None,
-            },
-        );
-
+        let desired = desired_recording_coordinator_enabled(&app_handle);
+        if !desired {
+            let _ = app_handle.emit(
+                EVENT_RECORDING_STATUS,
+                RecordingStatusPayload {
+                    session_id,
+                    status: RecordingStatus::Error,
+                    stopped_via_hotkey: false,
+                    mode: None,
+                },
+            );
+        }
         if let Some(state) = app_handle.try_state::<AppState>() {
             clear_dictation_failure_state_if_current(state.inner(), session_id).await;
+        }
+        if desired {
+            dispatch_recording_coordinator_event(
+                app_handle,
+                recording_intent::CoordinatorEvent::RuntimeFailed {
+                    run_id: recording_intent::RunId::new(session_id),
+                    error: recording_intent_error_code(&err.to_string()),
+                },
+            );
         }
     });
 }
@@ -443,6 +496,9 @@ fn emit_idle_recording_status(
     stopped_via_hotkey: bool,
     mode: Option<RecordingMode>,
 ) {
+    if desired_recording_coordinator_enabled(app_handle) {
+        return;
+    }
     log::debug!(
         "Emitting status: Idle (stopped_via_hotkey: {}, mode: {:?})",
         stopped_via_hotkey,
@@ -484,6 +540,495 @@ async fn active_recording_status(state: &AppState) -> RecordingStatus {
     }
 
     state.transcription_service.get_status().await
+}
+
+fn recording_intent_error_code(error: &str) -> recording_intent::ErrorCode {
+    // Trace stores only a stable category-sized code, never provider text or transcript data.
+    let mut hash = 0x811c_9dc5_u32;
+    for byte in error.bytes().take(256) {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    recording_intent::ErrorCode((hash ^ (hash >> 16)) as u16)
+}
+
+fn coordinator_projection_status(status: recording_intent::ProjectionStatus) -> RecordingStatus {
+    match status {
+        recording_intent::ProjectionStatus::Idle => RecordingStatus::Idle,
+        recording_intent::ProjectionStatus::Starting => RecordingStatus::Starting,
+        recording_intent::ProjectionStatus::Recording => RecordingStatus::Recording,
+        recording_intent::ProjectionStatus::Processing => RecordingStatus::Processing,
+        recording_intent::ProjectionStatus::Error => RecordingStatus::Error,
+    }
+}
+
+fn coordinator_monotonic_ns() -> u64 {
+    static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    ORIGIN
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+#[derive(Clone, Debug)]
+struct CoordinatorRunStartSpec {
+    session_id: u64,
+    policy_version: u64,
+    cancelled: Arc<AtomicBool>,
+    emit_start_requested: bool,
+}
+
+/// Applies one event under the small synchronous reducer mutex, then executes all
+/// returned effects after the mutex is released. Completions re-enter this function.
+pub(super) fn dispatch_recording_coordinator_event(
+    app_handle: AppHandle,
+    event: recording_intent::CoordinatorEvent,
+) {
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return;
+    };
+    if state.recording_intent_coordinator_mode != RecordingIntentCoordinatorMode::Desired {
+        return;
+    }
+
+    let (effects, accepted_panel_revision) = {
+        let mut coordinator = state
+            .recording_intent_coordinator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let effects =
+            recording_intent::reduce_at(&mut coordinator, event, coordinator_monotonic_ns());
+        let accepted_panel_revision =
+            matches!(event, recording_intent::CoordinatorEvent::Intent(_))
+                .then(|| coordinator.trace().last())
+                .flatten()
+                .filter(|entry| entry.phase == recording_intent::TracePhase::IntentApplied)
+                .and_then(|_| coordinator.desired_recording.revision())
+                .filter(|_| coordinator.desired_recording.is_on());
+        (effects, accepted_panel_revision)
+    };
+    if let Some(revision) = accepted_panel_revision {
+        let mut started = state
+            .recording_panel_intent_started_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        started.insert(revision.get(), Instant::now());
+        while started.len() > 64 {
+            started.pop_first();
+        }
+    }
+    drop(state);
+
+    for effect in effects {
+        execute_recording_coordinator_effect(app_handle.clone(), effect);
+    }
+}
+
+pub(crate) fn sync_recording_intent_runtime(
+    app_handle: AppHandle,
+    config: &AppConfig,
+    version: u64,
+) {
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return;
+    };
+    state
+        .hold_to_record_runtime
+        .store(config.hold_to_record, Ordering::SeqCst);
+    {
+        let active_policy_version = state
+            .recording_intent_coordinator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .capture
+            .run()
+            .map(|run| run.policy.version);
+        let mut snapshots = state
+            .recording_intent_policy_snapshots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        snapshots.insert(version, config.clone());
+        while snapshots.len() > 64 {
+            let removable = snapshots
+                .keys()
+                .copied()
+                .find(|candidate| Some(*candidate) != active_policy_version);
+            let Some(removable) = removable else {
+                break;
+            };
+            snapshots.remove(&removable);
+        }
+    }
+    let desired =
+        state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired;
+    drop(state);
+    if desired {
+        dispatch_recording_coordinator_event(
+            app_handle,
+            recording_intent::CoordinatorEvent::PolicyUpdated(
+                super::state::recording_intent_policy(config, version),
+            ),
+        );
+    }
+}
+
+pub(crate) async fn shutdown_recording_intent(app_handle: AppHandle) {
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return;
+    };
+    if state.recording_intent_coordinator_mode != RecordingIntentCoordinatorMode::Desired {
+        return;
+    }
+    let ready = state.recording_shutdown_ready.clone();
+    let force_off = state
+        .recording_hotkey_gestures
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .force_off(super::recording_hotkey_gestures::ForceOffReason::Shutdown);
+    drop(state);
+    let shutdown_ready = ready.notified();
+    tokio::pin!(shutdown_ready);
+    shutdown_ready.as_mut().enable();
+    dispatch_normalized_recording_gesture(app_handle.clone(), force_off);
+    dispatch_recording_coordinator_event(
+        app_handle,
+        recording_intent::CoordinatorEvent::ShutdownRequested,
+    );
+    if tokio::time::timeout(Duration::from_secs(8), shutdown_ready)
+        .await
+        .is_err()
+    {
+        log::error!(
+            "Recording coordinator shutdown timed out; capture terminal state is uncertain"
+        );
+    }
+}
+
+pub(super) fn force_off_recording_for_system_sleep(app_handle: AppHandle) {
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return;
+    };
+    if state.recording_intent_coordinator_mode != RecordingIntentCoordinatorMode::Desired {
+        return;
+    }
+    let intent = state
+        .recording_hotkey_gestures
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .force_off(super::recording_hotkey_gestures::ForceOffReason::Sleep);
+    drop(state);
+    dispatch_normalized_recording_gesture(app_handle, intent);
+}
+
+pub(super) fn reset_recording_gestures_after_system_wake(app_handle: &AppHandle) {
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return;
+    };
+    if state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired {
+        // Sleep already applied ForceOff. Re-clearing only the input latch prevents
+        // a pre-sleep key-up/watch callback from rearming a post-wake gesture.
+        let _ = state
+            .recording_hotkey_gestures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .force_off(super::recording_hotkey_gestures::ForceOffReason::Sleep);
+    }
+}
+
+fn execute_recording_coordinator_effect(
+    app_handle: AppHandle,
+    effect: recording_intent::CoordinatorEffect,
+) {
+    match effect {
+        recording_intent::CoordinatorEffect::StartRecording { effect_id, run } => {
+            let Some(state) = app_handle.try_state::<AppState>() else {
+                return;
+            };
+            let cancelled = Arc::new(AtomicBool::new(false));
+            state
+                .recording_start_cancellations
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(effect_id.get(), cancelled.clone());
+            drop(state);
+            tauri::async_runtime::spawn(async move {
+                let Some(state) = app_handle.try_state::<AppState>() else {
+                    return;
+                };
+                let result = start_recording_checked(
+                    state.clone(),
+                    app_handle.clone(),
+                    None,
+                    None,
+                    None,
+                    Some(CoordinatorRunStartSpec {
+                        session_id: run.run_id.get(),
+                        policy_version: run.policy.version,
+                        cancelled: cancelled.clone(),
+                        // Desired mode already emits an immediate run-scoped
+                        // projection and owns the window effect. The legacy
+                        // provisional event can finish epoch validation late and
+                        // clear the newly accepted frontend session.
+                        emit_start_requested: false,
+                    }),
+                )
+                .await;
+                let outcome = match result {
+                    Ok(_) => recording_intent::StartOutcome::Succeeded,
+                    Err(_) if cancelled.load(Ordering::Acquire) => {
+                        recording_intent::StartOutcome::Cancelled
+                    }
+                    Err(error) => {
+                        recording_intent::StartOutcome::Failed(recording_intent_error_code(&error))
+                    }
+                };
+                state
+                    .recording_start_cancellations
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&effect_id.get());
+                drop(state);
+                dispatch_recording_coordinator_event(
+                    app_handle,
+                    recording_intent::CoordinatorEvent::StartFinished {
+                        effect_id,
+                        run_id: run.run_id,
+                        outcome,
+                    },
+                );
+            });
+        }
+        recording_intent::CoordinatorEffect::CancelStart { effect_id, .. } => {
+            if let Some(state) = app_handle.try_state::<AppState>() {
+                if let Some(cancelled) = state
+                    .recording_start_cancellations
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get(&effect_id.get())
+                    .cloned()
+                {
+                    cancelled.store(true, Ordering::Release);
+                }
+            }
+        }
+        recording_intent::CoordinatorEffect::StopRecording {
+            effect_id,
+            run_id,
+            reason,
+            ..
+        } => {
+            tauri::async_runtime::spawn(async move {
+                let Some(state) = app_handle.try_state::<AppState>() else {
+                    return;
+                };
+                let result = stop_recording_and_emit_idle_if_current(
+                    state.inner(),
+                    &app_handle,
+                    matches!(
+                        reason,
+                        recording_intent::StopReason::Hotkey
+                            | recording_intent::StopReason::HoldReleased
+                    ),
+                    Some(run_id.get()),
+                )
+                .await;
+                let service_status = active_recording_status(state.inner()).await;
+                let outcome = match (result, service_status) {
+                    (Ok(_), RecordingStatus::Idle | RecordingStatus::Error) => {
+                        recording_intent::CaptureStopOutcome::Inactive
+                    }
+                    (Err(error), RecordingStatus::Idle | RecordingStatus::Error) => {
+                        recording_intent::CaptureStopOutcome::FailedButInactive(
+                            recording_intent_error_code(&error),
+                        )
+                    }
+                    (Err(error), _) => recording_intent::CaptureStopOutcome::StillActive(
+                        recording_intent_error_code(&error),
+                    ),
+                    (Ok(_), _) => recording_intent::CaptureStopOutcome::StillActive(
+                        recording_intent::ErrorCode(1),
+                    ),
+                };
+                drop(state);
+                if reason == recording_intent::StopReason::VadTimeout {
+                    let _ = app_handle.emit("vad-silence-timeout", ());
+                }
+                dispatch_recording_coordinator_event(
+                    app_handle,
+                    recording_intent::CoordinatorEvent::CaptureStopped {
+                        effect_id,
+                        run_id,
+                        outcome,
+                    },
+                );
+            });
+        }
+        recording_intent::CoordinatorEffect::FinalizeRecording {
+            effect_id, run_id, ..
+        } => {
+            tauri::async_runtime::spawn(async move {
+                let barrier = app_handle.try_state::<AppState>().and_then(|state| {
+                    state
+                        .transcript_delivery_barriers
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .get(&run_id.get())
+                        .cloned()
+                });
+                let outcome = match barrier {
+                    Some(barrier) => match barrier.flush().await {
+                        Ok(()) => {
+                            if let Some(state) = app_handle.try_state::<AppState>() {
+                                state
+                                    .transcript_delivery_barriers
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .remove(&run_id.get());
+                            }
+                            recording_intent::FinalizeOutcome::Committed
+                        }
+                        Err(error) => recording_intent::FinalizeOutcome::Failed(
+                            recording_intent_error_code(&error),
+                        ),
+                    },
+                    None => recording_intent::FinalizeOutcome::NoTranscript,
+                };
+                dispatch_recording_coordinator_event(
+                    app_handle,
+                    recording_intent::CoordinatorEvent::FinalizeFinished {
+                        effect_id,
+                        run_id,
+                        outcome,
+                    },
+                );
+            });
+        }
+        recording_intent::CoordinatorEffect::ShowPanel {
+            effect_id,
+            revision,
+            policy,
+            ..
+        } => {
+            // Showing is the latency-critical acknowledgement of an accepted
+            // foreground intent. Commit it synchronously after the reducer lock
+            // has been released so callers cannot observe the old window epoch
+            // after their Start request has already returned.
+            let Some(state) = app_handle.try_state::<AppState>() else {
+                return;
+            };
+            let outcome = if let Some(window) = app_handle.get_webview_window("main") {
+                let config = state
+                    .recording_intent_policy_snapshots
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get(&policy.version)
+                    .cloned();
+                match config {
+                    Some(config) => match show_webview_window_with_recording_config(
+                        &window,
+                        &config,
+                        state.inner(),
+                    ) {
+                        Ok(()) => recording_intent::WindowOutcome::Applied {
+                            window_epoch: state.recording_window_lifecycle.current(),
+                        },
+                        Err(error) => recording_intent::WindowOutcome::Failed(
+                            recording_intent_error_code(&error),
+                        ),
+                    },
+                    None => recording_intent::WindowOutcome::Failed(recording_intent::ErrorCode(4)),
+                }
+            } else {
+                recording_intent::WindowOutcome::Failed(recording_intent::ErrorCode(2))
+            };
+            let accepted_to_panel_ms = state
+                .recording_panel_intent_started_at
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&revision.get())
+                .map(|started| started.elapsed().as_millis());
+            if matches!(outcome, recording_intent::WindowOutcome::Applied { .. })
+                && accepted_to_panel_ms.is_some_and(|latency| latency > 250)
+            {
+                log::warn!(
+                        "[HotkeySlowTrace] phase=accepted_to_panel_applied revision={} effect_id={} latency_ms={} outcome={outcome:?}",
+                        revision.get(),
+                        effect_id.get(),
+                        accepted_to_panel_ms.unwrap_or_default(),
+                    );
+            }
+            drop(state);
+            dispatch_recording_coordinator_event(
+                app_handle,
+                recording_intent::CoordinatorEvent::WindowFinished { effect_id, outcome },
+            );
+        }
+        recording_intent::CoordinatorEffect::HidePanel {
+            effect_id,
+            window_epoch,
+            ..
+        } => {
+            let outcome = match app_handle.try_state::<AppState>() {
+                Some(state) => {
+                    match hide_recording_window_epoch(&app_handle, state.inner(), window_epoch) {
+                        Ok(true) => recording_intent::WindowOutcome::Applied {
+                            window_epoch: state.recording_window_lifecycle.current(),
+                        },
+                        Ok(false) => recording_intent::WindowOutcome::Superseded {
+                            window_epoch: state.recording_window_lifecycle.current(),
+                        },
+                        Err(error) => recording_intent::WindowOutcome::Failed(
+                            recording_intent_error_code(&error),
+                        ),
+                    }
+                }
+                None => recording_intent::WindowOutcome::Failed(recording_intent::ErrorCode(3)),
+            };
+            dispatch_recording_coordinator_event(
+                app_handle,
+                recording_intent::CoordinatorEvent::WindowFinished { effect_id, outcome },
+            );
+        }
+        recording_intent::CoordinatorEffect::EmitProjection(projection) => {
+            let (desired_on, intent_revision) = match projection.desired_recording {
+                recording_intent::DesiredRecording::Off => (false, None),
+                recording_intent::DesiredRecording::On { revision, .. } => {
+                    (true, Some(revision.get()))
+                }
+            };
+            let _ = app_handle.emit(
+                EVENT_RECORDING_INTENT_PROJECTION,
+                crate::presentation::RecordingIntentProjectionPayload {
+                    run_id: projection.current_run.map(|run| run.get()),
+                    intent_revision,
+                    status: coordinator_projection_status(projection.status),
+                    desired_on,
+                    pending_start: projection.pending_start,
+                    processing_jobs: projection.processing_jobs,
+                    shutdown_requested: projection.shutdown_requested,
+                },
+            );
+            let session_id = projection.status_run.map_or(0, |run| run.get());
+            if session_id > 0 {
+                let _ = app_handle.emit(
+                    EVENT_RECORDING_STATUS,
+                    RecordingStatusPayload {
+                        session_id,
+                        status: coordinator_projection_status(projection.status),
+                        stopped_via_hotkey: projection.stopped_via_hotkey,
+                        mode: None,
+                    },
+                );
+            }
+        }
+        recording_intent::CoordinatorEffect::ShutdownReady => {
+            log::info!("Recording intent coordinator reached shutdown-ready state");
+            if let Some(state) = app_handle.try_state::<AppState>() {
+                state.recording_shutdown_ready.notify_one();
+            }
+        }
+    }
 }
 
 fn should_report_live_translation_status(
@@ -1154,6 +1699,7 @@ async fn start_live_translation_recording(
     session_id: u64,
     displaced_session_id: u64,
     displaced_recording_mode: Option<RecordingMode>,
+    config: AppConfig,
 ) -> Result<String, String> {
     use crate::application::services::{
         LiveTranslationCallbacks, LiveTranslationConfig, LiveTranslationError,
@@ -1163,20 +1709,21 @@ async fn start_live_translation_recording(
         EVENT_AUDIO_SPECTRUM, EVENT_TRANSLATION_DELTA, EVENT_TRANSLATION_ERROR,
     };
 
-    let config = state.config.read().await.clone();
     let service = get_or_create_live_translation_service(state).await;
     *state.active_recording_mode.write().await = Some(RecordingMode::LiveTranslation);
 
     // Translation status emit — Starting с mode
-    let _ = app_handle.emit(
-        EVENT_RECORDING_STATUS,
-        RecordingStatusPayload {
-            session_id,
-            status: RecordingStatus::Starting,
-            stopped_via_hotkey: false,
-            mode: Some(RecordingMode::LiveTranslation),
-        },
-    );
+    if !desired_recording_coordinator_enabled(&app_handle) {
+        let _ = app_handle.emit(
+            EVENT_RECORDING_STATUS,
+            RecordingStatusPayload {
+                session_id,
+                status: RecordingStatus::Starting,
+                stopped_via_hotkey: false,
+                mode: Some(RecordingMode::LiveTranslation),
+            },
+        );
+    }
 
     let translation_cfg = LiveTranslationConfig {
         openai_api_key: resolve_openai_api_key(&config),
@@ -1214,6 +1761,7 @@ async fn start_live_translation_recording(
     let on_error: std::sync::Arc<dyn Fn(LiveTranslationError) + Send + Sync> =
         std::sync::Arc::new(move |err: LiveTranslationError| {
             let error_type = translation_error_type_to_str(&err).to_string();
+            let error_code = recording_intent_error_code(&err.to_string());
             let payload = crate::presentation::events::TranslationErrorPayload {
                 session_id,
                 error: err.to_string(),
@@ -1222,21 +1770,33 @@ async fn start_live_translation_recording(
             if let Err(e) = app_handle_error.emit(EVENT_TRANSLATION_ERROR, payload) {
                 log::error!("Failed to emit translation error: {}", e);
             }
-            let _ = app_handle_error.emit(
-                EVENT_RECORDING_STATUS,
-                RecordingStatusPayload {
-                    session_id,
-                    status: RecordingStatus::Error,
-                    stopped_via_hotkey: false,
-                    mode: Some(RecordingMode::LiveTranslation),
-                },
-            );
+            let desired = desired_recording_coordinator_enabled(&app_handle_error);
+            if !desired {
+                let _ = app_handle_error.emit(
+                    EVENT_RECORDING_STATUS,
+                    RecordingStatusPayload {
+                        session_id,
+                        status: RecordingStatus::Error,
+                        stopped_via_hotkey: false,
+                        mode: Some(RecordingMode::LiveTranslation),
+                    },
+                );
+            }
             let cleanup_handle = app_handle_error_cleanup.clone();
             tauri::async_runtime::spawn(async move {
                 let Some(state) = cleanup_handle.try_state::<AppState>() else {
                     return;
                 };
                 clear_live_translation_failure_state_if_current(state.inner(), session_id).await;
+                if desired {
+                    dispatch_recording_coordinator_event(
+                        cleanup_handle,
+                        recording_intent::CoordinatorEvent::RuntimeFailed {
+                            run_id: recording_intent::RunId::new(session_id),
+                            error: error_code,
+                        },
+                    );
+                }
             });
         });
 
@@ -1250,7 +1810,9 @@ async fn start_live_translation_recording(
             );
             // Recording is emitted while the service still owns its startup lock, so
             // a queued runtime failure cannot overtake it with a stale Recording event.
-            if status == RecordingStatus::Recording {
+            if status == RecordingStatus::Recording
+                && !desired_recording_coordinator_enabled(&app_handle_status)
+            {
                 let _ = app_handle_status.emit(
                     EVENT_RECORDING_STATUS,
                     RecordingStatusPayload {
@@ -1284,15 +1846,17 @@ async fn start_live_translation_recording(
                 error_type,
             };
             let _ = app_handle.emit(EVENT_TRANSLATION_ERROR, payload);
-            let _ = app_handle.emit(
-                EVENT_RECORDING_STATUS,
-                RecordingStatusPayload {
-                    session_id,
-                    status: RecordingStatus::Error,
-                    stopped_via_hotkey: false,
-                    mode: Some(RecordingMode::LiveTranslation),
-                },
-            );
+            if !desired_recording_coordinator_enabled(&app_handle) {
+                let _ = app_handle.emit(
+                    EVENT_RECORDING_STATUS,
+                    RecordingStatusPayload {
+                        session_id,
+                        status: RecordingStatus::Error,
+                        stopped_via_hotkey: false,
+                        mode: Some(RecordingMode::LiveTranslation),
+                    },
+                );
+            }
             restore_or_clear_failed_start_state_if_current(
                 state,
                 session_id,
@@ -1321,15 +1885,17 @@ async fn stop_live_translation_recording(
     let session_id = take_active_transcription_session_id(state);
 
     // Эмитим Processing (drain) — UI знает что мы заканчиваем
-    let _ = app_handle.emit(
-        EVENT_RECORDING_STATUS,
-        RecordingStatusPayload {
-            session_id,
-            status: RecordingStatus::Processing,
-            stopped_via_hotkey,
-            mode: Some(RecordingMode::LiveTranslation),
-        },
-    );
+    if !desired_recording_coordinator_enabled(app_handle) {
+        let _ = app_handle.emit(
+            EVENT_RECORDING_STATUS,
+            RecordingStatusPayload {
+                session_id,
+                status: RecordingStatus::Processing,
+                stopped_via_hotkey,
+                mode: Some(RecordingMode::LiveTranslation),
+            },
+        );
+    }
 
     if let Some(svc) = service {
         if let Err(e) = svc.stop_translation().await {
@@ -2143,8 +2709,34 @@ pub async fn start_recording(
     app_handle: AppHandle,
     client_start_id: Option<String>,
 ) -> Result<String, String> {
+    if state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired {
+        let already_active = {
+            let coordinator = state
+                .recording_intent_coordinator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            coordinator.desired_recording.is_on()
+                && matches!(
+                    coordinator.capture,
+                    recording_intent::CaptureState::Starting { .. }
+                        | recording_intent::CaptureState::Recording { .. }
+                )
+        };
+        dispatch_recording_coordinator_event(
+            app_handle,
+            recording_intent::CoordinatorEvent::Intent(recording_intent::RecordingIntent::start(
+                recording_intent::IntentSource::Frontend,
+                None,
+            )),
+        );
+        return Ok(if already_active {
+            "Recording already active".to_string()
+        } else {
+            "Recording start requested".to_string()
+        });
+    }
     state.recording_window_lifecycle.start_intent();
-    start_recording_checked(state, app_handle, None, client_start_id, None).await
+    start_recording_checked(state, app_handle, None, client_start_id, None, None).await
 }
 
 async fn start_recording_checked(
@@ -2153,9 +2745,16 @@ async fn start_recording_checked(
     expected_press_seq: Option<u64>,
     client_start_id: Option<String>,
     mut pending_start: Option<PendingStartUi>,
+    coordinator_run: Option<CoordinatorRunStartSpec>,
 ) -> Result<String, String> {
     log::info!("Command: start_recording");
     let _lifecycle_guard = state.recording_lifecycle_guard.lock().await;
+    if coordinator_run
+        .as_ref()
+        .is_some_and(|run| run.cancelled.load(Ordering::Acquire))
+    {
+        return Err("recording start cancelled before resource admission".to_string());
+    }
     if expected_press_seq.is_some_and(|seq| {
         hotkey_action_is_stale(
             seq,
@@ -2178,7 +2777,9 @@ async fn start_recording_checked(
             .load(Ordering::Relaxed);
         let mode = *state.active_recording_mode.read().await;
         if let Some(payload) = active_recording_status_payload(session_id, current_status, mode) {
-            let _ = app_handle.emit(EVENT_RECORDING_STATUS, payload);
+            if !desired_recording_coordinator_enabled(&app_handle) {
+                let _ = app_handle.emit(EVENT_RECORDING_STATUS, payload);
+            }
         }
         // The direct command fenced old hides before waiting for admission.
         // Publish its current epoch without resetting the accepted session.
@@ -2186,7 +2787,22 @@ async fn start_recording_checked(
         return Ok("Recording already active".to_string());
     }
 
-    let config = state.config.read().await.clone();
+    let config = if let Some(run) = coordinator_run.as_ref() {
+        state
+            .recording_intent_policy_snapshots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&run.policy_version)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "recording policy snapshot {} is unavailable for run {}",
+                    run.policy_version, run.session_id
+                )
+            })?
+    } else {
+        state.config.read().await.clone()
+    };
     let (can_resume_keep_alive, warm_start_expected) =
         get_hotkey_start_connection_hint(state.inner(), &config).await;
     if expected_press_seq.is_some_and(|seq| {
@@ -2214,13 +2830,18 @@ async fn start_recording_checked(
     if let Some(pending) = pending_start.as_mut() {
         pending.disarm();
     }
-    let _ = emit_recording_start_requested(
-        &app_handle,
-        "native-start",
-        can_resume_keep_alive,
-        warm_start_expected,
-        client_start_id.as_deref(),
-    );
+    if coordinator_run
+        .as_ref()
+        .map_or(true, |run| run.emit_start_requested)
+    {
+        let _ = emit_recording_start_requested(
+            &app_handle,
+            "native-start",
+            can_resume_keep_alive,
+            warm_start_expected,
+            client_start_id.as_deref(),
+        );
+    }
     if app_handle
         .get_webview_window("main")
         .is_some_and(|window| window.is_visible().unwrap_or(false))
@@ -2230,10 +2851,21 @@ async fn start_recording_checked(
 
     // Новый идентификатор сессии записи. Маркируем им все события transcription:* и recording:status,
     // чтобы frontend мог игнорировать "поздние" сообщения от предыдущей сессии.
-    let session_id = state
-        .transcription_session_seq
-        .fetch_add(1, Ordering::Relaxed)
-        + 1;
+    let session_id = if let Some(session_id) = coordinator_run
+        .as_ref()
+        .map(|run| run.session_id)
+        .filter(|id| *id > 0)
+    {
+        state
+            .transcription_session_seq
+            .fetch_max(session_id, Ordering::AcqRel);
+        session_id
+    } else {
+        state
+            .transcription_session_seq
+            .fetch_add(1, Ordering::Relaxed)
+            + 1
+    };
     // fetch_max вместо store: при конкурентных стартах (кнопка + hotkey) опоздавший store
     // младшего id не может затереть уже застолблённую более новую сессию. Вытесненное
     // значение запоминаем, чтобы вернуть его, если ЭТОТ старт провалится.
@@ -2245,7 +2877,7 @@ async fn start_recording_checked(
 
     // Dispatcher: если в Settings выбран live_translation, направляем в отдельный сервис
     // и НЕ запускаем STT pipeline. Dictation идёт по прежнему пути ниже.
-    let selected_mode = state.config.read().await.recording_mode;
+    let selected_mode = config.recording_mode;
     if selected_mode == crate::domain::RecordingMode::LiveTranslation {
         return start_live_translation_recording(
             state.inner(),
@@ -2253,6 +2885,7 @@ async fn start_recording_checked(
             session_id,
             displaced_session_id,
             displaced_recording_mode,
+            config,
         )
         .await;
     }
@@ -2288,15 +2921,17 @@ async fn start_recording_checked(
                 if let Err(emit_err) = app_handle.emit(EVENT_TRANSCRIPTION_ERROR, payload) {
                     log::error!("Failed to emit transcription error event: {}", emit_err);
                 }
-                let _ = app_handle.emit(
-                    EVENT_RECORDING_STATUS,
-                    RecordingStatusPayload {
-                        session_id,
-                        status: RecordingStatus::Error,
-                        stopped_via_hotkey: false,
-                        mode: None,
-                    },
-                );
+                if !desired_recording_coordinator_enabled(&app_handle) {
+                    let _ = app_handle.emit(
+                        EVENT_RECORDING_STATUS,
+                        RecordingStatusPayload {
+                            session_id,
+                            status: RecordingStatus::Error,
+                            stopped_via_hotkey: false,
+                            mode: None,
+                        },
+                    );
+                }
                 restore_or_clear_failed_start_state_if_current(
                     state.inner(),
                     session_id,
@@ -2317,6 +2952,18 @@ async fn start_recording_checked(
     // события идут через один канал и обрабатываются одной задачей последовательно.
     let (transcript_tx, transcript_rx) = transcript_event_channel(TRANSCRIPT_EVENT_QUEUE_CAPACITY);
     let transcript_overflow_reported = Arc::new(AtomicBool::new(false));
+    if state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired {
+        state
+            .transcript_delivery_barriers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                session_id,
+                TranscriptDeliveryBarrierPort {
+                    sender: transcript_tx.clone(),
+                },
+            );
+    }
 
     let app_handle_transcripts = app_handle.clone();
     let state_partial = state.partial_transcription.clone();
@@ -2360,6 +3007,9 @@ async fn start_recording_checked(
                     {
                         log::error!("Failed to emit final transcription event: {}", e);
                     }
+                }
+                TranscriptEvent::Barrier(completion) => {
+                    let _ = completion.send(());
                 }
             }
         }
@@ -2471,20 +3121,22 @@ async fn start_recording_checked(
         );
     } else {
         log::debug!("Emitting status: Starting (stopped_via_hotkey: false)");
-        let _ = app_handle.emit(
-            EVENT_RECORDING_STATUS,
-            RecordingStatusPayload {
-                session_id,
-                status: RecordingStatus::Starting,
-                stopped_via_hotkey: false,
-                mode: None,
-            },
-        );
+        if !desired_recording_coordinator_enabled(&app_handle) {
+            let _ = app_handle.emit(
+                EVENT_RECORDING_STATUS,
+                RecordingStatusPayload {
+                    session_id,
+                    status: RecordingStatus::Starting,
+                    stopped_via_hotkey: false,
+                    mode: None,
+                },
+            );
+        }
     }
 
     // Пересоздаём audio capture только когда выбранное устройство реально изменилось.
     // Если cached capture сломался/устройство исчезло, ниже будет forced recreate + один retry.
-    let selected_device = state.config.read().await.selected_audio_device.clone();
+    let selected_device = config.selected_audio_device.clone();
     if let Err(e) = state
         .ensure_audio_capture_device(selected_device.clone(), app_handle.clone(), false)
         .await
@@ -2502,15 +3154,17 @@ async fn start_recording_checked(
         if let Err(emit_err) = app_handle.emit(EVENT_TRANSCRIPTION_ERROR, payload) {
             log::error!("Failed to emit transcription error event: {}", emit_err);
         }
-        let _ = app_handle.emit(
-            EVENT_RECORDING_STATUS,
-            RecordingStatusPayload {
-                session_id,
-                status: RecordingStatus::Error,
-                stopped_via_hotkey: false,
-                mode: None,
-            },
-        );
+        if !desired_recording_coordinator_enabled(&app_handle) {
+            let _ = app_handle.emit(
+                EVENT_RECORDING_STATUS,
+                RecordingStatusPayload {
+                    session_id,
+                    status: RecordingStatus::Error,
+                    stopped_via_hotkey: false,
+                    mode: None,
+                },
+            );
+        }
         restore_or_clear_failed_start_state_if_current(
             state.inner(),
             session_id,
@@ -2519,6 +3173,11 @@ async fn start_recording_checked(
             displaced_recording_mode,
         )
         .await;
+        state
+            .transcript_delivery_barriers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&session_id);
         return Err(error_msg);
     }
 
@@ -2605,6 +3264,11 @@ async fn start_recording_checked(
             displaced_recording_mode,
         )
         .await;
+        state
+            .transcript_delivery_barriers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&session_id);
 
         // Сначала transcription:error, потом recording:status=Error (во фронте есть логика suppression/retry).
         on_error(stt);
@@ -2621,15 +3285,17 @@ async fn start_recording_checked(
 
     // Emit Recording status after successful start
     log::debug!("Emitting status: Recording (stopped_via_hotkey: false)");
-    let _ = app_handle.emit(
-        EVENT_RECORDING_STATUS,
-        RecordingStatusPayload {
-            session_id,
-            status: RecordingStatus::Recording,
-            stopped_via_hotkey: false,
-            mode: None,
-        },
-    );
+    if !desired_recording_coordinator_enabled(&app_handle) {
+        let _ = app_handle.emit(
+            EVENT_RECORDING_STATUS,
+            RecordingStatusPayload {
+                session_id,
+                status: RecordingStatus::Recording,
+                stopped_via_hotkey: false,
+                mode: None,
+            },
+        );
+    }
 
     Ok("Recording started".to_string())
 }
@@ -2642,6 +3308,20 @@ pub async fn stop_recording(
     expected_session_id: Option<u64>,
 ) -> Result<String, String> {
     log::info!("Command: stop_recording");
+
+    if state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired {
+        dispatch_recording_coordinator_event(
+            app_handle,
+            recording_intent::CoordinatorEvent::Intent(
+                recording_intent::RecordingIntent::stop_expected(
+                    recording_intent::IntentSource::Frontend,
+                    None,
+                    expected_session_id.map(recording_intent::RunId::new),
+                ),
+            ),
+        );
+        return Ok("Recording stop requested".to_string());
+    }
 
     stop_recording_and_emit_idle_if_current(state.inner(), &app_handle, false, expected_session_id)
         .await
@@ -4221,6 +4901,19 @@ pub async fn toggle_recording_with_window(
 ) -> Result<(), String> {
     log::info!("Command: toggle_recording_with_window");
 
+    if state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired {
+        dispatch_recording_coordinator_event(
+            app_handle,
+            recording_intent::CoordinatorEvent::Intent(recording_intent::RecordingIntent {
+                kind: recording_intent::IntentKind::Toggle,
+                source: recording_intent::IntentSource::Frontend,
+                gesture_id: None,
+                expected_run_id: None,
+            }),
+        );
+        return Ok(());
+    }
+
     // Если пользователь не авторизован — не показываем recording окно.
     // Иначе получается странное поведение: окно может получить фокус, но UI в нём "none" (скрыт правилами windowMode).
     let is_authenticated = *state.is_authenticated.read().await;
@@ -4258,6 +4951,7 @@ pub async fn toggle_recording_with_window(
                 None,
                 None,
                 Some(pending),
+                None,
             )
             .await
             {
@@ -4463,6 +5157,7 @@ async fn toggle_recording_with_pending_start(
                 Some(accepted_press_seq),
                 None,
                 Some(pending),
+                None,
             )
             .await
             {
@@ -5282,7 +5977,10 @@ pub async fn update_app_config(
 
     // Если ничего не менялось — выходим без лишнего I/O и invalidation
     if !any_changed {
+        let config_snapshot = config.clone();
         drop(config);
+        let policy_version = *state.app_config_revision.read().await;
+        sync_recording_intent_runtime(app_handle.clone(), &config_snapshot, policy_version);
         if matches!(requested_double_space_hotkey_enabled, Some(true)) {
             state
                 .double_space_hotkey_enabled_runtime
@@ -5302,6 +6000,7 @@ pub async fn update_app_config(
     } else {
         None
     };
+    let config_snapshot = config.clone();
 
     // Сохраняем конфигурацию на диск
     ConfigStore::save_app_config(&config)
@@ -5357,6 +6056,8 @@ pub async fn update_app_config(
 
     // Синхронизация между окнами через state-sync
     let revision = AppState::bump_revision(&state.app_config_revision).await;
+    let policy_version = revision.parse::<u64>().unwrap_or(0);
+    sync_recording_intent_runtime(app_handle.clone(), &config_snapshot, policy_version);
     let _ = app_handle.emit(
         EVENT_STATE_SYNC_INVALIDATION,
         crate::presentation::StateSyncInvalidationPayload {
@@ -5838,6 +6539,7 @@ async fn start_recording_after_queued_hotkey_idle(
         stop_suppression_press_seq,
         None,
         Some(pending),
+        None,
     )
     .await
     {
@@ -6528,6 +7230,120 @@ fn accept_recording_hotkey_press(state: &AppState, accepted_at_ms: u64) -> u64 {
         + 1
 }
 
+fn dispatch_normalized_recording_gesture(
+    app_handle: AppHandle,
+    intent: super::recording_hotkey_gestures::GestureIntent,
+) {
+    use super::recording_hotkey_gestures::{ForceOffReason, GestureIntent, GestureSource};
+
+    let event = match intent {
+        GestureIntent::Toggle { gesture_id } => {
+            let source = match gesture_id.source() {
+                GestureSource::GlobalShortcut => recording_intent::IntentSource::CarbonHotkey,
+                GestureSource::DoubleSpace => recording_intent::IntentSource::DoubleSpaceHotkey,
+            };
+            recording_intent::CoordinatorEvent::Intent(recording_intent::RecordingIntent::toggle(
+                source,
+                recording_intent::GestureId::new(gesture_id.sequence()),
+            ))
+        }
+        GestureIntent::HoldBegan { token } => {
+            recording_intent::CoordinatorEvent::Intent(recording_intent::RecordingIntent::start(
+                recording_intent::IntentSource::HoldHotkey,
+                Some(recording_intent::GestureId::new(
+                    token.gesture_id().sequence(),
+                )),
+            ))
+        }
+        GestureIntent::HoldEnded { token } => {
+            recording_intent::CoordinatorEvent::Intent(recording_intent::RecordingIntent::stop(
+                recording_intent::IntentSource::HoldHotkey,
+                Some(recording_intent::GestureId::new(
+                    token.gesture_id().sequence(),
+                )),
+            ))
+        }
+        GestureIntent::ForceOff { reason, .. } => {
+            recording_intent::CoordinatorEvent::ForceOff(match reason {
+                ForceOffReason::Shutdown => recording_intent::StopReason::Shutdown,
+                ForceOffReason::Sleep => recording_intent::StopReason::SystemSleep,
+            })
+        }
+    };
+    dispatch_recording_coordinator_event(app_handle, event);
+}
+
+fn trace_recording_input(
+    app_handle: AppHandle,
+    source: recording_intent::IntentSource,
+    gesture_id: Option<super::recording_hotkey_gestures::GestureId>,
+    phase: recording_intent::InputTracePhase,
+) {
+    dispatch_recording_coordinator_event(
+        app_handle,
+        recording_intent::CoordinatorEvent::InputTrace {
+            source,
+            gesture_id: gesture_id
+                .map(|gesture| recording_intent::GestureId::new(gesture.sequence())),
+            phase,
+        },
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn schedule_desired_hotkey_physical_release_watch(
+    app_handle: AppHandle,
+    handle: super::recording_hotkey_gestures::PressHandle,
+    key_code: Option<u16>,
+) {
+    let Some(key_code) = key_code else {
+        return;
+    };
+    tauri::async_runtime::spawn(async move {
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_millis(HOTKEY_PHYSICAL_RELEASE_TIMEOUT_MS);
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(HOTKEY_PHYSICAL_RELEASE_POLL_MS)).await;
+            if macos_physical_key_is_pressed(key_code) {
+                continue;
+            }
+            let Some(state) = app_handle.try_state::<AppState>() else {
+                return;
+            };
+            let result = state
+                .recording_hotkey_gestures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .physical_watcher_released(handle);
+            log::debug!(
+                "[HotkeyTrace] physical release recovery result={result:?}, gesture={:?}",
+                handle.gesture_id()
+            );
+            return;
+        }
+        let Some(state) = app_handle.try_state::<AppState>() else {
+            return;
+        };
+        let result = state
+            .recording_hotkey_gestures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .physical_watcher_released(handle);
+        log::warn!(
+            "[HotkeyTrace] physical release watcher timed out; recovered input latch only: result={result:?}, gesture={:?}",
+            handle.gesture_id()
+        );
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn schedule_desired_hotkey_physical_release_watch(
+    _app_handle: AppHandle,
+    _handle: super::recording_hotkey_gestures::PressHandle,
+    _key_code: Option<u16>,
+) {
+}
+
 fn dispatch_recording_hotkey_toggle(app_clone: AppHandle, accepted_press_seq: u64) {
     dispatch_recording_hotkey_action(app_clone, accepted_press_seq, None);
 }
@@ -6687,6 +7503,19 @@ fn hotkey_action_eligible(
 }
 
 fn dispatch_double_space_hotkey_toggle(app_clone: AppHandle) {
+    if let Some(state) = app_clone.try_state::<AppState>() {
+        if state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired {
+            let intent = state
+                .recording_hotkey_gestures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .discrete_toggle(super::recording_hotkey_gestures::GestureSource::DoubleSpace);
+            drop(state);
+            dispatch_desired_double_space_intent(app_clone, intent);
+            return;
+        }
+    }
+
     let _ = tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_millis(DOUBLE_SPACE_HOTKEY_CLEANUP_DELAY_MS)).await;
 
@@ -6718,6 +7547,40 @@ fn dispatch_double_space_hotkey_toggle(app_clone: AppHandle) {
             accepted_press_seq
         );
         dispatch_recording_hotkey_toggle(app_clone, accepted_press_seq);
+    });
+}
+
+fn dispatch_desired_double_space_intent(
+    app_handle: AppHandle,
+    intent: super::recording_hotkey_gestures::GestureIntent,
+) {
+    let gesture_id = match intent {
+        super::recording_hotkey_gestures::GestureIntent::Toggle { gesture_id } => Some(gesture_id),
+        _ => None,
+    };
+    trace_recording_input(
+        app_handle.clone(),
+        recording_intent::IntentSource::DoubleSpaceHotkey,
+        None,
+        recording_intent::InputTracePhase::OsReceived,
+    );
+    trace_recording_input(
+        app_handle.clone(),
+        recording_intent::IntentSource::DoubleSpaceHotkey,
+        gesture_id,
+        recording_intent::InputTracePhase::GestureAccepted,
+    );
+    // User intent is accepted before the cosmetic Backspace cleanup.
+    dispatch_normalized_recording_gesture(app_handle.clone(), intent);
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(DOUBLE_SPACE_HOTKEY_CLEANUP_DELAY_MS)).await;
+        let cleanup_result = tokio::task::spawn_blocking(|| {
+            crate::infrastructure::auto_paste::send_backspaces(DOUBLE_SPACE_HOTKEY_BACKSPACE_COUNT)
+        })
+        .await;
+        if let Ok(Err(error)) = cleanup_result {
+            log::warn!("Double-Space hotkey cleanup failed: {error}");
+        }
     });
 }
 
@@ -6790,8 +7653,38 @@ fn run_rdev_double_space_hotkey_listener(app_handle: AppHandle) {
             .double_space_hotkey_enabled_runtime
             .load(Ordering::SeqCst)
         {
+            state
+                .recording_hotkey_gestures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .reset_double_space();
             if let Ok(mut detector) = detector_for_callback.lock() {
                 *detector = DoubleSpaceHotkeyState::default();
+            }
+            return;
+        }
+
+        if state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired {
+            let key = normalized_double_space_key_from_rdev(&event.event_type);
+            let intent = {
+                let mut normalizer = state
+                    .recording_hotkey_gestures
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                match event.event_type {
+                    rdev::EventType::KeyPress(_) => {
+                        normalizer.double_space_key_down(key, now_ms_u64(), false)
+                    }
+                    rdev::EventType::KeyRelease(_) => {
+                        normalizer.double_space_key_up(key);
+                        None
+                    }
+                    _ => None,
+                }
+            };
+            drop(state);
+            if let Some(intent) = intent {
+                dispatch_desired_double_space_intent(app_for_callback.clone(), intent);
             }
             return;
         }
@@ -6821,6 +7714,30 @@ fn run_rdev_double_space_hotkey_listener(app_handle: AppHandle) {
 
     if let Err(error) = result {
         log::error!("Double-Space global hotkey listener stopped: {:?}", error);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn normalized_double_space_key_from_rdev(
+    event_type: &rdev::EventType,
+) -> super::recording_hotkey_gestures::DoubleSpaceKey {
+    use super::recording_hotkey_gestures::{DoubleSpaceKey, ModifierKey};
+
+    let key = match event_type {
+        rdev::EventType::KeyPress(key) | rdev::EventType::KeyRelease(key) => *key,
+        _ => return DoubleSpaceKey::Other,
+    };
+    match key {
+        rdev::Key::Space => DoubleSpaceKey::Space,
+        rdev::Key::Alt => DoubleSpaceKey::Modifier(ModifierKey::Alt),
+        rdev::Key::AltGr => DoubleSpaceKey::Modifier(ModifierKey::AltGr),
+        rdev::Key::ControlLeft => DoubleSpaceKey::Modifier(ModifierKey::ControlLeft),
+        rdev::Key::ControlRight => DoubleSpaceKey::Modifier(ModifierKey::ControlRight),
+        rdev::Key::MetaLeft => DoubleSpaceKey::Modifier(ModifierKey::MetaLeft),
+        rdev::Key::MetaRight => DoubleSpaceKey::Modifier(ModifierKey::MetaRight),
+        rdev::Key::ShiftLeft => DoubleSpaceKey::Modifier(ModifierKey::ShiftLeft),
+        rdev::Key::ShiftRight => DoubleSpaceKey::Modifier(ModifierKey::ShiftRight),
+        _ => DoubleSpaceKey::Other,
     }
 }
 
@@ -6928,8 +7845,52 @@ extern "C" fn mac_double_space_event_tap_callback(
         .double_space_hotkey_enabled_runtime
         .load(Ordering::SeqCst)
     {
+        state
+            .recording_hotkey_gestures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .reset_double_space();
         if let Ok(mut detector) = context.detector.lock() {
             *detector = DoubleSpaceHotkeyState::default();
+        }
+        return event;
+    }
+
+    if state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired {
+        use super::recording_hotkey_gestures::DoubleSpaceKey;
+
+        let key_code = unsafe { CGEventGetIntegerValueField(event, MAC_CG_KEYBOARD_EVENT_KEYCODE) };
+        let intent = {
+            let mut normalizer = state
+                .recording_hotkey_gestures
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if key_code == MAC_KEY_CODE_SPACE {
+                if event_type == MAC_CG_EVENT_KEY_DOWN {
+                    let modifiers_down =
+                        unsafe { CGEventGetFlags(event) & MAC_MODIFIER_FLAGS_MASK != 0 };
+                    normalizer.double_space_key_down(
+                        if modifiers_down {
+                            DoubleSpaceKey::Other
+                        } else {
+                            DoubleSpaceKey::Space
+                        },
+                        now_ms_u64(),
+                        false,
+                    )
+                } else {
+                    normalizer.double_space_key_up(DoubleSpaceKey::Space);
+                    None
+                }
+            } else if event_type == MAC_CG_EVENT_KEY_DOWN {
+                normalizer.double_space_key_down(DoubleSpaceKey::Other, now_ms_u64(), false)
+            } else {
+                None
+            }
+        };
+        drop(state);
+        if let Some(intent) = intent {
+            dispatch_desired_double_space_intent(context.app_handle.clone(), intent);
         }
         return event;
     }
@@ -7413,6 +8374,104 @@ pub(super) fn handle_recording_shortcut_event(
     let Some(state) = app.try_state::<crate::presentation::state::AppState>() else {
         return;
     };
+
+    if state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired {
+        trace_recording_input(
+            app.clone(),
+            recording_intent::IntentSource::CarbonHotkey,
+            None,
+            recording_intent::InputTracePhase::OsReceived,
+        );
+        match event_state {
+            ShortcutState::Released => {
+                let (intent, gesture_id, accepted) = {
+                    let mut gestures = state
+                        .recording_hotkey_gestures
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    match gestures.active_press() {
+                        Some(handle) => match gestures.release(handle) {
+                            super::recording_hotkey_gestures::ReleaseResult::HoldEnded(intent) => {
+                                (Some(intent), Some(handle.gesture_id()), true)
+                            }
+                            super::recording_hotkey_gestures::ReleaseResult::Rearmed => {
+                                (None, Some(handle.gesture_id()), true)
+                            }
+                            super::recording_hotkey_gestures::ReleaseResult::Stale => {
+                                (None, Some(handle.gesture_id()), false)
+                            }
+                        },
+                        None => (None, None, false),
+                    }
+                };
+                drop(state);
+                trace_recording_input(
+                    app.clone(),
+                    recording_intent::IntentSource::CarbonHotkey,
+                    gesture_id,
+                    if accepted {
+                        recording_intent::InputTracePhase::GestureAccepted
+                    } else {
+                        recording_intent::InputTracePhase::GestureRejected
+                    },
+                );
+                if let Some(intent) = intent {
+                    dispatch_normalized_recording_gesture(app.clone(), intent);
+                }
+                return;
+            }
+            ShortcutState::Pressed => {
+                let now_ms = now_ms_u64();
+                if state.should_suppress_recording_hotkey(now_ms) {
+                    drop(state);
+                    trace_recording_input(
+                        app.clone(),
+                        recording_intent::IntentSource::CarbonHotkey,
+                        None,
+                        recording_intent::InputTracePhase::GestureRejected,
+                    );
+                    return;
+                }
+                let mode = if state.hold_to_record_runtime.load(Ordering::SeqCst) {
+                    super::recording_hotkey_gestures::PhysicalHotkeyMode::Hold
+                } else {
+                    super::recording_hotkey_gestures::PhysicalHotkeyMode::Toggle
+                };
+                let accepted = state
+                    .recording_hotkey_gestures
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .press(mode);
+                let super::recording_hotkey_gestures::PressResult::Accepted(accepted) = accepted
+                else {
+                    drop(state);
+                    trace_recording_input(
+                        app.clone(),
+                        recording_intent::IntentSource::CarbonHotkey,
+                        None,
+                        recording_intent::InputTracePhase::GestureRejected,
+                    );
+                    return;
+                };
+                drop(state);
+                trace_recording_input(
+                    app.clone(),
+                    recording_intent::IntentSource::CarbonHotkey,
+                    Some(accepted.handle.gesture_id()),
+                    recording_intent::InputTracePhase::GestureAccepted,
+                );
+                if mode == super::recording_hotkey_gestures::PhysicalHotkeyMode::Toggle {
+                    schedule_desired_hotkey_physical_release_watch(
+                        app.clone(),
+                        accepted.handle,
+                        physical_release_key_code,
+                    );
+                }
+                dispatch_normalized_recording_gesture(app.clone(), accepted.intent);
+                return;
+            }
+        }
+    }
 
     match event_state {
         ShortcutState::Released => {
@@ -8516,6 +9575,9 @@ mod tests {
                 TranscriptEvent::Final(transcription) => {
                     events.push((true, transcription.text));
                 }
+                TranscriptEvent::Barrier(completion) => {
+                    let _ = completion.send(());
+                }
             }
         }
 
@@ -8616,5 +9678,24 @@ mod tests {
         drop(tx);
 
         assert!(drain_transcript_events(&rx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn transcript_delivery_barrier_runs_after_a_capacity_filling_final() {
+        let (tx, rx) = transcript_event_channel(1);
+        tx.send_final(final_text("terminal")).unwrap();
+        let barrier = TranscriptDeliveryBarrierPort { sender: tx.clone() };
+
+        let consumer = async move {
+            let first = rx.recv().await.expect("final must be queued first");
+            assert!(matches!(first, TranscriptEvent::Final(_)));
+            let second = rx.recv().await.expect("barrier must follow final");
+            let TranscriptEvent::Barrier(completion) = second else {
+                panic!("expected delivery barrier")
+            };
+            let _ = completion.send(());
+        };
+        let (flush, ()) = tokio::join!(barrier.flush(), consumer);
+        assert_eq!(flush, Ok(()));
     }
 }

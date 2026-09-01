@@ -45,6 +45,7 @@ import {
   PartialTranscriptionPayload,
   FinalTranscriptionPayload,
   RecordingStatusPayload,
+  RecordingIntentProjectionPayload,
   TranscriptionErrorPayload,
   ConnectionQualityPayload,
   TranslationDeltaPayload,
@@ -57,6 +58,7 @@ import {
   EVENT_TRANSCRIPTION_PARTIAL,
   EVENT_TRANSCRIPTION_FINAL,
   EVENT_RECORDING_STATUS,
+  EVENT_RECORDING_INTENT_PROJECTION,
   EVENT_TRANSCRIPTION_ERROR,
   EVENT_CONNECTION_QUALITY,
   EVENT_TRANSLATION_DELTA,
@@ -87,6 +89,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   // Флаг "ждём старт новой сессии": пока он true — игнорируем любые статусы/события,
   // которые не относятся к запуску новой записи (защита от поздних событий старого сокета).
   const awaitingSessionStart = ref<boolean>(false);
+  // Backend-owned desired state. `pendingStart` deliberately has no deadline:
+  // it stays true while a previous run releases capture/finalization resources.
+  const recordingDesiredOn = ref<boolean>(false);
+  const recordingStartPending = ref<boolean>(false);
   // UI effects consume only statuses accepted by this store's session guards.
   const lastAcceptedRecordingStatus = shallowRef<RecordingStatusPayload | null>(null);
   let recordingStateRevision = 0;
@@ -380,6 +386,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   let unlistenPartial: UnlistenFn | null = null;
   let unlistenFinal: UnlistenFn | null = null;
   let unlistenStatus: UnlistenFn | null = null;
+  let unlistenIntentProjection: UnlistenFn | null = null;
   let unlistenError: UnlistenFn | null = null;
   let unlistenConnectionQuality: UnlistenFn | null = null;
   let unlistenTranslationDelta: UnlistenFn | null = null;
@@ -1609,6 +1616,36 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       if (!finalUnlisten) return;
       unlistenFinal = finalUnlisten;
 
+      const intentProjectionUnlisten =
+        await registerStoreListener<RecordingIntentProjectionPayload>(
+          generation,
+          EVENT_RECORDING_INTENT_PROJECTION,
+          async (event) => {
+            recordingDesiredOn.value = event.payload.desiredOn;
+            recordingStartPending.value =
+              event.payload.desiredOn && event.payload.pendingStart;
+            clientLog('recording_intent_projection_received', {
+              ...event.payload,
+              awaitingSessionStart: awaitingSessionStart.value,
+            }, 'debug');
+
+            if (recordingStartPending.value && sessionId.value === null) {
+              status.value = RecordingStatus.Processing;
+            }
+
+            if (!event.payload.desiredOn) {
+              recordingStartPending.value = false;
+              awaitingSessionStart.value = false;
+              if (connectOperation) cancelConnectOperation();
+              if (sessionId.value === null) {
+                status.value = event.payload.status;
+              }
+            }
+          },
+        );
+      if (!intentProjectionUnlisten) return;
+      unlistenIntentProjection = intentProjectionUnlisten;
+
       // Listen to recording status events
       const statusUnlisten = await registerStoreListener<RecordingStatusPayload>(
         generation,
@@ -2667,10 +2704,18 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         }
       );
 
-      timer = setTimeout(() => {
+      const onTimeout = () => {
         if (finished) return;
+        if (recordingDesiredOn.value && recordingStartPending.value) {
+          // This is not a connect timeout: a prior run still owns the capture
+          // transition. The coordinator will emit a terminal completion and
+          // reconcile immediately, even if finalization takes 5/30/60 seconds.
+          timer = setTimeout(onTimeout, 1_000);
+          return;
+        }
         finishErr('timeout');
-      }, timeoutMs);
+      };
+      timer = setTimeout(onTimeout, timeoutMs);
     });
   }
 
@@ -3088,6 +3133,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       const result = await invoke<string>('stop_recording', { expectedSessionId: expectedSessionId ?? undefined });
       if (!isCurrentStop()) return;
       console.log('Recording stopped:', result);
+      if (result === 'Recording stop requested') {
+        // Desired-state mode completes through run-scoped projection/status
+        // events. Polling the physical service here would reintroduce a second
+        // lifecycle owner and can briefly resurrect Recording after Stop.
+        return;
+      }
       const backendStatus = await reconcileBackendStatus('stop_recording_success');
       if (!isCurrentStop()) return;
       clientLog('recording_stop_completed', {
@@ -3258,6 +3309,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       unlistenStatus();
       unlistenStatus = null;
     }
+    if (unlistenIntentProjection) {
+      unlistenIntentProjection();
+      unlistenIntentProjection = null;
+    }
     if (unlistenError) {
       unlistenError();
       unlistenError = null;
@@ -3296,6 +3351,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
 
     clearHotkeyStopFinalizeTimer();
+    recordingDesiredOn.value = false;
+    recordingStartPending.value = false;
 
     // Очищаем таймеры анимации
     if (partialAnimationTimer) {
@@ -3314,6 +3371,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     sessionId,
     closedSessionIdFloor,
     lastAcceptedRecordingStatus,
+    recordingDesiredOn,
+    recordingStartPending,
     getRecordingStartRevision: () => recordingStartRevision,
     partialText,
     accumulatedText,

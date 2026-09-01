@@ -45,6 +45,16 @@ export interface RecordingStatusPayload {
   mode?: RecordingMode;
 }
 
+export interface RecordingIntentProjectionPayload {
+  runId?: number;
+  intentRevision?: number;
+  status: RecordingStatus;
+  desiredOn: boolean;
+  pendingStart: boolean;
+  processingJobs: number;
+  shutdownRequested: boolean;
+}
+
 export interface TranslationDeltaPayload {
   session_id: number;
   text: string;
@@ -160,6 +170,7 @@ export interface ConnectionQualityPayload {
 export const EVENT_TRANSCRIPTION_PARTIAL = 'transcription:partial';
 export const EVENT_TRANSCRIPTION_FINAL = 'transcription:final';
 export const EVENT_RECORDING_STATUS = 'recording:status';
+export const EVENT_RECORDING_INTENT_PROJECTION = 'recording:intent-projection';
 export const EVENT_TRANSCRIPTION_ERROR = 'transcription:error';
 export const EVENT_CONNECTION_QUALITY = 'connection:quality';
 export const EVENT_TRANSLATION_DELTA = 'translation:delta';

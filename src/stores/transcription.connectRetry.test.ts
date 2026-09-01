@@ -149,6 +149,59 @@ describe('transcription connect-retry reliability', () => {
     });
   });
 
+  it('не превращает подтвержденный pending start в timeout/retry даже через 60 секунд', async () => {
+    vi.useFakeTimers();
+    const handlers = new Map<string, any>();
+    try {
+      listenMock.mockImplementation(async (eventName: string, handler: any) => {
+        handlers.set(eventName, handler);
+        return () => {};
+      });
+      invokeMock.mockResolvedValue(null);
+
+      const store = useTranscriptionStore();
+      await store.initialize();
+      const start = store.startRecording();
+      await flushMicrotasks();
+
+      await handlers.get('recording:intent-projection')({
+        payload: {
+          runId: 80,
+          intentRevision: 2,
+          status: 'Processing',
+          desiredOn: true,
+          pendingStart: true,
+          processingJobs: 1,
+          shutdownRequested: false,
+        },
+      });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(invokeMock.mock.calls.filter((call) => call[0] === 'start_recording')).toHaveLength(1);
+      expect(invokeMock.mock.calls.filter((call) => call[0] === 'stop_recording')).toHaveLength(0);
+
+      await handlers.get('recording:intent-projection')({
+        payload: {
+          runId: 81,
+          intentRevision: 2,
+          status: 'Starting',
+          desiredOn: true,
+          pendingStart: false,
+          processingJobs: 1,
+          shutdownRequested: false,
+        },
+      });
+      await handlers.get('recording:status')({
+        payload: { session_id: 81, status: 'Recording', stopped_via_hotkey: false },
+      });
+      await start;
+
+      expect(store.status).toBe('Recording');
+      expect(store.sessionId).toBe(81);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   afterEach(() => {
     for (const spy of consoleSpies) {
       spy.mockRestore();
