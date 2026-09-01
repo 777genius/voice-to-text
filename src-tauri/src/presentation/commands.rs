@@ -562,6 +562,25 @@ fn coordinator_projection_status(status: recording_intent::ProjectionStatus) -> 
     }
 }
 
+fn coordinator_projection_fault(
+    fault: recording_intent::ProjectionFault,
+) -> crate::presentation::RecordingIntentProjectionFault {
+    match fault {
+        recording_intent::ProjectionFault::StartFailed => {
+            crate::presentation::RecordingIntentProjectionFault::StartFailed
+        }
+        recording_intent::ProjectionFault::RuntimeFailed => {
+            crate::presentation::RecordingIntentProjectionFault::RuntimeFailed
+        }
+        recording_intent::ProjectionFault::StopUncertain => {
+            crate::presentation::RecordingIntentProjectionFault::StopUncertain
+        }
+        recording_intent::ProjectionFault::FinalizeFailed => {
+            crate::presentation::RecordingIntentProjectionFault::FinalizeFailed
+        }
+    }
+}
+
 fn coordinator_monotonic_ns() -> u64 {
     static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     ORIGIN
@@ -569,6 +588,17 @@ fn coordinator_monotonic_ns() -> u64 {
         .elapsed()
         .as_nanos()
         .min(u128::from(u64::MAX)) as u64
+}
+
+fn newly_accepted_panel_revision(
+    event: recording_intent::CoordinatorEvent,
+    before: recording_intent::DesiredRecording,
+    after: recording_intent::DesiredRecording,
+) -> Option<recording_intent::IntentRevision> {
+    matches!(event, recording_intent::CoordinatorEvent::Intent(_))
+        .then_some((before, after))
+        .filter(|(before, after)| before != after && after.is_on())
+        .and_then(|(_, after)| after.revision())
 }
 
 #[derive(Clone, Debug)]
@@ -592,20 +622,18 @@ pub(super) fn dispatch_recording_coordinator_event(
         return;
     }
 
+    let event_received_at = Instant::now();
     let (effects, accepted_panel_revision) = {
         let mut coordinator = state
             .recording_intent_coordinator
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let desired_before = coordinator.desired_recording;
         let effects =
             recording_intent::reduce_at(&mut coordinator, event, coordinator_monotonic_ns());
+        let desired_after = coordinator.desired_recording;
         let accepted_panel_revision =
-            matches!(event, recording_intent::CoordinatorEvent::Intent(_))
-                .then(|| coordinator.trace().last())
-                .flatten()
-                .filter(|entry| entry.phase == recording_intent::TracePhase::IntentApplied)
-                .and_then(|_| coordinator.desired_recording.revision())
-                .filter(|_| coordinator.desired_recording.is_on());
+            newly_accepted_panel_revision(event, desired_before, desired_after);
         (effects, accepted_panel_revision)
     };
     if let Some(revision) = accepted_panel_revision {
@@ -613,14 +641,29 @@ pub(super) fn dispatch_recording_coordinator_event(
             .recording_panel_intent_started_at
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        started.insert(revision.get(), Instant::now());
+        started.insert(revision.get(), event_received_at);
         while started.len() > 64 {
             started.pop_first();
         }
     }
     drop(state);
 
-    for effect in effects {
+    // Publish the reducer snapshot before starting any async effect whose
+    // completion could otherwise overtake and be followed by this older snapshot.
+    for effect in effects.iter().copied().filter(|effect| {
+        matches!(
+            effect,
+            recording_intent::CoordinatorEffect::EmitProjection(_)
+        )
+    }) {
+        execute_recording_coordinator_effect(app_handle.clone(), effect);
+    }
+    for effect in effects.into_iter().filter(|effect| {
+        !matches!(
+            effect,
+            recording_intent::CoordinatorEffect::EmitProjection(_)
+        )
+    }) {
         execute_recording_coordinator_effect(app_handle.clone(), effect);
     }
 }
@@ -904,6 +947,15 @@ fn execute_recording_coordinator_effect(
                 );
             });
         }
+        recording_intent::CoordinatorEffect::ReleaseTranscriptBarrier { run_id } => {
+            if let Some(state) = app_handle.try_state::<AppState>() {
+                state
+                    .transcript_delivery_barriers
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&run_id.get());
+            }
+        }
         recording_intent::CoordinatorEffect::ShowPanel {
             effect_id,
             revision,
@@ -1007,6 +1059,7 @@ fn execute_recording_coordinator_effect(
                     pending_start: projection.pending_start,
                     processing_jobs: projection.processing_jobs,
                     shutdown_requested: projection.shutdown_requested,
+                    fault: projection.fault.map(coordinator_projection_fault),
                 },
             );
             let session_id = projection.status_run.map_or(0, |run| run.get());
@@ -2710,6 +2763,10 @@ pub async fn start_recording(
     client_start_id: Option<String>,
 ) -> Result<String, String> {
     if state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired {
+        if !*state.is_authenticated.read().await {
+            show_auth_window(app_handle).await?;
+            return Err("Authentication required".to_string());
+        }
         let already_active = {
             let coordinator = state
                 .recording_intent_coordinator
@@ -4902,6 +4959,19 @@ pub async fn toggle_recording_with_window(
     log::info!("Command: toggle_recording_with_window");
 
     if state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired {
+        let requests_start = !state
+            .recording_intent_coordinator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .desired_recording
+            .is_on();
+        if requests_start && !*state.is_authenticated.read().await {
+            log::info!(
+                "toggle_recording_with_window: user not authenticated -> redirect to auth window"
+            );
+            show_auth_window(app_handle).await?;
+            return Ok(());
+        }
         dispatch_recording_coordinator_event(
             app_handle,
             recording_intent::CoordinatorEvent::Intent(recording_intent::RecordingIntent {
@@ -7236,6 +7306,11 @@ fn dispatch_normalized_recording_gesture(
 ) {
     use super::recording_hotkey_gestures::{ForceOffReason, GestureIntent, GestureSource};
 
+    if !desired_recording_gesture_is_authorized(&app_handle, intent) {
+        redirect_unauthenticated_recording_intent(app_handle);
+        return;
+    }
+
     let event = match intent {
         GestureIntent::Toggle { gesture_id } => {
             let source = match gesture_id.source() {
@@ -7273,6 +7348,45 @@ fn dispatch_normalized_recording_gesture(
     dispatch_recording_coordinator_event(app_handle, event);
 }
 
+fn desired_recording_gesture_is_authorized(
+    app_handle: &AppHandle,
+    intent: super::recording_hotkey_gestures::GestureIntent,
+) -> bool {
+    use super::recording_hotkey_gestures::GestureIntent;
+
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return false;
+    };
+    if state.recording_intent_coordinator_mode != RecordingIntentCoordinatorMode::Desired {
+        return true;
+    }
+    let requests_start = match intent {
+        GestureIntent::HoldBegan { .. } => true,
+        GestureIntent::Toggle { .. } => !state
+            .recording_intent_coordinator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .desired_recording
+            .is_on(),
+        GestureIntent::HoldEnded { .. } | GestureIntent::ForceOff { .. } => false,
+    };
+    !requests_start
+        || state
+            .is_authenticated
+            .try_read()
+            .map(|authenticated| *authenticated)
+            .unwrap_or(false)
+}
+
+fn redirect_unauthenticated_recording_intent(app_handle: AppHandle) {
+    log::info!("Recording start rejected because the user is not authenticated");
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = show_auth_window(app_handle).await {
+            log::warn!("Failed to show auth window after rejected recording intent: {error}");
+        }
+    });
+}
+
 fn trace_recording_input(
     app_handle: AppHandle,
     source: recording_intent::IntentSource,
@@ -7294,6 +7408,7 @@ fn trace_recording_input(
 fn schedule_desired_hotkey_physical_release_watch(
     app_handle: AppHandle,
     handle: super::recording_hotkey_gestures::PressHandle,
+    mode: super::recording_hotkey_gestures::PhysicalHotkeyMode,
     key_code: Option<u16>,
 ) {
     let Some(key_code) = key_code else {
@@ -7302,10 +7417,18 @@ fn schedule_desired_hotkey_physical_release_watch(
     tauri::async_runtime::spawn(async move {
         let deadline =
             tokio::time::Instant::now() + Duration::from_millis(HOTKEY_PHYSICAL_RELEASE_TIMEOUT_MS);
-        while tokio::time::Instant::now() < deadline {
+        loop {
             tokio::time::sleep(Duration::from_millis(HOTKEY_PHYSICAL_RELEASE_POLL_MS)).await;
             if macos_physical_key_is_pressed(key_code) {
-                continue;
+                if mode == super::recording_hotkey_gestures::PhysicalHotkeyMode::Hold
+                    || tokio::time::Instant::now() < deadline
+                {
+                    continue;
+                }
+                log::warn!(
+                    "[HotkeyTrace] toggle physical release watcher timed out; recovering latch: gesture={:?}",
+                    handle.gesture_id()
+                );
             }
             let Some(state) = app_handle.try_state::<AppState>() else {
                 return;
@@ -7315,24 +7438,21 @@ fn schedule_desired_hotkey_physical_release_watch(
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .physical_watcher_released(handle);
+            let recovered_intent = match result {
+                super::recording_hotkey_gestures::ReleaseResult::HoldEnded(intent) => Some(intent),
+                super::recording_hotkey_gestures::ReleaseResult::Rearmed
+                | super::recording_hotkey_gestures::ReleaseResult::Stale => None,
+            };
             log::debug!(
                 "[HotkeyTrace] physical release recovery result={result:?}, gesture={:?}",
                 handle.gesture_id()
             );
+            drop(state);
+            if let Some(intent) = recovered_intent {
+                dispatch_normalized_recording_gesture(app_handle.clone(), intent);
+            }
             return;
         }
-        let Some(state) = app_handle.try_state::<AppState>() else {
-            return;
-        };
-        let result = state
-            .recording_hotkey_gestures
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .physical_watcher_released(handle);
-        log::warn!(
-            "[HotkeyTrace] physical release watcher timed out; recovered input latch only: result={result:?}, gesture={:?}",
-            handle.gesture_id()
-        );
     });
 }
 
@@ -7340,6 +7460,7 @@ fn schedule_desired_hotkey_physical_release_watch(
 fn schedule_desired_hotkey_physical_release_watch(
     _app_handle: AppHandle,
     _handle: super::recording_hotkey_gestures::PressHandle,
+    _mode: super::recording_hotkey_gestures::PhysicalHotkeyMode,
     _key_code: Option<u16>,
 ) {
 }
@@ -7564,14 +7685,24 @@ fn dispatch_desired_double_space_intent(
         None,
         recording_intent::InputTracePhase::OsReceived,
     );
-    trace_recording_input(
-        app_handle.clone(),
-        recording_intent::IntentSource::DoubleSpaceHotkey,
-        gesture_id,
-        recording_intent::InputTracePhase::GestureAccepted,
-    );
-    // User intent is accepted before the cosmetic Backspace cleanup.
-    dispatch_normalized_recording_gesture(app_handle.clone(), intent);
+    if !desired_recording_gesture_is_authorized(&app_handle, intent) {
+        trace_recording_input(
+            app_handle.clone(),
+            recording_intent::IntentSource::DoubleSpaceHotkey,
+            gesture_id,
+            recording_intent::InputTracePhase::GestureRejected,
+        );
+        redirect_unauthenticated_recording_intent(app_handle.clone());
+    } else {
+        trace_recording_input(
+            app_handle.clone(),
+            recording_intent::IntentSource::DoubleSpaceHotkey,
+            gesture_id,
+            recording_intent::InputTracePhase::GestureAccepted,
+        );
+        // User intent is accepted before the cosmetic Backspace cleanup.
+        dispatch_normalized_recording_gesture(app_handle.clone(), intent);
+    }
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_millis(DOUBLE_SPACE_HOTKEY_CLEANUP_DELAY_MS)).await;
         let cleanup_result = tokio::task::spawn_blocking(|| {
@@ -8389,8 +8520,9 @@ pub(super) fn handle_recording_shortcut_event(
                         .recording_hotkey_gestures
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    match gestures.active_press() {
-                        Some(handle) => match gestures.release(handle) {
+                    let (handle, result) = gestures.os_released();
+                    match (handle, result) {
+                        (Some(handle), result) => match result {
                             super::recording_hotkey_gestures::ReleaseResult::HoldEnded(intent) => {
                                 (Some(intent), Some(handle.gesture_id()), true)
                             }
@@ -8401,7 +8533,7 @@ pub(super) fn handle_recording_shortcut_event(
                                 (None, Some(handle.gesture_id()), false)
                             }
                         },
-                        None => (None, None, false),
+                        (None, _) => (None, None, false),
                     }
                 };
                 drop(state);
@@ -8454,19 +8586,34 @@ pub(super) fn handle_recording_shortcut_event(
                     return;
                 };
                 drop(state);
+                if !desired_recording_gesture_is_authorized(app, accepted.intent) {
+                    trace_recording_input(
+                        app.clone(),
+                        recording_intent::IntentSource::CarbonHotkey,
+                        Some(accepted.handle.gesture_id()),
+                        recording_intent::InputTracePhase::GestureRejected,
+                    );
+                    schedule_desired_hotkey_physical_release_watch(
+                        app.clone(),
+                        accepted.handle,
+                        mode,
+                        physical_release_key_code,
+                    );
+                    redirect_unauthenticated_recording_intent(app.clone());
+                    return;
+                }
                 trace_recording_input(
                     app.clone(),
                     recording_intent::IntentSource::CarbonHotkey,
                     Some(accepted.handle.gesture_id()),
                     recording_intent::InputTracePhase::GestureAccepted,
                 );
-                if mode == super::recording_hotkey_gestures::PhysicalHotkeyMode::Toggle {
-                    schedule_desired_hotkey_physical_release_watch(
-                        app.clone(),
-                        accepted.handle,
-                        physical_release_key_code,
-                    );
-                }
+                schedule_desired_hotkey_physical_release_watch(
+                    app.clone(),
+                    accepted.handle,
+                    mode,
+                    physical_release_key_code,
+                );
                 dispatch_normalized_recording_gesture(app.clone(), accepted.intent);
                 return;
             }
@@ -9532,6 +9679,41 @@ pub async fn set_authenticated(
 mod tests {
     use super::*;
     use crate::domain::{AudioChunk, Transcription};
+
+    #[test]
+    fn accepted_panel_latency_uses_the_intent_transition_not_the_last_effect_trace() {
+        let revision = recording_intent::IntentRevision::new(7);
+        let event =
+            recording_intent::CoordinatorEvent::Intent(recording_intent::RecordingIntent::start(
+                recording_intent::IntentSource::CarbonHotkey,
+                None,
+            ));
+        assert_eq!(
+            newly_accepted_panel_revision(
+                event,
+                recording_intent::DesiredRecording::Off,
+                recording_intent::DesiredRecording::On {
+                    revision,
+                    source: recording_intent::IntentSource::CarbonHotkey,
+                },
+            ),
+            Some(revision)
+        );
+        assert_eq!(
+            newly_accepted_panel_revision(
+                event,
+                recording_intent::DesiredRecording::On {
+                    revision,
+                    source: recording_intent::IntentSource::CarbonHotkey,
+                },
+                recording_intent::DesiredRecording::On {
+                    revision,
+                    source: recording_intent::IntentSource::CarbonHotkey,
+                },
+            ),
+            None
+        );
+    }
 
     #[test]
     fn failed_start_cleanup_allows_retry_without_stopping_a_successor() {

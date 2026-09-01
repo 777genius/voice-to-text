@@ -53,6 +53,7 @@ export interface RecordingIntentProjectionPayload {
   pendingStart: boolean;
   processingJobs: number;
   shutdownRequested: boolean;
+  fault?: 'startFailed' | 'runtimeFailed' | 'stopUncertain' | 'finalizeFailed';
 }
 
 export interface TranslationDeltaPayload {

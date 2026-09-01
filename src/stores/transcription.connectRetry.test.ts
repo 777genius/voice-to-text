@@ -178,6 +178,7 @@ describe('transcription connect-retry reliability', () => {
       await vi.advanceTimersByTimeAsync(60_000);
       expect(invokeMock.mock.calls.filter((call) => call[0] === 'start_recording')).toHaveLength(1);
       expect(invokeMock.mock.calls.filter((call) => call[0] === 'stop_recording')).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
 
       await handlers.get('recording:intent-projection')({
         payload: {
@@ -200,6 +201,34 @@ describe('transcription connect-retry reliability', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('показывает terminal mic-safety ошибку из desired-state projection', async () => {
+    const handlers = new Map<string, any>();
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+    await handlers.get('recording:intent-projection')({
+      payload: {
+        runId: 91,
+        intentRevision: undefined,
+        status: 'Error',
+        desiredOn: false,
+        pendingStart: false,
+        processingJobs: 0,
+        shutdownRequested: false,
+        fault: 'stopUncertain',
+      },
+    });
+
+    expect(store.status).toBe('Error');
+    expect(store.recordingStartPending).toBe(false);
+    expect(store.error).toBeTruthy();
   });
 
   afterEach(() => {

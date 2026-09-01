@@ -288,6 +288,10 @@ const messages = {
       providerQuotaExceeded: 'STT provider quota is exhausted. Top up the provider account or update the API key.',
       authentication: 'Authentication error. Sign in again or check the keys in Settings.',
       processing: 'Audio processing error. Try restarting the recording.',
+      microphoneStopUncertain:
+        'The microphone could not be confirmed as stopped. Quit the app to release it safely, then reopen the app.',
+      transcriptFinalizeFailed:
+        'The final transcript could not be delivered. Start a new recording to try again.',
       audioDeviceUnavailable:
         'Microphone is unavailable. Reconnect it and select it in your system sound settings, then try again.',
       audioDeviceNotFound:
@@ -703,6 +707,10 @@ const messages = {
       providerQuotaExceeded: 'Квота STT-провайдера исчерпана. Пополните баланс провайдера или обновите API key.',
       authentication: 'Ошибка авторизации. Войдите заново или проверьте ключи в настройках.',
       processing: 'Ошибка обработки аудио. Попробуйте перезапустить запись.',
+      microphoneStopUncertain:
+        'Не удалось подтвердить остановку микрофона. Закройте приложение, чтобы безопасно освободить микрофон, затем откройте его снова.',
+      transcriptFinalizeFailed:
+        'Не удалось доставить финальный текст. Запустите новую запись, чтобы попробовать снова.',
       audioDeviceUnavailable:
         'Микрофон недоступен. Подключите/переподключите его и выберите в настройках звука системы, затем попробуйте снова.',
       audioDeviceNotFound:
@@ -1118,6 +1126,10 @@ const messages = {
       providerQuotaExceeded: 'La cuota del proveedor STT se agotó. Recargue la cuenta del proveedor o actualice la API key.',
       authentication: 'Error de autenticación. Inicie sesión de nuevo o compruebe las claves en ajustes.',
       processing: 'Error de procesamiento de audio. Reinicie la grabación.',
+      microphoneStopUncertain:
+        'No se pudo confirmar que el micrófono se detuvo. Cierre la aplicación para liberarlo de forma segura y vuelva a abrirla.',
+      transcriptFinalizeFailed:
+        'No se pudo entregar la transcripción final. Inicie una nueva grabación para volver a intentarlo.',
       audioDeviceUnavailable:
         'El micrófono no está disponible. Vuelva a conectarlo y selecciónelo en la configuración de sonido del sistema, luego inténtelo de nuevo.',
       audioDeviceNotFound:
@@ -1533,6 +1545,10 @@ const messages = {
       providerQuotaExceeded: 'Le quota du fournisseur STT est épuisé. Rechargez le compte fournisseur ou mettez à jour la clé API.',
       authentication: "Erreur d'authentification. Reconnectez-vous ou vérifiez les clés dans les paramètres.",
       processing: "Erreur de traitement audio. Redémarrez l'enregistrement.",
+      microphoneStopUncertain:
+        "Impossible de confirmer l'arrêt du microphone. Quittez l'application pour le libérer en toute sécurité, puis rouvrez-la.",
+      transcriptFinalizeFailed:
+        "La transcription finale n'a pas pu être livrée. Démarrez un nouvel enregistrement pour réessayer.",
       audioDeviceUnavailable:
         'Le microphone est indisponible. Reconnectez-le et sélectionnez-le dans les réglages audio du système, puis réessayez.',
       audioDeviceNotFound:
@@ -1948,6 +1964,10 @@ const messages = {
       providerQuotaExceeded: 'Das Kontingent des STT-Anbieters ist erschöpft. Laden Sie das Anbieterkonto auf oder aktualisieren Sie den API key.',
       authentication: 'Authentifizierungsfehler. Bitte erneut anmelden oder die Schlüssel in den Einstellungen prüfen.',
       processing: 'Audioverarbeitungsfehler. Aufnahme neu starten.',
+      microphoneStopUncertain:
+        'Das Beenden des Mikrofons konnte nicht bestätigt werden. Beenden Sie die App, um es sicher freizugeben, und öffnen Sie sie erneut.',
+      transcriptFinalizeFailed:
+        'Das endgültige Transkript konnte nicht zugestellt werden. Starten Sie eine neue Aufnahme, um es erneut zu versuchen.',
       audioDeviceUnavailable:
         'Mikrofon nicht verfügbar. Bitte neu verbinden und in den Sound-Einstellungen des Systems auswählen, dann erneut versuchen.',
       audioDeviceNotFound:
@@ -2363,6 +2383,10 @@ const messages = {
       providerQuotaExceeded: 'Квоту STT-провайдера вичерпано. Поповніть баланс провайдера або оновіть API key.',
       authentication: 'Помилка автентифікації. Увійдіть знову або перевірте ключі в налаштуваннях.',
       processing: 'Помилка обробки аудіо. Спробуйте перезапустити запис.',
+      microphoneStopUncertain:
+        'Не вдалося підтвердити зупинку мікрофона. Закрийте застосунок, щоб безпечно звільнити мікрофон, а потім відкрийте його знову.',
+      transcriptFinalizeFailed:
+        'Не вдалося доставити фінальний текст. Запустіть новий запис, щоб спробувати ще раз.',
       audioDeviceUnavailable:
         'Мікрофон недоступний. Під’єднайте/перепід’єднайте його та виберіть у налаштуваннях звуку системи, потім спробуйте ще раз.',
       audioDeviceNotFound:

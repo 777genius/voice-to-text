@@ -134,6 +134,17 @@ pub struct RecordingIntentProjectionPayload {
     pub pending_start: bool,
     pub processing_jobs: usize,
     pub shutdown_requested: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fault: Option<RecordingIntentProjectionFault>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RecordingIntentProjectionFault {
+    StartFailed,
+    RuntimeFailed,
+    StopUncertain,
+    FinalizeFailed,
 }
 
 /// Payload for audio level event

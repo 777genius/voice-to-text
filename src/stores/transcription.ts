@@ -93,6 +93,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   // it stays true while a previous run releases capture/finalization resources.
   const recordingDesiredOn = ref<boolean>(false);
   const recordingStartPending = ref<boolean>(false);
+  const recordingIntentFault = ref<NonNullable<RecordingIntentProjectionPayload['fault']> | null>(
+    null,
+  );
   // UI effects consume only statuses accepted by this store's session guards.
   const lastAcceptedRecordingStatus = shallowRef<RecordingStatusPayload | null>(null);
   let recordingStateRevision = 0;
@@ -1622,12 +1625,33 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           EVENT_RECORDING_INTENT_PROJECTION,
           async (event) => {
             recordingDesiredOn.value = event.payload.desiredOn;
+            recordingIntentFault.value = event.payload.fault ?? null;
             recordingStartPending.value =
               event.payload.desiredOn && event.payload.pendingStart;
             clientLog('recording_intent_projection_received', {
               ...event.payload,
               awaitingSessionStart: awaitingSessionStart.value,
             }, 'debug');
+
+            if (event.payload.fault === 'stopUncertain') {
+              recordingStartPending.value = false;
+              awaitingSessionStart.value = false;
+              if (connectOperation) cancelConnectOperation();
+              status.value = RecordingStatus.Error;
+              const message = i18n.global.t('errors.microphoneStopUncertain');
+              setRecordingError(null, message, null, message);
+              return;
+            }
+
+            if (event.payload.fault === 'finalizeFailed') {
+              recordingStartPending.value = false;
+              awaitingSessionStart.value = false;
+              if (connectOperation) cancelConnectOperation();
+              status.value = RecordingStatus.Error;
+              const message = i18n.global.t('errors.transcriptFinalizeFailed');
+              setRecordingError('processing', message, null, message);
+              return;
+            }
 
             if (recordingStartPending.value && sessionId.value === null) {
               status.value = RecordingStatus.Processing;
@@ -2657,6 +2681,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       let finished = false;
       let stop: (() => void) | null = null;
       let timer: ReturnType<typeof setTimeout> | null = null;
+      let timeoutSuspendedForCoordinator = false;
 
       const finishOk = () => {
         if (finished) return;
@@ -2690,9 +2715,26 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         return;
       }
 
+      const onTimeout = () => {
+        if (finished) return;
+        if (recordingDesiredOn.value && recordingStartPending.value) {
+          // The coordinator owns this wait. Suspend the connect deadline until
+          // the previous run's transcript barrier reaches a terminal result.
+          timer = null;
+          timeoutSuspendedForCoordinator = true;
+          return;
+        }
+        finishErr('timeout');
+      };
+
+      const armTimeout = () => {
+        if (finished || timer) return;
+        timer = setTimeout(onTimeout, timeoutMs);
+      };
+
       stop = watch(
-        [status, lastConnectFailure],
-        ([nextStatus, failure]) => {
+        [status, lastConnectFailure, recordingDesiredOn, recordingStartPending, recordingIntentFault],
+        ([nextStatus, failure, desiredOn, pendingStart, intentFault]) => {
           if (finished) return;
           if (nextStatus === RecordingStatus.Recording) {
             finishOk();
@@ -2700,22 +2742,20 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
           if (failure) {
             finishErr(failure);
+            return;
+          }
+          if (intentFault === 'stopUncertain' || intentFault === 'finalizeFailed') {
+            finishErr('processing');
+            return;
+          }
+          if (timeoutSuspendedForCoordinator && desiredOn && !pendingStart) {
+            timeoutSuspendedForCoordinator = false;
+            armTimeout();
           }
         }
       );
 
-      const onTimeout = () => {
-        if (finished) return;
-        if (recordingDesiredOn.value && recordingStartPending.value) {
-          // This is not a connect timeout: a prior run still owns the capture
-          // transition. The coordinator will emit a terminal completion and
-          // reconcile immediately, even if finalization takes 5/30/60 seconds.
-          timer = setTimeout(onTimeout, 1_000);
-          return;
-        }
-        finishErr('timeout');
-      };
-      timer = setTimeout(onTimeout, timeoutMs);
+      armTimeout();
     });
   }
 
@@ -3353,6 +3393,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     clearHotkeyStopFinalizeTimer();
     recordingDesiredOn.value = false;
     recordingStartPending.value = false;
+    recordingIntentFault.value = null;
 
     // Очищаем таймеры анимации
     if (partialAnimationTimer) {

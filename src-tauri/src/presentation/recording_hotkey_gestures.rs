@@ -120,12 +120,6 @@ pub enum ReleaseResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WatcherResult {
-    Rearmed,
-    Stale,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ActivePress {
     handle: PressHandle,
     mode: PhysicalHotkeyMode,
@@ -137,6 +131,10 @@ pub struct RecordingHotkeyGestureNormalizer {
     next_double_space_sequence: u64,
     next_watcher_generation: u64,
     active_press: Option<ActivePress>,
+    /// A watcher can observe key-up before the shortcut plugin delivers the
+    /// corresponding Released callback. Those callbacks must be consumed as
+    /// releases of the retired press, never applied to a newer press.
+    recovered_release_debt: u64,
     double_space: DoubleSpaceState,
 }
 
@@ -203,17 +201,27 @@ impl RecordingHotkeyGestureNormalizer {
         }
     }
 
-    /// Recovery may only clear the exact press it observed and never emits intent.
-    pub fn physical_watcher_released(&mut self, handle: PressHandle) -> WatcherResult {
-        if self
-            .active_press
-            .is_some_and(|active| active.handle == handle)
-        {
-            self.active_press = None;
-            WatcherResult::Rearmed
-        } else {
-            WatcherResult::Stale
+    /// Applies an OS Released callback without borrowing identity from whatever
+    /// press happens to be current when a delayed callback arrives.
+    pub fn os_released(&mut self) -> (Option<PressHandle>, ReleaseResult) {
+        if self.recovered_release_debt > 0 {
+            self.recovered_release_debt -= 1;
+            return (None, ReleaseResult::Stale);
         }
+        let Some(handle) = self.active_press.map(|active| active.handle) else {
+            return (None, ReleaseResult::Stale);
+        };
+        (Some(handle), self.release(handle))
+    }
+
+    /// Recovery may only release the exact press it observed. A hold recovery
+    /// emits the same semantic HoldEnded intent as the normal OS release path.
+    pub fn physical_watcher_released(&mut self, handle: PressHandle) -> ReleaseResult {
+        let result = self.release(handle);
+        if result != ReleaseResult::Stale {
+            self.recovered_release_debt = self.recovered_release_debt.saturating_add(1);
+        }
+        result
     }
 
     /// Clears all gesture state and emits an explicit system force-off intent.
@@ -221,7 +229,9 @@ impl RecordingHotkeyGestureNormalizer {
         let interrupted_hold = self.active_press.and_then(|active| {
             (active.mode == PhysicalHotkeyMode::Hold).then_some(HoldToken(active.handle))
         });
-        self.active_press = None;
+        if self.active_press.take().is_some() {
+            self.recovered_release_debt = self.recovered_release_debt.saturating_add(1);
+        }
         self.double_space.reset();
         GestureIntent::ForceOff {
             reason,
@@ -445,12 +455,12 @@ mod tests {
 
         assert_eq!(
             normalizer.physical_watcher_released(old.handle),
-            WatcherResult::Stale
+            ReleaseResult::Stale
         );
         assert_eq!(normalizer.active_press(), Some(current.handle));
         assert_eq!(
             normalizer.physical_watcher_released(current.handle),
-            WatcherResult::Rearmed
+            ReleaseResult::Rearmed
         );
         assert_eq!(normalizer.active_press(), None);
     }
@@ -475,28 +485,48 @@ mod tests {
 
         assert_eq!(
             normalizer.physical_watcher_released(wrong_generation),
-            WatcherResult::Stale
+            ReleaseResult::Stale
         );
         assert_eq!(
             normalizer.physical_watcher_released(wrong_gesture),
-            WatcherResult::Stale
+            ReleaseResult::Stale
         );
         assert_eq!(normalizer.active_press(), Some(current.handle));
         assert_eq!(
             normalizer.physical_watcher_released(current.handle),
-            WatcherResult::Rearmed
+            ReleaseResult::Rearmed
         );
     }
 
     #[test]
-    fn watcher_rearms_interrupted_hold_without_emitting_hold_end() {
+    fn watcher_ends_interrupted_hold_with_the_original_token() {
         let mut normalizer = RecordingHotkeyGestureNormalizer::new();
         let hold = accepted(normalizer.press(PhysicalHotkeyMode::Hold));
         assert_eq!(
             normalizer.physical_watcher_released(hold.handle),
-            WatcherResult::Rearmed
+            ReleaseResult::HoldEnded(GestureIntent::HoldEnded {
+                token: HoldToken(hold.handle)
+            })
         );
         assert_eq!(normalizer.release(hold.handle), ReleaseResult::Stale);
+    }
+
+    #[test]
+    fn delayed_os_release_after_watcher_cannot_release_a_new_hold() {
+        let mut normalizer = RecordingHotkeyGestureNormalizer::new();
+        let old = accepted(normalizer.press(PhysicalHotkeyMode::Hold));
+        assert!(matches!(
+            normalizer.physical_watcher_released(old.handle),
+            ReleaseResult::HoldEnded(_)
+        ));
+        let current = accepted(normalizer.press(PhysicalHotkeyMode::Hold));
+
+        assert_eq!(normalizer.os_released(), (None, ReleaseResult::Stale));
+        assert_eq!(normalizer.active_press(), Some(current.handle));
+        assert!(matches!(
+            normalizer.physical_watcher_released(current.handle),
+            ReleaseResult::HoldEnded(_)
+        ));
     }
 
     #[test]

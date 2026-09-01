@@ -1305,8 +1305,14 @@ impl AppState {
                     drop(_lifecycle_guard);
                     super::commands::dispatch_recording_coordinator_event(
                         app_handle.clone(),
-                        super::recording_intent_coordinator::CoordinatorEvent::ForceOff(
-                            super::recording_intent_coordinator::StopReason::VadTimeout,
+                        super::recording_intent_coordinator::CoordinatorEvent::Intent(
+                            super::recording_intent_coordinator::RecordingIntent::stop_expected(
+                                super::recording_intent_coordinator::IntentSource::Vad,
+                                None,
+                                Some(super::recording_intent_coordinator::RunId::new(
+                                    timeout_session_id,
+                                )),
+                            ),
                         ),
                     );
                     continue;

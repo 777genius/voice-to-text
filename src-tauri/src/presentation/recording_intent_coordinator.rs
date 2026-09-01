@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 const DEFAULT_TRACE_CAPACITY: usize = 256;
 const MAX_TRACE_CAPACITY: usize = 4_096;
 const COMPLETED_EFFECT_RETENTION: usize = 4_096;
+const MAX_PANEL_ATTEMPTS: u8 = 2;
 
 macro_rules! id_type {
     ($name:ident) => {
@@ -247,16 +248,12 @@ pub enum ProcessingState {
         effect_id: EffectId,
         attempts: u8,
     },
-    FinalizeFailed {
-        attempts: u8,
-        error: ErrorCode,
-    },
     CompensatingStop {
         effect_id: EffectId,
         attempts: u8,
     },
     StopUncertain {
-        active_effect: Option<EffectId>,
+        effect_id: EffectId,
         attempts: u8,
         error: ErrorCode,
     },
@@ -446,6 +443,11 @@ pub enum CoordinatorEffect {
         run_id: RunId,
         attempt: u8,
     },
+    /// Releases the adapter-owned sender that keeps a run's transcript delivery
+    /// task alive after a terminal failure where no further flush is possible.
+    ReleaseTranscriptBarrier {
+        run_id: RunId,
+    },
     ShowPanel {
         effect_id: EffectId,
         revision: IntentRevision,
@@ -471,7 +473,9 @@ impl CoordinatorEffect {
             | Self::FinalizeRecording { effect_id, .. }
             | Self::ShowPanel { effect_id, .. }
             | Self::HidePanel { effect_id, .. } => Some(effect_id),
-            Self::EmitProjection(_) | Self::ShutdownReady => None,
+            Self::ReleaseTranscriptBarrier { .. }
+            | Self::EmitProjection(_)
+            | Self::ShutdownReady => None,
         }
     }
 }
@@ -496,6 +500,15 @@ pub struct RecordingStatusProjection {
     pub pending_start: bool,
     pub stopped_via_hotkey: bool,
     pub shutdown_requested: bool,
+    pub fault: Option<ProjectionFault>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProjectionFault {
+    StartFailed,
+    RuntimeFailed,
+    StopUncertain,
+    FinalizeFailed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -512,6 +525,25 @@ pub enum CoordinatorFault {
         run_id: RunId,
         error: ErrorCode,
     },
+    FinalizeFailed {
+        run_id: RunId,
+        error: ErrorCode,
+    },
+}
+
+impl CoordinatorFault {
+    const fn projection(self) -> ProjectionFault {
+        match self {
+            Self::StartFailed { .. } => ProjectionFault::StartFailed,
+            Self::RuntimeFailed { .. } => ProjectionFault::RuntimeFailed,
+            Self::StopUncertain { .. } => ProjectionFault::StopUncertain,
+            Self::FinalizeFailed { .. } => ProjectionFault::FinalizeFailed,
+        }
+    }
+
+    const fn blocks_capture_start(self) -> bool {
+        matches!(self, Self::StopUncertain { .. })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -537,11 +569,20 @@ enum PendingEffect {
     },
     ShowPanel {
         revision: IntentRevision,
+        attempt: u8,
     },
     HidePanel {
         revision: IntentRevision,
         previous_epoch: u64,
+        attempt: u8,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PanelFailure {
+    goal: PanelGoal,
+    revision: IntentRevision,
+    attempts: u8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -856,6 +897,7 @@ pub struct CoordinatorState {
     completed_effect_order: VecDeque<EffectId>,
     mismatched_start_cleanups: BTreeSet<(EffectId, RunId)>,
     blocked_start_revision: Option<IntentRevision>,
+    panel_failure: Option<PanelFailure>,
     terminal_status_run: Option<RunId>,
     last_projection: Option<RecordingStatusProjection>,
     shutdown_ready_emitted: bool,
@@ -895,6 +937,7 @@ impl CoordinatorState {
             completed_effect_order: VecDeque::new(),
             mismatched_start_cleanups: BTreeSet::new(),
             blocked_start_revision: None,
+            panel_failure: None,
             terminal_status_run: None,
             last_projection: None,
             shutdown_ready_emitted: false,
@@ -924,6 +967,9 @@ impl CoordinatorState {
             CaptureState::Idle => ProjectionStatus::Idle,
         };
         let pending_start = self.desired_recording.is_on()
+            && !self
+                .fault
+                .is_some_and(CoordinatorFault::blocks_capture_start)
             && !matches!(
                 self.capture,
                 CaptureState::Starting { .. } | CaptureState::Recording { .. }
@@ -946,6 +992,7 @@ impl CoordinatorState {
                 StopReason::Hotkey | StopReason::HoldReleased
             ),
             shutdown_requested: self.shutdown_requested,
+            fault: self.fault.map(CoordinatorFault::projection),
         }
     }
 
@@ -1037,7 +1084,7 @@ impl CoordinatorState {
                     },
                 )),
                 ProcessingState::StopUncertain {
-                    active_effect: Some(effect_id),
+                    effect_id,
                     attempts,
                     ..
                 } => Some((
@@ -1049,11 +1096,6 @@ impl CoordinatorState {
                         reason: StopReason::CompensatingStaleStart,
                     },
                 )),
-                ProcessingState::FinalizeFailed { .. }
-                | ProcessingState::StopUncertain {
-                    active_effect: None,
-                    ..
-                } => None,
             };
             if let Some((effect_id, pending)) = expected {
                 if self.in_flight.get(&effect_id) != Some(&pending) {
@@ -1242,8 +1284,14 @@ fn apply_intent(state: &mut CoordinatorState, intent: RecordingIntent, phase: &m
         IntentKind::Stop => false,
     };
     let revision = state.next_revision();
-    state.fault = None;
-    state.blocked_start_revision = None;
+    if !state
+        .fault
+        .is_some_and(CoordinatorFault::blocks_capture_start)
+    {
+        state.fault = None;
+        state.blocked_start_revision = None;
+    }
+    state.panel_failure = None;
     if wants_on {
         if intent.kind == IntentKind::Start && matches!(state.panel, PanelState::Shown { .. }) {
             // Explicit Start is also a foreground/show request. Re-issuing the
@@ -1274,6 +1322,7 @@ fn force_off(state: &mut CoordinatorState, reason: StopReason) {
     state.active_hold_gesture = None;
     state.desired_stop_reason = reason;
     state.blocked_start_revision = None;
+    state.panel_failure = None;
     state.desired_panel =
         if reason == StopReason::Shutdown || state.current_policy.hide_panel_on_force_off {
             PanelGoal::Hidden
@@ -1306,8 +1355,26 @@ fn apply_runtime_failed(state: &mut CoordinatorState, run_id: RunId, error: Erro
     if state.capture.run().map(|run| run.run_id) != Some(run_id) {
         return;
     }
-    state.fault = Some(CoordinatorFault::RuntimeFailed { run_id, error });
+    set_recoverable_fault(state, CoordinatorFault::RuntimeFailed { run_id, error });
     force_off(state, StopReason::RuntimeFailure);
+}
+
+fn clear_recoverable_fault(state: &mut CoordinatorState) {
+    if !state
+        .fault
+        .is_some_and(CoordinatorFault::blocks_capture_start)
+    {
+        state.fault = None;
+    }
+}
+
+fn set_recoverable_fault(state: &mut CoordinatorState, fault: CoordinatorFault) {
+    if !state
+        .fault
+        .is_some_and(CoordinatorFault::blocks_capture_start)
+    {
+        state.fault = Some(fault);
+    }
 }
 
 fn apply_start_finished(
@@ -1360,7 +1427,7 @@ fn apply_start_finished(
     match outcome {
         StartOutcome::Succeeded => {
             state.capture = CaptureState::Recording { run };
-            state.fault = None;
+            clear_recoverable_fault(state);
         }
         StartOutcome::Cancelled => {
             state.capture = CaptureState::Idle;
@@ -1371,10 +1438,13 @@ fn apply_start_finished(
             state.terminal_status_run = Some(run_id);
             if state.desired_recording.revision() == Some(run.revision) {
                 state.blocked_start_revision = Some(run.revision);
-                state.fault = Some(CoordinatorFault::StartFailed {
-                    revision: run.revision,
-                    error,
-                });
+                set_recoverable_fault(
+                    state,
+                    CoordinatorFault::StartFailed {
+                        revision: run.revision,
+                        error,
+                    },
+                );
             }
         }
     }
@@ -1488,7 +1558,7 @@ fn apply_active_capture_stop(
     match outcome {
         CaptureStopOutcome::Inactive | CaptureStopOutcome::FailedButInactive(_) => {
             state.capture = CaptureState::Idle;
-            state.fault = None;
+            clear_recoverable_fault(state);
             begin_finalize(state, run_id, 1, effects);
         }
         CaptureStopOutcome::StillActive(error) => {
@@ -1527,6 +1597,7 @@ fn apply_active_capture_stop(
                     error,
                 };
                 state.fault = Some(CoordinatorFault::StopUncertain { run_id, error });
+                effects.push(CoordinatorEffect::ReleaseTranscriptBarrier { run_id });
             }
         }
     }
@@ -1553,7 +1624,7 @@ fn apply_compensating_stop(
                     ProcessingJob {
                         run_id,
                         state: ProcessingState::StopUncertain {
-                            active_effect: Some(next_effect),
+                            effect_id: next_effect,
                             attempts: next_attempt,
                             error,
                         },
@@ -1576,17 +1647,10 @@ fn apply_compensating_stop(
                     attempt: next_attempt,
                 });
             } else {
-                state.processing_jobs.insert(
-                    run_id,
-                    ProcessingJob {
-                        run_id,
-                        state: ProcessingState::StopUncertain {
-                            active_effect: None,
-                            attempts: attempt,
-                            error,
-                        },
-                    },
-                );
+                state.processing_jobs.remove(&run_id);
+                state.terminal_status_run = Some(run_id);
+                state.fault = Some(CoordinatorFault::StopUncertain { run_id, error });
+                effects.push(CoordinatorEffect::ReleaseTranscriptBarrier { run_id });
             }
         }
     }
@@ -1670,16 +1734,11 @@ fn apply_finalize_finished(
                 state.processing_jobs.remove(&run_id);
                 begin_finalize(state, run_id, next_attempt, effects);
             } else {
-                state.processing_jobs.insert(
-                    run_id,
-                    ProcessingJob {
-                        run_id,
-                        state: ProcessingState::FinalizeFailed {
-                            attempts: attempt,
-                            error,
-                        },
-                    },
-                );
+                state.processing_jobs.remove(&run_id);
+                state.terminal_status_run = Some(run_id);
+                set_recoverable_fault(state, CoordinatorFault::FinalizeFailed { run_id, error });
+                state.blocked_start_revision = state.desired_recording.revision();
+                effects.push(CoordinatorEffect::ReleaseTranscriptBarrier { run_id });
             }
         }
     }
@@ -1722,23 +1781,53 @@ fn apply_window_finished(
     match (pending, outcome) {
         (PendingEffect::ShowPanel { .. }, WindowOutcome::Applied { window_epoch }) => {
             state.panel = PanelState::Shown { window_epoch };
+            state.panel_failure = None;
         }
-        (PendingEffect::ShowPanel { .. }, WindowOutcome::Failed(_)) => {
+        (PendingEffect::ShowPanel { revision, attempt }, WindowOutcome::Failed(_)) => {
             state.panel = PanelState::Hidden;
+            state.panel_failure = Some(PanelFailure {
+                goal: PanelGoal::Shown,
+                revision,
+                attempts: attempt,
+            });
         }
         (PendingEffect::HidePanel { .. }, WindowOutcome::Applied { .. }) => {
             state.panel = PanelState::Hidden;
+            state.panel_failure = None;
+        }
+        (PendingEffect::ShowPanel { .. }, WindowOutcome::Superseded { window_epoch }) => {
+            state.panel = PanelState::Shown { window_epoch };
+            state.panel_failure = None;
         }
         (
-            PendingEffect::ShowPanel { .. } | PendingEffect::HidePanel { .. },
-            WindowOutcome::Superseded { window_epoch },
+            PendingEffect::HidePanel {
+                revision,
+                previous_epoch,
+                attempt,
+            },
+            WindowOutcome::Failed(_),
         ) => {
-            state.panel = PanelState::Shown { window_epoch };
-        }
-        (PendingEffect::HidePanel { previous_epoch, .. }, WindowOutcome::Failed(_)) => {
             state.panel = PanelState::Shown {
                 window_epoch: previous_epoch,
             };
+            state.panel_failure = Some(PanelFailure {
+                goal: PanelGoal::Hidden,
+                revision,
+                attempts: attempt,
+            });
+        }
+        (
+            PendingEffect::HidePanel {
+                revision, attempt, ..
+            },
+            WindowOutcome::Superseded { window_epoch },
+        ) => {
+            state.panel = PanelState::Shown { window_epoch };
+            state.panel_failure = Some(PanelFailure {
+                goal: PanelGoal::Hidden,
+                revision,
+                attempts: attempt,
+            });
         }
         _ => {
             *phase = TracePhase::StaleCompletion;
@@ -1752,7 +1841,11 @@ fn reconcile_capture(state: &mut CoordinatorState, effects: &mut Vec<Coordinator
     }
     match (state.desired_recording, state.capture) {
         (DesiredRecording::On { revision, source }, CaptureState::Idle)
-            if state.blocked_start_revision != Some(revision) =>
+            if state.blocked_start_revision != Some(revision)
+                && state.processing_jobs.is_empty()
+                && !state
+                    .fault
+                    .is_some_and(CoordinatorFault::blocks_capture_start) =>
         {
             let run = RunContext {
                 run_id: state.ids.run_id(),
@@ -1838,12 +1931,19 @@ fn reconcile_panel(state: &mut CoordinatorState, effects: &mut Vec<CoordinatorEf
                 DesiredRecording::On { source, .. } => source,
                 DesiredRecording::Off => IntentSource::Frontend,
             };
+            let Some(attempt) = next_panel_attempt(state, PanelGoal::Shown, revision) else {
+                return;
+            };
             let effect_id = state.next_effect();
             state.panel = PanelState::Showing {
                 effect_id,
                 revision,
             };
-            register_effect(state, effect_id, PendingEffect::ShowPanel { revision });
+            register_effect(
+                state,
+                effect_id,
+                PendingEffect::ShowPanel { revision, attempt },
+            );
             effects.push(CoordinatorEffect::ShowPanel {
                 effect_id,
                 revision,
@@ -1853,6 +1953,9 @@ fn reconcile_panel(state: &mut CoordinatorState, effects: &mut Vec<CoordinatorEf
         }
         (PanelGoal::Hidden, PanelState::Shown { window_epoch }) => {
             let revision = IntentRevision::new(state.ids.intent);
+            let Some(attempt) = next_panel_attempt(state, PanelGoal::Hidden, revision) else {
+                return;
+            };
             let effect_id = state.next_effect();
             state.panel = PanelState::Hiding {
                 effect_id,
@@ -1865,6 +1968,7 @@ fn reconcile_panel(state: &mut CoordinatorState, effects: &mut Vec<CoordinatorEf
                 PendingEffect::HidePanel {
                     revision,
                     previous_epoch: window_epoch,
+                    attempt,
                 },
             );
             effects.push(CoordinatorEffect::HidePanel {
@@ -1882,6 +1986,20 @@ fn reconcile_panel(state: &mut CoordinatorState, effects: &mut Vec<CoordinatorEf
     }
 }
 
+fn next_panel_attempt(
+    state: &CoordinatorState,
+    goal: PanelGoal,
+    revision: IntentRevision,
+) -> Option<u8> {
+    match state.panel_failure {
+        Some(failure) if failure.goal == goal && failure.revision == revision => {
+            let next = failure.attempts.saturating_add(1);
+            (next <= MAX_PANEL_ATTEMPTS).then_some(next)
+        }
+        _ => Some(1),
+    }
+}
+
 fn reconcile_projection(state: &mut CoordinatorState, effects: &mut Vec<CoordinatorEffect>) {
     let projection = state.projection();
     if state.last_projection != Some(projection) {
@@ -1892,7 +2010,14 @@ fn reconcile_projection(state: &mut CoordinatorState, effects: &mut Vec<Coordina
 
 fn reconcile_shutdown(state: &mut CoordinatorState, effects: &mut Vec<CoordinatorEffect>) {
     let ready = state.shutdown_requested
-        && matches!(state.capture, CaptureState::Idle)
+        && matches!(
+            state.capture,
+            CaptureState::Idle
+                | CaptureState::StopUncertain {
+                    active_effect: None,
+                    ..
+                }
+        )
         && state.processing_jobs.is_empty();
     if ready && !state.shutdown_ready_emitted {
         state.shutdown_ready_emitted = true;
@@ -1945,9 +2070,9 @@ fn trace_enqueued_effects(state: &mut CoordinatorState, effects: &[CoordinatorEf
                 Some(window_epoch),
                 Some(reason),
             ),
-            CoordinatorEffect::EmitProjection(_) | CoordinatorEffect::ShutdownReady => {
-                (TracePhase::EffectEnqueued, None, None, None)
-            }
+            CoordinatorEffect::ReleaseTranscriptBarrier { .. }
+            | CoordinatorEffect::EmitProjection(_)
+            | CoordinatorEffect::ShutdownReady => (TracePhase::EffectEnqueued, None, None, None),
         };
         if effect.effect_id().is_none() {
             continue;
@@ -2006,6 +2131,18 @@ mod tests {
                 _ => None,
             })
             .expect("expected StopRecording")
+    }
+
+    fn find_finalize(effects: &[CoordinatorEffect]) -> (EffectId, RunId) {
+        effects
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::FinalizeRecording {
+                    effect_id, run_id, ..
+                } => Some((*effect_id, *run_id)),
+                _ => None,
+            })
+            .expect("expected FinalizeRecording")
     }
 
     fn complete_start(
@@ -2217,7 +2354,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_on_survives_stop_and_starts_before_old_finalize_completes() {
+    fn retained_on_waits_for_old_transcript_barrier_before_starting_new_run() {
         let mut state = CoordinatorState::default();
         let initial = reduce(
             &mut state,
@@ -2247,9 +2384,23 @@ mod tests {
             effect,
             CoordinatorEffect::FinalizeRecording { run_id, .. } if *run_id == run.run_id
         )));
-        let (_, replacement) = find_start(&effects);
-        assert_ne!(replacement.run_id, run.run_id);
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::StartRecording { .. })));
         assert!(state.processing_jobs.contains_key(&run.run_id));
+
+        let (finalize_id, _) = find_finalize(&effects);
+        let finalized = reduce(
+            &mut state,
+            CoordinatorEvent::FinalizeFinished {
+                effect_id: finalize_id,
+                run_id: run.run_id,
+                outcome: FinalizeOutcome::Committed,
+            },
+        );
+        let (_, replacement) = find_start(&finalized);
+        assert_ne!(replacement.run_id, run.run_id);
+        assert!(!state.processing_jobs.contains_key(&run.run_id));
     }
 
     #[test]
@@ -2379,6 +2530,174 @@ mod tests {
         assert!(!exhausted
             .iter()
             .any(|effect| matches!(effect, CoordinatorEffect::StopRecording { .. })));
+        assert!(exhausted.iter().any(|effect| matches!(
+            effect,
+            CoordinatorEffect::ReleaseTranscriptBarrier { run_id }
+                if *run_id == run.run_id
+        )));
+        assert_eq!(
+            state.projection().fault,
+            Some(ProjectionFault::StopUncertain)
+        );
+        assert!(!state.projection().pending_start);
+    }
+
+    #[test]
+    fn terminal_compensating_stop_is_removed_but_blocks_future_capture() {
+        let mut policy = RuntimePolicySnapshot::default();
+        policy.max_stop_attempts = 1;
+        let mut state = CoordinatorState::new(policy);
+        let cleanup = reduce(
+            &mut state,
+            CoordinatorEvent::StartFinished {
+                effect_id: EffectId::new(999),
+                run_id: RunId::new(77),
+                outcome: StartOutcome::Succeeded,
+            },
+        );
+        let (stop_id, run_id) = find_stop(&cleanup);
+        let terminal = reduce(
+            &mut state,
+            CoordinatorEvent::CaptureStopped {
+                effect_id: stop_id,
+                run_id,
+                outcome: CaptureStopOutcome::StillActive(ErrorCode(31)),
+            },
+        );
+
+        assert!(state.processing_jobs.is_empty());
+        assert_eq!(
+            state.projection().fault,
+            Some(ProjectionFault::StopUncertain)
+        );
+        assert!(terminal.iter().any(|effect| matches!(
+            effect,
+            CoordinatorEffect::ReleaseTranscriptBarrier { run_id: released }
+                if *released == run_id
+        )));
+
+        let requested = reduce(
+            &mut state,
+            CoordinatorEvent::Intent(RecordingIntent::start(IntentSource::Frontend, None)),
+        );
+        assert!(!requested
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::StartRecording { .. })));
+    }
+
+    #[test]
+    fn compensating_stop_safety_fault_survives_unrelated_capture_cleanup() {
+        let mut policy = RuntimePolicySnapshot::default();
+        policy.max_stop_attempts = 1;
+        let mut state = CoordinatorState::new(policy);
+        let initial = reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::Frontend, 1),
+        );
+        let (start_id, current) = find_start(&initial);
+        complete_start(&mut state, start_id, current.run_id);
+
+        let stale_cleanup = reduce(
+            &mut state,
+            CoordinatorEvent::StartFinished {
+                effect_id: EffectId::new(999),
+                run_id: RunId::new(77),
+                outcome: StartOutcome::Succeeded,
+            },
+        );
+        let (stale_stop_id, stale_run) = find_stop(&stale_cleanup);
+        reduce(
+            &mut state,
+            CoordinatorEvent::CaptureStopped {
+                effect_id: stale_stop_id,
+                run_id: stale_run,
+                outcome: CaptureStopOutcome::StillActive(ErrorCode(32)),
+            },
+        );
+        assert_eq!(
+            state.projection().fault,
+            Some(ProjectionFault::StopUncertain)
+        );
+
+        let current_stop = reduce(
+            &mut state,
+            intent(IntentKind::Stop, IntentSource::Frontend, 2),
+        );
+        let (current_stop_id, _) = find_stop(&current_stop);
+        reduce(
+            &mut state,
+            CoordinatorEvent::CaptureStopped {
+                effect_id: current_stop_id,
+                run_id: current.run_id,
+                outcome: CaptureStopOutcome::Inactive,
+            },
+        );
+
+        assert_eq!(
+            state.projection().fault,
+            Some(ProjectionFault::StopUncertain)
+        );
+    }
+
+    #[test]
+    fn terminal_finalize_failure_releases_job_and_requires_new_revision() {
+        let mut policy = RuntimePolicySnapshot::default();
+        policy.max_finalize_attempts = 1;
+        let mut state = CoordinatorState::new(policy);
+        let initial = reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::Frontend, 1),
+        );
+        let (start_id, run) = find_start(&initial);
+        complete_start(&mut state, start_id, run.run_id);
+        let stopping = reduce(
+            &mut state,
+            intent(IntentKind::Stop, IntentSource::Frontend, 2),
+        );
+        let (stop_id, _) = find_stop(&stopping);
+        reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::Frontend, 3),
+        );
+        let stopped = reduce(
+            &mut state,
+            CoordinatorEvent::CaptureStopped {
+                effect_id: stop_id,
+                run_id: run.run_id,
+                outcome: CaptureStopOutcome::Inactive,
+            },
+        );
+        let (finalize_id, _) = find_finalize(&stopped);
+        let terminal = reduce(
+            &mut state,
+            CoordinatorEvent::FinalizeFinished {
+                effect_id: finalize_id,
+                run_id: run.run_id,
+                outcome: FinalizeOutcome::Failed(ErrorCode(41)),
+            },
+        );
+
+        assert!(state.processing_jobs.is_empty());
+        assert_eq!(
+            state.projection().fault,
+            Some(ProjectionFault::FinalizeFailed)
+        );
+        assert!(!terminal
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::StartRecording { .. })));
+        assert!(terminal.iter().any(|effect| matches!(
+            effect,
+            CoordinatorEffect::ReleaseTranscriptBarrier { run_id }
+                if *run_id == run.run_id
+        )));
+
+        let retry = reduce(
+            &mut state,
+            CoordinatorEvent::Intent(RecordingIntent::start(IntentSource::Frontend, None)),
+        );
+        assert!(retry
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::StartRecording { .. })));
     }
 
     #[test]
@@ -2444,6 +2763,30 @@ mod tests {
     }
 
     #[test]
+    fn stale_vad_stop_cannot_turn_off_a_newer_run() {
+        let mut state = recording_state();
+        let active_run = state.capture.run().unwrap().run_id;
+        let effects = reduce(
+            &mut state,
+            CoordinatorEvent::Intent(RecordingIntent::stop_expected(
+                IntentSource::Vad,
+                None,
+                Some(RunId::new(active_run.get().saturating_sub(1))),
+            )),
+        );
+
+        assert!(state.desired_recording.is_on());
+        assert_eq!(state.capture.run().map(|run| run.run_id), Some(active_run));
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::StopRecording { .. })));
+        assert_eq!(
+            state.trace().last().unwrap().phase,
+            TracePhase::IntentRejected
+        );
+    }
+
+    #[test]
     fn reversed_panel_completion_reconciles_latest_goal() {
         let mut state = CoordinatorState::default();
         let on = reduce(
@@ -2471,6 +2814,47 @@ mod tests {
         assert!(after_show
             .iter()
             .any(|effect| matches!(effect, CoordinatorEffect::HidePanel { .. })));
+    }
+
+    #[test]
+    fn persistent_panel_failure_retries_once_without_recursive_loop() {
+        let mut state = CoordinatorState::default();
+        let initial = reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::CarbonHotkey, 1),
+        );
+        let first_show = initial
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::ShowPanel { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .unwrap();
+        let retry = reduce(
+            &mut state,
+            CoordinatorEvent::WindowFinished {
+                effect_id: first_show,
+                outcome: WindowOutcome::Failed(ErrorCode(50)),
+            },
+        );
+        let second_show = retry
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::ShowPanel { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .expect("one bounded retry");
+        let exhausted = reduce(
+            &mut state,
+            CoordinatorEvent::WindowFinished {
+                effect_id: second_show,
+                outcome: WindowOutcome::Failed(ErrorCode(51)),
+            },
+        );
+        assert!(!exhausted
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::ShowPanel { .. })));
+        assert!(matches!(state.panel, PanelState::Hidden));
     }
 
     #[test]
@@ -2552,6 +2936,34 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn shutdown_completes_after_terminal_stop_uncertain() {
+        let mut policy = RuntimePolicySnapshot::default();
+        policy.max_stop_attempts = 1;
+        let mut state = CoordinatorState::new(policy);
+        let start_effects = reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::Frontend, 1),
+        );
+        let (start_id, run) = find_start(&start_effects);
+        complete_start(&mut state, start_id, run.run_id);
+
+        let shutdown_effects = reduce(&mut state, CoordinatorEvent::ShutdownRequested);
+        let (stop_id, _) = find_stop(&shutdown_effects);
+        let terminal_effects = reduce(
+            &mut state,
+            CoordinatorEvent::CaptureStopped {
+                effect_id: stop_id,
+                run_id: run.run_id,
+                outcome: CaptureStopOutcome::StillActive(ErrorCode(90)),
+            },
+        );
+
+        assert!(terminal_effects.contains(&CoordinatorEffect::ShutdownReady));
+        assert!(terminal_effects
+            .contains(&CoordinatorEffect::ReleaseTranscriptBarrier { run_id: run.run_id }));
     }
 
     #[test]
@@ -2641,7 +3053,9 @@ mod tests {
                 observed_effects.extend(effects.iter().copied().filter(|effect| {
                     !matches!(
                         effect,
-                        CoordinatorEffect::EmitProjection(_) | CoordinatorEffect::ShutdownReady
+                        CoordinatorEffect::ReleaseTranscriptBarrier { .. }
+                            | CoordinatorEffect::EmitProjection(_)
+                            | CoordinatorEffect::ShutdownReady
                     )
                 }));
                 assert!(state.validate().is_ok(), "seed={seed}, event={event:?}");
@@ -2706,7 +3120,9 @@ mod tests {
                     outcome: StartOutcome::Cancelled,
                 }
             }
-            CoordinatorEffect::EmitProjection(_) | CoordinatorEffect::ShutdownReady => {
+            CoordinatorEffect::ReleaseTranscriptBarrier { .. }
+            | CoordinatorEffect::EmitProjection(_)
+            | CoordinatorEffect::ShutdownReady => {
                 unreachable!("non-completing effects are not retained")
             }
         }
