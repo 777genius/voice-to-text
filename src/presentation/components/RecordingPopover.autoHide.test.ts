@@ -1754,9 +1754,17 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     await waitForListenerCount('recording:status', 1);
     expect(tauriEventMock.handlers.get('recording:start-requested')).toHaveLength(1);
     const button = document.querySelector<HTMLButtonElement>('.record-button')!;
+    const incomingButton = document.querySelector<HTMLButtonElement>(
+      '[data-testid="incoming-translation-toggle"]',
+    )!;
     expect(button.disabled).toBe(true);
+    expect(incomingButton.disabled).toBe(true);
     button.click();
+    incomingButton.click();
     expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'start_recording')).toHaveLength(0);
+    expect(
+      invokeMock.mock.calls.filter(([cmd]) => cmd === 'start_incoming_translation'),
+    ).toHaveLength(0);
 
     const query = deferred<number>();
     const oldInvoke = deferred<void>();
@@ -1787,6 +1795,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     await waitForListenerCount('hotkey:toggle-recording', 1);
     await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
     expect(button.disabled).toBe(false);
+    expect(incomingButton.disabled).toBe(false);
     wrapper.unmount();
   });
 

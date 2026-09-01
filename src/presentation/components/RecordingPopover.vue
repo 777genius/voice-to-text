@@ -1333,7 +1333,7 @@ const minimizeWindow = async (event?: Event) => {
           class="incoming-toggle-button no-drag"
           data-testid="incoming-translation-toggle"
           :class="{ active: store.isIncomingTranslationActive, error: store.incomingTranslationError }"
-          :disabled="store.incomingTranslationStatus === 'Processing'"
+          :disabled="!isRecordingUiReady || store.incomingTranslationStatus === 'Processing'"
           @click="store.toggleIncomingTranslation()"
           :title="store.isIncomingTranslationActive ? t('main.incomingTranslationStop') : t('main.incomingTranslationStart')"
         >
