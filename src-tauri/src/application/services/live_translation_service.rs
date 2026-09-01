@@ -26,9 +26,10 @@ use super::{
     abort_startup_translation, close_startup_capture, close_startup_output,
     initialize_startup_capture, open_startup_output, spawn_realtime_interpretation_supervisor,
     AudioSpectrumAnalyzer, RealtimeInterpretationCallbacks, RealtimeInterpretationConfig,
-    RealtimeInterpretationError, RealtimeInterpretationPorts, RealtimeInterpretationSession,
-    RealtimeInterpretationShutdown, RealtimeInterpretationStartError, RealtimeInterpretationStop,
-    RealtimeStartupPolicy, StartupCaptureError, StartupOutputError,
+    RealtimeInterpretationError, RealtimeInterpretationPolicy, RealtimeInterpretationPorts,
+    RealtimeInterpretationSession, RealtimeInterpretationShutdown,
+    RealtimeInterpretationStartError, RealtimeInterpretationStop, RealtimeStartupPolicy,
+    StartupCaptureError, StartupOutputError,
 };
 
 const TRANSLATION_TARGET_LANGUAGE_DEFAULT: &str = "en";
@@ -195,6 +196,10 @@ fn call_live_callback(label: &str, callback: impl FnOnce()) {
 }
 
 impl LiveTranslationService {
+    pub(crate) fn maximum_stop_cleanup_timeout() -> std::time::Duration {
+        RealtimeInterpretationPolicy::outgoing().maximum_shutdown_timeout()
+    }
+
     pub fn new_with_factories(
         audio_factory: Arc<dyn PlatformAudioFactory>,
         client_factory: Arc<dyn RealtimeTranslationFactory>,

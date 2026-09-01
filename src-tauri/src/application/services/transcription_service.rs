@@ -333,6 +333,15 @@ where
 }
 
 impl TranscriptionService {
+    /// Upper bound for the service-owned portion of a normal recording stop.
+    /// The app shutdown gate adds a small grace period for reducer finalization
+    /// and transcript delivery after this work completes.
+    pub(crate) fn maximum_stop_cleanup_timeout() -> Duration {
+        AUDIO_PROCESSOR_STOP_DRAIN_TIMEOUT
+            .saturating_add(STT_STOP_OPERATION_TIMEOUT)
+            .saturating_add(STT_ABORT_OPERATION_TIMEOUT)
+    }
+
     pub fn new(
         audio_capture: Box<dyn AudioCapture>,
         stt_factory: Arc<dyn SttProviderFactory>,

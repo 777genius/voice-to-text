@@ -226,8 +226,7 @@ impl RealtimeInterpretationPolicy {
             .saturating_add(self.worker_stop_timeout.saturating_mul(6))
     }
 
-    #[cfg(test)]
-    fn maximum_shutdown_timeout(&self) -> Duration {
+    pub(crate) fn maximum_shutdown_timeout(&self) -> Duration {
         self.worker_stop_timeout
             .saturating_add(self.graceful_shutdown_timeout)
             .saturating_add(self.forced_shutdown_timeout)

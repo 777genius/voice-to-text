@@ -58,6 +58,7 @@ fn error_details_from_stt(err: &SttError) -> Option<TranscriptionErrorDetailsPay
 
 const TRANSCRIPT_EVENT_QUEUE_CAPACITY: usize = 128;
 const MAX_TRANSCRIPT_EVENT_TEXT_BYTES: usize = 64 * 1024;
+const RECORDING_SHUTDOWN_FINALIZATION_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 enum TranscriptEvent {
@@ -68,7 +69,6 @@ enum TranscriptEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FinalTranscriptEnqueueError {
-    QueueFull,
     TextTooLarge { bytes: usize },
 }
 
@@ -122,9 +122,10 @@ impl TranscriptEventQueue {
                 .position(|event| matches!(event, TranscriptEvent::Partial(_)))
             {
                 self.items.remove(index);
-            } else {
-                return Err(FinalTranscriptEnqueueError::QueueFull);
             }
+            // Final transcripts are lossless data. If the bounded queue is full
+            // of finals, temporarily exceed its soft capacity instead of
+            // dropping text. The async consumer drains this backlog in order.
         }
 
         self.items.push_back(TranscriptEvent::Final(transcription));
@@ -738,14 +739,19 @@ pub(crate) async fn shutdown_recording_intent(app_handle: AppHandle) {
         app_handle,
         recording_intent::CoordinatorEvent::ShutdownRequested,
     );
-    if tokio::time::timeout(Duration::from_secs(8), shutdown_ready)
-        .await
-        .is_err()
-    {
+    let timeout = recording_intent_shutdown_timeout();
+    if tokio::time::timeout(timeout, shutdown_ready).await.is_err() {
         log::error!(
-            "Recording coordinator shutdown timed out; capture terminal state is uncertain"
+            "Recording coordinator shutdown timed out after {} ms; capture terminal state is uncertain",
+            timeout.as_millis()
         );
     }
+}
+
+fn recording_intent_shutdown_timeout() -> Duration {
+    crate::application::TranscriptionService::maximum_stop_cleanup_timeout()
+        .max(crate::application::LiveTranslationService::maximum_stop_cleanup_timeout())
+        .saturating_add(RECORDING_SHUTDOWN_FINALIZATION_GRACE)
 }
 
 pub(super) fn force_off_recording_for_system_sleep(app_handle: AppHandle) {
@@ -3085,9 +3091,6 @@ async fn start_recording_checked(
     let on_final = Arc::new(move |transcription: crate::domain::Transcription| {
         let error_message = match final_tx.send_final(transcription) {
             Ok(()) => return,
-            Err(FinalTranscriptEnqueueError::QueueFull) => {
-                "Transcription event queue is overloaded; recording was stopped to avoid losing final text".to_string()
-            }
             Err(FinalTranscriptEnqueueError::TextTooLarge { bytes }) => format!(
                 "Transcription segment is too large to process safely ({} bytes, limit {} bytes)",
                 bytes, MAX_TRANSCRIPT_EVENT_TEXT_BYTES
@@ -9824,19 +9827,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transcript_event_queue_rejects_final_when_only_finals_fill_capacity() {
+    async fn transcript_event_queue_preserves_finals_beyond_soft_capacity() {
         let (tx, rx) = transcript_event_channel(1);
 
         assert_eq!(tx.send_final(final_text("f1")), Ok(()));
-        assert_eq!(
-            tx.send_final(final_text("f2")),
-            Err(FinalTranscriptEnqueueError::QueueFull)
-        );
+        assert_eq!(tx.send_final(final_text("f2")), Ok(()));
         drop(tx);
 
         assert_eq!(
             drain_transcript_events(&rx).await,
-            vec![(true, "f1".to_string())]
+            vec![(true, "f1".to_string()), (true, "f2".to_string())]
         );
     }
 
@@ -9874,5 +9874,18 @@ mod tests {
         };
         let (flush, ()) = tokio::join!(barrier.flush(), consumer);
         assert_eq!(flush, Ok(()));
+    }
+
+    #[test]
+    fn recording_shutdown_timeout_covers_service_cleanup_and_finalization() {
+        let service_cleanup =
+            crate::application::TranscriptionService::maximum_stop_cleanup_timeout()
+                .max(crate::application::LiveTranslationService::maximum_stop_cleanup_timeout());
+
+        assert_eq!(
+            recording_intent_shutdown_timeout(),
+            service_cleanup.saturating_add(RECORDING_SHUTDOWN_FINALIZATION_GRACE)
+        );
+        assert!(recording_intent_shutdown_timeout() > Duration::from_secs(35));
     }
 }
