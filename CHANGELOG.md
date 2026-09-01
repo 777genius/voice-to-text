@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.16.8] - 2026-09-02
+
+### Added
+- Added a feedback email at the bottom of Settings.
+
+### Changed
+- Reworked hotkey handling around a deterministic desired-state coordinator so rapid presses, hold-to-record, double Space, window visibility, and recording lifecycle share one ordering owner.
+
+### Fixed
+- Kept accepted hotkey actions responsive while preserving reliable start and stop behavior across slow starts, processing, sleep/wake, shutdown, and delayed native callbacks.
+- Prevented stale window, VAD, release, start, stop, and finalize completions from changing a newer recording session.
+- Preserved final transcript delivery during rapid restarts, queue pressure, terminal failures, and application shutdown.
+- Kept authentication, recording projection, and frontend session ownership consistent across asynchronous lifecycle transitions.
+
 ## [0.16.7] - 2026-08-31
 
 ### Fixed

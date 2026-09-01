@@ -154,6 +154,9 @@ vi.mock('./sections/MicTestSection.vue', () => ({
 vi.mock('./sections/UpdatesSection.vue', () => ({
   default: { name: 'UpdatesSection', template: '<div />' },
 }));
+vi.mock('./sections/FeedbackSection.vue', () => ({
+  default: { name: 'FeedbackSection', template: '<div />' },
+}));
 
 async function flushMicrotasks() {
   await Promise.resolve();
