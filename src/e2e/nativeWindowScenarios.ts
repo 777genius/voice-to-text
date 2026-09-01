@@ -368,7 +368,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
 
     // Hold press while a real UI stop finalizes creates pending start, released hold cancels it.
     await progress('processing-pending-hold-starting');
-    await configure({ stopDelayMs: 1000 });
+    await configure({ stopDelayMs: 5000 });
     current = await start();
     const uiStop = store.stopRecording('native-e2e-processing');
     await until(async () => ({ backend: await state(), processing: !!document.querySelector('.mini-status-dot.processing, .record-button.processing') }),
@@ -383,8 +383,12 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     await hotkey('release');
     await uiStop;
     const cancelledPending = await state();
-    await delay(1200);
-    const afterPending = await state();
+    const afterPending = await until(
+      state,
+      (sample) => sample.status === 'Idle' && sample.fixture.activeCaptures === 0,
+      'Five-second finalize did not preserve and then cancel pending hold intent',
+      8_000,
+    );
     check(afterPending.status === 'Idle' && afterPending.fixture.activeCaptures === 0 &&
       afterPending.fixture.providerStarts === cancelledPending.fixture.providerStarts,
       'Released pending hold started after finalize');

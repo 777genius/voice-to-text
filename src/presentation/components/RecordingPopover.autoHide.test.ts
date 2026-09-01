@@ -1261,6 +1261,29 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     wrapper.unmount();
   });
 
+  it('cancels an old run hide while the backend owns a pending replacement start', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:intent-projection', 1);
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Processing' });
+    expect(document.querySelector('.mini-closing')).not.toBeNull();
+
+    await emitTauriEvent('recording:intent-projection', {
+      runId: 90,
+      intentRevision: 91,
+      status: 'Processing',
+      desiredOn: true,
+      pendingStart: true,
+      processingJobs: 0,
+      shutdownRequested: false,
+    });
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(document.querySelector('.mini-closing')).toBeNull();
+    expect(hideWindowMock).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
   it('retains the current native epoch when Recording arrives before the start event query resolves', async () => {
     const wrapper = mountRecordingPopover();
     await waitForListenerCount('hotkey:toggle-recording', 1);
@@ -1731,9 +1754,17 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     await waitForListenerCount('recording:status', 1);
     expect(tauriEventMock.handlers.get('recording:start-requested')).toHaveLength(1);
     const button = document.querySelector<HTMLButtonElement>('.record-button')!;
+    const incomingButton = document.querySelector<HTMLButtonElement>(
+      '[data-testid="incoming-translation-toggle"]',
+    )!;
     expect(button.disabled).toBe(true);
+    expect(incomingButton.disabled).toBe(true);
     button.click();
+    incomingButton.click();
     expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'start_recording')).toHaveLength(0);
+    expect(
+      invokeMock.mock.calls.filter(([cmd]) => cmd === 'start_incoming_translation'),
+    ).toHaveLength(0);
 
     const query = deferred<number>();
     const oldInvoke = deferred<void>();
@@ -1764,6 +1795,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     await waitForListenerCount('hotkey:toggle-recording', 1);
     await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
     expect(button.disabled).toBe(false);
+    expect(incomingButton.disabled).toBe(false);
     wrapper.unmount();
   });
 

@@ -149,6 +149,103 @@ describe('transcription connect-retry reliability', () => {
     });
   });
 
+  it('не превращает подтвержденный pending start в timeout/retry даже через 60 секунд', async () => {
+    vi.useFakeTimers();
+    const handlers = new Map<string, any>();
+    try {
+      listenMock.mockImplementation(async (eventName: string, handler: any) => {
+        handlers.set(eventName, handler);
+        return () => {};
+      });
+      invokeMock.mockResolvedValue(null);
+
+      const store = useTranscriptionStore();
+      await store.initialize();
+      const start = store.startRecording();
+      await flushMicrotasks();
+
+      await handlers.get('recording:intent-projection')({
+        payload: {
+          runId: 80,
+          intentRevision: 2,
+          status: 'Processing',
+          desiredOn: true,
+          pendingStart: true,
+          processingJobs: 1,
+          shutdownRequested: false,
+        },
+      });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(invokeMock.mock.calls.filter((call) => call[0] === 'start_recording')).toHaveLength(1);
+      expect(invokeMock.mock.calls.filter((call) => call[0] === 'stop_recording')).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+
+      await handlers.get('recording:intent-projection')({
+        payload: {
+          runId: 81,
+          intentRevision: 2,
+          status: 'Starting',
+          desiredOn: true,
+          pendingStart: false,
+          processingJobs: 1,
+          shutdownRequested: false,
+        },
+      });
+      await handlers.get('recording:status')({
+        payload: { session_id: 81, status: 'Recording', stopped_via_hotkey: false },
+      });
+      await start;
+
+      expect(store.status).toBe('Recording');
+      expect(store.sessionId).toBe(81);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['stopUncertain', 'terminal mic-safety'],
+    ['finalizeFailed', 'terminal finalize'],
+  ] as const)('закрывает активную сессию при %s fault (%s)', async (fault, _label) => {
+    const handlers = new Map<string, any>();
+    listenMock.mockImplementation(async (eventName: string, handler: any) => {
+      handlers.set(eventName, handler);
+      return () => {};
+    });
+    invokeMock.mockResolvedValue(null);
+
+    const store = useTranscriptionStore();
+    await store.initialize();
+    await handlers.get('recording:status')({
+      payload: { session_id: 91, status: 'Recording', stopped_via_hotkey: false },
+    });
+    expect(store.sessionId).toBe(91);
+
+    await handlers.get('recording:intent-projection')({
+      payload: {
+        runId: 91,
+        intentRevision: undefined,
+        status: 'Error',
+        desiredOn: false,
+        pendingStart: false,
+        processingJobs: 0,
+        shutdownRequested: false,
+        fault,
+      },
+    });
+
+    expect(store.status).toBe('Error');
+    expect(store.sessionId).toBeNull();
+    expect(store.recordingStartPending).toBe(false);
+    expect(store.error).toBeTruthy();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 91, status: 'Recording', stopped_via_hotkey: false },
+    });
+    expect(store.status).toBe('Error');
+    expect(store.sessionId).toBeNull();
+  });
+
   afterEach(() => {
     for (const spy of consoleSpies) {
       spy.mockRestore();

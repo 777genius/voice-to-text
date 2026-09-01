@@ -45,6 +45,7 @@ import {
   PartialTranscriptionPayload,
   FinalTranscriptionPayload,
   RecordingStatusPayload,
+  RecordingIntentProjectionPayload,
   TranscriptionErrorPayload,
   ConnectionQualityPayload,
   TranslationDeltaPayload,
@@ -57,6 +58,7 @@ import {
   EVENT_TRANSCRIPTION_PARTIAL,
   EVENT_TRANSCRIPTION_FINAL,
   EVENT_RECORDING_STATUS,
+  EVENT_RECORDING_INTENT_PROJECTION,
   EVENT_TRANSCRIPTION_ERROR,
   EVENT_CONNECTION_QUALITY,
   EVENT_TRANSLATION_DELTA,
@@ -87,6 +89,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   // Флаг "ждём старт новой сессии": пока он true — игнорируем любые статусы/события,
   // которые не относятся к запуску новой записи (защита от поздних событий старого сокета).
   const awaitingSessionStart = ref<boolean>(false);
+  // Backend-owned desired state. `pendingStart` deliberately has no deadline:
+  // it stays true while a previous run releases capture/finalization resources.
+  const recordingDesiredOn = ref<boolean>(false);
+  const recordingStartPending = ref<boolean>(false);
+  const recordingIntentFault = ref<NonNullable<RecordingIntentProjectionPayload['fault']> | null>(
+    null,
+  );
   // UI effects consume only statuses accepted by this store's session guards.
   const lastAcceptedRecordingStatus = shallowRef<RecordingStatusPayload | null>(null);
   let recordingStateRevision = 0;
@@ -380,6 +389,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   let unlistenPartial: UnlistenFn | null = null;
   let unlistenFinal: UnlistenFn | null = null;
   let unlistenStatus: UnlistenFn | null = null;
+  let unlistenIntentProjection: UnlistenFn | null = null;
   let unlistenError: UnlistenFn | null = null;
   let unlistenConnectionQuality: UnlistenFn | null = null;
   let unlistenTranslationDelta: UnlistenFn | null = null;
@@ -466,7 +476,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     awaitingSessionStart.value = false;
   }
 
-  function closeCurrentRecordingSessionForNewStart(reason: string): void {
+  function closeCurrentRecordingSession(reason: string): void {
     if (sessionId.value !== null) {
       markRecordingSessionClosed(sessionId.value, reason);
     }
@@ -1609,6 +1619,59 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       if (!finalUnlisten) return;
       unlistenFinal = finalUnlisten;
 
+      const intentProjectionUnlisten =
+        await registerStoreListener<RecordingIntentProjectionPayload>(
+          generation,
+          EVENT_RECORDING_INTENT_PROJECTION,
+          async (event) => {
+            recordingDesiredOn.value = event.payload.desiredOn;
+            recordingIntentFault.value = event.payload.fault ?? null;
+            recordingStartPending.value =
+              event.payload.desiredOn && event.payload.pendingStart;
+            clientLog('recording_intent_projection_received', {
+              ...event.payload,
+              awaitingSessionStart: awaitingSessionStart.value,
+            }, 'debug');
+
+            if (event.payload.fault === 'stopUncertain') {
+              recordingStartPending.value = false;
+              awaitingSessionStart.value = false;
+              if (connectOperation) cancelConnectOperation();
+              status.value = RecordingStatus.Error;
+              closeCurrentRecordingSession('intent_fault:stop_uncertain');
+              const message = i18n.global.t('errors.microphoneStopUncertain');
+              setRecordingError(null, message, null, message);
+              return;
+            }
+
+            if (event.payload.fault === 'finalizeFailed') {
+              recordingStartPending.value = false;
+              awaitingSessionStart.value = false;
+              if (connectOperation) cancelConnectOperation();
+              status.value = RecordingStatus.Error;
+              closeCurrentRecordingSession('intent_fault:finalize_failed');
+              const message = i18n.global.t('errors.transcriptFinalizeFailed');
+              setRecordingError('processing', message, null, message);
+              return;
+            }
+
+            if (recordingStartPending.value && sessionId.value === null) {
+              status.value = RecordingStatus.Processing;
+            }
+
+            if (!event.payload.desiredOn) {
+              recordingStartPending.value = false;
+              awaitingSessionStart.value = false;
+              if (connectOperation) cancelConnectOperation();
+              if (sessionId.value === null) {
+                status.value = event.payload.status;
+              }
+            }
+          },
+        );
+      if (!intentProjectionUnlisten) return;
+      unlistenIntentProjection = intentProjectionUnlisten;
+
       // Listen to recording status events
       const statusUnlisten = await registerStoreListener<RecordingStatusPayload>(
         generation,
@@ -2620,6 +2683,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       let finished = false;
       let stop: (() => void) | null = null;
       let timer: ReturnType<typeof setTimeout> | null = null;
+      let timeoutSuspendedForCoordinator = false;
 
       const finishOk = () => {
         if (finished) return;
@@ -2653,9 +2717,26 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         return;
       }
 
+      const onTimeout = () => {
+        if (finished) return;
+        if (recordingDesiredOn.value && recordingStartPending.value) {
+          // The coordinator owns this wait. Suspend the connect deadline until
+          // the previous run's transcript barrier reaches a terminal result.
+          timer = null;
+          timeoutSuspendedForCoordinator = true;
+          return;
+        }
+        finishErr('timeout');
+      };
+
+      const armTimeout = () => {
+        if (finished || timer) return;
+        timer = setTimeout(onTimeout, timeoutMs);
+      };
+
       stop = watch(
-        [status, lastConnectFailure],
-        ([nextStatus, failure]) => {
+        [status, lastConnectFailure, recordingDesiredOn, recordingStartPending, recordingIntentFault],
+        ([nextStatus, failure, desiredOn, pendingStart, intentFault]) => {
           if (finished) return;
           if (nextStatus === RecordingStatus.Recording) {
             finishOk();
@@ -2663,14 +2744,20 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
           if (failure) {
             finishErr(failure);
+            return;
+          }
+          if (intentFault === 'stopUncertain' || intentFault === 'finalizeFailed') {
+            finishErr('processing');
+            return;
+          }
+          if (timeoutSuspendedForCoordinator && desiredOn && !pendingStart) {
+            timeoutSuspendedForCoordinator = false;
+            armTimeout();
           }
         }
       );
 
-      timer = setTimeout(() => {
-        if (finished) return;
-        finishErr('timeout');
-      }, timeoutMs);
+      armTimeout();
     });
   }
 
@@ -2755,7 +2842,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     // Начинаем новую сессию "с чистого листа": пока не получим Starting/Recording с новым session_id,
     // игнорируем любые поздние события от прошлых запусков.
     awaitingSessionStart.value = true;
-    closeCurrentRecordingSessionForNewStart('start_recording_once');
+    closeCurrentRecordingSession('start_recording_once');
 
     resetTextStateBeforeStart();
     status.value = RecordingStatus.Starting;
@@ -3039,7 +3126,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     flushPendingHotkeyStopTailBeforeReset('rust_hotkey_start');
 
     suppressPreviousTranscriptionDisplay('rust_hotkey_start');
-    closeCurrentRecordingSessionForNewStart('rust_hotkey_start');
+    closeCurrentRecordingSession('rust_hotkey_start');
     activeRecordingMode.value = appConfig.recordingMode ?? 'dictation';
     awaitingSessionStart.value = true;
     status.value = warmStartExpected ? RecordingStatus.Recording : RecordingStatus.Starting;
@@ -3088,6 +3175,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       const result = await invoke<string>('stop_recording', { expectedSessionId: expectedSessionId ?? undefined });
       if (!isCurrentStop()) return;
       console.log('Recording stopped:', result);
+      if (result === 'Recording stop requested') {
+        // Desired-state mode completes through run-scoped projection/status
+        // events. Polling the physical service here would reintroduce a second
+        // lifecycle owner and can briefly resurrect Recording after Stop.
+        return;
+      }
       const backendStatus = await reconcileBackendStatus('stop_recording_success');
       if (!isCurrentStop()) return;
       clientLog('recording_stop_completed', {
@@ -3258,6 +3351,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       unlistenStatus();
       unlistenStatus = null;
     }
+    if (unlistenIntentProjection) {
+      unlistenIntentProjection();
+      unlistenIntentProjection = null;
+    }
     if (unlistenError) {
       unlistenError();
       unlistenError = null;
@@ -3296,6 +3393,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
 
     clearHotkeyStopFinalizeTimer();
+    recordingDesiredOn.value = false;
+    recordingStartPending.value = false;
+    recordingIntentFault.value = null;
 
     // Очищаем таймеры анимации
     if (partialAnimationTimer) {
@@ -3314,6 +3414,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     sessionId,
     closedSessionIdFloor,
     lastAcceptedRecordingStatus,
+    recordingDesiredOn,
+    recordingStartPending,
     getRecordingStartRevision: () => recordingStartRevision,
     partialText,
     accumulatedText,
