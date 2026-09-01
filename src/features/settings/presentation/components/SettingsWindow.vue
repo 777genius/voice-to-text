@@ -30,6 +30,7 @@ import AutoActionsSection from './sections/AutoActionsSection.vue';
 import AudioDeviceSection from './sections/AudioDeviceSection.vue';
 import MicTestSection from './sections/MicTestSection.vue';
 import UpdatesSection from './sections/UpdatesSection.vue';
+import FeedbackSection from './sections/FeedbackSection.vue';
 
 const { t, locale } = useI18n();
 const { loadConfig, saveConfig, isSaving, isLoading, errorMessage, clearError } =
@@ -341,6 +342,8 @@ watch(
         >
           {{ errorMessage }}
         </v-alert>
+
+        <FeedbackSection />
       </template>
     </div>
 

@@ -30,6 +30,7 @@ import AutoActionsSection from './sections/AutoActionsSection.vue';
 import AudioDeviceSection from './sections/AudioDeviceSection.vue';
 import MicTestSection from './sections/MicTestSection.vue';
 import UpdatesSection from './sections/UpdatesSection.vue';
+import FeedbackSection from './sections/FeedbackSection.vue';
 
 const emit = defineEmits<{
   close: [];
@@ -301,6 +302,9 @@ watch(
           >
             {{ errorMessage }}
           </v-alert>
+
+          <!-- Обратная связь -->
+          <FeedbackSection />
         </template>
       </v-card-text>
 

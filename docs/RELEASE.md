@@ -16,46 +16,46 @@
 
 ---
 
-## Текущий релиз: v0.16.7
+## Текущий релиз: v0.16.8
 
-Patch-релиз с устойчивым мини-окном при быстрых повторных hotkey, защитой новой записи от старых hide/auto-paste/retry операций и сохранением текста в UI и clipboard.
+Patch-релиз с детерминированным lifecycle hotkey, быстрым откликом окна, надёжным start/stop и feedback-контактом в настройках.
 
 ### Что говорить в статье
 
 - Скачать приложение можно с [voicetext.site](https://voicetext.site).
-- Быстрые повторные нажатия hotkey больше не смешивают lifecycle разных открытий мини-окна.
-- Старые hide-запросы, восстановление окна после auto-paste и connection retry не нарушают новую запись.
-- Первая анимация транскрипта больше не уменьшает уже видимый текст.
-- Приложения с отложенным чтением clipboard сохраняют доступ к диктовке даже при ошибке команды вставки.
-- Добавлены изолированные native E2E и регрессионные проверки этих сценариев.
+- Hotkey быстро подтверждает намерение пользователя и надёжно переключает запись даже при медленном start или processing.
+- Один desired-state coordinator упорядочивает обычный hotkey, hold-to-record, double Space, окно и recording lifecycle.
+- Старые native callbacks, VAD, release, stop и finalize больше не меняют новую сессию.
+- Финальный текст сохраняется при быстрых рестартах, перегрузке очереди и завершении приложения.
+- Внизу настроек добавлена почта для обратной связи.
 
 ### Ссылки на код для статьи
 
-- Recording-window lifecycle: `src-tauri/src/presentation/recording_window_lifecycle.rs`
-- Auto-paste clipboard recovery: `src-tauri/src/infrastructure/auto_paste.rs`
-- Transcript animation: `src/presentation/components/RecordingPopover.vue`
-- Native-window scenarios на macOS: `src/e2e/nativeWindowScenarios.ts`
-- Native-window scenarios на Linux/Windows: `e2e-tests/specs/recordingWindowLifecycle.e2e.mjs`
+- Desired-state reducer: `src-tauri/src/presentation/recording_intent_coordinator.rs`
+- Hotkey gesture normalizer: `src-tauri/src/presentation/recording_hotkey_gestures.rs`
+- Native lifecycle integration: `src-tauri/src/presentation/commands.rs`
+- Frontend session projection: `src/stores/transcription.ts`
+- Feedback contact: `src/features/settings/presentation/components/sections/FeedbackSection.vue`
 
 ### Release notes для GitHub
 
-Источник release notes - секция `0.16.7` в `CHANGELOG.md`; получить её можно командой ниже.
+Источник release notes - секция `0.16.8` в `CHANGELOG.md`; получить её можно командой ниже.
 
 Изолированные native-window E2E используют синтетические PCM/STT. Эти сценарии и idle-проверки не заменяют hardware/Zoom audio gate и не подтверждают ручные проверки устройств.
 
 ### Команды релиза
 
 ```bash
-pnpm release:notes v0.16.7
+pnpm release:notes v0.16.8
 git add CHANGELOG.md docs package.json src-tauri src e2e-tests
-git commit -m "release: v0.16.7"
-git tag v0.16.7
+git commit -m "release: v0.16.8"
+git tag v0.16.8
 git push origin HEAD
-git push origin v0.16.7
+git push origin v0.16.8
 
 # Только после реальных Zoom/output-disconnect/sleep-wake проверок
 gh workflow run "macOS Audio Release Gate" \
-  -f ref=v0.16.7 \
+  -f ref=v0.16.8 \
   -f soak_seconds=1800 \
   -f zoom_half_volume_bidirectional_verified=true \
   -f output_disconnect_recovery_verified=true \
@@ -63,7 +63,7 @@ gh workflow run "macOS Audio Release Gate" \
 
 # После успешного audio gate
 gh workflow run Release \
-  -f tag=v0.16.7 \
+  -f tag=v0.16.8 \
   -f macos_audio_gate_run_id=<SUCCESSFUL_GATE_RUN_ID>
 ```
 
@@ -253,7 +253,7 @@ gh run watch <RELEASE_RUN_ID>
 # Явный выбор выпускающего owner/operator: исключение из audio gate
 # Это исключение, а не подтверждение hardware/Zoom проверок
 gh workflow run Release \
-  -f tag=v0.16.7 \
+  -f tag=v0.16.8 \
   -f waive_macos_audio_gate=true
 ```
 

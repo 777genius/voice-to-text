@@ -37,6 +37,9 @@ const messages = {
     },
     settings: {
       title: 'Settings',
+      feedback: {
+        label: 'Feedback',
+      },
       provider: {
         label: 'Speech-to-Text Provider',
         optionWhisper: 'Whisper Local (offline, requires cmake)',
@@ -456,6 +459,9 @@ const messages = {
     },
     settings: {
       title: 'Настройки',
+      feedback: {
+        label: 'Обратная связь',
+      },
       provider: {
         label: 'Провайдер распознавания речи',
         optionWhisper: 'Whisper Local (оффлайн, требует cmake)',
@@ -875,6 +881,9 @@ const messages = {
     },
     settings: {
       title: 'Ajustes',
+      feedback: {
+        label: 'Comentarios',
+      },
       provider: {
         label: 'Proveedor de voz a texto',
         optionWhisper: 'Whisper Local (offline, requiere cmake)',
@@ -1294,6 +1303,9 @@ const messages = {
     },
     settings: {
       title: 'Paramètres',
+      feedback: {
+        label: 'Commentaires',
+      },
       provider: {
         label: 'Fournisseur de transcription',
         optionWhisper: 'Whisper Local (hors ligne, nécessite cmake)',
@@ -1713,6 +1725,9 @@ const messages = {
     },
     settings: {
       title: 'Einstellungen',
+      feedback: {
+        label: 'Feedback',
+      },
       provider: {
         label: 'Speech-to-Text-Anbieter',
         optionWhisper: 'Whisper Local (offline, benötigt cmake)',
@@ -2132,6 +2147,9 @@ const messages = {
     },
     settings: {
       title: 'Налаштування',
+      feedback: {
+        label: 'Зворотний звʼязок',
+      },
       provider: {
         label: 'Провайдер розпізнавання мовлення',
         optionWhisper: 'Whisper Local (офлайн, потребує cmake)',
