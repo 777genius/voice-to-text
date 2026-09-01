@@ -237,6 +237,9 @@ pub struct AppState {
     /// Используется для определения какое окно показывать при нажатии hotkey
     pub is_authenticated: Arc<RwLock<bool>>,
 
+    /// Callback-safe mirror for synchronous global-hotkey handlers.
+    pub is_authenticated_runtime: Arc<AtomicBool>,
+
     /// Auth store (device_id + session) — Rust source of truth.
     ///
     /// Важно: нужен даже когда WebView "спит" (hotkey сценарий).
@@ -458,6 +461,7 @@ impl AppState {
                     vad_handler_task: Arc::new(RwLock::new(None)),
                     last_focused_app_target: Arc::new(RwLock::new(None)),
                     is_authenticated: Arc::new(RwLock::new(false)),
+                    is_authenticated_runtime: Arc::new(AtomicBool::new(false)),
                     auth_store: Arc::new(RwLock::new(AuthStoreData {
                         device_id: format!("desktop-{}", uuid::Uuid::new_v4()),
                         session: None,
@@ -558,6 +562,7 @@ impl AppState {
                     vad_handler_task: Arc::new(RwLock::new(None)),
                     last_focused_app_target: Arc::new(RwLock::new(None)),
                     is_authenticated: Arc::new(RwLock::new(false)),
+                    is_authenticated_runtime: Arc::new(AtomicBool::new(false)),
                     auth_store: Arc::new(RwLock::new(AuthStoreData {
                         device_id: format!("desktop-{}", uuid::Uuid::new_v4()),
                         session: None,
@@ -694,6 +699,7 @@ impl AppState {
             vad_handler_task: Arc::new(RwLock::new(None)),
             last_focused_app_target: Arc::new(RwLock::new(None)),
             is_authenticated: Arc::new(RwLock::new(false)),
+            is_authenticated_runtime: Arc::new(AtomicBool::new(false)),
             auth_store: Arc::new(RwLock::new(AuthStoreData {
                 device_id: format!("desktop-{}", uuid::Uuid::new_v4()),
                 session: None,
@@ -767,6 +773,13 @@ impl AppState {
         };
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         Self::from_recording_ports(service, config, tx, rx, Arc::new(AtomicU64::new(0)))
+    }
+
+    pub(crate) async fn set_authenticated(&self, authenticated: bool) {
+        let mut guarded = self.is_authenticated.write().await;
+        *guarded = authenticated;
+        self.is_authenticated_runtime
+            .store(authenticated, Ordering::Release);
     }
 
     pub async fn shutdown_translation_runtimes(&self) {
@@ -928,6 +941,7 @@ impl AppState {
 
         let auth_store_arc = self.auth_store.clone();
         let is_authenticated_arc = self.is_authenticated.clone();
+        let is_authenticated_runtime = self.is_authenticated_runtime.clone();
         let auth_state_revision = self.auth_state_revision.clone();
         let auth_session_revision = self.auth_session_revision.clone();
         let app_handle_for_task = app_handle.clone();
@@ -1113,7 +1127,10 @@ impl AppState {
                     let _ = AuthStore::save(&store).await;
                     drop(store);
 
-                    *is_authenticated_arc.write().await = false;
+                    let mut authenticated = is_authenticated_arc.write().await;
+                    *authenticated = false;
+                    is_authenticated_runtime.store(false, Ordering::Release);
+                    drop(authenticated);
 
                     let rev_state = AppState::bump_revision(&auth_state_revision).await;
                     AppState::emit_invalidation(
@@ -1215,7 +1232,10 @@ impl AppState {
                     let _ = AuthStore::save(&store).await;
                 }
 
-                *is_authenticated_arc.write().await = true;
+                let mut authenticated = is_authenticated_arc.write().await;
+                *authenticated = true;
+                is_authenticated_runtime.store(true, Ordering::Release);
+                drop(authenticated);
 
                 // Update STT token best-effort
                 if let Some(state) = app_handle_for_task.try_state::<AppState>() {

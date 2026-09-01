@@ -203,7 +203,10 @@ describe('transcription connect-retry reliability', () => {
     }
   });
 
-  it('показывает terminal mic-safety ошибку из desired-state projection', async () => {
+  it.each([
+    ['stopUncertain', 'terminal mic-safety'],
+    ['finalizeFailed', 'terminal finalize'],
+  ] as const)('закрывает активную сессию при %s fault (%s)', async (fault, _label) => {
     const handlers = new Map<string, any>();
     listenMock.mockImplementation(async (eventName: string, handler: any) => {
       handlers.set(eventName, handler);
@@ -213,6 +216,11 @@ describe('transcription connect-retry reliability', () => {
 
     const store = useTranscriptionStore();
     await store.initialize();
+    await handlers.get('recording:status')({
+      payload: { session_id: 91, status: 'Recording', stopped_via_hotkey: false },
+    });
+    expect(store.sessionId).toBe(91);
+
     await handlers.get('recording:intent-projection')({
       payload: {
         runId: 91,
@@ -222,13 +230,20 @@ describe('transcription connect-retry reliability', () => {
         pendingStart: false,
         processingJobs: 0,
         shutdownRequested: false,
-        fault: 'stopUncertain',
+        fault,
       },
     });
 
     expect(store.status).toBe('Error');
+    expect(store.sessionId).toBeNull();
     expect(store.recordingStartPending).toBe(false);
     expect(store.error).toBeTruthy();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 91, status: 'Recording', stopped_via_hotkey: false },
+    });
+    expect(store.status).toBe('Error');
+    expect(store.sessionId).toBeNull();
   });
 
   afterEach(() => {

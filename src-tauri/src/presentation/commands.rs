@@ -7370,12 +7370,7 @@ fn desired_recording_gesture_is_authorized(
             .is_on(),
         GestureIntent::HoldEnded { .. } | GestureIntent::ForceOff { .. } => false,
     };
-    !requests_start
-        || state
-            .is_authenticated
-            .try_read()
-            .map(|authenticated| *authenticated)
-            .unwrap_or(false)
+    !requests_start || state.is_authenticated_runtime.load(Ordering::Acquire)
 }
 
 fn redirect_unauthenticated_recording_intent(app_handle: AppHandle) {
@@ -9575,7 +9570,7 @@ pub async fn set_auth_session(
 
     // 2) Обновляем derived auth flag
     let next_is_auth = next.is_authenticated();
-    *state.is_authenticated.write().await = next_is_auth;
+    state.set_authenticated(next_is_auth).await;
 
     // 3) Обновляем токен для STT (чтобы hotkey start_recording всегда имел актуальный access)
     let stt_token = next.session.as_ref().map(|s| s.access_token.clone());
@@ -9642,7 +9637,7 @@ pub async fn set_authenticated(
         return Ok(());
     }
 
-    *state.is_authenticated.write().await = authenticated;
+    state.set_authenticated(authenticated).await;
 
     // Обновляем только токен в текущем in-memory STT конфиге, чтобы не перетирать keyterms
     // и другие поля конкурентным чтением старой disk-версии.

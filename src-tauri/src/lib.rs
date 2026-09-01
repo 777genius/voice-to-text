@@ -271,7 +271,7 @@ pub fn run() {
             if is_e2e {
                 let state = app.state::<AppState>();
                 tauri::async_runtime::block_on(async {
-                    *state.is_authenticated.write().await = true;
+                    state.set_authenticated(true).await;
                     let mut config = state.config.write().await;
                     apply_webdriver_e2e_app_config(&mut config, true);
                 });
@@ -548,7 +548,7 @@ pub fn run() {
                     match crate::infrastructure::AuthStore::load_or_create().await {
                         Ok(store) => {
                             *state.auth_store.write().await = store.clone();
-                            *state.is_authenticated.write().await = store.is_authenticated();
+                            state.set_authenticated(store.is_authenticated()).await;
                             let _guard = state.stt_config_guard.lock().await;
 
                             // Держим STT token синхронизированным с access token из сессии.

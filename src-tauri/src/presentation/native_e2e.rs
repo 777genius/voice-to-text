@@ -115,7 +115,7 @@ pub fn validate_launch(identifier: &str) -> Result<(), String> {
 pub fn setup(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     tauri::async_runtime::block_on(async {
-        *state.is_authenticated.write().await = true;
+        state.set_authenticated(true).await;
         let config = state.config.read().await.stt.clone();
         state
             .transcription_service

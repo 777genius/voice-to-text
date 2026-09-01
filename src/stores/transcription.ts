@@ -476,7 +476,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     awaitingSessionStart.value = false;
   }
 
-  function closeCurrentRecordingSessionForNewStart(reason: string): void {
+  function closeCurrentRecordingSession(reason: string): void {
     if (sessionId.value !== null) {
       markRecordingSessionClosed(sessionId.value, reason);
     }
@@ -1638,6 +1638,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               awaitingSessionStart.value = false;
               if (connectOperation) cancelConnectOperation();
               status.value = RecordingStatus.Error;
+              closeCurrentRecordingSession('intent_fault:stop_uncertain');
               const message = i18n.global.t('errors.microphoneStopUncertain');
               setRecordingError(null, message, null, message);
               return;
@@ -1648,6 +1649,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               awaitingSessionStart.value = false;
               if (connectOperation) cancelConnectOperation();
               status.value = RecordingStatus.Error;
+              closeCurrentRecordingSession('intent_fault:finalize_failed');
               const message = i18n.global.t('errors.transcriptFinalizeFailed');
               setRecordingError('processing', message, null, message);
               return;
@@ -2840,7 +2842,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     // Начинаем новую сессию "с чистого листа": пока не получим Starting/Recording с новым session_id,
     // игнорируем любые поздние события от прошлых запусков.
     awaitingSessionStart.value = true;
-    closeCurrentRecordingSessionForNewStart('start_recording_once');
+    closeCurrentRecordingSession('start_recording_once');
 
     resetTextStateBeforeStart();
     status.value = RecordingStatus.Starting;
@@ -3124,7 +3126,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     flushPendingHotkeyStopTailBeforeReset('rust_hotkey_start');
 
     suppressPreviousTranscriptionDisplay('rust_hotkey_start');
-    closeCurrentRecordingSessionForNewStart('rust_hotkey_start');
+    closeCurrentRecordingSession('rust_hotkey_start');
     activeRecordingMode.value = appConfig.recordingMode ?? 'dictation';
     awaitingSessionStart.value = true;
     status.value = warmStartExpected ? RecordingStatus.Recording : RecordingStatus.Starting;
