@@ -293,7 +293,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   // Отслеживание utterances по start времени
   const currentUtteranceStart = ref<number>(-1); // start время текущей utterance (-1 = нет активной)
-  const lastPastedFinalText = ref<string>('');
 
   function normalizeForDedup(v: string): string {
     return String(v ?? '')
@@ -362,12 +361,22 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   // Таймеры для анимации
   let partialAnimationTimer: ReturnType<typeof setInterval> | null = null;
   let accumulatedAnimationTimer: ReturnType<typeof setInterval> | null = null;
+  interface AutoPasteSessionLedger {
+    readonly sessionId: number | null;
+    baseline: string;
+  }
+  interface PendingStopFinalization {
+    readonly timer: ReturnType<typeof setTimeout>;
+    readonly sessionId: number;
+    readonly pasteLedger: AutoPasteSessionLedger;
+  }
   let autoPasteQueue: Promise<void> = Promise.resolve();
-  let autoPasteGeneration = 0;
-  let hotkeyStopFinalizeTimer: ReturnType<typeof setTimeout> | null = null;
+  const autoPasteLedgers = new Map<number, AutoPasteSessionLedger>();
+  let pendingStopFinalization: PendingStopFinalization | null = null;
 
   const HOTKEY_STOP_LATE_FINAL_GRACE_MS = 1_500;
   const IDLE_STOP_LATE_FINAL_GRACE_MS = 500;
+  const AUTO_PASTE_SESSION_RETENTION = 32;
 
   function clientLog(
     event: string,
@@ -1034,9 +1043,24 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       .trim();
   }
 
-  function getAutoPasteDelta(currentText: string): string {
+  function captureAutoPasteLedger(sessionId: number | null): AutoPasteSessionLedger {
+    const key = sessionId ?? 0;
+    const existing = autoPasteLedgers.get(key);
+    if (existing) return existing;
+
+    const ledger: AutoPasteSessionLedger = { sessionId, baseline: '' };
+    autoPasteLedgers.set(key, ledger);
+    while (autoPasteLedgers.size > AUTO_PASTE_SESSION_RETENTION) {
+      const oldestKey = autoPasteLedgers.keys().next().value;
+      if (typeof oldestKey !== 'number') break;
+      autoPasteLedgers.delete(oldestKey);
+    }
+    return ledger;
+  }
+
+  function getAutoPasteDelta(currentText: string, alreadyPastedText: string): string {
     const normalizedCurrent = currentText.trim();
-    const alreadyPasted = lastPastedFinalText.value.trim();
+    const alreadyPasted = alreadyPastedText.trim();
 
     if (!normalizedCurrent) return '';
     if (!alreadyPasted) return normalizedCurrent;
@@ -1057,22 +1081,21 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   async function runAutoPasteCurrentText(
     reason: string,
     currentText: string,
-    generation: number,
-    pasteSessionId: number | null
+    pasteLedger: AutoPasteSessionLedger,
   ): Promise<boolean> {
     const normalizedCurrent = currentText.trim();
-    const textToInsert = getAutoPasteDelta(normalizedCurrent);
+    const textToInsert = getAutoPasteDelta(normalizedCurrent, pasteLedger.baseline);
 
     if (!textToInsert.trim()) {
       console.log('[AutoPaste] Nothing new to paste:', {
         reason,
         currentText: normalizedCurrent,
-        alreadyPasted: lastPastedFinalText.value,
+        alreadyPasted: pasteLedger.baseline,
       });
       clientLog('auto_paste_skipped', {
         reason,
         currentLength: normalizedCurrent.length,
-        alreadyPastedLength: lastPastedFinalText.value.length,
+        alreadyPastedLength: pasteLedger.baseline.length,
       }, 'debug');
       return true;
     }
@@ -1083,21 +1106,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         reason,
         textLength: textToInsert.length,
         currentLength: normalizedCurrent.length,
-        alreadyPastedLength: lastPastedFinalText.value.length,
+        alreadyPastedLength: pasteLedger.baseline.length,
       }, 'info');
       await invoke('auto_paste_text', {
         text: textToInsert,
-        sessionId: pasteSessionId ?? undefined,
+        sessionId: pasteLedger.sessionId ?? undefined,
       });
-      if (generation !== autoPasteGeneration) {
-        console.log('[AutoPaste] Paste completed after reset, keeping current session baseline:', { reason });
-        clientLog('auto_paste_completed_after_reset', {
-          reason,
-          textLength: textToInsert.length,
-        }, 'warn');
-        return true;
-      }
-      lastPastedFinalText.value = normalizedCurrent;
+      pasteLedger.baseline = normalizedCurrent;
       console.log('✅ Auto-pasted successfully');
       clientLog('auto_paste_success', {
         reason,
@@ -1116,21 +1131,38 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
-  function autoPasteCurrentText(
+  function enqueueTextDelivery(
     reason: string,
-    currentText = buildCurrentTranscriptionText(),
-    pasteSessionId = sessionId.value,
+    currentText: string,
+    pasteLedger: AutoPasteSessionLedger,
+    shouldAutoCopy: boolean,
+    shouldAutoPaste: boolean,
+    copyOnPasteFailureText: string | null = null,
   ): Promise<boolean> {
     const textSnapshot = currentText.trim();
-    const generation = autoPasteGeneration;
     const task = autoPasteQueue
       .catch(() => undefined)
-      .then(() => {
-        if (generation !== autoPasteGeneration) {
-          console.log('[AutoPaste] Skipping stale paste task:', { reason });
-          return true;
+      .then(async () => {
+        if (shouldAutoCopy) {
+          try {
+            await invoke('copy_to_clipboard_native', { text: textSnapshot });
+            console.log('📋 Auto-copied full transcription to clipboard');
+          } catch (err) {
+            console.error('❌ Failed to auto-copy transcription:', err);
+          }
         }
-        return runAutoPasteCurrentText(reason, textSnapshot, generation, pasteSessionId);
+
+        if (!shouldAutoPaste) return true;
+        const pasted = await runAutoPasteCurrentText(reason, textSnapshot, pasteLedger);
+        if (!pasted && copyOnPasteFailureText) {
+          try {
+            await invoke('copy_to_clipboard_native', { text: copyOnPasteFailureText });
+            console.log('📋 Auto-paste fallback copied current utterance to clipboard');
+          } catch (copyErr) {
+            console.error('❌ Failed to copy auto-paste fallback:', copyErr);
+          }
+        }
+        return pasted;
       });
 
     autoPasteQueue = task.then(
@@ -1141,15 +1173,26 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     return task;
   }
 
-  function resetAutoPasteProgress(): void {
-    lastPastedFinalText.value = '';
-    autoPasteGeneration++;
+  function autoPasteCurrentText(
+    reason: string,
+    currentText = buildCurrentTranscriptionText(),
+    pasteLedger = captureAutoPasteLedger(sessionId.value),
+    copyOnPasteFailureText: string | null = null,
+  ): Promise<boolean> {
+    return enqueueTextDelivery(
+      reason,
+      currentText,
+      pasteLedger,
+      false,
+      true,
+      copyOnPasteFailureText,
+    );
   }
 
   function clearHotkeyStopFinalizeTimer(): void {
-    if (hotkeyStopFinalizeTimer) {
-      clearTimeout(hotkeyStopFinalizeTimer);
-      hotkeyStopFinalizeTimer = null;
+    if (pendingStopFinalization) {
+      clearTimeout(pendingStopFinalization.timer);
+      pendingStopFinalization = null;
     }
   }
 
@@ -1171,7 +1214,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     lastFinalizedSegmentKey.value = '';
     lastSpeechFinalRangeKey.value = '';
     currentUtteranceStart.value = -1;
-    resetAutoPasteProgress();
     previousTranscriptionDisplaySuppressed.value = false;
     suppressedPreviousSessionId.value = null;
     animatedPartialText.value = '';
@@ -1205,11 +1247,14 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     animatedAccumulatedText.value = accumulatedText.value;
   }
 
-  async function processCurrentTextAfterStop(
+  function processCurrentTextAfterStop(
     reason: string,
-    pasteSessionId = sessionId.value,
+    pasteLedger = captureAutoPasteLedger(sessionId.value),
   ): Promise<boolean> {
+    // Capture session ownership before any clipboard IPC can yield to a reset.
     const currentText = buildCurrentTranscriptionText();
+    const shouldAutoCopy = autoCopyEnabled.value;
+    const shouldAutoPaste = autoPasteEnabled.value;
     if (!currentText) {
       console.log('[STT] No transcription text to process after stop:', { reason });
       clientLog('recording_stop_text_empty', {
@@ -1219,78 +1264,49 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         finalLength: finalText.value.length,
         sessionId: sessionId.value,
       }, 'warn');
-      return false;
+      return Promise.resolve(false);
     }
 
     console.log('📝 Текущий текст для обработки:', currentText);
-
-    if (autoCopyEnabled.value) {
-      try {
-        await invoke('copy_to_clipboard_native', { text: currentText });
-        console.log('📋 Auto-copied full transcription to clipboard');
-      } catch (err) {
-        console.error('❌ Failed to auto-copy transcription:', err);
-      }
-    }
-
-    if (autoPasteEnabled.value) {
-      await autoPasteCurrentText(reason, currentText, pasteSessionId);
-    }
-
-    return true;
+    return enqueueTextDelivery(
+      reason,
+      currentText,
+      pasteLedger,
+      shouldAutoCopy,
+      shouldAutoPaste,
+    ).then(() => true);
   }
 
   /**
-   * Досылает незапечатанный хвост прошлой сессии, если grace-таймер hotkey-стопа
-   * ещё не успел сработать, а новая сессия уже стартует.
+   * Settles a pending stop before any start path resets the shared transcript
+   * buffers. The timer owns both its recording session and paste ledger.
    *
    * Без этого clearHotkeyStopFinalizeTimer() при быстром рестарте (< grace-окна)
    * молча выбрасывал поздние финалы: текст оставался в буферах и терялся при reset.
-   * Дельту считаем сразу (baseline вот-вот сбросится), а в очередь ставим задачу
-   * без generation-проверки — этот paste принадлежит уже завершившейся сессии.
+   * Delta calculation stays inside the serialized paste queue, so an earlier
+   * in-flight paste can advance this session's baseline before the tail runs.
    */
-  function flushPendingHotkeyStopTailBeforeReset(reason: string): void {
-    if (!hotkeyStopFinalizeTimer) return;
+  function settlePendingStopBeforeReset(reason: string): void {
+    const pending = pendingStopFinalization;
+    if (!pending) return;
     clearHotkeyStopFinalizeTimer();
 
     const currentText = buildCurrentTranscriptionText();
-    const pasteSessionId = sessionId.value;
+    markRecordingSessionClosed(pending.sessionId, `settled_before_reset:${reason}`);
     if (!currentText) return;
 
     clientLog('hotkey_stop_tail_flush', {
       reason,
       textLength: currentText.length,
-      sessionId: sessionId.value,
+      sessionId: pending.sessionId,
     }, 'info');
 
-    if (autoCopyEnabled.value) {
-      invoke('copy_to_clipboard_native', { text: currentText }).catch((err) => {
-        console.error('❌ Failed to auto-copy pending tail before reset:', err);
-      });
-    }
-
-    if (!autoPasteEnabled.value) return;
-
-    const textToInsert = getAutoPasteDelta(currentText);
-    if (!textToInsert.trim()) return;
-
-    const task = autoPasteQueue
-      .catch(() => undefined)
-      .then(async () => {
-        try {
-          console.log('[AutoPaste] Pasting pending tail from previous session:', { reason, textToInsert });
-          await invoke('auto_paste_text', {
-            text: textToInsert,
-            sessionId: pasteSessionId ?? undefined,
-          });
-        } catch (err) {
-          console.error('❌ Failed to paste pending tail before reset:', err);
-        }
-      });
-
-    autoPasteQueue = task.then(
-      () => undefined,
-      () => undefined
+    void enqueueTextDelivery(
+      reason,
+      currentText,
+      pending.pasteLedger,
+      autoCopyEnabled.value,
+      autoPasteEnabled.value,
     );
   }
 
@@ -1302,39 +1318,51 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   ): void {
     clearHotkeyStopFinalizeTimer();
 
-    hotkeyStopFinalizeTimer = setTimeout(() => {
-      hotkeyStopFinalizeTimer = null;
+    const pasteLedger = captureAutoPasteLedger(payloadSessionId);
+    let pending!: PendingStopFinalization;
+    const timer = setTimeout(() => {
+      if (pendingStopFinalization !== pending) return;
+      pendingStopFinalization = null;
 
       if (sessionId.value !== payloadSessionId) {
         return;
       }
 
-      void (async () => {
-        try {
-          clientLog('hotkey_stop_grace_elapsed', {
-            reason,
-            payloadSessionId,
-            textLength: buildCurrentTranscriptionText().length,
-            accumulatedLength: accumulatedText.value.length,
-            partialLength: partialText.value.length,
-            finalLength: finalText.value.length,
-          }, 'info');
-          await processCurrentTextAfterStop(reason, payloadSessionId);
-        } catch (err) {
+      try {
+        clientLog('hotkey_stop_grace_elapsed', {
+          reason,
+          payloadSessionId,
+          textLength: buildCurrentTranscriptionText().length,
+          accumulatedLength: accumulatedText.value.length,
+          partialLength: partialText.value.length,
+          finalLength: finalText.value.length,
+        }, 'info');
+        void processCurrentTextAfterStop(reason, pasteLedger).catch((err) => {
           console.error('[STT] Failed to process text after stop:', err);
           clientLog('recording_stop_text_processing_failed', {
             reason,
             payloadSessionId,
             error: String(err),
           }, 'error');
-        } finally {
-          markSessionsClosed(payloadSessionId, closeReason);
-          sessionId.value = null;
+        });
+      } catch (err) {
+        console.error('[STT] Failed to process text after stop:', err);
+        clientLog('recording_stop_text_processing_failed', {
+          reason,
+          payloadSessionId,
+          error: String(err),
+        }, 'error');
+      } finally {
+        const stillOwnsSession = sessionId.value === payloadSessionId;
+        markRecordingSessionClosed(payloadSessionId, closeReason);
+        if (stillOwnsSession) {
           awaitingSessionStart.value = false;
           resetTextStateBeforeStart();
         }
-      })();
+      }
     }, delayMs);
+    pending = { timer, sessionId: payloadSessionId, pasteLedger };
+    pendingStopFinalization = pending;
   }
 
   function scheduleHotkeyStopFinalize(payloadSessionId: number): void {
@@ -1614,15 +1642,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             console.log('📋 Successfully added utterance to finalText');
 
             if (autoPasteEnabled.value && currentUtteranceText.trim()) {
-              const pasted = await autoPasteCurrentText('speech_final');
-              if (!pasted && autoCopyEnabled.value) {
-                try {
-                  await invoke('copy_to_clipboard_native', { text: currentUtteranceText });
-                  console.log('📋 Auto-paste fallback copied current utterance to clipboard');
-                } catch (copyErr) {
-                  console.error('❌ Failed to copy auto-paste fallback:', copyErr);
-                }
-              }
+              await autoPasteCurrentText(
+                'speech_final',
+                undefined,
+                undefined,
+                autoCopyEnabled.value ? currentUtteranceText : null,
+              );
             }
 
           } else {
@@ -1831,9 +1856,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             console.log('Recording starting/started - clearing all text');
             // Если grace-таймер hotkey-стопа ещё не сработал, досылаем хвост прошлой
             // сессии до очистки буферов — иначе он молча потеряется.
-            flushPendingHotkeyStopTailBeforeReset('new_session_status');
-            clearRecordingErrorState();
-            resetTranscriptionBuffersForNewSession();
+            resetTextStateBeforeStart('new_session_status');
           }
 
           // Если статус стал Idle - обрабатываем текущий текст при ЛЮБОЙ остановке
@@ -1939,6 +1962,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:error')) {
             return;
           }
+          const errorSessionId = event.payload.session_id;
+          const errorStartRevision = recordingStartRevision;
+          const errorContinuationIsCurrent = () =>
+            generation === listenerGeneration &&
+            errorStartRevision === recordingStartRevision &&
+            (sessionId.value === null || sessionId.value === errorSessionId);
 
           console.error('Transcription error received:', event.payload);
 
@@ -2030,6 +2059,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
                 usageMessage = i18n.global.t('errors.limitExceededDetailed', { plan: planName, used: usedMin, total: totalMin });
               }
             } catch {}
+            if (!errorContinuationIsCurrent()) return;
             setRecordingError(
               'limit_exceeded',
               event.payload.error,
@@ -2121,6 +2151,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
                   usageMessage = i18n.global.t('errors.limitExceededDetailed', { plan: planName, used: usedMin, total: totalMin });
                 }
               } catch {}
+              if (!errorContinuationIsCurrent()) return;
               setRecordingError(
                 'limit_exceeded',
                 event.payload.error,
@@ -2843,8 +2874,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
-  function resetTextStateBeforeStart(): void {
-    clearHotkeyStopFinalizeTimer();
+  function resetTextStateBeforeStart(reason = 'reset_before_start'): void {
+    settlePendingStopBeforeReset(reason);
 
     // Очищаем весь предыдущий текст перед новой записью
     clearRecordingErrorState();
@@ -2859,7 +2890,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     awaitingSessionStart.value = true;
     closeCurrentRecordingSession('start_recording_once');
 
-    resetTextStateBeforeStart();
+    resetTextStateBeforeStart('ui_start');
     status.value = RecordingStatus.Starting;
 
     // На каждый запуск сбрасываем маркеры исхода подключения
@@ -3138,7 +3169,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     recordingStateRevision += 1;
     recordingStartRevision += 1;
     clearRateLimitRetryTimer();
-    flushPendingHotkeyStopTailBeforeReset('rust_hotkey_start');
+    settlePendingStopBeforeReset('rust_hotkey_start');
 
     suppressPreviousTranscriptionDisplay('rust_hotkey_start');
     closeCurrentRecordingSession('rust_hotkey_start');
@@ -3407,7 +3438,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       unlistenIncomingPlayback = null;
     }
 
-    clearHotkeyStopFinalizeTimer();
+    settlePendingStopBeforeReset('cleanup');
     recordingDesiredOn.value = false;
     recordingStartPending.value = false;
     recordingIntentFault.value = null;
