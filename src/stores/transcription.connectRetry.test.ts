@@ -27,6 +27,10 @@ const authContainerMock = vi.hoisted(() => ({
   },
 }));
 
+const apiClientMock = vi.hoisted(() => ({
+  get: vi.fn(),
+}));
+
 const appConfigMock = vi.hoisted(() => ({
   autoCopyToClipboard: false,
   autoPasteText: false,
@@ -40,16 +44,29 @@ const appConfigMock = vi.hoisted(() => ({
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 async function flushMicrotasks() {
   await Promise.resolve();
   await Promise.resolve();
   await Promise.resolve();
+}
+
+async function initializeStoreWithHandlers() {
+  const handlers = new Map<string, any>();
+  listenMock.mockImplementation(async (eventName: string, handler: any) => {
+    handlers.set(eventName, handler);
+    return () => {};
+  });
+  const store = useTranscriptionStore();
+  await store.initialize();
+  return { handlers, store };
 }
 
 function liveTranslationHealthCheckOk() {
@@ -92,6 +109,10 @@ vi.mock('../features/auth/infrastructure/di/authContainer', () => ({
   getAuthContainer: () => authContainerMock,
 }));
 
+vi.mock('../features/auth/infrastructure/api/apiClient', () => ({
+  api: apiClientMock,
+}));
+
 vi.mock('../features/auth/store/authStore', () => ({
   useAuthStore: () => authStoreMock,
 }));
@@ -116,6 +137,7 @@ describe('transcription connect-retry reliability', () => {
     authStoreMock.reset.mockReset();
     authStoreMock.setAuthenticated.mockReset();
     authContainerMock.refreshTokensUseCase.execute.mockReset();
+    apiClientMock.get.mockReset();
     appConfigMock.autoCopyToClipboard = false;
     appConfigMock.autoPasteText = false;
     appConfigMock.playCompletionSound = false;
@@ -138,6 +160,7 @@ describe('transcription connect-retry reliability', () => {
     authContainerMock.refreshTokensUseCase.execute.mockResolvedValue({
       accessToken: 'access_new',
     });
+    apiClientMock.get.mockResolvedValue({ licenses: [] });
   });
 
   it('reconciles a corrected suffix without blanking its stable animated prefix', () => {
@@ -608,6 +631,51 @@ describe('transcription connect-retry reliability', () => {
     expect(store.closedSessionIdFloor).toBeLessThan(701);
     expect(store.partialText).toBe('');
     expect(store.errorType).toBe('provider_quota_exceeded');
+  });
+
+  it('late usage lookup старой limit error не перезаписывает новую Recording session', async () => {
+    const usage = deferred<{
+      licenses: Array<{
+        status: string;
+        plan: string;
+        seconds_used: number;
+        seconds_limit: number;
+      }>;
+    }>();
+    apiClientMock.get.mockReturnValue(usage.promise);
+    invokeMock.mockResolvedValue(null);
+    const { handlers, store } = await initializeStoreWithHandlers();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 711, status: 'Recording', stopped_via_hotkey: false },
+    });
+    const staleError = handlers.get('transcription:error')({
+      payload: {
+        session_id: 711,
+        error: 'Monthly limit exceeded',
+        error_type: 'limit_exceeded',
+        error_details: { category: 'limit_exceeded' },
+      },
+    });
+    await flushMicrotasks();
+    expect(apiClientMock.get).toHaveBeenCalledWith('/api/v1/account/licenses');
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 712, status: 'Recording', stopped_via_hotkey: false },
+    });
+    usage.resolve({
+      licenses: [{
+        status: 'active',
+        plan: 'pro',
+        seconds_used: 3_600,
+        seconds_limit: 7_200,
+      }],
+    });
+    await staleError;
+
+    expect(store.sessionId).toBe(712);
+    expect(store.status).toBe('Recording');
+    expect(store.errorType).toBeNull();
   });
 
   it('показывает INTERNAL_ERROR как ошибку обработки, а не как перезапуск сервера', async () => {
@@ -2829,6 +2897,549 @@ describe('transcription connect-retry reliability', () => {
     }
   });
 
+  it('быстрый restart вставляет pending tail с target старой сессии', async () => {
+    vi.useFakeTimers();
+    try {
+      const handlers = new Map<string, any>();
+      appConfigMock.autoPasteText = true;
+
+      listenMock.mockImplementation(async (eventName: string, handler: any) => {
+        handlers.set(eventName, handler);
+        return () => {};
+      });
+      invokeMock.mockResolvedValue(null);
+
+      const store = useTranscriptionStore();
+      await store.initialize();
+      await handlers.get('recording:status')({
+        payload: { session_id: 41, status: 'Recording', stopped_via_hotkey: false },
+      });
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 41,
+          text: 'хвост старой сессии',
+          timestamp: 1,
+          is_segment_final: false,
+          start: 0,
+          duration: 1,
+        },
+      });
+      await handlers.get('recording:status')({
+        payload: { session_id: 41, status: 'Idle', stopped_via_hotkey: true },
+      });
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 42, status: 'Recording', stopped_via_hotkey: false },
+      });
+      await flushMicrotasks();
+
+      expect(invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text')).toEqual([
+        ['auto_paste_text', { text: 'хвост старой сессии', sessionId: 41 }],
+      ]);
+      expect(store.sessionId).toBe(42);
+      expect(store.status).toBe('Recording');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('delayed cleanup старой вставки не сбрасывает новую сессию', async () => {
+    vi.useFakeTimers();
+    const oldPaste = deferred<null>();
+    try {
+      const handlers = new Map<string, any>();
+      appConfigMock.autoPasteText = true;
+
+      listenMock.mockImplementation(async (eventName: string, handler: any) => {
+        handlers.set(eventName, handler);
+        return () => {};
+      });
+      let pasteCount = 0;
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd !== 'auto_paste_text') return Promise.resolve(null);
+        pasteCount += 1;
+        return pasteCount === 1 ? oldPaste.promise : Promise.resolve(null);
+      });
+
+      const store = useTranscriptionStore();
+      await store.initialize();
+      await handlers.get('recording:status')({
+        payload: { session_id: 51, status: 'Recording', stopped_via_hotkey: false },
+      });
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 51,
+          text: 'старый хвост',
+          timestamp: 1,
+          is_segment_final: false,
+          start: 0,
+          duration: 1,
+        },
+      });
+      await handlers.get('recording:status')({
+        payload: { session_id: 51, status: 'Idle', stopped_via_hotkey: true },
+      });
+      await vi.advanceTimersByTimeAsync(1_500);
+      await flushMicrotasks();
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 52, status: 'Recording', stopped_via_hotkey: false },
+      });
+      const newFinal = handlers.get('transcription:partial')({
+        payload: {
+          session_id: 52,
+          text: 'новый текст',
+          timestamp: 2,
+          is_segment_final: true,
+          start: 0,
+          duration: 1,
+        },
+      });
+      await flushMicrotasks();
+
+      expect(store.sessionId).toBe(52);
+      expect(store.status).toBe('Recording');
+      expect(store.accumulatedText).toBe('новый текст');
+
+      oldPaste.resolve(null);
+      await newFinal;
+      await flushMicrotasks();
+
+      expect(store.sessionId).toBe(52);
+      expect(store.status).toBe('Recording');
+      expect(store.accumulatedText).toBe('новый текст');
+      expect(invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text')).toEqual([
+        ['auto_paste_text', { text: 'старый хвост', sessionId: 51 }],
+        ['auto_paste_text', { text: 'новый текст', sessionId: 52 }],
+      ]);
+    } finally {
+      oldPaste.resolve(null);
+      vi.useRealTimers();
+    }
+  });
+
+  it('UI start синхронно сохраняет pending Idle tail и не ждёт старую вставку', async () => {
+    vi.useFakeTimers();
+    const oldPaste = deferred<null>();
+    try {
+      appConfigMock.autoPasteText = true;
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'auto_paste_text') return oldPaste.promise;
+        return Promise.resolve(null);
+      });
+      const { handlers, store } = await initializeStoreWithHandlers();
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 53, status: 'Recording', stopped_via_hotkey: false },
+      });
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 53,
+          text: 'tail before button restart',
+          timestamp: 1,
+          is_segment_final: false,
+          start: 0,
+          duration: 1,
+        },
+      });
+      await handlers.get('recording:status')({
+        payload: { session_id: 53, status: 'Idle', stopped_via_hotkey: false },
+      });
+
+      const start = store.startRecording();
+      await flushMicrotasks();
+
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'start_recording')).toHaveLength(1);
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text')).toEqual([
+        ['auto_paste_text', { text: 'tail before button restart', sessionId: 53 }],
+      ]);
+      expect(store.status).toBe('Starting');
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 54, status: 'Recording', stopped_via_hotkey: false },
+      });
+      oldPaste.resolve(null);
+      await start;
+
+      expect(store.sessionId).toBe(54);
+      expect(store.status).toBe('Recording');
+    } finally {
+      oldPaste.resolve(null);
+      vi.useRealTimers();
+    }
+  });
+
+  it('stale high-session finalizer не закрывает восстановленную lower session', async () => {
+    vi.useFakeTimers();
+    const oldPaste = deferred<null>();
+    try {
+      appConfigMock.autoPasteText = true;
+      invokeMock.mockImplementation((cmd: string) =>
+        cmd === 'auto_paste_text' ? oldPaste.promise : Promise.resolve(null)
+      );
+      const { handlers, store } = await initializeStoreWithHandlers();
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 500, status: 'Recording', stopped_via_hotkey: false },
+      });
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 500,
+          text: 'high session tail',
+          timestamp: 1,
+          is_segment_final: false,
+          start: 0,
+          duration: 1,
+        },
+      });
+      await handlers.get('recording:status')({
+        payload: { session_id: 500, status: 'Idle', stopped_via_hotkey: true },
+      });
+      await vi.advanceTimersByTimeAsync(1_500);
+      await flushMicrotasks();
+
+      // Native failed-start recovery can restore an older displaced owner without
+      // replaying a monotonic recording:status event through this listener.
+      store.sessionId = 400;
+      oldPaste.resolve(null);
+      await flushMicrotasks();
+      await flushMicrotasks();
+
+      expect(store.sessionId).toBe(400);
+      expect(store.closedSessionIdFloor).toBeLessThan(400);
+    } finally {
+      oldPaste.resolve(null);
+      vi.useRealTimers();
+    }
+  });
+
+  it('stop snapshot сохраняет auto-paste intent пока auto-copy ждёт IPC', async () => {
+    vi.useFakeTimers();
+    const oldCopy = deferred<null>();
+    try {
+      appConfigMock.autoCopyToClipboard = true;
+      appConfigMock.autoPasteText = true;
+      invokeMock.mockImplementation((cmd: string) =>
+        cmd === 'copy_to_clipboard_native' ? oldCopy.promise : Promise.resolve(null)
+      );
+      const { handlers } = await initializeStoreWithHandlers();
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 61, status: 'Recording', stopped_via_hotkey: false },
+      });
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 61,
+          text: 'copy delayed tail',
+          timestamp: 1,
+          is_segment_final: false,
+          start: 0,
+          duration: 1,
+        },
+      });
+      await handlers.get('recording:status')({
+        payload: { session_id: 61, status: 'Idle', stopped_via_hotkey: true },
+      });
+      await vi.advanceTimersByTimeAsync(1_500);
+      await flushMicrotasks();
+
+      appConfigMock.autoPasteText = false;
+      oldCopy.resolve(null);
+      await flushMicrotasks();
+      await flushMicrotasks();
+
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text')).toEqual([
+        ['auto_paste_text', { text: 'copy delayed tail', sessionId: 61 }],
+      ]);
+    } finally {
+      oldCopy.resolve(null);
+      vi.useRealTimers();
+    }
+  });
+
+  it('speech-final fallback copy блокирует paste новой session в общей delivery queue', async () => {
+    vi.useFakeTimers();
+    const fallbackCopy = deferred<null>();
+    try {
+      appConfigMock.autoCopyToClipboard = true;
+      appConfigMock.autoPasteText = true;
+      let pasteCount = 0;
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === 'auto_paste_text') {
+          pasteCount += 1;
+          return pasteCount === 1
+            ? Promise.reject(new Error('first native paste failed'))
+            : Promise.resolve(null);
+        }
+        if (cmd === 'copy_to_clipboard_native') return fallbackCopy.promise;
+        return Promise.resolve(null);
+      });
+      const { handlers } = await initializeStoreWithHandlers();
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 62, status: 'Recording', stopped_via_hotkey: false },
+      });
+      const oldFinal = handlers.get('transcription:final')({
+        payload: {
+          session_id: 62,
+          text: 'old fallback',
+          timestamp: 1,
+          start: 0,
+          duration: 1,
+        },
+      });
+      await flushMicrotasks();
+
+      expect(invokeMock.mock.calls.filter(([cmd]) =>
+        cmd === 'auto_paste_text' || cmd === 'copy_to_clipboard_native'
+      )).toEqual([
+        ['auto_paste_text', { text: 'old fallback', sessionId: 62 }],
+        ['copy_to_clipboard_native', { text: 'old fallback' }],
+      ]);
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 63, status: 'Recording', stopped_via_hotkey: false },
+      });
+      const newSegment = handlers.get('transcription:partial')({
+        payload: {
+          session_id: 63,
+          text: 'new delivery',
+          timestamp: 2,
+          is_segment_final: true,
+          start: 0,
+          duration: 1,
+        },
+      });
+      await flushMicrotasks();
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text')).toHaveLength(1);
+
+      fallbackCopy.resolve(null);
+      await Promise.all([oldFinal, newSegment]);
+
+      expect(invokeMock.mock.calls.filter(([cmd]) =>
+        cmd === 'auto_paste_text' || cmd === 'copy_to_clipboard_native'
+      )).toEqual([
+        ['auto_paste_text', { text: 'old fallback', sessionId: 62 }],
+        ['copy_to_clipboard_native', { text: 'old fallback' }],
+        ['auto_paste_text', { text: 'new delivery', sessionId: 63 }],
+      ]);
+    } finally {
+      fallbackCopy.resolve(null);
+      vi.useRealTimers();
+    }
+  });
+
+  it('успешная in-flight вставка обновляет old ledger до расчёта restart tail', async () => {
+    vi.useFakeTimers();
+    const firstPaste = deferred<null>();
+    try {
+      appConfigMock.autoCopyToClipboard = true;
+      appConfigMock.autoPasteText = true;
+      let pasteCount = 0;
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd !== 'auto_paste_text') return Promise.resolve(null);
+        pasteCount += 1;
+        return pasteCount === 1 ? firstPaste.promise : Promise.resolve(null);
+      });
+      const { handlers } = await initializeStoreWithHandlers();
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 71, status: 'Recording', stopped_via_hotkey: false },
+      });
+      const firstSegment = handlers.get('transcription:partial')({
+        payload: {
+          session_id: 71,
+          text: 'alpha',
+          timestamp: 1,
+          is_segment_final: true,
+          start: 0,
+          duration: 1,
+        },
+      });
+      await flushMicrotasks();
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 71,
+          text: 'beta',
+          timestamp: 2,
+          is_segment_final: false,
+          start: 1,
+          duration: 1,
+        },
+      });
+      await handlers.get('recording:status')({
+        payload: { session_id: 71, status: 'Idle', stopped_via_hotkey: true },
+      });
+      await handlers.get('recording:status')({
+        payload: { session_id: 72, status: 'Recording', stopped_via_hotkey: false },
+      });
+
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'copy_to_clipboard_native')).toHaveLength(0);
+
+      firstPaste.resolve(null);
+      await firstSegment;
+      await flushMicrotasks();
+      await flushMicrotasks();
+
+      expect(invokeMock.mock.calls.filter(([cmd]) =>
+        cmd === 'auto_paste_text' || cmd === 'copy_to_clipboard_native'
+      )).toEqual([
+        ['auto_paste_text', { text: 'alpha', sessionId: 71 }],
+        ['copy_to_clipboard_native', { text: 'alpha beta' }],
+        ['auto_paste_text', { text: ' beta', sessionId: 71 }],
+      ]);
+    } finally {
+      firstPaste.resolve(null);
+      vi.useRealTimers();
+    }
+  });
+
+  it('failed in-flight вставка оставляет old ledger пустым для полного retry tail', async () => {
+    vi.useFakeTimers();
+    const firstPaste = deferred<null>();
+    try {
+      appConfigMock.autoPasteText = true;
+      let pasteCount = 0;
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd !== 'auto_paste_text') return Promise.resolve(null);
+        pasteCount += 1;
+        return pasteCount === 1 ? firstPaste.promise : Promise.resolve(null);
+      });
+      const { handlers } = await initializeStoreWithHandlers();
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 73, status: 'Recording', stopped_via_hotkey: false },
+      });
+      const firstSegment = handlers.get('transcription:partial')({
+        payload: {
+          session_id: 73,
+          text: 'alpha',
+          timestamp: 1,
+          is_segment_final: true,
+          start: 0,
+          duration: 1,
+        },
+      });
+      await flushMicrotasks();
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 73,
+          text: 'beta',
+          timestamp: 2,
+          is_segment_final: false,
+          start: 1,
+          duration: 1,
+        },
+      });
+      await handlers.get('recording:status')({
+        payload: { session_id: 73, status: 'Idle', stopped_via_hotkey: true },
+      });
+      await handlers.get('recording:status')({
+        payload: { session_id: 74, status: 'Recording', stopped_via_hotkey: false },
+      });
+
+      firstPaste.reject(new Error('native paste failed'));
+      await firstSegment;
+      await flushMicrotasks();
+      await flushMicrotasks();
+
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text')).toEqual([
+        ['auto_paste_text', { text: 'alpha', sessionId: 73 }],
+        ['auto_paste_text', { text: 'alpha beta', sessionId: 73 }],
+      ]);
+    } finally {
+      firstPaste.resolve(null);
+      vi.useRealTimers();
+    }
+  });
+
+  it('duplicate Idle и repeated cleanup финализируют pending tail ровно один раз', async () => {
+    vi.useFakeTimers();
+    try {
+      appConfigMock.autoPasteText = true;
+      invokeMock.mockResolvedValue(null);
+      const { handlers, store } = await initializeStoreWithHandlers();
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 75, status: 'Recording', stopped_via_hotkey: false },
+      });
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 75,
+          text: 'single delivery',
+          timestamp: 1,
+          is_segment_final: false,
+          start: 0,
+          duration: 1,
+        },
+      });
+      await handlers.get('recording:status')({
+        payload: { session_id: 75, status: 'Idle', stopped_via_hotkey: true },
+      });
+      await handlers.get('recording:status')({
+        payload: { session_id: 75, status: 'Idle', stopped_via_hotkey: true },
+      });
+
+      store.cleanup();
+      store.cleanup();
+      await flushMicrotasks();
+
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text')).toEqual([
+        ['auto_paste_text', { text: 'single delivery', sessionId: 75 }],
+      ]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('сработавший stop timer синхронно claims session до завершения delivery IPC', async () => {
+    vi.useFakeTimers();
+    const pendingPaste = deferred<null>();
+    try {
+      appConfigMock.autoPasteText = true;
+      invokeMock.mockImplementation((cmd: string) =>
+        cmd === 'auto_paste_text' ? pendingPaste.promise : Promise.resolve(null)
+      );
+      const { handlers, store } = await initializeStoreWithHandlers();
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 76, status: 'Recording', stopped_via_hotkey: false },
+      });
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 76,
+          text: 'claimed once',
+          timestamp: 1,
+          is_segment_final: false,
+          start: 0,
+          duration: 1,
+        },
+      });
+      await handlers.get('recording:status')({
+        payload: { session_id: 76, status: 'Idle', stopped_via_hotkey: true },
+      });
+      await vi.advanceTimersByTimeAsync(1_500);
+      await flushMicrotasks();
+
+      expect(store.sessionId).toBeNull();
+      await handlers.get('recording:status')({
+        payload: { session_id: 76, status: 'Idle', stopped_via_hotkey: true },
+      });
+      store.cleanup();
+      pendingPaste.resolve(null);
+      await flushMicrotasks();
+
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text')).toEqual([
+        ['auto_paste_text', { text: 'claimed once', sessionId: 76 }],
+      ]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      pendingPaste.resolve(null);
+      vi.useRealTimers();
+    }
+  });
+
   it('hotkey stop закрывает session даже если delayed post-stop processing неожиданно упал', async () => {
     vi.useFakeTimers();
     try {
@@ -2873,7 +3484,18 @@ describe('transcription connect-retry reliability', () => {
 
       expect(store.sessionId).toBeNull();
       expect(store.partialText).toBe('');
-      expect(store.closedSessionIdFloor).toBeGreaterThanOrEqual(137);
+      expect(store.closedSessionIdFloor).toBeLessThan(137);
+      await handlers.get('transcription:partial')({
+        payload: {
+          session_id: 137,
+          text: 'late closed text',
+          timestamp: 2,
+          is_segment_final: false,
+          start: 1,
+          duration: 1,
+        },
+      });
+      expect(store.partialText).toBe('');
       expect(console.error).toHaveBeenCalledWith(
         '[STT] Failed to process text after stop:',
         expect.any(Error)
