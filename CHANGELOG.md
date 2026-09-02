@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.16.9] - 2026-09-02
+
+### Changed
+- Made macOS audio evidence optional for releases while preserving strict validation whenever an Audio Release Gate run is supplied.
+- Made Deepgram the default streaming provider and documented ElevenLabs reconnect latency in Settings.
+
+### Fixed
+- Kept rapid recording reopen and close actions ordered across delayed native window, provider, and frontend callbacks.
+- Isolated transcript delivery and auto-paste progress per recording session so delayed copy or paste work cannot lose text, duplicate it, or affect a newer session.
+- Preserved early speech, final transcript tails, focus, and paste behavior during repeated hotkey starts and stops.
+
 ## [0.16.8] - 2026-09-02
 
 ### Added

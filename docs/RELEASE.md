@@ -10,60 +10,63 @@
 3. Обновить CHANGELOG.md
 4. Закоммитить и запушить изменения
 5. Создать и запушить git tag
-6. Запустить обязательный по умолчанию macOS Audio Release Gate с подтверждёнными ручными проверками
-7. Передать успешный gate run в Release workflow (явное исключение через waiver описано в шаге 7)
+6. При необходимости запустить macOS Audio Release Gate с подтверждёнными ручными проверками
+7. Запустить Release workflow; переданный audio gate run будет строго проверен, но не обязателен
 ```
 
 ---
 
-## Текущий релиз: v0.16.8
+## Текущий релиз: v0.16.9
 
-Patch-релиз с детерминированным lifecycle hotkey, быстрым откликом окна, надёжным start/stop и feedback-контактом в настройках.
+Patch-релиз с надёжным повторным открытием по hotkey, session-scoped доставкой текста и необязательным macOS audio evidence для релиза.
 
 ### Что говорить в статье
 
 - Скачать приложение можно с [voicetext.site](https://voicetext.site).
-- Hotkey быстро подтверждает намерение пользователя и надёжно переключает запись даже при медленном start или processing.
-- Один desired-state coordinator упорядочивает обычный hotkey, hold-to-record, double Space, окно и recording lifecycle.
-- Старые native callbacks, VAD, release, stop и finalize больше не меняют новую сессию.
-- Финальный текст сохраняется при быстрых рестартах, перегрузке очереди и завершении приложения.
-- Внизу настроек добавлена почта для обратной связи.
+- Повторные hotkey start/stop не теряются из-за delayed native window, provider или frontend callbacks.
+- Auto-paste и финализация текста изолированы по recording session, поэтому старая доставка не меняет новую сессию.
+- Ранняя речь и финальный transcript tail сохраняются при быстрых рестартах.
+- Deepgram выбран streaming provider по умолчанию; для ElevenLabs в Settings показано предупреждение о reconnect latency.
+- macOS Audio Release Gate теперь optional: если run ID передан, evidence по-прежнему проверяется строго.
 
 ### Ссылки на код для статьи
 
-- Desired-state reducer: `src-tauri/src/presentation/recording_intent_coordinator.rs`
-- Hotkey gesture normalizer: `src-tauri/src/presentation/recording_hotkey_gestures.rs`
 - Native lifecycle integration: `src-tauri/src/presentation/commands.rs`
-- Frontend session projection: `src/stores/transcription.ts`
-- Feedback contact: `src/features/settings/presentation/components/sections/FeedbackSection.vue`
+- Session-scoped transcript delivery: `src/stores/transcription.ts`
+- Provider guidance: `src/features/settings/presentation/components/sections/StreamingProviderSection.vue`
+- Optional release evidence contract: `.github/workflows/release.yml`
 
 ### Release notes для GitHub
 
-Источник release notes - секция `0.16.8` в `CHANGELOG.md`; получить её можно командой ниже.
+Источник release notes - секция `0.16.9` в `CHANGELOG.md`; получить её можно командой ниже.
 
 Изолированные native-window E2E используют синтетические PCM/STT. Эти сценарии и idle-проверки не заменяют hardware/Zoom audio gate и не подтверждают ручные проверки устройств.
 
 ### Команды релиза
 
 ```bash
-pnpm release:notes v0.16.8
+pnpm release:notes v0.16.9
 git add CHANGELOG.md docs package.json src-tauri src e2e-tests
-git commit -m "release: v0.16.8"
-git tag v0.16.8
+git commit -m "release: v0.16.9"
+git tag v0.16.9
 git push origin HEAD
-git push origin v0.16.8
+git push origin v0.16.9
 
-# Только после реальных Zoom/output-disconnect/sleep-wake проверок
+# Optional: только после реальных Zoom/output-disconnect/sleep-wake проверок
 gh workflow run "macOS Audio Release Gate" \
-  -f ref=v0.16.8 \
+  -f ref=v0.16.9 \
   -f soak_seconds=1800 \
   -f zoom_half_volume_bidirectional_verified=true \
   -f output_disconnect_recovery_verified=true \
   -f sleep_wake_recovery_verified=true
 
-# После успешного audio gate
+# Release без audio evidence
 gh workflow run Release \
-  -f tag=v0.16.8 \
+  -f tag=v0.16.9
+
+# Либо со строгой проверкой optional audio evidence
+gh workflow run Release \
+  -f tag=v0.16.9 \
   -f macos_audio_gate_run_id=<SUCCESSFUL_GATE_RUN_ID>
 ```
 
@@ -200,9 +203,9 @@ git push origin v0.9.4
 
 ---
 
-## 6. Запустить macOS Audio Release Gate
+## 6. Опционально запустить macOS Audio Release Gate
 
-Перед запуском нужно реально проверить:
+Этот gate не блокирует обычный релиз. Если решено приложить audio evidence, перед запуском нужно реально проверить:
 
 - Zoom call в обе стороны при 50% speaker volume;
 - cleanup и restart после отключения output device;
@@ -234,35 +237,32 @@ gh run view <AUDIO_GATE_RUN_ID> --log-failed
 
 ## 7. Запустить Release workflow
 
-Release workflow по умолчанию требует успешный audio gate для того же tagged commit, повторяет keyless quality gates, создаёт draft, последовательно собирает все платформы, проверяет assets и `latest.json`, затем публикует релиз.
+Release workflow всегда повторяет keyless quality gates, создаёт draft, последовательно собирает все платформы, проверяет assets и `latest.json`, затем публикует релиз. Audio gate необязателен. Если его run ID передан, workflow строго проверяет commit, ручные attestations, smoke, soak и checksummed evidence.
 
 ```bash
 gh workflow run Release \
-  -f tag=v0.9.4 \
-  -f macos_audio_gate_run_id=<SUCCESSFUL_GATE_RUN_ID>
+  -f tag=v0.16.9
 
 gh run list --workflow Release --limit 3
 gh run watch <RELEASE_RUN_ID>
 ```
 
-### Исключение из audio gate
+### Optional audio evidence
 
-Существующий input `waive_macos_audio_gate` по умолчанию равен `false`. Значение `true` - явное решение выпускающего owner/operator воспользоваться исключением. Workflow записывает actor и tag в warning и job summary; остальные quality gates и проверки релиза остаются обязательными.
+`macos_audio_gate_run_id` можно не передавать. Workflow явно записывает отсутствие audio evidence в job summary, но все keyless quality gates, сборки, signatures, updater manifest и asset-проверки остаются обязательными.
 
 ```bash
-# Явный выбор выпускающего owner/operator: исключение из audio gate
-# Это исключение, а не подтверждение hardware/Zoom проверок
+# Обычный релиз без optional audio evidence
 gh workflow run Release \
-  -f tag=v0.16.8 \
-  -f waive_macos_audio_gate=true
+  -f tag=v0.16.9
 ```
 
-Этот пример не означает, что waiver уже выбран или ручные проверки выполнены.
+Отсутствие run ID не означает, что hardware/Zoom проверки выполнены.
 
 Проверка опубликованного релиза:
 
 ```bash
-gh release view v0.9.4 --json tagName,isDraft,isPrerelease,url,assets
+gh release view v0.16.9 --json tagName,isDraft,isPrerelease,url,assets
 ```
 
 ---
@@ -280,8 +280,8 @@ gh release view v0.9.4 --json tagName,isDraft,isPrerelease,url,assets
 - [ ] Rust-тесты проходят: `cargo test --manifest-path src-tauri/Cargo.toml`
 - [ ] Clippy release lint проходит: `cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D clippy::await_holding_lock`
 - [ ] Tag создан и запушен
-- [ ] Три ручные hardware/Zoom проверки реально выполнены и macOS Audio Release Gate прошёл для tagged commit; либо выпускающий owner/operator явно выбрал waiver
-- [ ] При waiver проверены actor/tag в Release workflow warning и job summary
+- [ ] Если передаётся `macos_audio_gate_run_id`, три ручные hardware/Zoom проверки реально выполнены и gate прошёл для tagged commit
+- [ ] В Release workflow summary проверен статус optional audio evidence
 - [ ] Release workflow прошёл и опубликовал релиз
 - [ ] `latest.json` содержит новую версию и все platform signatures
 - [ ] Артефакты доступны для скачивания
@@ -309,7 +309,7 @@ git tag "v$VERSION"
 git push origin HEAD
 git push origin "v$VERSION"
 
-# 4. После реальных Zoom/output-disconnect/sleep-wake проверок запустить audio gate
+# 4. Optional: после реальных Zoom/output-disconnect/sleep-wake проверок запустить audio gate
 gh workflow run "macOS Audio Release Gate" \
   -f ref="v$VERSION" \
   -f soak_seconds=1800 \
@@ -317,7 +317,11 @@ gh workflow run "macOS Audio Release Gate" \
   -f output_disconnect_recovery_verified=true \
   -f sleep_wake_recovery_verified=true
 
-# 5. После успешного audio gate запустить Release workflow
+# 5. Запустить Release workflow без audio evidence
+gh workflow run Release \
+  -f tag="v$VERSION"
+
+# Либо передать успешный optional audio gate
 gh workflow run Release \
   -f tag="v$VERSION" \
   -f macos_audio_gate_run_id=<SUCCESSFUL_GATE_RUN_ID>
@@ -345,7 +349,7 @@ git push origin master
 git push origin v0.6.1
 ```
 
-Для hotfix audio gate также обязателен по умолчанию; выпускающий owner/operator может явно выбрать waiver по шагу 7. Release workflow и остальные quality gates обязательны в обоих случаях.
+Для hotfix audio gate также optional. Release workflow, keyless quality gates, сборки, signatures и asset verification остаются обязательными.
 
 ---
 

@@ -148,14 +148,17 @@ test('normal CI and release share the same keyless quality gate workflow', () =>
   assert.ok(!quality.includes('VOICETEXT_RUN_PAID_E2E'));
 });
 
-test('audio gate waiver is explicit, off by default, and keeps quality gates mandatory', () => {
+test('audio gate is optional, verifies supplied evidence, and keeps quality gates mandatory', () => {
   const release = readRepositoryFile('.github/workflows/release.yml');
 
-  assert.match(release, /waive_macos_audio_gate:\n\s+description:[^\n]+\n\s+required: true\n\s+default: false/);
-  assert.ok(release.includes("if: ${{ !inputs.waive_macos_audio_gate }}"));
+  assert.match(release, /macos_audio_gate_run_id:\n\s+description:[^\n]+\n\s+required: false\n\s+default: ''/);
+  assert.ok(release.includes("if: ${{ inputs.macos_audio_gate_run_id != '' }}"));
   assert.ok(release.includes("needs.quality-gates.result == 'success'"));
-  assert.ok(release.includes("inputs.waive_macos_audio_gate && needs.verify-macos-audio-gate.result == 'skipped'"));
-  assert.ok(release.includes('Record macOS audio gate waiver'));
+  assert.ok(release.includes("needs.verify-macos-audio-gate.result == 'success' || needs.verify-macos-audio-gate.result == 'skipped'"));
+  assert.ok(release.includes('Record optional macOS audio gate omission'));
+  assert.ok(release.includes("if: ${{ needs.verify-macos-audio-gate.result == 'skipped' }}"));
+  assert.ok(release.includes('$GITHUB_STEP_SUMMARY'));
+  assert.ok(!release.includes('waive_macos_audio_gate'));
 });
 
 test('release notes use the workflow revision while binaries stay pinned to the tag', () => {
@@ -166,7 +169,7 @@ test('release notes use the workflow revision while binaries stay pinned to the 
   assert.ok(release.includes('release_commit="$(git rev-list -n 1 "$tag")"') || release.includes('commit="$(git rev-list -n 1 "$tag")"'));
 });
 
-test('audio waiver does not transitively skip release builds or publication', () => {
+test('optional audio evidence does not transitively skip release builds or publication', () => {
   const release = readRepositoryFile('.github/workflows/release.yml');
 
   assert.ok(release.includes("needs.create-release.result == 'success'"));
