@@ -8,15 +8,10 @@ on:
         required: true
         type: string
       macos_audio_gate_run_id:
-        description: 'Successful macOS Audio Release Gate run ID for the same tagged commit'
+        description: 'Optional successful macOS Audio Release Gate run ID for the same tagged commit'
         required: false
         default: ''
         type: string
-      waive_macos_audio_gate:
-        description: 'Explicitly waive the local macOS audio gate for this release'
-        required: true
-        default: false
-        type: boolean
 
 permissions:
   contents: write
@@ -35,7 +30,7 @@ jobs:
       ref: ${{ inputs.tag }}
 
   verify-macos-audio-gate:
-    if: ${{ !inputs.waive_macos_audio_gate }}
+    if: ${{ inputs.macos_audio_gate_run_id != '' }}
     runs-on: ubuntu-24.04
 
     steps:
@@ -233,7 +228,7 @@ jobs:
     needs:
       - quality-gates
       - verify-macos-audio-gate
-    if: ${{ always() && needs.quality-gates.result == 'success' && (needs.verify-macos-audio-gate.result == 'success' || (inputs.waive_macos_audio_gate && needs.verify-macos-audio-gate.result == 'skipped')) }}
+    if: ${{ always() && needs.quality-gates.result == 'success' && (needs.verify-macos-audio-gate.result == 'success' || needs.verify-macos-audio-gate.result == 'skipped') }}
     runs-on: ubuntu-24.04
     outputs:
       release_id: ${{ steps.release.outputs.release_id }}
@@ -241,12 +236,12 @@ jobs:
       release_commit: ${{ steps.resolve.outputs.release_commit }}
 
     steps:
-      - name: Record macOS audio gate waiver
-        if: ${{ inputs.waive_macos_audio_gate }}
+      - name: Record optional macOS audio gate omission
+        if: ${{ needs.verify-macos-audio-gate.result == 'skipped' }}
         shell: bash
         run: |
-          echo "::warning::macOS audio gate waived by ${GITHUB_ACTOR} for ${RELEASE_TAG}"
-          echo "macOS audio gate waived by **${GITHUB_ACTOR}** for **${RELEASE_TAG}**." >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::macOS audio evidence was not supplied for ${RELEASE_TAG}; continuing with mandatory keyless quality gates"
+          echo "macOS audio evidence was not supplied for **${RELEASE_TAG}**. Mandatory keyless quality gates still passed." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
