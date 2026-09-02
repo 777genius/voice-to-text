@@ -3,7 +3,7 @@ use super::{
     recording_intent_coordinator as recording_intent, state::RecordingIntentCoordinatorMode,
 };
 use serde::Serialize;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -59,6 +59,7 @@ fn error_details_from_stt(err: &SttError) -> Option<TranscriptionErrorDetailsPay
 const TRANSCRIPT_EVENT_QUEUE_CAPACITY: usize = 128;
 const MAX_TRANSCRIPT_EVENT_TEXT_BYTES: usize = 64 * 1024;
 const RECORDING_SHUTDOWN_FINALIZATION_GRACE: Duration = Duration::from_secs(2);
+const AUTO_PASTE_TARGET_RETENTION: usize = 32;
 
 #[derive(Debug)]
 enum TranscriptEvent {
@@ -794,6 +795,19 @@ fn execute_recording_coordinator_effect(
             let Some(state) = app_handle.try_state::<AppState>() else {
                 return;
             };
+            let auto_paste_enabled = state
+                .recording_intent_policy_snapshots
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&run.policy.version)
+                .is_some_and(|config| config.auto_paste_text);
+            if auto_paste_enabled {
+                bind_or_capture_auto_paste_target_for_run(
+                    state.inner(),
+                    run.run_id.get(),
+                    run.revision.get(),
+                );
+            }
             let cancelled = Arc::new(AtomicBool::new(false));
             state
                 .recording_start_cancellations
@@ -965,6 +979,7 @@ fn execute_recording_coordinator_effect(
         recording_intent::CoordinatorEffect::ShowPanel {
             effect_id,
             revision,
+            run_id,
             policy,
             ..
         } => {
@@ -988,7 +1003,21 @@ fn execute_recording_coordinator_effect(
                         // panel. Otherwise auto-paste can inherit VoicetextAI (or a
                         // stale target) after a desired-state hotkey start.
                         if config.auto_paste_text {
-                            save_active_app_target_for_auto_paste(state.inner());
+                            let session_id = run_id.map(|run_id| run_id.get());
+                            let target_already_bound = session_id.is_some_and(|session_id| {
+                                state
+                                    .auto_paste_targets_by_session
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .contains_key(&session_id)
+                            });
+                            if !target_already_bound {
+                                save_active_app_target_for_auto_paste(
+                                    state.inner(),
+                                    session_id,
+                                    session_id.is_none().then_some(revision.get()),
+                                );
+                            }
                         }
                         match show_webview_window_with_recording_config(
                             &window,
@@ -1514,7 +1543,7 @@ async fn apply_recording_window_for_hotkey_start(
         config.hide_recording_window_on_hotkey && !config.show_mini_recording_window;
     let window_visible = window.is_visible().map_err(|e| e.to_string())?;
     if should_save_auto_paste_target_for_hotkey_start(config.auto_paste_text, window_visible) {
-        save_active_app_target_for_auto_paste(state);
+        save_active_app_target_for_auto_paste(state, None, None);
     }
 
     if hide_window_on_hotkey {
@@ -2937,6 +2966,12 @@ async fn start_recording_checked(
             .fetch_add(1, Ordering::Relaxed)
             + 1
     };
+    if config.auto_paste_text {
+        // Desired-state starts already own an exact session target. Legacy/UI
+        // starts bind the last target captured before the recording window was
+        // shown, without overwriting a run-scoped target.
+        bind_last_auto_paste_target_to_session_if_absent(state.inner(), session_id);
+    }
     // fetch_max вместо store: при конкурентных стартах (кнопка + hotkey) опоздавший store
     // младшего id не может затереть уже застолблённую более новую сессию. Вытесненное
     // значение запоминаем, чтобы вернуть его, если ЭТОТ старт провалится.
@@ -3500,10 +3535,132 @@ fn calculate_recording_window_position(
     }
 }
 
-fn save_active_app_target_for_auto_paste(_state: &AppState) {
+fn remember_bounded_auto_paste_target(
+    targets: &mut BTreeMap<u64, AutoPasteTarget>,
+    owner_id: u64,
+    target: AutoPasteTarget,
+) {
+    if owner_id == 0 {
+        return;
+    }
+    targets.insert(owner_id, target);
+    while targets.len() > AUTO_PASTE_TARGET_RETENTION {
+        let Some(oldest) = targets.keys().next().copied() else {
+            break;
+        };
+        targets.remove(&oldest);
+    }
+}
+
+fn bind_pending_auto_paste_target_to_run(state: &AppState, session_id: u64, revision: u64) -> bool {
+    let pending = state
+        .pending_auto_paste_targets_by_revision
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&revision);
+    let Some(target) = pending else {
+        return false;
+    };
+    remember_bounded_auto_paste_target(
+        &mut state
+            .auto_paste_targets_by_session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        session_id,
+        target,
+    );
+    true
+}
+
+fn bind_last_auto_paste_target_to_session_if_absent(state: &AppState, session_id: u64) {
+    let mut targets = state
+        .auto_paste_targets_by_session
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if targets.contains_key(&session_id) {
+        return;
+    }
+    let target = state
+        .last_focused_app_target
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if let Some(target) = target {
+        remember_bounded_auto_paste_target(&mut targets, session_id, target);
+    }
+}
+
+fn bind_or_capture_auto_paste_target_for_run(state: &AppState, session_id: u64, revision: u64) {
+    if bind_pending_auto_paste_target_to_run(state, session_id, revision) {
+        return;
+    }
+    save_active_app_target_for_auto_paste(state, Some(session_id), None);
+}
+
+fn resolve_auto_paste_target(state: &AppState, session_id: Option<u64>) -> Option<AutoPasteTarget> {
+    match session_id {
+        Some(session_id) => state
+            .auto_paste_targets_by_session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&session_id)
+            .cloned(),
+        None => state
+            .last_focused_app_target
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone(),
+    }
+}
+
+fn store_captured_auto_paste_target(
+    state: &AppState,
+    target: AutoPasteTarget,
+    session_id: Option<u64>,
+    intent_revision: Option<u64>,
+) {
+    *state
+        .last_focused_app_target
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(target.clone());
+    if let Some(session_id) = session_id {
+        remember_bounded_auto_paste_target(
+            &mut state
+                .auto_paste_targets_by_session
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            session_id,
+            target,
+        );
+    } else if let Some(revision) = intent_revision {
+        remember_bounded_auto_paste_target(
+            &mut state
+                .pending_auto_paste_targets_by_revision
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            revision,
+            target,
+        );
+    }
+}
+
+fn save_active_app_target_for_auto_paste(
+    state: &AppState,
+    session_id: Option<u64>,
+    intent_revision: Option<u64>,
+) {
     #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
     {
         super::native_e2e::record_auto_paste_target_capture();
+        store_captured_auto_paste_target(
+            state,
+            AutoPasteTarget {
+                bundle_id: "com.voicetotext.native-e2e-target".to_string(),
+                pid: 1,
+            },
+            session_id,
+            intent_revision,
+        );
         return;
     }
     #[cfg(all(
@@ -3513,10 +3670,12 @@ fn save_active_app_target_for_auto_paste(_state: &AppState) {
     {
         match crate::infrastructure::auto_paste::get_active_app_target() {
             Some(target) => {
-                *_state
-                    .last_focused_app_target
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(target.clone());
+                store_captured_auto_paste_target(
+                    state,
+                    target.clone(),
+                    session_id,
+                    intent_revision,
+                );
                 log::info!(
                     "Saved last focused auto-paste target: bundle_id={}, pid={}",
                     target.bundle_id,
@@ -3524,7 +3683,7 @@ fn save_active_app_target_for_auto_paste(_state: &AppState) {
                 );
             }
             None => {
-                *_state
+                *state
                     .last_focused_app_target
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
@@ -4960,7 +5119,7 @@ pub async fn toggle_window(state: State<'_, AppState>, window: Window) -> Result
     } else {
         // Перед показом окна сохраняем текущее активное приложение
         // (чтобы потом вставлять текст в правильное окно)
-        save_active_app_target_for_auto_paste(state.inner());
+        save_active_app_target_for_auto_paste(state.inner(), None, None);
 
         let config = state.config.read().await.clone();
         show_window_with_recording_config(&window, &config, state.inner())?;
@@ -9090,9 +9249,10 @@ pub async fn auto_paste_text(
     state: State<'_, AppState>,
     app_handle: AppHandle,
     text: String,
+    session_id: Option<u64>,
 ) -> Result<(), String> {
     #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
-    return super::native_e2e::record_auto_paste(&text);
+    return super::native_e2e::record_auto_paste(&text, session_id);
     let window_epoch_before_paste = state.recording_window_lifecycle.current();
     log::info!("Command: auto_paste_text - text length: {}", text.len());
 
@@ -9134,16 +9294,16 @@ pub async fn auto_paste_text(
 
     #[cfg(target_os = "macos")]
     {
-        let target = validate_auto_paste_target_for_focus(
-            state
-                .last_focused_app_target
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone(),
-        )
+        let target = validate_auto_paste_target_for_focus(resolve_auto_paste_target(
+            state.inner(),
+            session_id,
+        ))
         .map_err(|message| {
-            log::warn!("{}", message);
-            message
+            let scoped_message = session_id.map_or(message.clone(), |session_id| {
+                format!("{message} for recording session {session_id}")
+            });
+            log::warn!("{}", scoped_message);
+            scoped_message
         })?;
 
         log::info!(
@@ -9701,6 +9861,44 @@ pub async fn set_authenticated(
 mod tests {
     use super::*;
     use crate::domain::{AudioChunk, Transcription};
+
+    #[test]
+    fn session_scoped_auto_paste_targets_survive_a_new_capture() {
+        let old_target = AutoPasteTarget {
+            bundle_id: "com.example.EditorA".to_string(),
+            pid: 101,
+        };
+        let new_target = AutoPasteTarget {
+            bundle_id: "com.example.EditorB".to_string(),
+            pid: 202,
+        };
+        let mut targets = BTreeMap::new();
+
+        remember_bounded_auto_paste_target(&mut targets, 34, old_target.clone());
+        remember_bounded_auto_paste_target(&mut targets, 35, new_target.clone());
+
+        assert_eq!(targets.get(&34), Some(&old_target));
+        assert_eq!(targets.get(&35), Some(&new_target));
+    }
+
+    #[test]
+    fn session_scoped_auto_paste_targets_are_bounded() {
+        let mut targets = BTreeMap::new();
+        for session_id in 1..=(AUTO_PASTE_TARGET_RETENTION as u64 + 1) {
+            remember_bounded_auto_paste_target(
+                &mut targets,
+                session_id,
+                AutoPasteTarget {
+                    bundle_id: format!("com.example.Editor{session_id}"),
+                    pid: session_id as i32,
+                },
+            );
+        }
+
+        assert_eq!(targets.len(), AUTO_PASTE_TARGET_RETENTION);
+        assert!(!targets.contains_key(&1));
+        assert!(targets.contains_key(&(AUTO_PASTE_TARGET_RETENTION as u64 + 1)));
+    }
 
     #[test]
     fn accepted_panel_latency_uses_the_intent_transition_not_the_last_effect_trace() {

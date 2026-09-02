@@ -1057,7 +1057,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   async function runAutoPasteCurrentText(
     reason: string,
     currentText: string,
-    generation: number
+    generation: number,
+    pasteSessionId: number | null
   ): Promise<boolean> {
     const normalizedCurrent = currentText.trim();
     const textToInsert = getAutoPasteDelta(normalizedCurrent);
@@ -1084,7 +1085,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         currentLength: normalizedCurrent.length,
         alreadyPastedLength: lastPastedFinalText.value.length,
       }, 'info');
-      await invoke('auto_paste_text', { text: textToInsert });
+      await invoke('auto_paste_text', {
+        text: textToInsert,
+        sessionId: pasteSessionId ?? undefined,
+      });
       if (generation !== autoPasteGeneration) {
         console.log('[AutoPaste] Paste completed after reset, keeping current session baseline:', { reason });
         clientLog('auto_paste_completed_after_reset', {
@@ -1112,7 +1116,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
-  function autoPasteCurrentText(reason: string, currentText = buildCurrentTranscriptionText()): Promise<boolean> {
+  function autoPasteCurrentText(
+    reason: string,
+    currentText = buildCurrentTranscriptionText(),
+    pasteSessionId = sessionId.value,
+  ): Promise<boolean> {
     const textSnapshot = currentText.trim();
     const generation = autoPasteGeneration;
     const task = autoPasteQueue
@@ -1122,7 +1130,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           console.log('[AutoPaste] Skipping stale paste task:', { reason });
           return true;
         }
-        return runAutoPasteCurrentText(reason, textSnapshot, generation);
+        return runAutoPasteCurrentText(reason, textSnapshot, generation, pasteSessionId);
       });
 
     autoPasteQueue = task.then(
@@ -1197,7 +1205,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     animatedAccumulatedText.value = accumulatedText.value;
   }
 
-  async function processCurrentTextAfterStop(reason: string): Promise<boolean> {
+  async function processCurrentTextAfterStop(
+    reason: string,
+    pasteSessionId = sessionId.value,
+  ): Promise<boolean> {
     const currentText = buildCurrentTranscriptionText();
     if (!currentText) {
       console.log('[STT] No transcription text to process after stop:', { reason });
@@ -1223,7 +1234,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
 
     if (autoPasteEnabled.value) {
-      await autoPasteCurrentText(reason, currentText);
+      await autoPasteCurrentText(reason, currentText, pasteSessionId);
     }
 
     return true;
@@ -1243,6 +1254,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     clearHotkeyStopFinalizeTimer();
 
     const currentText = buildCurrentTranscriptionText();
+    const pasteSessionId = sessionId.value;
     if (!currentText) return;
 
     clientLog('hotkey_stop_tail_flush', {
@@ -1267,7 +1279,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       .then(async () => {
         try {
           console.log('[AutoPaste] Pasting pending tail from previous session:', { reason, textToInsert });
-          await invoke('auto_paste_text', { text: textToInsert });
+          await invoke('auto_paste_text', {
+            text: textToInsert,
+            sessionId: pasteSessionId ?? undefined,
+          });
         } catch (err) {
           console.error('❌ Failed to paste pending tail before reset:', err);
         }
@@ -1304,7 +1319,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             partialLength: partialText.value.length,
             finalLength: finalText.value.length,
           }, 'info');
-          await processCurrentTextAfterStop(reason);
+          await processCurrentTextAfterStop(reason, payloadSessionId);
         } catch (err) {
           console.error('[STT] Failed to process text after stop:', err);
           clientLog('recording_stop_text_processing_failed', {

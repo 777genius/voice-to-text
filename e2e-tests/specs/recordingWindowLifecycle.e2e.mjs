@@ -171,13 +171,14 @@ describe('recording window lifecycle (native window + Vue, no microphone)', () =
       assert.equal(await visibility(), true);
       assert.equal(await invoke('get_recording_status'), 'Idle');
     } finally {
-      // Restore the shared harness's full layout and the config fields we changed,
-      // even after an assertion fails, so later specs do not inherit mini mode.
+      // Restore the persisted config and the current WebView layout without
+      // re-showing an already visible native window. Re-applying native size and
+      // position here can trip a GTK/X11 error trap after the hide/show stress;
+      // the test has already verified the final window is visible above.
       await invoke('update_app_config', {
         showMiniRecordingWindow: original.showMiniRecordingWindow,
         playCompletionSound: original.playCompletionSound,
       });
-      await invoke('show_recording_window');
       await browser.execute(() => {
         window.__E2E__.seedRecordingTranscript('');
         window.__E2E__.useFullRecordingLayout();

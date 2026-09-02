@@ -718,7 +718,7 @@ onMounted(async () => {
     const acceptedCloseRevision = closeRevision;
     await nextTick();
     if (acceptedCloseRevision !== closeRevision || currentWindowEpoch !== event.payload.windowEpoch || isComponentUnmounted) return;
-    if (lastAnimatedWindowEpoch !== event.payload.windowEpoch) {
+    if (useMiniLayout.value && lastAnimatedWindowEpoch !== event.payload.windowEpoch) {
       lastAnimatedWindowEpoch = event.payload.windowEpoch;
       void playMiniOpenAnimation();
     }

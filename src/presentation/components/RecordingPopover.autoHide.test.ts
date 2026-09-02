@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createApp, nextTick } from 'vue';
+import { createApp, nextTick, reactive } from 'vue';
 import { createI18n } from 'vue-i18n';
 import { createPinia, setActivePinia } from 'pinia';
 import RecordingPopover from './RecordingPopover.vue';
@@ -24,7 +24,7 @@ const resizeObserverMock = vi.hoisted(() => ({
   callbacks: [] as ResizeObserverCallback[],
 }));
 
-const appConfigMock = vi.hoisted(() => ({
+const appConfigSeed = vi.hoisted(() => ({
   autoCopyToClipboard: false,
   autoPasteText: false,
   playCompletionSound: false,
@@ -37,6 +37,7 @@ const appConfigMock = vi.hoisted(() => ({
   stopSync: vi.fn(),
   refresh: vi.fn(),
 }));
+const appConfigMock = reactive(appConfigSeed);
 
 const sttConfigMock = vi.hoisted(() => ({
   startSync: vi.fn(),
@@ -487,6 +488,21 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     nativeWindowEpoch.value = 2;
     await emitTauriEvent('recording:window-shown', {});
     await vi.advanceTimersByTimeAsync(1);
+    expect(document.querySelector('.mini-opening')).not.toBeNull();
+    wrapper.unmount();
+  });
+
+  it('does not consume an opening epoch before mini layout is enabled', async () => {
+    appConfigMock.showMiniRecordingWindow = false;
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:window-shown', 1);
+
+    await emitTauriEvent('recording:window-shown', {});
+    appConfigMock.showMiniRecordingWindow = true;
+    await nextTick();
+    await emitTauriEvent('recording:window-shown', {});
+    await vi.advanceTimersByTimeAsync(1);
+
     expect(document.querySelector('.mini-opening')).not.toBeNull();
     wrapper.unmount();
   });

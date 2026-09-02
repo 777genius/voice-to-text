@@ -451,6 +451,7 @@ pub enum CoordinatorEffect {
     ShowPanel {
         effect_id: EffectId,
         revision: IntentRevision,
+        run_id: Option<RunId>,
         source: IntentSource,
         policy: RuntimePolicySnapshot,
     },
@@ -1949,6 +1950,11 @@ fn reconcile_panel(state: &mut CoordinatorState, effects: &mut Vec<CoordinatorEf
             effects.push(CoordinatorEffect::ShowPanel {
                 effect_id,
                 revision,
+                run_id: state
+                    .capture
+                    .run()
+                    .filter(|run| run.revision == revision)
+                    .map(|run| run.run_id),
                 source,
                 policy: state.current_policy,
             });
@@ -2169,12 +2175,17 @@ mod tests {
             &mut state,
             intent(IntentKind::Start, IntentSource::CarbonHotkey, 1),
         );
+        let (_, run) = find_start(&effects);
         assert!(effects
             .iter()
             .any(|effect| matches!(effect, CoordinatorEffect::StartRecording { .. })));
-        assert!(effects
-            .iter()
-            .any(|effect| matches!(effect, CoordinatorEffect::ShowPanel { .. })));
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            CoordinatorEffect::ShowPanel {
+                run_id: Some(run_id),
+                ..
+            } if *run_id == run.run_id
+        )));
         assert!(matches!(state.capture, CaptureState::Starting { .. }));
         assert_eq!(state.desired_panel, PanelGoal::Shown);
         assert!(state.validate().is_ok());

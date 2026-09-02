@@ -2204,8 +2204,8 @@ describe('transcription connect-retry reliability', () => {
 
     const pasteCalls = invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text');
     expect(pasteCalls).toEqual([
-      ['auto_paste_text', { text: 'Ты уверен, что так будет надёжно,' }],
-      ['auto_paste_text', { text: ' фокусироваться и не сломается?' }],
+      ['auto_paste_text', { text: 'Ты уверен, что так будет надёжно,', sessionId: 18 }],
+      ['auto_paste_text', { text: ' фокусироваться и не сломается?', sessionId: 18 }],
     ]);
     expect(store.finalText).toBe('Ты уверен, что так будет надёжно, фокусироваться и не сломается?');
   });
@@ -2309,8 +2309,8 @@ describe('transcription connect-retry reliability', () => {
       await flushMicrotasks();
 
       expect(invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text')).toEqual([
-        ['auto_paste_text', { text: 'The quick brown fox' }],
-        ['auto_paste_text', { text: ' jumps over' }],
+        ['auto_paste_text', { text: 'The quick brown fox', sessionId: 19 }],
+        ['auto_paste_text', { text: ' jumps over', sessionId: 19 }],
       ]);
     } finally {
       vi.useRealTimers();
@@ -2559,8 +2559,8 @@ describe('transcription connect-retry reliability', () => {
 
     const pasteCalls = invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text');
     expect(pasteCalls).toEqual([
-      ['auto_paste_text', { text: 'Первый кусок' }],
-      ['auto_paste_text', { text: ' второй кусок' }],
+      ['auto_paste_text', { text: 'Первый кусок', sessionId: 32 }],
+      ['auto_paste_text', { text: ' второй кусок', sessionId: 32 }],
     ]);
   });
 
@@ -2603,7 +2603,7 @@ describe('transcription connect-retry reliability', () => {
     await flushMicrotasks();
 
     expect(invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text')).toEqual([
-      ['auto_paste_text', { text: 'Первый кусок' }],
+      ['auto_paste_text', { text: 'Первый кусок', sessionId: 33 }],
     ]);
 
     const secondPartial = handlers.get('transcription:partial')({
@@ -2625,8 +2625,8 @@ describe('transcription connect-retry reliability', () => {
 
     const pasteCalls = invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text');
     expect(pasteCalls).toEqual([
-      ['auto_paste_text', { text: 'Первый кусок' }],
-      ['auto_paste_text', { text: ' второй кусок' }],
+      ['auto_paste_text', { text: 'Первый кусок', sessionId: 33 }],
+      ['auto_paste_text', { text: ' второй кусок', sessionId: 33 }],
     ]);
   });
 
@@ -2688,8 +2688,8 @@ describe('transcription connect-retry reliability', () => {
 
     const pasteCalls = invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text');
     expect(pasteCalls).toEqual([
-      ['auto_paste_text', { text: 'Старый текст' }],
-      ['auto_paste_text', { text: 'Новый текст' }],
+      ['auto_paste_text', { text: 'Старый текст', sessionId: 34 }],
+      ['auto_paste_text', { text: 'Новый текст', sessionId: 35 }],
     ]);
   });
 
@@ -2750,7 +2750,7 @@ describe('transcription connect-retry reliability', () => {
       await flushMicrotasks();
 
       expect(invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text')).toEqual([
-        ['auto_paste_text', { text: 'Первый кусок' }],
+        ['auto_paste_text', { text: 'Первый кусок', sessionId: 36 }],
       ]);
 
       const lateFinal = handlers.get('transcription:final')({
@@ -2772,10 +2772,10 @@ describe('transcription connect-retry reliability', () => {
 
       const pasteCalls = invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text');
       expect(pasteCalls).toEqual([
-        ['auto_paste_text', { text: 'Первый кусок' }],
-        ['auto_paste_text', { text: ' чистовой хвост' }],
+        ['auto_paste_text', { text: 'Первый кусок', sessionId: 36 }],
+        ['auto_paste_text', { text: ' чистовой хвост', sessionId: 36 }],
       ]);
-      expect(pasteCalls).not.toContainEqual(['auto_paste_text', { text: ' сырой хвост' }]);
+      expect(pasteCalls).not.toContainEqual(['auto_paste_text', { text: ' сырой хвост', sessionId: 36 }]);
     } finally {
       vi.useRealTimers();
     }
@@ -2822,7 +2822,7 @@ describe('transcription connect-retry reliability', () => {
       await flushMicrotasks();
 
       expect(invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text')).toEqual([
-        ['auto_paste_text', { text: 'последний распознанный текст' }],
+        ['auto_paste_text', { text: 'последний распознанный текст', sessionId: 37 }],
       ]);
     } finally {
       vi.useRealTimers();
@@ -2982,7 +2982,7 @@ describe('transcription connect-retry reliability', () => {
       await flushMicrotasks();
 
       expect(invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text')).toEqual([
-        ['auto_paste_text', { text: 'текст перед vad stop' }],
+        ['auto_paste_text', { text: 'текст перед vad stop', sessionId: 39 }],
       ]);
     } finally {
       vi.useRealTimers();
@@ -3038,7 +3038,7 @@ describe('transcription connect-retry reliability', () => {
       await flushMicrotasks();
 
       expect(invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text')).toEqual([
-        ['auto_paste_text', { text: 'чистовой vad текст' }],
+        ['auto_paste_text', { text: 'чистовой vad текст', sessionId: 39 }],
       ]);
     } finally {
       vi.useRealTimers();
@@ -3084,7 +3084,7 @@ describe('transcription connect-retry reliability', () => {
       await flushMicrotasks();
 
       expect(invokeMock.mock.calls.filter((call) => call[0] === 'auto_paste_text')).toEqual([
-        ['auto_paste_text', { text: 'готовый сегмент' }],
+        ['auto_paste_text', { text: 'готовый сегмент', sessionId: 40 }],
       ]);
     } finally {
       vi.useRealTimers();

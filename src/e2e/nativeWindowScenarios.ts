@@ -21,6 +21,7 @@ interface NativeState {
     providerStarts: number; providerResumes: number; providerStops: number; providerFailures: number; activeProviders: number;
     providerAudioChunks: number; finals: number; lastTranscript: string;
     autoPasteTargetCaptures: number; autoPastes: number; lastPastedText: string | null;
+    lastPastedSessionId: number | null;
   };
 }
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -245,10 +246,12 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     check(current.fixture.autoPasteTargetCaptures === beforeToggleRestart.fixture.autoPasteTargetCaptures + 1,
       'Toggle start did not capture exactly one auto-paste target before showing the panel');
     const firstToggleTranscript = current.expected;
+    const firstToggleSessionId = current.sessionId;
     await stop();
     const firstToggleStopped = await until(state,
       (sample) => sample.fixture.autoPastes === beforeToggleRestart.fixture.autoPastes + 1 &&
-        sample.fixture.lastPastedText === firstToggleTranscript,
+        sample.fixture.lastPastedText === firstToggleTranscript &&
+        sample.fixture.lastPastedSessionId === firstToggleSessionId,
       'Recognized final text did not reach the safe auto-paste fixture exactly once');
     const hiddenToggleEpoch = firstToggleStopped.windowEpoch;
 
@@ -258,10 +261,12 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     check(current.fixture.autoPasteTargetCaptures === firstToggleStopped.fixture.autoPasteTargetCaptures + 1,
       'Toggle restart did not replace the auto-paste target exactly once');
     const secondToggleTranscript = current.expected;
+    const secondToggleSessionId = current.sessionId;
     await stop();
     await until(state,
       (sample) => sample.fixture.autoPastes === firstToggleStopped.fixture.autoPastes + 1 &&
-        sample.fixture.lastPastedText === secondToggleTranscript,
+        sample.fixture.lastPastedText === secondToggleTranscript &&
+        sample.fixture.lastPastedSessionId === secondToggleSessionId,
       'Second recognized final text did not reach the safe auto-paste fixture exactly once');
     report.scenarios.push('toggle-auto-hide-reopens-and-pastes-recognized-text');
     await invoke('update_app_config', {
