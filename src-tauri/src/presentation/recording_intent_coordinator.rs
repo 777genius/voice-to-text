@@ -451,6 +451,7 @@ pub enum CoordinatorEffect {
     ShowPanel {
         effect_id: EffectId,
         revision: IntentRevision,
+        run_id: Option<RunId>,
         source: IntentSource,
         policy: RuntimePolicySnapshot,
     },
@@ -1293,10 +1294,12 @@ fn apply_intent(state: &mut CoordinatorState, intent: RecordingIntent, phase: &m
     }
     state.panel_failure = None;
     if wants_on {
-        if intent.kind == IntentKind::Start && matches!(state.panel, PanelState::Shown { .. }) {
-            // Explicit Start is also a foreground/show request. Re-issuing the
-            // idempotent show advances the native window epoch without creating
-            // another capture run.
+        if state.current_policy.show_panel_on_start
+            && matches!(state.panel, PanelState::Shown { .. })
+        {
+            // Every accepted transition to On is also a foreground/show request.
+            // Re-issuing the idempotent show repairs native visibility after an
+            // out-of-band UI auto-hide and advances the epoch for this intent.
             state.panel = PanelState::Hidden;
         }
         state.desired_recording = DesiredRecording::On {
@@ -1947,6 +1950,11 @@ fn reconcile_panel(state: &mut CoordinatorState, effects: &mut Vec<CoordinatorEf
             effects.push(CoordinatorEffect::ShowPanel {
                 effect_id,
                 revision,
+                run_id: state
+                    .capture
+                    .run()
+                    .filter(|run| run.revision == revision)
+                    .map(|run| run.run_id),
                 source,
                 policy: state.current_policy,
             });
@@ -2167,12 +2175,17 @@ mod tests {
             &mut state,
             intent(IntentKind::Start, IntentSource::CarbonHotkey, 1),
         );
+        let (_, run) = find_start(&effects);
         assert!(effects
             .iter()
             .any(|effect| matches!(effect, CoordinatorEffect::StartRecording { .. })));
-        assert!(effects
-            .iter()
-            .any(|effect| matches!(effect, CoordinatorEffect::ShowPanel { .. })));
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            CoordinatorEffect::ShowPanel {
+                run_id: Some(run_id),
+                ..
+            } if *run_id == run.run_id
+        )));
         assert!(matches!(state.capture, CaptureState::Starting { .. }));
         assert_eq!(state.desired_panel, PanelGoal::Shown);
         assert!(state.validate().is_ok());
@@ -2298,6 +2311,75 @@ mod tests {
             .iter()
             .any(|effect| matches!(effect, CoordinatorEffect::StartRecording { .. })));
         assert!(duplicate
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::ShowPanel { .. })));
+    }
+
+    #[test]
+    fn toggle_restart_reissues_show_after_out_of_band_auto_hide() {
+        let mut policy = RuntimePolicySnapshot::default();
+        policy.hide_panel_on_hotkey_stop = false;
+        let mut state = CoordinatorState::new(policy);
+
+        let initial = reduce(
+            &mut state,
+            intent(IntentKind::Toggle, IntentSource::CarbonHotkey, 1),
+        );
+        let (start_id, run) = find_start(&initial);
+        let show_id = initial
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::ShowPanel { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .expect("expected initial ShowPanel");
+        complete_start(&mut state, start_id, run.run_id);
+        reduce(
+            &mut state,
+            CoordinatorEvent::WindowFinished {
+                effect_id: show_id,
+                outcome: WindowOutcome::Applied { window_epoch: 7 },
+            },
+        );
+
+        let stop = reduce(
+            &mut state,
+            intent(IntentKind::Toggle, IntentSource::CarbonHotkey, 2),
+        );
+        assert!(!stop
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::HidePanel { .. })));
+        let (stop_id, _) = find_stop(&stop);
+        let finalizing = reduce(
+            &mut state,
+            CoordinatorEvent::CaptureStopped {
+                effect_id: stop_id,
+                run_id: run.run_id,
+                outcome: CaptureStopOutcome::Inactive,
+            },
+        );
+        let (finalize_id, _) = find_finalize(&finalizing);
+        reduce(
+            &mut state,
+            CoordinatorEvent::FinalizeFinished {
+                effect_id: finalize_id,
+                run_id: run.run_id,
+                outcome: FinalizeOutcome::NoTranscript,
+            },
+        );
+
+        // The frontend may now hide the native window without mutating this
+        // pure reducer, so its last completed panel state is intentionally stale.
+        assert!(matches!(state.panel, PanelState::Shown { window_epoch: 7 }));
+        let restarted = reduce(
+            &mut state,
+            intent(IntentKind::Toggle, IntentSource::CarbonHotkey, 3),
+        );
+
+        assert!(restarted
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::StartRecording { .. })));
+        assert!(restarted
             .iter()
             .any(|effect| matches!(effect, CoordinatorEffect::ShowPanel { .. })));
     }

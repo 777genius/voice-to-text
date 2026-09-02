@@ -230,8 +230,17 @@ pub struct AppState {
     vad_handler_task: Arc<RwLock<Option<tauri::async_runtime::JoinHandle<()>>>>,
 
     /// Последнее активное приложение (перед показом VoicetextAI окна)
-    /// Используется для автоматической вставки текста в правильное окно
-    pub last_focused_app_target: Arc<RwLock<Option<AutoPasteTarget>>>,
+    /// Используется только как fallback для legacy/non-recording window flows.
+    pub last_focused_app_target: Arc<std::sync::Mutex<Option<AutoPasteTarget>>>,
+
+    /// Immutable per-session paste destinations. A newer recording must not
+    /// redirect delayed text that still belongs to an older session.
+    pub auto_paste_targets_by_session: Arc<std::sync::Mutex<BTreeMap<u64, AutoPasteTarget>>>,
+
+    /// A restart can show the panel while the previous session is still
+    /// finalizing and before the coordinator allocates the next run id.
+    pub pending_auto_paste_targets_by_revision:
+        Arc<std::sync::Mutex<BTreeMap<u64, AutoPasteTarget>>>,
 
     /// Флаг авторизации пользователя (синхронизируется из frontend)
     /// Используется для определения какое окно показывать при нажатии hotkey
@@ -459,7 +468,11 @@ impl AppState {
                     vad_timeout_tx: vad_tx,
                     vad_timeout_rx: Arc::new(tokio::sync::Mutex::new(vad_rx)),
                     vad_handler_task: Arc::new(RwLock::new(None)),
-                    last_focused_app_target: Arc::new(RwLock::new(None)),
+                    last_focused_app_target: Arc::new(std::sync::Mutex::new(None)),
+                    auto_paste_targets_by_session: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+                    pending_auto_paste_targets_by_revision: Arc::new(std::sync::Mutex::new(
+                        BTreeMap::new(),
+                    )),
                     is_authenticated: Arc::new(RwLock::new(false)),
                     is_authenticated_runtime: Arc::new(AtomicBool::new(false)),
                     auth_store: Arc::new(RwLock::new(AuthStoreData {
@@ -560,7 +573,11 @@ impl AppState {
                     vad_timeout_tx: vad_tx,
                     vad_timeout_rx: Arc::new(tokio::sync::Mutex::new(vad_rx)),
                     vad_handler_task: Arc::new(RwLock::new(None)),
-                    last_focused_app_target: Arc::new(RwLock::new(None)),
+                    last_focused_app_target: Arc::new(std::sync::Mutex::new(None)),
+                    auto_paste_targets_by_session: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+                    pending_auto_paste_targets_by_revision: Arc::new(std::sync::Mutex::new(
+                        BTreeMap::new(),
+                    )),
                     is_authenticated: Arc::new(RwLock::new(false)),
                     is_authenticated_runtime: Arc::new(AtomicBool::new(false)),
                     auth_store: Arc::new(RwLock::new(AuthStoreData {
@@ -697,7 +714,11 @@ impl AppState {
             vad_timeout_tx: vad_tx,
             vad_timeout_rx: Arc::new(tokio::sync::Mutex::new(vad_rx)),
             vad_handler_task: Arc::new(RwLock::new(None)),
-            last_focused_app_target: Arc::new(RwLock::new(None)),
+            last_focused_app_target: Arc::new(std::sync::Mutex::new(None)),
+            auto_paste_targets_by_session: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            pending_auto_paste_targets_by_revision: Arc::new(
+                std::sync::Mutex::new(BTreeMap::new()),
+            ),
             is_authenticated: Arc::new(RwLock::new(false)),
             is_authenticated_runtime: Arc::new(AtomicBool::new(false)),
             auth_store: Arc::new(RwLock::new(AuthStoreData {

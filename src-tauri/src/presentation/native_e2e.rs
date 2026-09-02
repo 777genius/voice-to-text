@@ -32,6 +32,10 @@ struct Counters {
     provider_audio_chunks: u64,
     finals: u64,
     last_transcript: Option<String>,
+    auto_paste_target_captures: u64,
+    auto_pastes: u64,
+    last_pasted_text: Option<String>,
+    last_pasted_session_id: Option<u64>,
 }
 #[derive(Clone)]
 struct Timing {
@@ -58,6 +62,26 @@ pub struct Fixture {
 }
 pub fn fixture() -> Arc<Fixture> {
     FIXTURE.get_or_init(|| Arc::new(Fixture::default())).clone()
+}
+
+pub(super) fn record_auto_paste_target_capture() {
+    fixture()
+        .counters
+        .lock()
+        .unwrap()
+        .auto_paste_target_captures += 1;
+}
+
+pub(super) fn record_auto_paste(text: &str, session_id: Option<u64>) -> Result<(), String> {
+    if text.is_empty() {
+        return Err("native fixture refuses an empty auto-paste".into());
+    }
+    let fixture = fixture();
+    let mut counters = fixture.counters.lock().unwrap();
+    counters.auto_pastes += 1;
+    counters.last_pasted_text = Some(text.to_string());
+    counters.last_pasted_session_id = session_id;
+    Ok(())
 }
 
 pub fn validate_launch(identifier: &str) -> Result<(), String> {
@@ -937,6 +961,21 @@ mod tests {
         assert!(validate_launch("com.voicetotext.app").is_err());
         assert!(validate_launch("com.voicetotext.app.native-e2e.").is_err());
         assert!(validate_launch("com.voicetotext.app.native-e2e../outside").is_err());
+    }
+
+    #[test]
+    fn auto_paste_fixture_preserves_exact_text() {
+        let text = "  exact paste fixture  \n";
+        record_auto_paste(text, Some(41)).unwrap();
+        assert_eq!(
+            fixture().counters.lock().unwrap().last_pasted_text,
+            Some(text.to_string())
+        );
+        assert_eq!(
+            fixture().counters.lock().unwrap().last_pasted_session_id,
+            Some(41)
+        );
+        assert!(record_auto_paste("", Some(42)).is_err());
     }
 
     #[tokio::test]

@@ -35,5 +35,21 @@ const providerOptions = computed<StreamingProviderOption[]>(() => [
       density="comfortable"
       hide-details
     />
+
+    <v-alert
+      v-if="backendStreamingProvider === BackendStreamingProviderType.ElevenLabs"
+      data-testid="elevenlabs-startup-delay-notice"
+      type="warning"
+      variant="tonal"
+      density="compact"
+      class="mt-3"
+    >
+      <div class="font-weight-medium mb-1">
+        {{ t('settings.streamingProvider.elevenLabsDelayTitle') }}
+      </div>
+      <div class="text-body-2">
+        {{ t('settings.streamingProvider.elevenLabsDelayBody') }}
+      </div>
+    </v-alert>
   </SettingGroup>
 </template>
