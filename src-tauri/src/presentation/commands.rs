@@ -983,18 +983,26 @@ fn execute_recording_coordinator_effect(
                     .get(&policy.version)
                     .cloned();
                 match config {
-                    Some(config) => match show_webview_window_with_recording_config(
-                        &window,
-                        &config,
-                        state.inner(),
-                    ) {
-                        Ok(()) => recording_intent::WindowOutcome::Applied {
-                            window_epoch: state.recording_window_lifecycle.current(),
-                        },
-                        Err(error) => recording_intent::WindowOutcome::Failed(
-                            recording_intent_error_code(&error),
-                        ),
-                    },
+                    Some(config) => {
+                        // Capture the user's current target before AppKit shows the
+                        // panel. Otherwise auto-paste can inherit VoicetextAI (or a
+                        // stale target) after a desired-state hotkey start.
+                        if config.auto_paste_text {
+                            save_active_app_target_for_auto_paste(state.inner());
+                        }
+                        match show_webview_window_with_recording_config(
+                            &window,
+                            &config,
+                            state.inner(),
+                        ) {
+                            Ok(()) => recording_intent::WindowOutcome::Applied {
+                                window_epoch: state.recording_window_lifecycle.current(),
+                            },
+                            Err(error) => recording_intent::WindowOutcome::Failed(
+                                recording_intent_error_code(&error),
+                            ),
+                        }
+                    }
                     None => recording_intent::WindowOutcome::Failed(recording_intent::ErrorCode(4)),
                 }
             } else {
@@ -1506,7 +1514,7 @@ async fn apply_recording_window_for_hotkey_start(
         config.hide_recording_window_on_hotkey && !config.show_mini_recording_window;
     let window_visible = window.is_visible().map_err(|e| e.to_string())?;
     if should_save_auto_paste_target_for_hotkey_start(config.auto_paste_text, window_visible) {
-        save_active_app_target_for_auto_paste(state).await;
+        save_active_app_target_for_auto_paste(state);
     }
 
     if hide_window_on_hotkey {
@@ -3492,14 +3500,23 @@ fn calculate_recording_window_position(
     }
 }
 
-async fn save_active_app_target_for_auto_paste(_state: &AppState) {
+fn save_active_app_target_for_auto_paste(_state: &AppState) {
     #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
-    return;
-    #[cfg(target_os = "macos")]
+    {
+        super::native_e2e::record_auto_paste_target_capture();
+        return;
+    }
+    #[cfg(all(
+        target_os = "macos",
+        not(all(debug_assertions, feature = "native-window-e2e"))
+    ))]
     {
         match crate::infrastructure::auto_paste::get_active_app_target() {
             Some(target) => {
-                *_state.last_focused_app_target.write().await = Some(target.clone());
+                *_state
+                    .last_focused_app_target
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(target.clone());
                 log::info!(
                     "Saved last focused auto-paste target: bundle_id={}, pid={}",
                     target.bundle_id,
@@ -3507,7 +3524,10 @@ async fn save_active_app_target_for_auto_paste(_state: &AppState) {
                 );
             }
             None => {
-                *_state.last_focused_app_target.write().await = None;
+                *_state
+                    .last_focused_app_target
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
                 log::warn!("No valid frontmost app target saved for auto-paste");
             }
         }
@@ -4940,7 +4960,7 @@ pub async fn toggle_window(state: State<'_, AppState>, window: Window) -> Result
     } else {
         // Перед показом окна сохраняем текущее активное приложение
         // (чтобы потом вставлять текст в правильное окно)
-        save_active_app_target_for_auto_paste(state.inner()).await;
+        save_active_app_target_for_auto_paste(state.inner());
 
         let config = state.config.read().await.clone();
         show_window_with_recording_config(&window, &config, state.inner())?;
@@ -9072,7 +9092,7 @@ pub async fn auto_paste_text(
     text: String,
 ) -> Result<(), String> {
     #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
-    return Err("System clipboard and external-app paste are disabled in native fixture".into());
+    return super::native_e2e::record_auto_paste(&text);
     let window_epoch_before_paste = state.recording_window_lifecycle.current();
     log::info!("Command: auto_paste_text - text length: {}", text.len());
 
@@ -9115,7 +9135,11 @@ pub async fn auto_paste_text(
     #[cfg(target_os = "macos")]
     {
         let target = validate_auto_paste_target_for_focus(
-            state.last_focused_app_target.read().await.clone(),
+            state
+                .last_focused_app_target
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
         )
         .map_err(|message| {
             log::warn!("{}", message);

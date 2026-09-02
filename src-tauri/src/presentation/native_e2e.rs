@@ -32,6 +32,9 @@ struct Counters {
     provider_audio_chunks: u64,
     finals: u64,
     last_transcript: Option<String>,
+    auto_paste_target_captures: u64,
+    auto_pastes: u64,
+    last_pasted_text: Option<String>,
 }
 #[derive(Clone)]
 struct Timing {
@@ -58,6 +61,26 @@ pub struct Fixture {
 }
 pub fn fixture() -> Arc<Fixture> {
     FIXTURE.get_or_init(|| Arc::new(Fixture::default())).clone()
+}
+
+pub(super) fn record_auto_paste_target_capture() {
+    fixture()
+        .counters
+        .lock()
+        .unwrap()
+        .auto_paste_target_captures += 1;
+}
+
+pub(super) fn record_auto_paste(text: &str) -> Result<(), String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("native fixture refuses an empty auto-paste".into());
+    }
+    let fixture = fixture();
+    let mut counters = fixture.counters.lock().unwrap();
+    counters.auto_pastes += 1;
+    counters.last_pasted_text = Some(text.to_string());
+    Ok(())
 }
 
 pub fn validate_launch(identifier: &str) -> Result<(), String> {

@@ -59,7 +59,9 @@ Scenarios cover 22 complete record/transcript/stop/hide/reopen cycles, cold and 
 current/stale real native closes, a replacement press during the 220 ms close interval, stale status
 and window events, session-scoped stop ownership, duplicate key callbacks, stop during slow Starting,
 queued hold cancellation during Processing, failed start/retry, UI retry cancellation by a newer
-native hotkey or manual stop, and mini/full layouts. It also proves automatic retry after a real
+native hotkey or manual stop, and mini/full layouts. A dedicated toggle-mode cycle proves that a
+frontend auto-hide is followed by a fresh native show and that recognized final text reaches a safe
+fixture paste with a newly captured target. It also proves automatic retry after a real
 scoped Starting failure clears native ownership, provisional hold cancellation before session
 allocation leaves the visible UI Idle, and duplicate direct starts preserve working UI minimize.
 Mutation observers retain brief closing-class

@@ -20,6 +20,7 @@ interface NativeState {
     captureStarts: number; captureStops: number; activeCaptures: number; audioChunks: number;
     providerStarts: number; providerResumes: number; providerStops: number; providerFailures: number; activeProviders: number;
     providerAudioChunks: number; finals: number; lastTranscript: string;
+    autoPasteTargetCaptures: number; autoPastes: number; lastPastedText: string | null;
   };
 }
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -222,6 +223,54 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     }, current.expected);
     await stop();
     report.scenarios.push('current-and-stale-native-close');
+
+    // Production users normally use toggle mode and may leave native hotkey-hide
+    // disabled. Vue then performs the delayed auto-hide after finalization. The
+    // coordinator's last completed panel state used to remain Shown, so the next
+    // toggle started audio without issuing another native show. Exercise that
+    // exact path, including the safe fixture substitute for external-app paste.
+    // Let the previous scenario's hotkey-stop grace expire while auto-paste is
+    // still disabled, so its transcript cannot contaminate these exact counters.
+    await delay(1_550);
+    await progress('toggle-auto-hide-autopaste-restart-starting');
+    await invoke('update_app_config', {
+      holdToRecord: false,
+      hideRecordingWindowOnHotkey: false,
+      autoPasteText: true,
+    });
+    await appConfig.refresh();
+    holdMode = false;
+    const beforeToggleRestart = await state();
+    current = await start();
+    check(current.fixture.autoPasteTargetCaptures === beforeToggleRestart.fixture.autoPasteTargetCaptures + 1,
+      'Toggle start did not capture exactly one auto-paste target before showing the panel');
+    const firstToggleTranscript = current.expected;
+    await stop();
+    const firstToggleStopped = await until(state,
+      (sample) => sample.fixture.autoPastes === beforeToggleRestart.fixture.autoPastes + 1 &&
+        sample.fixture.lastPastedText === firstToggleTranscript,
+      'Recognized final text did not reach the safe auto-paste fixture exactly once');
+    const hiddenToggleEpoch = firstToggleStopped.windowEpoch;
+
+    current = await start();
+    check(current.windowEpoch > hiddenToggleEpoch,
+      'Toggle restart after frontend auto-hide did not issue a fresh native show');
+    check(current.fixture.autoPasteTargetCaptures === firstToggleStopped.fixture.autoPasteTargetCaptures + 1,
+      'Toggle restart did not replace the auto-paste target exactly once');
+    const secondToggleTranscript = current.expected;
+    await stop();
+    await until(state,
+      (sample) => sample.fixture.autoPastes === firstToggleStopped.fixture.autoPastes + 1 &&
+        sample.fixture.lastPastedText === secondToggleTranscript,
+      'Second recognized final text did not reach the safe auto-paste fixture exactly once');
+    report.scenarios.push('toggle-auto-hide-reopens-and-pastes-recognized-text');
+    await invoke('update_app_config', {
+      holdToRecord: true,
+      hideRecordingWindowOnHotkey: true,
+      autoPasteText: false,
+    });
+    await appConfig.refresh();
+    holdMode = true;
 
     await progress('duplicate-direct-start-starting');
     current = await start();

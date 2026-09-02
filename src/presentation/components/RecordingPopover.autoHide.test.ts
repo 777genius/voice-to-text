@@ -14,6 +14,7 @@ const tauriEventMock = vi.hoisted(() => ({
 }));
 
 const invokeMock = vi.hoisted(() => vi.fn());
+const openExternalUrlMock = vi.hoisted(() => vi.fn());
 const hideWindowMock = vi.hoisted(() => vi.fn());
 const outerPositionMock = vi.hoisted(() => vi.fn());
 const nativeWindowEpoch = vi.hoisted(() => ({ value: 1 }));
@@ -52,6 +53,10 @@ const authStoreMock = vi.hoisted(() => ({
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args: any[]) => invokeMock(...args),
+}));
+
+vi.mock('@tauri-apps/plugin-shell', () => ({
+  open: (...args: any[]) => openExternalUrlMock(...args),
 }));
 
 vi.mock('@tauri-apps/api/event', () => ({
@@ -206,6 +211,7 @@ function mountRecordingPopover() {
             title: 'VoicetextAI',
           },
           main: {
+          support: 'Support',
           miniHotkeyPrompt: 'Press {hotkey}',
           errorGeneric: 'Error',
           connecting: 'Connecting',
@@ -279,6 +285,8 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     });
 
     invokeMock.mockReset();
+    openExternalUrlMock.mockReset();
+    openExternalUrlMock.mockResolvedValue(undefined);
     nativeWindowEpoch.value = 1;
     cursorOverRecordingWindowMock.value = false;
     invokeMock.mockImplementation(async (command: string) => {
@@ -443,6 +451,43 @@ describe('RecordingPopover mini auto-hide e2e', () => {
 
     expect(document.activeElement).not.toBe(profileButton);
     expect(invokeMock).toHaveBeenCalledWith('show_profile_window', { initialSection: 'none' });
+    wrapper.unmount();
+  });
+
+  it('opens the support issue tracker from the mini actions', async () => {
+    cursorOverRecordingWindowMock.value = true;
+
+    const wrapper = mountRecordingPopover();
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(80);
+    await nextTick();
+
+    const supportButton = document.querySelector<HTMLButtonElement>('[data-testid="mini-support"]');
+    expect(supportButton).not.toBeNull();
+    supportButton!.click();
+    await flushMicrotasks();
+
+    expect(openExternalUrlMock).toHaveBeenCalledOnce();
+    expect(openExternalUrlMock).toHaveBeenCalledWith('https://github.com/777genius/voice-to-text/issues');
+    wrapper.unmount();
+  });
+
+  it('does not replay the mini opening animation for a duplicate shown event in the same epoch', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:window-shown', 1);
+
+    await emitTauriEvent('recording:window-shown', {});
+    await vi.advanceTimersByTimeAsync(520);
+    expect(document.querySelector('.mini-opening')).toBeNull();
+
+    await emitTauriEvent('recording:window-shown', {});
+    await vi.advanceTimersByTimeAsync(1);
+    expect(document.querySelector('.mini-opening')).toBeNull();
+
+    nativeWindowEpoch.value = 2;
+    await emitTauriEvent('recording:window-shown', {});
+    await vi.advanceTimersByTimeAsync(1);
+    expect(document.querySelector('.mini-opening')).not.toBeNull();
     wrapper.unmount();
   });
 

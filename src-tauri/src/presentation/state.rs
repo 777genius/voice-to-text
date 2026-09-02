@@ -231,7 +231,7 @@ pub struct AppState {
 
     /// Последнее активное приложение (перед показом VoicetextAI окна)
     /// Используется для автоматической вставки текста в правильное окно
-    pub last_focused_app_target: Arc<RwLock<Option<AutoPasteTarget>>>,
+    pub last_focused_app_target: Arc<std::sync::Mutex<Option<AutoPasteTarget>>>,
 
     /// Флаг авторизации пользователя (синхронизируется из frontend)
     /// Используется для определения какое окно показывать при нажатии hotkey
@@ -459,7 +459,7 @@ impl AppState {
                     vad_timeout_tx: vad_tx,
                     vad_timeout_rx: Arc::new(tokio::sync::Mutex::new(vad_rx)),
                     vad_handler_task: Arc::new(RwLock::new(None)),
-                    last_focused_app_target: Arc::new(RwLock::new(None)),
+                    last_focused_app_target: Arc::new(std::sync::Mutex::new(None)),
                     is_authenticated: Arc::new(RwLock::new(false)),
                     is_authenticated_runtime: Arc::new(AtomicBool::new(false)),
                     auth_store: Arc::new(RwLock::new(AuthStoreData {
@@ -560,7 +560,7 @@ impl AppState {
                     vad_timeout_tx: vad_tx,
                     vad_timeout_rx: Arc::new(tokio::sync::Mutex::new(vad_rx)),
                     vad_handler_task: Arc::new(RwLock::new(None)),
-                    last_focused_app_target: Arc::new(RwLock::new(None)),
+                    last_focused_app_target: Arc::new(std::sync::Mutex::new(None)),
                     is_authenticated: Arc::new(RwLock::new(false)),
                     is_authenticated_runtime: Arc::new(AtomicBool::new(false)),
                     auth_store: Arc::new(RwLock::new(AuthStoreData {
@@ -697,7 +697,7 @@ impl AppState {
             vad_timeout_tx: vad_tx,
             vad_timeout_rx: Arc::new(tokio::sync::Mutex::new(vad_rx)),
             vad_handler_task: Arc::new(RwLock::new(None)),
-            last_focused_app_target: Arc::new(RwLock::new(None)),
+            last_focused_app_target: Arc::new(std::sync::Mutex::new(None)),
             is_authenticated: Arc::new(RwLock::new(false)),
             is_authenticated_runtime: Arc::new(AtomicBool::new(false)),
             auth_store: Arc::new(RwLock::new(AuthStoreData {

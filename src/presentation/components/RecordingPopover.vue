@@ -6,6 +6,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { currentMonitor } from '@tauri-apps/api/window';
 import { getVersion } from '@tauri-apps/api/app';
+import { open as openExternalUrl } from '@tauri-apps/plugin-shell';
 import { useTranscriptionStore } from '../../stores/transcription';
 import { useAppConfigStore } from '../../stores/appConfig';
 import { useSettingsStore } from '../../features/settings';
@@ -64,6 +65,7 @@ const miniHideSide = ref<'left' | 'right'>('right');
 const isMiniWindow = computed(() => appConfigStore.showMiniRecordingWindow);
 const useMiniLayout = computed(() => isMiniWindow.value && !showUpdateDialog.value);
 const isMiniActionsVisible = ref(false);
+const SUPPORT_ISSUES_URL = 'https://github.com/777genius/voice-to-text/issues';
 
 const recordingHotkey = computed(() => formatHotkeyForDisplay(appConfigStore.recordingHotkey));
 
@@ -289,6 +291,7 @@ let hideGeneration = 0;
 let closeRevision = 0;
 let closingWindowEpoch: number | null = null;
 let currentWindowEpoch: number | null = null;
+let lastAnimatedWindowEpoch: number | null = null;
 let handledStartEpoch: number | null = null;
 let cancelledStartEpoch = -1;
 let pendingRustStart: { epoch: number; revision: number } | null = null;
@@ -715,7 +718,10 @@ onMounted(async () => {
     const acceptedCloseRevision = closeRevision;
     await nextTick();
     if (acceptedCloseRevision !== closeRevision || currentWindowEpoch !== event.payload.windowEpoch || isComponentUnmounted) return;
-    void playMiniOpenAnimation();
+    if (lastAnimatedWindowEpoch !== event.payload.windowEpoch) {
+      lastAnimatedWindowEpoch = event.payload.windowEpoch;
+      void playMiniOpenAnimation();
+    }
     alignMiniTextToEnd();
     // Подтягиваем актуальную auth session из Rust SoT (important when WebView was "frozen").
     // Best-effort: не блокируем UI на сетевых/IPC проблемах.
@@ -929,6 +935,19 @@ const openProfileWithLicense = (event?: Event) => {
   showProfile.value = true;
 };
 
+const openSupport = async (event?: Event) => {
+  resetMiniActionState(event);
+  try {
+    if (isTauriAvailable()) {
+      await openExternalUrl(SUPPORT_ISSUES_URL);
+      return;
+    }
+    window.open(SUPPORT_ISSUES_URL, '_blank', 'noopener,noreferrer');
+  } catch (err) {
+    console.error('Failed to open support page:', err);
+  }
+};
+
 const closeProfile = () => {
   resetMiniActionState();
   showProfile.value = false;
@@ -1103,6 +1122,15 @@ const minimizeWindow = async (event?: Event) => {
                 :title="t('profile.title')"
               >
                 <span class="mdi mdi-account-circle-outline"></span>
+              </button>
+              <button
+                class="mini-icon-button"
+                data-testid="mini-support"
+                @click="openSupport"
+                :title="t('main.support')"
+                :aria-label="t('main.support')"
+              >
+                <span class="mdi mdi-lifebuoy"></span>
               </button>
             </template>
             <button class="mini-icon-button" @click="minimizeWindow" :title="t('main.minimize')">
@@ -1472,7 +1500,7 @@ const minimizeWindow = async (event?: Event) => {
   padding: 2px 5px 2px 7px;
   cursor: default;
   user-select: none;
-  --mini-actions-reserve: 82px;
+  --mini-actions-reserve: 101px;
 }
 
 .mini-status-dot {

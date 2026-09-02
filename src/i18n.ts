@@ -8,6 +8,7 @@ const messages = {
     main: {
       minimize: 'Minimize',
       settings: 'Settings',
+      support: 'Support',
       connectionRecovering: 'Reconnecting...',
       connectionPoor: 'Poor connection. Recording continues...',
       connecting: 'Connecting...',
@@ -53,8 +54,10 @@ const messages = {
       },
       streamingProvider: {
         label: 'Streaming provider',
-        optionDeepgram: 'Deepgram',
+        optionDeepgram: 'Deepgram (recommended)',
         optionElevenLabs: 'ElevenLabs',
+        elevenLabsDelayTitle: 'ElevenLabs may reconnect before recording',
+        elevenLabsDelayBody: 'Wait for the green indicator before speaking. While ElevenLabs connects, speech may not be recognized and the first text may appear a few seconds later.',
       },
       language: {
         label: 'Language',
@@ -430,6 +433,7 @@ const messages = {
     main: {
       minimize: 'Свернуть',
       settings: 'Настройки',
+      support: 'Поддержка',
       connectionRecovering: 'Восстановление связи...',
       connectionPoor: 'Плохая связь. Запись продолжается...',
       connecting: 'Подключение...',
@@ -475,8 +479,10 @@ const messages = {
       },
       streamingProvider: {
         label: 'Streaming-провайдер',
-        optionDeepgram: 'Deepgram',
+        optionDeepgram: 'Deepgram (рекомендуется)',
         optionElevenLabs: 'ElevenLabs',
+        elevenLabsDelayTitle: 'ElevenLabs может подключаться заново перед записью',
+        elevenLabsDelayBody: 'Дождитесь зелёного индикатора перед началом речи. Пока ElevenLabs подключается, сказанное может не распознаться, а первый текст появиться с задержкой в несколько секунд.',
       },
       language: {
         label: 'Язык',
@@ -852,6 +858,7 @@ const messages = {
     main: {
       minimize: 'Minimizar',
       settings: 'Ajustes',
+      support: 'Soporte',
       connectionRecovering: 'Reconectando...',
       connectionPoor: 'Conexión débil. La grabación continúa...',
       connecting: 'Conectando...',
@@ -897,8 +904,10 @@ const messages = {
       },
       streamingProvider: {
         label: 'Proveedor de streaming',
-        optionDeepgram: 'Deepgram',
+        optionDeepgram: 'Deepgram (recomendado)',
         optionElevenLabs: 'ElevenLabs',
+        elevenLabsDelayTitle: 'ElevenLabs puede reconectarse antes de grabar',
+        elevenLabsDelayBody: 'Espere al indicador verde antes de hablar. Mientras ElevenLabs se conecta, es posible que no se reconozca lo dicho y el primer texto puede tardar unos segundos en aparecer.',
       },
       language: {
         label: 'Idioma',
@@ -1274,6 +1283,7 @@ const messages = {
     main: {
       minimize: 'Réduire',
       settings: 'Paramètres',
+      support: 'Assistance',
       connectionRecovering: 'Reconnexion...',
       connectionPoor: 'Connexion faible. L’enregistrement continue...',
       connecting: 'Connexion...',
@@ -1319,8 +1329,10 @@ const messages = {
       },
       streamingProvider: {
         label: 'Fournisseur streaming',
-        optionDeepgram: 'Deepgram',
+        optionDeepgram: 'Deepgram (recommandé)',
         optionElevenLabs: 'ElevenLabs',
+        elevenLabsDelayTitle: 'ElevenLabs peut se reconnecter avant l’enregistrement',
+        elevenLabsDelayBody: 'Attendez l’indicateur vert avant de parler. Pendant la connexion d’ElevenLabs, vos paroles peuvent ne pas être reconnues et le premier texte peut apparaître avec quelques secondes de retard.',
       },
       language: {
         label: 'Langue',
@@ -1696,6 +1708,7 @@ const messages = {
     main: {
       minimize: 'Minimieren',
       settings: 'Einstellungen',
+      support: 'Support',
       connectionRecovering: 'Verbindung wird wiederhergestellt...',
       connectionPoor: 'Schlechte Verbindung. Aufnahme läuft weiter...',
       connecting: 'Verbinden...',
@@ -1741,8 +1754,10 @@ const messages = {
       },
       streamingProvider: {
         label: 'Streaming-Anbieter',
-        optionDeepgram: 'Deepgram',
+        optionDeepgram: 'Deepgram (empfohlen)',
         optionElevenLabs: 'ElevenLabs',
+        elevenLabsDelayTitle: 'ElevenLabs verbindet sich möglicherweise vor der Aufnahme neu',
+        elevenLabsDelayBody: 'Warten Sie mit dem Sprechen auf die grüne Anzeige. Während ElevenLabs die Verbindung herstellt, wird Gesprochenes möglicherweise nicht erkannt und der erste Text kann einige Sekunden verzögert erscheinen.',
       },
       language: {
         label: 'Sprache',
@@ -2118,6 +2133,7 @@ const messages = {
     main: {
       minimize: 'Згорнути',
       settings: 'Налаштування',
+      support: 'Підтримка',
       connectionRecovering: 'Відновлення зʼєднання...',
       connectionPoor: 'Погане зʼєднання. Запис триває...',
       connecting: 'Підключення...',
@@ -2163,8 +2179,10 @@ const messages = {
       },
       streamingProvider: {
         label: 'Streaming-провайдер',
-        optionDeepgram: 'Deepgram',
+        optionDeepgram: 'Deepgram (рекомендовано)',
         optionElevenLabs: 'ElevenLabs',
+        elevenLabsDelayTitle: 'ElevenLabs може підключатися заново перед записом',
+        elevenLabsDelayBody: 'Дочекайтеся зеленого індикатора, перш ніж говорити. Поки ElevenLabs підключається, сказане може не розпізнатися, а перший текст з’явитися із затримкою в кілька секунд.',
       },
       language: {
         label: 'Мова',
