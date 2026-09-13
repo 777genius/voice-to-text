@@ -1082,10 +1082,14 @@ impl TranscriptionService {
                 return Ok(Unsent(ConfigChanged));
             }
         }
-        let context = self.validate_continuation_context(paused.logical_run_id).await;
+        let context = self
+            .validate_continuation_context(paused.logical_run_id)
+            .await;
         // Cancellation wins over an unattempted context refusal, including a
         // failure that settled while physical Stop was already being retried.
-        if cancelled.load(Ordering::Acquire) { return Ok(Cancelled); }
+        if cancelled.load(Ordering::Acquire) {
+            return Ok(Cancelled);
+        }
         match context {
             ContextValidation::Valid { .. } => {}
             ContextValidation::Mismatch => return Ok(Unsent(ContextMismatch)),
@@ -1354,7 +1358,10 @@ impl TranscriptionService {
                     // Cancelled does not prove microphone release. The existing
                     // Seal/retry owner must still dispose of the restored buffer.
                     if let Err(error) = self.cancel_prepared_capture(token).await {
-                        log::warn!("Unattempted Continue cancellation awaits capture release: {}", error);
+                        log::warn!(
+                            "Unattempted Continue cancellation awaits capture release: {}",
+                            error
+                        );
                     }
                     return Ok(Cancelled);
                 }
@@ -1445,15 +1452,28 @@ impl TranscriptionService {
     /// Share exact prepared-stop semantics between first Seal and its bounded
     /// retry. A write that already consumed this slot must settle as ordinary Stop.
     pub async fn retains_prepared_capture(&self, token: PreparedCaptureToken) -> bool {
-        self.prepared_capture.lock().await.as_ref().is_some_and(|prepared| prepared.token == token)
+        self.prepared_capture
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|prepared| prepared.token == token)
     }
 
-    pub async fn stop_pending_capture(&self, token: PreparedCaptureToken, cancel: bool) -> Result<()> {
-        let result = if cancel { self.cancel_prepared_capture(token).await }
-            else { self.seal_prepared_capture(token).await };
+    pub async fn stop_pending_capture(
+        &self,
+        token: PreparedCaptureToken,
+        cancel: bool,
+    ) -> Result<()> {
+        let result = if cancel {
+            self.cancel_prepared_capture(token).await
+        } else {
+            self.seal_prepared_capture(token).await
+        };
         if result.is_err() && self.active_capture_episode() == Some(token) {
             self.stop_capture_for_run(token.run_id).await
-        } else { result }
+        } else {
+            result
+        }
     }
 
     /// Only an upstream-disabled prepared episode may be discarded. Once the
@@ -4629,7 +4649,9 @@ mod tests {
             fence: &crate::domain::ContinuationWriteFence,
         ) -> SttResult<crate::domain::ContinuationFirstWrite> {
             let barrier = self.log.lock().unwrap().first_write_barrier.clone();
-            if let Some(barrier) = barrier { barrier.notified().await; }
+            if let Some(barrier) = barrier {
+                barrier.notified().await;
+            }
             if self.continued && self.first_b_mode == 2 {
                 return Ok(crate::domain::ContinuationFirstWrite::NotStarted);
             }
@@ -4993,14 +5015,19 @@ mod tests {
             .await
             .unwrap();
             if terminal == "error" || terminal == "finalize" {
-                assert!(!peer.is_finished(), "terminal evidence requires a live peer");
+                assert!(
+                    !peer.is_finished(),
+                    "terminal evidence requires a live peer"
+                );
                 if terminal == "error" {
                     tokio::time::timeout(Duration::from_secs(2), async {
                         while errors.lock().unwrap().is_empty() {
                             assert!(!peer.is_finished());
                             tokio::task::yield_now().await;
                         }
-                    }).await.expect("server error callback deadline");
+                    })
+                    .await
+                    .expect("server error callback deadline");
                     let errors = errors.lock().unwrap();
                     assert_eq!(errors.len(), 1);
                     let SttError::Connection(error) = &errors[0] else {
@@ -5012,8 +5039,14 @@ mod tests {
                     let provider = service.stt_provider.read().await;
                     let evidence = provider.as_ref().unwrap().finalize_evidence().unwrap();
                     assert_eq!(evidence.reason, crate::domain::FinalizeReason::Drained);
-                    assert_eq!(evidence.tail_evidence, crate::domain::TailEvidence::Unconfirmed);
-                    assert_eq!(evidence.provider_release, crate::domain::ProviderRelease::Released);
+                    assert_eq!(
+                        evidence.tail_evidence,
+                        crate::domain::TailEvidence::Unconfirmed
+                    );
+                    assert_eq!(
+                        evidence.provider_release,
+                        crate::domain::ProviderRelease::Released
+                    );
                     assert_eq!(evidence.last_delivery_seq, 0);
                     assert_eq!(evidence.stable_snapshot, "");
                 }
@@ -5067,7 +5100,9 @@ mod tests {
         struct RealFactory;
         impl SttProviderFactory for RealFactory {
             fn create(&self, _: &SttConfig) -> SttResult<Box<dyn SttProvider>> {
-                Ok(Box::new(crate::infrastructure::stt::BackendProvider::with_continuation_for_test()))
+                Ok(Box::new(
+                    crate::infrastructure::stt::BackendProvider::with_continuation_for_test(),
+                ))
             }
         }
         #[derive(Default)]
@@ -5185,10 +5220,14 @@ mod tests {
                     }
                 };
                 if let Some(response) = response {
-                    ws.send(Message::Text(response.to_string().into())).await.unwrap();
+                    ws.send(Message::Text(response.to_string().into()))
+                        .await
+                        .unwrap();
                     if late_barrier {
                         ws.send(Message::Text(serde_json::json!({"type":"stable","delivery_seq":1,"text":"late-barrier"}).to_string().into())).await.unwrap();
-                        ws.send(Message::Ping(b"held".to_vec().into())).await.unwrap();
+                        ws.send(Message::Ping(b"held".to_vec().into()))
+                            .await
+                            .unwrap();
                         late_barrier = false;
                     }
                 }
@@ -5199,10 +5238,14 @@ mod tests {
         let delivered = deliveries.clone();
         let chunks = Arc::new(StdMutex::new(None));
         let service = TranscriptionService::new_with_microphone_sensitivity_and_device(
-            Box::new(ManualAudioCapture::new(chunks.clone())), Arc::new(RealFactory),
-            Arc::new(AtomicU8::new(100)), Arc::new(StdMutex::new(Some("fixture-device".into()))));
+            Box::new(ManualAudioCapture::new(chunks.clone())),
+            Arc::new(RealFactory),
+            Arc::new(AtomicU8::new(100)),
+            Arc::new(StdMutex::new(Some("fixture-device".into()))),
+        );
         service.set_continuation_context_guard(Arc::new(ContinuationTestGuard {
-            revision: AtomicU64::new(7), refuse: AtomicBool::new(false),
+            revision: AtomicU64::new(7),
+            refuse: AtomicBool::new(false),
         }));
         // Success joins normal teardown; only failure/timeout aborts and joins the peer.
         let result = std::panic::AssertUnwindSafe(tokio::time::timeout(Duration::from_secs(12), async {
@@ -5468,22 +5511,42 @@ mod tests {
             for control in continues { assert_eq!(control["pause_epoch"], 7); }
         })).catch_unwind().await;
         // Emergency cleanup only; successful cleanup was asserted inside the scenario.
-        if matches!(&result, Ok(Ok(()))) { return; }
+        if matches!(&result, Ok(Ok(()))) {
+            return;
+        }
         let _ = tokio::time::timeout(Duration::from_secs(2), async {
-            let token = service.prepared_capture.lock().await.as_ref().map(|p| p.token);
-            if let Some(token) = token { let _ = service.cancel_prepared_capture(token).await; }
-        }).await;
-        let _ = tokio::time::timeout(Duration::from_secs(2), service.stop_capture_for_run(101)).await;
-        let _ = tokio::time::timeout(Duration::from_secs(2), service.stop_capture_for_run(102)).await;
+            let token = service
+                .prepared_capture
+                .lock()
+                .await
+                .as_ref()
+                .map(|p| p.token);
+            if let Some(token) = token {
+                let _ = service.cancel_prepared_capture(token).await;
+            }
+        })
+        .await;
+        let _ =
+            tokio::time::timeout(Duration::from_secs(2), service.stop_capture_for_run(101)).await;
+        let _ =
+            tokio::time::timeout(Duration::from_secs(2), service.stop_capture_for_run(102)).await;
         let _ = tokio::time::timeout(Duration::from_secs(2), async {
-            if let Some(provider) = service.stt_provider.write().await.as_mut() { let _ = provider.abort().await; }
-        }).await;
+            if let Some(provider) = service.stt_provider.write().await.as_mut() {
+                let _ = provider.abort().await;
+            }
+        })
+        .await;
         if !peer_joined {
             peer.abort();
             let joined = peer.await;
-            if let Err(error) = joined { assert!(error.is_cancelled(), "peer failed: {error}"); }
+            if let Err(error) = joined {
+                assert!(error.is_cancelled(), "peer failed: {error}");
+            }
         }
-        match result { Err(panic) => std::panic::resume_unwind(panic), Ok(result) => result.expect("composed service deadline") }
+        match result {
+            Err(panic) => std::panic::resume_unwind(panic),
+            Ok(result) => result.expect("composed service deadline"),
+        }
     }
 
     async fn prepare_continued_b(service: &TranscriptionService) -> PreparedCaptureToken {
@@ -5683,8 +5746,10 @@ mod tests {
             assert!(!service.can_resume_keep_alive_connection().await);
             // The service owns an adapter, not the platform's account/context cache.
             // Config fencing must win even when that adapter still reports Valid.
-            assert!(matches!(service.validate_continuation_context(101).await,
-                crate::domain::ContextValidation::Valid { revision: 7 }));
+            assert!(matches!(
+                service.validate_continuation_context(101).await,
+                crate::domain::ContextValidation::Valid { revision: 7 }
+            ));
             assert_eq!(log.lock().unwrap().samples, vec![1200; 480]);
             service.cancel_prepared_capture(token).await.unwrap();
             service.finalize_provider_for_run(101).await.unwrap();
@@ -5937,8 +6002,13 @@ mod tests {
             issued_effects.extend(reduce(&mut coordinator, failure));
             // Ready may already have issued the physical Stop. Runtime failure
             // transfers finalization to that exact owner instead of replacing it.
-            assert_eq!(issued_effects.iter().filter(|effect| matches!(effect,
-                CoordinatorEffect::StopRecording { .. })).count(), 1);
+            assert_eq!(
+                issued_effects
+                    .iter()
+                    .filter(|effect| matches!(effect, CoordinatorEffect::StopRecording { .. }))
+                    .count(),
+                1
+            );
             let stop = issued_effects
                 .iter()
                 .find_map(|e| match e {
@@ -7110,8 +7180,8 @@ mod tests {
                         "accepted_capabilities":["finalize_outcome_v1"]})
                 };
                 ws.send(Message::Text(ready.to_string().into()))
-                .await
-                .unwrap();
+                    .await
+                    .unwrap();
                 let mut pcm = Vec::new();
                 let mut finalized = 0;
                 let mut closed = 0;
@@ -7217,19 +7287,35 @@ mod tests {
         }
     }
 
-    struct RetryCapture { inner: ManualAudioCapture, stops: Arc<AtomicUsize> }
+    struct RetryCapture {
+        inner: ManualAudioCapture,
+        stops: Arc<AtomicUsize>,
+    }
     #[async_trait]
     impl AudioCapture for RetryCapture {
-        async fn initialize(&mut self, c: AudioConfig) -> AudioResult<()> { self.inner.initialize(c).await }
-        async fn start_capture(&mut self, cb: crate::domain::AudioChunkCallback) -> AudioResult<()> { self.inner.start_capture(cb).await }
+        async fn initialize(&mut self, c: AudioConfig) -> AudioResult<()> {
+            self.inner.initialize(c).await
+        }
+        async fn start_capture(
+            &mut self,
+            cb: crate::domain::AudioChunkCallback,
+        ) -> AudioResult<()> {
+            self.inner.start_capture(cb).await
+        }
         async fn stop_capture(&mut self) -> AudioResult<()> {
             if self.stops.fetch_add(1, Ordering::SeqCst) == 0 {
-                return Err(crate::domain::AudioError::Capture("retry fixture still active".into()));
+                return Err(crate::domain::AudioError::Capture(
+                    "retry fixture still active".into(),
+                ));
             }
             self.inner.stop_capture().await
         }
-        fn is_capturing(&self) -> bool { self.inner.is_capturing() }
-        fn config(&self) -> AudioConfig { self.inner.config() }
+        fn is_capturing(&self) -> bool {
+            self.inner.is_capturing()
+        }
+        fn config(&self) -> AudioConfig {
+            self.inner.config()
+        }
     }
 
     #[tokio::test]
@@ -7239,12 +7325,17 @@ mod tests {
             service.stop_capture_for_run(101).await.unwrap();
             let chunks = Arc::new(StdMutex::new(None));
             let stops = Arc::new(AtomicUsize::new(0));
-            *service.audio_capture.write().await = Box::new(RetryCapture { inner: ManualAudioCapture::new(chunks.clone()), stops: stops.clone() });
+            *service.audio_capture.write().await = Box::new(RetryCapture {
+                inner: ManualAudioCapture::new(chunks.clone()),
+                stops: stops.clone(),
+            });
             let provider_lock = service.stt_provider.write().await;
             let pause = service.pause_for_continuation(101, Instant::now());
             tokio::pin!(pause);
             assert!(futures_util::poll!(pause.as_mut()).is_pending());
-            let token = tokio::time::timeout(Duration::from_secs(1), prepare_continued_b(&service)).await.unwrap();
+            let token = tokio::time::timeout(Duration::from_secs(1), prepare_continued_b(&service))
+                .await
+                .unwrap();
             let tokens = StdMutex::new(std::collections::BTreeMap::from([(token.run_id, token)]));
             let samples: Vec<i16> = (0..480).map(|n| (n % 101) as i16 - 50).collect();
             let callback = chunks.lock().unwrap().clone().unwrap();
@@ -7257,30 +7348,72 @@ mod tests {
             assert_eq!(stops.load(Ordering::SeqCst), 2);
             assert_eq!(service.prepared_capture.lock().await.is_some(), !cancel);
             crate::presentation::commands::retire_prepared_capture_after_stop(
-                &tokens, token.run_id, false, Some((token.generation, cancel)));
-            assert_eq!(tokens.lock().unwrap().get(&token.run_id).copied(), if cancel { None } else { Some(token) });
+                &tokens,
+                token.run_id,
+                false,
+                Some((token.generation, cancel)),
+            );
+            assert_eq!(
+                tokens.lock().unwrap().get(&token.run_id).copied(),
+                if cancel { None } else { Some(token) }
+            );
             drop(provider_lock);
-            let paused = tokio::time::timeout(Duration::from_secs(1), pause).await.unwrap().unwrap();
+            let paused = tokio::time::timeout(Duration::from_secs(1), pause)
+                .await
+                .unwrap()
+                .unwrap();
             if cold {
                 // A has released its provider; cold Start must recover the same
                 // command-side token, not open a new physical capture over B.
                 service.finalize_provider_for_run(101).await.unwrap();
                 let routed = tokens.lock().unwrap().get(&token.run_id).copied().unwrap();
-                service.connect_prepared_recording(routed, Arc::new(|_| {}), Arc::new(|_| {}),
-                    Arc::new(|_, _| {}), Arc::new(|_, _| {}), Arc::new(|_| {}),
-                    Arc::new(|_, _| {}), Default::default()).await.unwrap();
-                service.finalize_provider_for_run(token.run_id).await.unwrap();
+                service
+                    .connect_prepared_recording(
+                        routed,
+                        Arc::new(|_| {}),
+                        Arc::new(|_| {}),
+                        Arc::new(|_, _| {}),
+                        Arc::new(|_, _| {}),
+                        Arc::new(|_| {}),
+                        Arc::new(|_, _| {}),
+                        Default::default(),
+                    )
+                    .await
+                    .unwrap();
+                service
+                    .finalize_provider_for_run(token.run_id)
+                    .await
+                    .unwrap();
                 assert_eq!(log.lock().unwrap().starts, 2);
             } else if !cancel {
-                assert!(matches!(service.continue_prepared_capture(token, paused, Instant::now(), Arc::new(AtomicBool::new(false))).await.unwrap(),
-                    ContinueCaptureOutcome::Attached { .. }));
+                assert!(matches!(
+                    service
+                        .continue_prepared_capture(
+                            token,
+                            paused,
+                            Instant::now(),
+                            Arc::new(AtomicBool::new(false))
+                        )
+                        .await
+                        .unwrap(),
+                    ContinueCaptureOutcome::Attached { .. }
+                ));
                 service.stop_capture_for_run(token.run_id).await.unwrap();
             }
-            if !cold { service.finalize_provider_for_run(101).await.unwrap(); }
-            crate::presentation::commands::retire_prepared_capture_after_stop(&tokens, token.run_id, false, None);
+            if !cold {
+                service.finalize_provider_for_run(101).await.unwrap();
+            }
+            crate::presentation::commands::retire_prepared_capture_after_stop(
+                &tokens,
+                token.run_id,
+                false,
+                None,
+            );
             assert!(tokens.lock().unwrap().is_empty());
             let mut expected = vec![1200; 480];
-            if !cancel { expected.extend(samples); }
+            if !cancel {
+                expected.extend(samples);
+            }
             assert_eq!(log.lock().unwrap().samples, expected, "cancel={cancel}");
             assert!(service.prepared_capture.lock().await.is_none());
         }
@@ -7288,8 +7421,10 @@ mod tests {
 
     #[tokio::test]
     async fn teardown_during_stop_retry_cancels_actual_context_wait_via_ordered_registry() {
+        use crate::presentation::commands::{
+            reduce_recording_event_with_cancellation, register_recording_effect_cancellations,
+        };
         use crate::presentation::recording_intent_coordinator as ri;
-        use crate::presentation::commands::{register_recording_effect_cancellations, reduce_recording_event_with_cancellation};
         struct ContextWait(tokio::sync::Notify);
         #[async_trait]
         impl crate::domain::ContinuationContextGuard for ContextWait {
@@ -7298,159 +7433,378 @@ mod tests {
                 crate::domain::ContextValidation::Valid { revision: 7 }
             }
         }
-        for teardown in [ri::CoordinatorEvent::ShutdownRequested, ri::CoordinatorEvent::ForceOff(ri::StopReason::SystemSleep)] {
+        for teardown in [
+            ri::CoordinatorEvent::ShutdownRequested,
+            ri::CoordinatorEvent::ForceOff(ri::StopReason::SystemSleep),
+        ] {
             for retry_before_cancel in [false, true] {
-            let (service, log, _, _) = continuation_service_fixture(false, 0, None).await;
-            service.stop_capture_for_run(101).await.unwrap();
-            let paused = service.pause_for_continuation(101, Instant::now()).await.unwrap();
-            let chunks = Arc::new(StdMutex::new(None));
-            let stops = Arc::new(AtomicUsize::new(0));
-            *service.audio_capture.write().await = Box::new(RetryCapture {
-                inner: ManualAudioCapture::new(chunks.clone()), stops: stops.clone() });
-            let token = prepare_continued_b(&service).await;
-            chunks.lock().unwrap().as_ref().unwrap()(AudioChunk::new(vec![2400; 480], 16_000, 1));
-            let barrier = Arc::new(ContextWait(Default::default()));
-            service.set_continuation_context_guard(barrier.clone());
-            let (mut coordinator, b, attach_id, key, generation, retry) = ri::pending_continue_with_failed_seal();
-            let cancellations = StdMutex::new(std::collections::BTreeMap::new());
-            register_recording_effect_cancellations(&cancellations, &[ri::CoordinatorEffect::Continuation(
-                ri::ContinuationEffect::Continue { effect_id: attach_id, key, run: b, generation })]);
-            let cancelled = cancellations.lock().unwrap().get(&attach_id.get()).unwrap().clone();
-            let attach = service.continue_prepared_capture(token, paused, Instant::now(), cancelled.clone());
-            tokio::pin!(attach);
-            assert!(futures_util::poll!(attach.as_mut()).is_pending());
-            assert!(service.stop_pending_capture(token, false).await.is_err());
-            assert!(service.capture_is_active_for_run(token.run_id).await);
-            if retry_before_cancel {
-                service.stop_pending_capture(token, false).await.unwrap();
-                reduce_recording_event_with_cancellation(&mut coordinator, &cancellations,
-                    ri::CoordinatorEvent::CaptureStopped { effect_id: retry, run_id: b.run_id, outcome: ri::CaptureStopOutcome::Inactive }, 998);
-            }
-            let owner = coordinator.capture;
-            let effects = reduce_recording_event_with_cancellation(&mut coordinator, &cancellations, teardown, 999);
-            assert_eq!(coordinator.capture, owner);
-            assert!(effects.iter().any(|e| matches!(e, ri::CoordinatorEffect::CancelStart { effect_id, .. } if *effect_id == attach_id)));
-            assert!(cancelled.load(Ordering::Acquire), "ordered event must revoke admission before its async executor");
-            assert_eq!(coordinator.pending_capture_retry(retry, b.run_id), if retry_before_cancel { None } else { Some((generation, false)) });
-            barrier.0.notify_one();
-            assert_eq!(tokio::time::timeout(Duration::from_secs(1), attach).await.unwrap().unwrap(), ContinueCaptureOutcome::Cancelled);
-            assert_eq!(log.lock().unwrap().samples, vec![1200; 480]);
-            assert!(matches!(log.lock().unwrap().operations.as_slice(), [crate::domain::ContinuationOperation::Pause { .. }]));
-            let mut queue = std::collections::VecDeque::from(effects);
-            queue.extend(reduce_recording_event_with_cancellation(&mut coordinator, &cancellations,
-                ri::CoordinatorEvent::Continuation(ri::ContinuationEvent::ContinueFinished { effect_id: attach_id, key, run_id: b.run_id, generation, outcome: ri::ContinueAttachOutcome::Cancelled }), 1000));
-            if !retry_before_cancel {
-                service.stop_pending_capture(token, false).await.unwrap();
-                queue.extend(reduce_recording_event_with_cancellation(&mut coordinator, &cancellations,
-                    ri::CoordinatorEvent::CaptureStopped { effect_id: retry, run_id: b.run_id, outcome: ri::CaptureStopOutcome::Inactive }, 1001));
-            }
-            let tokens = StdMutex::new(std::collections::BTreeMap::from([(token.run_id, token)]));
-            let mut disposal_count = 0;
-            let mut finalized = 0;
-            while let Some(effect) = queue.pop_front() {
-                let completion = match effect {
-                    ri::CoordinatorEffect::Continuation(ri::ContinuationEffect::SealPending { effect_id, run_id, generation, cancel }) => {
-                        assert!(cancel);
-                        service.stop_pending_capture(token, cancel).await.unwrap();
-                        crate::presentation::commands::retire_prepared_capture_after_stop(&tokens, token.run_id, false, Some((token.generation, cancel)));
-                        disposal_count += 1;
-                        Some(ri::CoordinatorEvent::Continuation(ri::ContinuationEvent::PendingCaptureStopped { effect_id, run_id, generation, outcome: ri::CaptureStopOutcome::Inactive }))
-                    }
-                    ri::CoordinatorEffect::FinalizeRecording { effect_id, run_id, .. } => {
-                        service.finalize_provider_for_run(101).await.unwrap();
-                        finalized += 1;
-                        Some(ri::CoordinatorEvent::FinalizeFinished { effect_id, run_id, outcome: ri::FinalizeOutcome::Committed })
-                    }
-                    _ => None,
-                };
-                if let Some(completion) = completion {
-                    queue.extend(reduce_recording_event_with_cancellation(&mut coordinator, &cancellations, completion, 1002));
+                let (service, log, _, _) = continuation_service_fixture(false, 0, None).await;
+                service.stop_capture_for_run(101).await.unwrap();
+                let paused = service
+                    .pause_for_continuation(101, Instant::now())
+                    .await
+                    .unwrap();
+                let chunks = Arc::new(StdMutex::new(None));
+                let stops = Arc::new(AtomicUsize::new(0));
+                *service.audio_capture.write().await = Box::new(RetryCapture {
+                    inner: ManualAudioCapture::new(chunks.clone()),
+                    stops: stops.clone(),
+                });
+                let token = prepare_continued_b(&service).await;
+                chunks.lock().unwrap().as_ref().unwrap()(AudioChunk::new(
+                    vec![2400; 480],
+                    16_000,
+                    1,
+                ));
+                let barrier = Arc::new(ContextWait(Default::default()));
+                service.set_continuation_context_guard(barrier.clone());
+                let (mut coordinator, b, attach_id, key, generation, retry) =
+                    ri::pending_continue_with_failed_seal();
+                let cancellations = StdMutex::new(std::collections::BTreeMap::new());
+                register_recording_effect_cancellations(
+                    &cancellations,
+                    &[ri::CoordinatorEffect::Continuation(
+                        ri::ContinuationEffect::Continue {
+                            effect_id: attach_id,
+                            key,
+                            run: b,
+                            generation,
+                        },
+                    )],
+                );
+                let cancelled = cancellations
+                    .lock()
+                    .unwrap()
+                    .get(&attach_id.get())
+                    .unwrap()
+                    .clone();
+                let attach = service.continue_prepared_capture(
+                    token,
+                    paused,
+                    Instant::now(),
+                    cancelled.clone(),
+                );
+                tokio::pin!(attach);
+                assert!(futures_util::poll!(attach.as_mut()).is_pending());
+                assert!(service.stop_pending_capture(token, false).await.is_err());
+                assert!(service.capture_is_active_for_run(token.run_id).await);
+                if retry_before_cancel {
+                    service.stop_pending_capture(token, false).await.unwrap();
+                    reduce_recording_event_with_cancellation(
+                        &mut coordinator,
+                        &cancellations,
+                        ri::CoordinatorEvent::CaptureStopped {
+                            effect_id: retry,
+                            run_id: b.run_id,
+                            outcome: ri::CaptureStopOutcome::Inactive,
+                        },
+                        998,
+                    );
                 }
-            }
-            assert_eq!(disposal_count, 1);
-            assert_eq!(finalized, 1);
-            assert!(tokens.lock().unwrap().is_empty());
-            assert!(matches!(coordinator.capture, ri::CaptureState::Idle));
-            assert!(coordinator.processing_jobs.is_empty());
-            assert!(service.prepared_capture.lock().await.is_none());
-            assert!(!service.capture_is_active_for_run(token.run_id).await);
-            assert_eq!(stops.load(Ordering::SeqCst), 2);
+                let owner = coordinator.capture;
+                let effects = reduce_recording_event_with_cancellation(
+                    &mut coordinator,
+                    &cancellations,
+                    teardown,
+                    999,
+                );
+                assert_eq!(coordinator.capture, owner);
+                assert!(effects.iter().any(|e| matches!(e, ri::CoordinatorEffect::CancelStart { effect_id, .. } if *effect_id == attach_id)));
+                assert!(
+                    cancelled.load(Ordering::Acquire),
+                    "ordered event must revoke admission before its async executor"
+                );
+                assert_eq!(
+                    coordinator.pending_capture_retry(retry, b.run_id),
+                    if retry_before_cancel {
+                        None
+                    } else {
+                        Some((generation, false))
+                    }
+                );
+                barrier.0.notify_one();
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(1), attach)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    ContinueCaptureOutcome::Cancelled
+                );
+                assert_eq!(log.lock().unwrap().samples, vec![1200; 480]);
+                assert!(matches!(
+                    log.lock().unwrap().operations.as_slice(),
+                    [crate::domain::ContinuationOperation::Pause { .. }]
+                ));
+                let mut queue = std::collections::VecDeque::from(effects);
+                queue.extend(reduce_recording_event_with_cancellation(
+                    &mut coordinator,
+                    &cancellations,
+                    ri::CoordinatorEvent::Continuation(ri::ContinuationEvent::ContinueFinished {
+                        effect_id: attach_id,
+                        key,
+                        run_id: b.run_id,
+                        generation,
+                        outcome: ri::ContinueAttachOutcome::Cancelled,
+                    }),
+                    1000,
+                ));
+                if !retry_before_cancel {
+                    service.stop_pending_capture(token, false).await.unwrap();
+                    queue.extend(reduce_recording_event_with_cancellation(
+                        &mut coordinator,
+                        &cancellations,
+                        ri::CoordinatorEvent::CaptureStopped {
+                            effect_id: retry,
+                            run_id: b.run_id,
+                            outcome: ri::CaptureStopOutcome::Inactive,
+                        },
+                        1001,
+                    ));
+                }
+                let tokens =
+                    StdMutex::new(std::collections::BTreeMap::from([(token.run_id, token)]));
+                let mut disposal_count = 0;
+                let mut finalized = 0;
+                while let Some(effect) = queue.pop_front() {
+                    let completion = match effect {
+                        ri::CoordinatorEffect::Continuation(
+                            ri::ContinuationEffect::SealPending {
+                                effect_id,
+                                run_id,
+                                generation,
+                                cancel,
+                            },
+                        ) => {
+                            assert!(cancel);
+                            service.stop_pending_capture(token, cancel).await.unwrap();
+                            crate::presentation::commands::retire_prepared_capture_after_stop(
+                                &tokens,
+                                token.run_id,
+                                false,
+                                Some((token.generation, cancel)),
+                            );
+                            disposal_count += 1;
+                            Some(ri::CoordinatorEvent::Continuation(
+                                ri::ContinuationEvent::PendingCaptureStopped {
+                                    effect_id,
+                                    run_id,
+                                    generation,
+                                    outcome: ri::CaptureStopOutcome::Inactive,
+                                },
+                            ))
+                        }
+                        ri::CoordinatorEffect::FinalizeRecording {
+                            effect_id, run_id, ..
+                        } => {
+                            service.finalize_provider_for_run(101).await.unwrap();
+                            finalized += 1;
+                            Some(ri::CoordinatorEvent::FinalizeFinished {
+                                effect_id,
+                                run_id,
+                                outcome: ri::FinalizeOutcome::Committed,
+                            })
+                        }
+                        _ => None,
+                    };
+                    if let Some(completion) = completion {
+                        queue.extend(reduce_recording_event_with_cancellation(
+                            &mut coordinator,
+                            &cancellations,
+                            completion,
+                            1002,
+                        ));
+                    }
+                }
+                assert_eq!(disposal_count, 1);
+                assert_eq!(finalized, 1);
+                assert!(tokens.lock().unwrap().is_empty());
+                assert!(matches!(coordinator.capture, ri::CaptureState::Idle));
+                assert!(coordinator.processing_jobs.is_empty());
+                assert!(service.prepared_capture.lock().await.is_none());
+                assert!(!service.capture_is_active_for_run(token.run_id).await);
+                assert_eq!(stops.load(Ordering::SeqCst), 2);
             }
         }
     }
 
     #[tokio::test]
     async fn not_started_cancel_cleanup_failure_disposes_after_outstanding_ordinary_seal() {
+        use crate::presentation::commands::{
+            reduce_recording_event_with_cancellation, register_recording_effect_cancellations,
+        };
         use crate::presentation::recording_intent_coordinator as ri;
-        use crate::presentation::commands::{register_recording_effect_cancellations, reduce_recording_event_with_cancellation};
-        struct ReleaseCapture { inner: ManualAudioCapture, release: Arc<AtomicBool> }
+        struct ReleaseCapture {
+            inner: ManualAudioCapture,
+            release: Arc<AtomicBool>,
+        }
         #[async_trait]
         impl AudioCapture for ReleaseCapture {
-            async fn initialize(&mut self, c: AudioConfig) -> AudioResult<()> { self.inner.initialize(c).await }
-            async fn start_capture(&mut self, cb: crate::domain::AudioChunkCallback) -> AudioResult<()> { self.inner.start_capture(cb).await }
+            async fn initialize(&mut self, c: AudioConfig) -> AudioResult<()> {
+                self.inner.initialize(c).await
+            }
+            async fn start_capture(
+                &mut self,
+                cb: crate::domain::AudioChunkCallback,
+            ) -> AudioResult<()> {
+                self.inner.start_capture(cb).await
+            }
             async fn stop_capture(&mut self) -> AudioResult<()> {
-                if !self.release.load(Ordering::Acquire) { return Err(crate::domain::AudioError::Capture("test release failure".into())); }
+                if !self.release.load(Ordering::Acquire) {
+                    return Err(crate::domain::AudioError::Capture(
+                        "test release failure".into(),
+                    ));
+                }
                 self.inner.stop_capture().await
             }
-            fn is_capturing(&self) -> bool { self.inner.is_capturing() }
-            fn config(&self) -> AudioConfig { self.inner.config() }
+            fn is_capturing(&self) -> bool {
+                self.inner.is_capturing()
+            }
+            fn config(&self) -> AudioConfig {
+                self.inner.config()
+            }
         }
         let (service, log, _, _) = continuation_service_fixture(false, 0, None).await;
         service.stop_capture_for_run(101).await.unwrap();
-        let paused = service.pause_for_continuation(101, Instant::now()).await.unwrap();
+        let paused = service
+            .pause_for_continuation(101, Instant::now())
+            .await
+            .unwrap();
         let release = Arc::new(AtomicBool::new(false));
         let chunks = Arc::new(StdMutex::new(None));
-        *service.audio_capture.write().await = Box::new(ReleaseCapture { inner: ManualAudioCapture::new(chunks.clone()), release: release.clone() });
+        *service.audio_capture.write().await = Box::new(ReleaseCapture {
+            inner: ManualAudioCapture::new(chunks.clone()),
+            release: release.clone(),
+        });
         let token = prepare_continued_b(&service).await;
         chunks.lock().unwrap().as_ref().unwrap()(AudioChunk::new(vec![2400; 480], 16_000, 1));
         let barrier = Arc::new(tokio::sync::Notify::new());
         log.lock().unwrap().first_write_barrier = Some(barrier.clone());
-        let (mut coordinator, b, attach_id, key, generation, seal) = ri::pending_continue_with_outstanding_seal();
+        let (mut coordinator, b, attach_id, key, generation, seal) =
+            ri::pending_continue_with_outstanding_seal();
         let cancellations = StdMutex::new(std::collections::BTreeMap::new());
-        register_recording_effect_cancellations(&cancellations, &[ri::CoordinatorEffect::Continuation(
-            ri::ContinuationEffect::Continue { effect_id: attach_id, key, run: b, generation })]);
-        let cancelled = cancellations.lock().unwrap().get(&attach_id.get()).unwrap().clone();
-        let attach = service.continue_prepared_capture(token, paused, Instant::now(), cancelled.clone());
+        register_recording_effect_cancellations(
+            &cancellations,
+            &[ri::CoordinatorEffect::Continuation(
+                ri::ContinuationEffect::Continue {
+                    effect_id: attach_id,
+                    key,
+                    run: b,
+                    generation,
+                },
+            )],
+        );
+        let cancelled = cancellations
+            .lock()
+            .unwrap()
+            .get(&attach_id.get())
+            .unwrap()
+            .clone();
+        let attach =
+            service.continue_prepared_capture(token, paused, Instant::now(), cancelled.clone());
         tokio::pin!(attach);
         assert!(futures_util::poll!(attach.as_mut()).is_pending());
-        assert!(service.prepared_capture.lock().await.is_none(), "receiver consumed before first transport attempt");
-        let effects = reduce_recording_event_with_cancellation(&mut coordinator, &cancellations,
-            ri::CoordinatorEvent::ForceOff(ri::StopReason::SystemSleep), 999);
+        assert!(
+            service.prepared_capture.lock().await.is_none(),
+            "receiver consumed before first transport attempt"
+        );
+        let effects = reduce_recording_event_with_cancellation(
+            &mut coordinator,
+            &cancellations,
+            ri::CoordinatorEvent::ForceOff(ri::StopReason::SystemSleep),
+            999,
+        );
         assert!(cancelled.load(Ordering::Acquire));
-        assert!(!effects.iter().any(|e| matches!(e, ri::CoordinatorEffect::StopRecording { .. } | ri::CoordinatorEffect::Continuation(ri::ContinuationEffect::SealPending { .. }))));
+        assert!(!effects.iter().any(|e| matches!(
+            e,
+            ri::CoordinatorEffect::StopRecording { .. }
+                | ri::CoordinatorEffect::Continuation(ri::ContinuationEffect::SealPending { .. })
+        )));
         barrier.notify_one();
-        assert_eq!(tokio::time::timeout(Duration::from_secs(1), attach).await.unwrap().unwrap(), ContinueCaptureOutcome::Cancelled);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), attach)
+                .await
+                .unwrap()
+                .unwrap(),
+            ContinueCaptureOutcome::Cancelled
+        );
         assert!(service.retains_prepared_capture(token).await);
         assert!(service.capture_is_active_for_run(token.run_id).await);
         let tokens = StdMutex::new(std::collections::BTreeMap::from([(token.run_id, token)]));
-        let effects = ri::reduce(&mut coordinator, ri::CoordinatorEvent::Continuation(ri::ContinuationEvent::ContinueFinished {
-            effect_id: attach_id, key, run_id: b.run_id, generation, outcome: ri::ContinueAttachOutcome::Cancelled }));
-        assert!(!effects.iter().any(|e| matches!(e, ri::CoordinatorEffect::StopRecording { .. })));
+        let effects = ri::reduce(
+            &mut coordinator,
+            ri::CoordinatorEvent::Continuation(ri::ContinuationEvent::ContinueFinished {
+                effect_id: attach_id,
+                key,
+                run_id: b.run_id,
+                generation,
+                outcome: ri::ContinueAttachOutcome::Cancelled,
+            }),
+        );
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, ri::CoordinatorEffect::StopRecording { .. })));
         // A may finalize independently of an unsent B; retain every issued effect.
         let mut queue = std::collections::VecDeque::from(effects);
         release.store(true, Ordering::Release);
         service.stop_pending_capture(token, false).await.unwrap();
         assert!(service.retains_prepared_capture(token).await);
-        let effects = ri::reduce(&mut coordinator, ri::CoordinatorEvent::Continuation(ri::ContinuationEvent::PendingCaptureStopped {
-            effect_id: seal, run_id: b.run_id, generation, outcome: ri::CaptureStopOutcome::Inactive }));
+        let effects = ri::reduce(
+            &mut coordinator,
+            ri::CoordinatorEvent::Continuation(ri::ContinuationEvent::PendingCaptureStopped {
+                effect_id: seal,
+                run_id: b.run_id,
+                generation,
+                outcome: ri::CaptureStopOutcome::Inactive,
+            }),
+        );
         queue.extend(effects);
-        let mut disposed = 0; let mut finalized = 0;
+        let mut disposed = 0;
+        let mut finalized = 0;
         while let Some(effect) = queue.pop_front() {
             let completion = match effect {
-                ri::CoordinatorEffect::Continuation(ri::ContinuationEffect::SealPending { effect_id, run_id, generation, cancel }) => {
-                    assert!(cancel); service.stop_pending_capture(token, cancel).await.unwrap();
-                    crate::presentation::commands::retire_prepared_capture_after_stop(&tokens, token.run_id, false, Some((token.generation, cancel)));
+                ri::CoordinatorEffect::Continuation(ri::ContinuationEffect::SealPending {
+                    effect_id,
+                    run_id,
+                    generation,
+                    cancel,
+                }) => {
+                    assert!(cancel);
+                    service.stop_pending_capture(token, cancel).await.unwrap();
+                    crate::presentation::commands::retire_prepared_capture_after_stop(
+                        &tokens,
+                        token.run_id,
+                        false,
+                        Some((token.generation, cancel)),
+                    );
                     disposed += 1;
-                    Some(ri::CoordinatorEvent::Continuation(ri::ContinuationEvent::PendingCaptureStopped { effect_id, run_id, generation, outcome: ri::CaptureStopOutcome::Inactive }))
+                    Some(ri::CoordinatorEvent::Continuation(
+                        ri::ContinuationEvent::PendingCaptureStopped {
+                            effect_id,
+                            run_id,
+                            generation,
+                            outcome: ri::CaptureStopOutcome::Inactive,
+                        },
+                    ))
                 }
-                ri::CoordinatorEffect::FinalizeRecording { effect_id, run_id, .. } => {
-                    service.finalize_provider_for_run(101).await.unwrap(); finalized += 1;
-                    Some(ri::CoordinatorEvent::FinalizeFinished { effect_id, run_id, outcome: ri::FinalizeOutcome::Committed })
+                ri::CoordinatorEffect::FinalizeRecording {
+                    effect_id, run_id, ..
+                } => {
+                    service.finalize_provider_for_run(101).await.unwrap();
+                    finalized += 1;
+                    Some(ri::CoordinatorEvent::FinalizeFinished {
+                        effect_id,
+                        run_id,
+                        outcome: ri::FinalizeOutcome::Committed,
+                    })
                 }
-                ri::CoordinatorEffect::StopRecording { .. } => panic!("existing Seal owner must not be replaced"),
+                ri::CoordinatorEffect::StopRecording { .. } => {
+                    panic!("existing Seal owner must not be replaced")
+                }
                 _ => None,
             };
-            if let Some(completion) = completion { queue.extend(ri::reduce(&mut coordinator, completion)); }
+            if let Some(completion) = completion {
+                queue.extend(ri::reduce(&mut coordinator, completion));
+            }
         }
         assert_eq!((disposed, finalized), (1, 1));
         assert!(tokens.lock().unwrap().is_empty());
@@ -7466,73 +7820,198 @@ mod tests {
     #[tokio::test]
     async fn attempted_write_failure_keeps_retry_owner_when_actual_cleanup_cannot_stop_mic() {
         use crate::presentation::recording_intent_coordinator as ri;
-        struct FailingStopCapture { inner: ManualAudioCapture, release: Arc<AtomicBool>, stops: Arc<AtomicUsize> }
+        struct FailingStopCapture {
+            inner: ManualAudioCapture,
+            release: Arc<AtomicBool>,
+            stops: Arc<AtomicUsize>,
+        }
         #[async_trait]
         impl AudioCapture for FailingStopCapture {
-            async fn initialize(&mut self, c: AudioConfig) -> AudioResult<()> { self.inner.initialize(c).await }
-            async fn start_capture(&mut self, cb: crate::domain::AudioChunkCallback) -> AudioResult<()> { self.inner.start_capture(cb).await }
+            async fn initialize(&mut self, c: AudioConfig) -> AudioResult<()> {
+                self.inner.initialize(c).await
+            }
+            async fn start_capture(
+                &mut self,
+                cb: crate::domain::AudioChunkCallback,
+            ) -> AudioResult<()> {
+                self.inner.start_capture(cb).await
+            }
             async fn stop_capture(&mut self) -> AudioResult<()> {
                 self.stops.fetch_add(1, Ordering::SeqCst);
-                if !self.release.load(Ordering::Acquire) { return Err(crate::domain::AudioError::Capture("owned microphone still active".into())); }
+                if !self.release.load(Ordering::Acquire) {
+                    return Err(crate::domain::AudioError::Capture(
+                        "owned microphone still active".into(),
+                    ));
+                }
                 self.inner.stop_capture().await
             }
-            fn is_capturing(&self) -> bool { self.inner.is_capturing() }
-            fn config(&self) -> AudioConfig { self.inner.config() }
+            fn is_capturing(&self) -> bool {
+                self.inner.is_capturing()
+            }
+            fn config(&self) -> AudioConfig {
+                self.inner.config()
+            }
         }
         let (service, log, _, _) = continuation_service_fixture(false, 1, None).await;
         service.stop_capture_for_run(101).await.unwrap();
-        let paused = service.pause_for_continuation(101, Instant::now()).await.unwrap();
+        let paused = service
+            .pause_for_continuation(101, Instant::now())
+            .await
+            .unwrap();
         let release = Arc::new(AtomicBool::new(false));
         let stops = Arc::new(AtomicUsize::new(0));
         let chunks = Arc::new(StdMutex::new(None));
         *service.audio_capture.write().await = Box::new(FailingStopCapture {
-            inner: ManualAudioCapture::new(chunks.clone()), release: release.clone(), stops: stops.clone() });
+            inner: ManualAudioCapture::new(chunks.clone()),
+            release: release.clone(),
+            stops: stops.clone(),
+        });
         let token = prepare_continued_b(&service).await;
         let tokens = StdMutex::new(std::collections::BTreeMap::from([(token.run_id, token)]));
-        assert!(!crate::presentation::commands::retire_consumed_prepared_capture(&service, &tokens, token).await);
+        assert!(
+            !crate::presentation::commands::retire_consumed_prepared_capture(
+                &service, &tokens, token
+            )
+            .await
+        );
         assert_eq!(tokens.lock().unwrap().get(&token.run_id), Some(&token));
         chunks.lock().unwrap().as_ref().unwrap()(AudioChunk::new(vec![2400; 480], 16_000, 1));
         assert!(service.stop_pending_capture(token, false).await.is_err());
-        let (mut coordinator, b, attach, key, generation, retry) = ri::pending_continue_with_failed_seal();
-        assert!(service.continue_prepared_capture(token, paused, Instant::now(), Default::default()).await.is_err());
-        assert!(crate::presentation::commands::retire_consumed_prepared_capture(&service, &tokens, token).await);
-        assert!(tokens.lock().unwrap().is_empty(), "adapter retires consumed token before any later Stop");
-        let newer = PreparedCaptureToken { generation: token.generation + 1, ..token };
+        let (mut coordinator, b, attach, key, generation, retry) =
+            ri::pending_continue_with_failed_seal();
+        assert!(service
+            .continue_prepared_capture(token, paused, Instant::now(), Default::default())
+            .await
+            .is_err());
+        assert!(
+            crate::presentation::commands::retire_consumed_prepared_capture(
+                &service, &tokens, token
+            )
+            .await
+        );
+        assert!(
+            tokens.lock().unwrap().is_empty(),
+            "adapter retires consumed token before any later Stop"
+        );
+        let newer = PreparedCaptureToken {
+            generation: token.generation + 1,
+            ..token
+        };
         tokens.lock().unwrap().insert(token.run_id, newer);
-        assert!(crate::presentation::commands::retire_consumed_prepared_capture(&service, &tokens, token).await);
-        assert_eq!(tokens.lock().unwrap().remove(&token.run_id), Some(newer), "stale cleanup cannot remove another generation");
-        assert!(stops.load(Ordering::SeqCst) >= 3, "both actual failure-cleanup stops must run");
+        assert!(
+            crate::presentation::commands::retire_consumed_prepared_capture(
+                &service, &tokens, token
+            )
+            .await
+        );
+        assert_eq!(
+            tokens.lock().unwrap().remove(&token.run_id),
+            Some(newer),
+            "stale cleanup cannot remove another generation"
+        );
+        assert!(
+            stops.load(Ordering::SeqCst) >= 3,
+            "both actual failure-cleanup stops must run"
+        );
         assert!(service.audio_capture.read().await.is_capturing());
         assert!(service.capture_is_active_for_run(token.run_id).await);
-        let effects = ri::reduce(&mut coordinator, ri::CoordinatorEvent::Continuation(ri::ContinuationEvent::ContinueFinished {
-            effect_id: attach, key, run_id: b.run_id, generation, outcome: ri::ContinueAttachOutcome::AttemptedFailure(ri::ErrorCode(101)) }));
-        assert!(matches!(coordinator.capture, ri::CaptureState::Stopping { effect_id, finalize_after: true, .. } if effect_id == retry));
-        assert!(!effects.iter().any(|e| matches!(e, ri::CoordinatorEffect::StopRecording { .. } | ri::CoordinatorEffect::FinalizeRecording { .. })));
+        let effects = ri::reduce(
+            &mut coordinator,
+            ri::CoordinatorEvent::Continuation(ri::ContinuationEvent::ContinueFinished {
+                effect_id: attach,
+                key,
+                run_id: b.run_id,
+                generation,
+                outcome: ri::ContinueAttachOutcome::AttemptedFailure(ri::ErrorCode(101)),
+            }),
+        );
+        assert!(
+            matches!(coordinator.capture, ri::CaptureState::Stopping { effect_id, finalize_after: true, .. } if effect_id == retry)
+        );
+        assert!(!effects.iter().any(|e| matches!(
+            e,
+            ri::CoordinatorEffect::StopRecording { .. }
+                | ri::CoordinatorEffect::FinalizeRecording { .. }
+        )));
         assert!(service.stop_capture_for_run(token.run_id).await.is_err());
-        let effects = ri::reduce(&mut coordinator, ri::CoordinatorEvent::CaptureStopped { effect_id: retry, run_id: b.run_id,
-            outcome: ri::CaptureStopOutcome::StillActive(ri::ErrorCode(102)) });
-        let next = effects.iter().find_map(|e| match e { ri::CoordinatorEffect::StopRecording { effect_id, attempt: 2, .. } => Some(*effect_id), _ => None }).unwrap();
-        assert!(service.prepared_capture.lock().await.is_none(), "attempted B cannot become replayable");
+        let effects = ri::reduce(
+            &mut coordinator,
+            ri::CoordinatorEvent::CaptureStopped {
+                effect_id: retry,
+                run_id: b.run_id,
+                outcome: ri::CaptureStopOutcome::StillActive(ri::ErrorCode(102)),
+            },
+        );
+        let next = effects
+            .iter()
+            .find_map(|e| match e {
+                ri::CoordinatorEffect::StopRecording {
+                    effect_id,
+                    attempt: 2,
+                    ..
+                } => Some(*effect_id),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            service.prepared_capture.lock().await.is_none(),
+            "attempted B cannot become replayable"
+        );
         let attempted_samples = log.lock().unwrap().samples.clone();
         release.store(true, Ordering::Release);
         service.stop_capture_for_run(token.run_id).await.unwrap();
-        let effects = ri::reduce(&mut coordinator, ri::CoordinatorEvent::CaptureStopped { effect_id: next, run_id: b.run_id, outcome: ri::CaptureStopOutcome::Inactive });
-        assert_eq!(effects.iter().filter(|e| matches!(e, ri::CoordinatorEffect::FinalizeRecording { .. })).count(), 1);
+        let effects = ri::reduce(
+            &mut coordinator,
+            ri::CoordinatorEvent::CaptureStopped {
+                effect_id: next,
+                run_id: b.run_id,
+                outcome: ri::CaptureStopOutcome::Inactive,
+            },
+        );
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|e| matches!(e, ri::CoordinatorEffect::FinalizeRecording { .. }))
+                .count(),
+            1
+        );
         let failure = service.finalize_provider_for_run(101).await.unwrap_err();
         assert!(failure.to_string().contains("unknown B write"));
         let report = service.completed_report_for_run(101).await.unwrap();
         // A local abort is not server admission release evidence.
-        assert_eq!(report.provider_release, crate::domain::ProviderRelease::Unconfirmed);
+        assert_eq!(
+            report.provider_release,
+            crate::domain::ProviderRelease::Unconfirmed
+        );
         assert!(report.audio.unknown_bytes > 0);
         for effect in effects {
-            if let ri::CoordinatorEffect::FinalizeRecording { effect_id, run_id, .. } = effect {
-                ri::reduce(&mut coordinator, ri::CoordinatorEvent::FinalizeFinished { effect_id, run_id,
-                    outcome: ri::FinalizeOutcome::ReleaseUnconfirmed(ri::ErrorCode(101)) });
+            if let ri::CoordinatorEffect::FinalizeRecording {
+                effect_id, run_id, ..
+            } = effect
+            {
+                ri::reduce(
+                    &mut coordinator,
+                    ri::CoordinatorEvent::FinalizeFinished {
+                        effect_id,
+                        run_id,
+                        outcome: ri::FinalizeOutcome::ReleaseUnconfirmed(ri::ErrorCode(101)),
+                    },
+                );
             }
         }
         assert_eq!(coordinator.processing_jobs.len(), 1);
-        let blocked = ri::reduce(&mut coordinator, ri::CoordinatorEvent::Intent(ri::RecordingIntent::start(ri::IntentSource::Frontend, None)));
-        assert!(!blocked.iter().any(|e| matches!(e, ri::CoordinatorEffect::PrepareCapture { .. } | ri::CoordinatorEffect::StartRecording { .. })));
+        let blocked = ri::reduce(
+            &mut coordinator,
+            ri::CoordinatorEvent::Intent(ri::RecordingIntent::start(
+                ri::IntentSource::Frontend,
+                None,
+            )),
+        );
+        assert!(!blocked.iter().any(|e| matches!(
+            e,
+            ri::CoordinatorEffect::PrepareCapture { .. }
+                | ri::CoordinatorEffect::StartRecording { .. }
+        )));
         assert!(!service.audio_capture.read().await.is_capturing());
         assert!(matches!(coordinator.capture, ri::CaptureState::Idle));
         assert_eq!(log.lock().unwrap().samples, attempted_samples);
@@ -7550,30 +8029,54 @@ mod tests {
             }
         }
         for (provider_lock, context) in [
-            (true, crate::domain::ContextValidation::Valid { revision: 7 }),
-            (false, crate::domain::ContextValidation::Valid { revision: 7 }),
+            (
+                true,
+                crate::domain::ContextValidation::Valid { revision: 7 },
+            ),
+            (
+                false,
+                crate::domain::ContextValidation::Valid { revision: 7 },
+            ),
             (false, crate::domain::ContextValidation::Unavailable),
             (false, crate::domain::ContextValidation::Mismatch),
         ] {
             let (service, log, _, _) = continuation_service_fixture(false, 0, None).await;
             service.stop_capture_for_run(101).await.unwrap();
-            let paused = service.pause_for_continuation(101, Instant::now()).await.unwrap();
+            let paused = service
+                .pause_for_continuation(101, Instant::now())
+                .await
+                .unwrap();
             let token = prepare_continued_b(&service).await;
             let barrier = Arc::new(ContextBarrier(Default::default(), context));
-            if !provider_lock { service.set_continuation_context_guard(barrier.clone()); }
-            let held = if provider_lock { Some(service.stt_provider.write().await) } else { None };
+            if !provider_lock {
+                service.set_continuation_context_guard(barrier.clone());
+            }
+            let held = if provider_lock {
+                Some(service.stt_provider.write().await)
+            } else {
+                None
+            };
             let cancelled = Arc::new(AtomicBool::new(false));
-            let attach = service.continue_prepared_capture(token, paused, Instant::now(), cancelled.clone());
+            let attach =
+                service.continue_prepared_capture(token, paused, Instant::now(), cancelled.clone());
             tokio::pin!(attach);
             assert!(futures_util::poll!(attach.as_mut()).is_pending());
             cancelled.store(true, Ordering::Release);
             drop(held);
             barrier.0.notify_one();
-            assert_eq!(tokio::time::timeout(Duration::from_secs(1), attach).await.unwrap().unwrap(),
-                ContinueCaptureOutcome::Cancelled);
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), attach)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                ContinueCaptureOutcome::Cancelled
+            );
             {
                 let observed = log.lock().unwrap();
-                assert!(matches!(observed.operations.as_slice(), [crate::domain::ContinuationOperation::Pause { .. }]));
+                assert!(matches!(
+                    observed.operations.as_slice(),
+                    [crate::domain::ContinuationOperation::Pause { .. }]
+                ));
                 assert_eq!(observed.samples, vec![1200; 480]);
             }
             service.cancel_prepared_capture(token).await.unwrap();

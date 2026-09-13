@@ -175,18 +175,43 @@ impl PendingEpisode {
     }
 }
 
-pub(super) fn pending_capture_retry(state: &CoordinatorState, effect: EffectId, run: RunId) -> Option<(u64, bool)> {
+pub(super) fn pending_capture_retry(
+    state: &CoordinatorState,
+    effect: EffectId,
+    run: RunId,
+) -> Option<(u64, bool)> {
     let owns = match state.capture {
-        CaptureState::Stopping { effect_id, run: owner, .. } => effect_id == effect && owner.run_id == run,
-        CaptureState::StopUncertain { active_effect: Some(effect_id), run: owner, .. } => effect_id == effect && owner.run_id == run,
+        CaptureState::Stopping {
+            effect_id,
+            run: owner,
+            ..
+        } => effect_id == effect && owner.run_id == run,
+        CaptureState::StopUncertain {
+            active_effect: Some(effect_id),
+            run: owner,
+            ..
+        } => effect_id == effect && owner.run_id == run,
         _ => false,
     };
-    owns.then(|| state.pending_episode.filter(|p| p.run_id == run)?.physical_retry).flatten()
+    owns.then(|| {
+        state
+            .pending_episode
+            .filter(|p| p.run_id == run)?
+            .physical_retry
+    })
+    .flatten()
 }
 
-pub(super) fn complete_pending_capture_retry(state: &mut CoordinatorState, run: RunContext) -> bool {
-    let Some(mut pending) = state.pending_episode.filter(|p| p.run_id == run.run_id) else { return false; };
-    let Some((generation, cancelled)) = pending.physical_retry.take() else { return false; };
+pub(super) fn complete_pending_capture_retry(
+    state: &mut CoordinatorState,
+    run: RunContext,
+) -> bool {
+    let Some(mut pending) = state.pending_episode.filter(|p| p.run_id == run.run_id) else {
+        return false;
+    };
+    let Some((generation, cancelled)) = pending.physical_retry.take() else {
+        return false;
+    };
     if cancelled {
         state.capture = CaptureState::Idle;
         state.pending_episode = None;
@@ -204,11 +229,19 @@ pub(super) fn complete_pending_capture_retry(state: &mut CoordinatorState, run: 
 // allocate a second physical Stop or renew an exhausted retry budget.
 fn transfer_stop_finalization(state: &mut CoordinatorState) -> bool {
     let owner = match &mut state.capture {
-        CaptureState::Stopping { effect_id, finalize_after, .. } => {
+        CaptureState::Stopping {
+            effect_id,
+            finalize_after,
+            ..
+        } => {
             *finalize_after = true;
             Some(*effect_id)
         }
-        CaptureState::StopUncertain { active_effect, finalize_after, .. } => {
+        CaptureState::StopUncertain {
+            active_effect,
+            finalize_after,
+            ..
+        } => {
             *finalize_after = true;
             *active_effect
         }
@@ -216,14 +249,23 @@ fn transfer_stop_finalization(state: &mut CoordinatorState) -> bool {
     };
     if let Some(PendingEffect::Stop { finalize_after, .. }) =
         owner.and_then(|id| state.in_flight.get_mut(&id))
-    { *finalize_after = true; }
+    {
+        *finalize_after = true;
+    }
     true
 }
 
-pub(super) fn settle_after_physical_release(state: &mut CoordinatorState, run: RunContext, effects: &mut Vec<CoordinatorEffect>) {
+pub(super) fn settle_after_physical_release(
+    state: &mut CoordinatorState,
+    run: RunContext,
+    effects: &mut Vec<CoordinatorEffect>,
+) {
     if transfer_stop_finalization(state) {
         state.pending_episode = None;
-    } else if state.pending_episode.is_some_and(|p| p.run_id == run.run_id && p.seal_effect.is_some()) {
+    } else if state
+        .pending_episode
+        .is_some_and(|p| p.run_id == run.run_id && p.seal_effect.is_some())
+    {
         // The first Seal has not proved release yet. Observe its result too.
         state.capture = CaptureState::Recording { run };
     } else {
@@ -413,7 +455,10 @@ pub(super) fn apply_continuation_event(
                         state.capture = CaptureState::Recording { run };
                         // A first Seal can also still own physical release.
                         // Its completion must remain observable after attachment.
-                        if !state.pending_episode.is_some_and(|p| p.seal_effect.is_some()) {
+                        if !state
+                            .pending_episode
+                            .is_some_and(|p| p.seal_effect.is_some())
+                        {
                             state.pending_episode = None;
                         }
                     }
@@ -422,9 +467,13 @@ pub(super) fn apply_continuation_event(
                     route.phase = LogicalPhase::Draining;
                     // An unattempted refusal does not retire a physical Stop retry.
                     // Only the still-owned Continue transition may restore Buffering.
-                    if matches!(state.capture, CaptureState::Starting { effect_id: owner, .. } if owner == effect_id) {
-                        if state.pending_episode.is_some_and(|p| p.run_id == run_id &&
-                            p.sealed && p.disposition == PendingDisposition::Cancel) {
+                    if matches!(state.capture, CaptureState::Starting { effect_id: owner, .. } if owner == effect_id)
+                    {
+                        if state.pending_episode.is_some_and(|p| {
+                            p.run_id == run_id
+                                && p.sealed
+                                && p.disposition == PendingDisposition::Cancel
+                        }) {
                             state.capture = CaptureState::Idle;
                             state.pending_episode = None;
                         } else {
@@ -437,11 +486,16 @@ pub(super) fn apply_continuation_event(
                     // Control cancellation does not prove physical microphone release.
                     // SealPending (or its bounded stop retry) retains ownership until
                     // it confirms inactivity, in either completion order.
-                    if state.pending_episode.is_some_and(|p| p.run_id == run_id && !p.sealed) {
-                        if matches!(state.capture, CaptureState::Starting { effect_id: owner, .. } if owner == effect_id) {
+                    if state
+                        .pending_episode
+                        .is_some_and(|p| p.run_id == run_id && !p.sealed)
+                    {
+                        if matches!(state.capture, CaptureState::Starting { effect_id: owner, .. } if owner == effect_id)
+                        {
                             state.capture = CaptureState::Buffering { run, generation };
                         }
-                    } else if matches!(state.capture, CaptureState::Starting { effect_id: owner, .. } if owner == effect_id) {
+                    } else if matches!(state.capture, CaptureState::Starting { effect_id: owner, .. } if owner == effect_id)
+                    {
                         state.capture = CaptureState::Idle;
                         state.pending_episode = None;
                     }
@@ -458,7 +512,11 @@ pub(super) fn apply_continuation_event(
                         },
                     );
                     force_off(state, StopReason::RuntimeFailure);
-                    if state.capture.run().is_some_and(|owner| owner.run_id == run_id) {
+                    if state
+                        .capture
+                        .run()
+                        .is_some_and(|owner| owner.run_id == run_id)
+                    {
                         settle_after_physical_release(state, run, effects);
                     } else {
                         begin_terminal_finalize(state, key.logical_run_id, 1, effects);
@@ -496,8 +554,10 @@ pub(super) fn apply_continuation_event(
                 return;
             };
             pending.seal_effect = None;
-            let attached = state.continuation.is_some_and(|route|
-                matches!(route.phase, LogicalPhase::Active | LogicalPhase::Finalizing) && route.episode == run_id);
+            let attached = state.continuation.is_some_and(|route| {
+                matches!(route.phase, LogicalPhase::Active | LogicalPhase::Finalizing)
+                    && route.episode == run_id
+            });
             if let CaptureStopOutcome::StillActive(error) = outcome {
                 set_recoverable_fault(state, CoordinatorFault::RuntimeFailed { run_id, error });
                 // The bounded Stop retry retains the exact prepared generation and
@@ -631,21 +691,35 @@ pub(super) fn reconcile_continuation_capture(
     // Continue owns its cancellation independently of the physical microphone.
     // Seal/retry may have replaced Starting while that control still awaits admission.
     if pending.disposition == PendingDisposition::Cancel && !pending.cancel_signalled {
-        let owner = state.in_flight.iter().find_map(|(effect_id, effect)| match effect {
-            PendingEffect::Continue { run, .. } if run.run_id == pending.run_id => Some(*effect_id),
-            _ => None,
-        }).or_else(|| match state.capture {
-            CaptureState::Starting { effect_id, run, .. } if run.run_id == pending.run_id => Some(effect_id),
-            _ => None,
-        });
+        let owner = state
+            .in_flight
+            .iter()
+            .find_map(|(effect_id, effect)| match effect {
+                PendingEffect::Continue { run, .. } if run.run_id == pending.run_id => {
+                    Some(*effect_id)
+                }
+                _ => None,
+            })
+            .or_else(|| match state.capture {
+                CaptureState::Starting { effect_id, run, .. } if run.run_id == pending.run_id => {
+                    Some(effect_id)
+                }
+                _ => None,
+            });
         if let Some(effect_id) = owner {
-            effects.push(CoordinatorEffect::CancelStart { effect_id, run_id: pending.run_id });
+            effects.push(CoordinatorEffect::CancelStart {
+                effect_id,
+                run_id: pending.run_id,
+            });
             pending.cancel_signalled = true;
         }
     }
     state.pending_episode = Some(pending);
     // Physical release still belongs to the existing bounded retry owner.
-    if matches!(state.capture, CaptureState::Stopping { .. } | CaptureState::StopUncertain { .. }) {
+    if matches!(
+        state.capture,
+        CaptureState::Stopping { .. } | CaptureState::StopUncertain { .. }
+    ) {
         return true;
     }
     if pending.disposition != PendingDisposition::Live {
@@ -854,54 +928,106 @@ mod tests {
     }
     #[test]
     fn cancelled_or_unsent_continue_keeps_physical_owner_until_seal_or_retry_confirms_release() {
-        for attach_outcome in [ContinueAttachOutcome::Cancelled, ContinueAttachOutcome::Unsent] {
-        for seal_first in [false, true] {
-            for outcome in [CaptureStopOutcome::Inactive,
-                CaptureStopOutcome::FailedButInactive(ErrorCode(90)),
-                CaptureStopOutcome::StillActive(ErrorCode(91))] {
-                let (mut state, a) = active();
-                pause(&mut state, a, 1);
-                let (prepare, b) = start(&mut state);
-                let effects = prepared(&mut state, prepare, b, 22);
-                let (attach, key, _, generation) = continue_effect(&effects);
-                let effects = reduce(&mut state, CoordinatorEvent::Intent(
-                    RecordingIntent::toggle(IntentSource::Frontend, GestureId::new(900))));
-                let seal = effects.iter().find_map(|e| match e {
-                    CoordinatorEffect::Continuation(ContinuationEffect::SealPending {
-                        effect_id, run_id, cancel: true, .. }) if *run_id == b.run_id => Some(*effect_id),
-                    _ => None,
-                }).unwrap();
-                let completed = ContinuationEvent::ContinueFinished { effect_id: attach, key,
-                    run_id: b.run_id, generation, outcome: attach_outcome };
-                let stopped = ContinuationEvent::PendingCaptureStopped { effect_id: seal,
-                    run_id: b.run_id, generation, outcome };
-                let mut effects = if seal_first { event(&mut state, stopped) }
-                    else { event(&mut state, completed) };
-                if !seal_first {
-                    assert_eq!(state.capture.run().map(|r| r.run_id), Some(b.run_id));
-                    assert_eq!(state.pending_episode.unwrap().seal_effect, Some(seal));
+        for attach_outcome in [
+            ContinueAttachOutcome::Cancelled,
+            ContinueAttachOutcome::Unsent,
+        ] {
+            for seal_first in [false, true] {
+                for outcome in [
+                    CaptureStopOutcome::Inactive,
+                    CaptureStopOutcome::FailedButInactive(ErrorCode(90)),
+                    CaptureStopOutcome::StillActive(ErrorCode(91)),
+                ] {
+                    let (mut state, a) = active();
+                    pause(&mut state, a, 1);
+                    let (prepare, b) = start(&mut state);
+                    let effects = prepared(&mut state, prepare, b, 22);
+                    let (attach, key, _, generation) = continue_effect(&effects);
+                    let effects = reduce(
+                        &mut state,
+                        CoordinatorEvent::Intent(RecordingIntent::toggle(
+                            IntentSource::Frontend,
+                            GestureId::new(900),
+                        )),
+                    );
+                    let seal = effects
+                        .iter()
+                        .find_map(|e| match e {
+                            CoordinatorEffect::Continuation(ContinuationEffect::SealPending {
+                                effect_id,
+                                run_id,
+                                cancel: true,
+                                ..
+                            }) if *run_id == b.run_id => Some(*effect_id),
+                            _ => None,
+                        })
+                        .unwrap();
+                    let completed = ContinuationEvent::ContinueFinished {
+                        effect_id: attach,
+                        key,
+                        run_id: b.run_id,
+                        generation,
+                        outcome: attach_outcome,
+                    };
+                    let stopped = ContinuationEvent::PendingCaptureStopped {
+                        effect_id: seal,
+                        run_id: b.run_id,
+                        generation,
+                        outcome,
+                    };
+                    let mut effects = if seal_first {
+                        event(&mut state, stopped)
+                    } else {
+                        event(&mut state, completed)
+                    };
+                    if !seal_first {
+                        assert_eq!(state.capture.run().map(|r| r.run_id), Some(b.run_id));
+                        assert_eq!(state.pending_episode.unwrap().seal_effect, Some(seal));
+                    }
+                    effects.extend(if seal_first {
+                        event(&mut state, completed)
+                    } else {
+                        event(&mut state, stopped)
+                    });
+                    if matches!(outcome, CaptureStopOutcome::StillActive(_)) {
+                        let retry = effects
+                            .iter()
+                            .find_map(|e| match e {
+                                CoordinatorEffect::StopRecording {
+                                    effect_id, run_id, ..
+                                } if *run_id == b.run_id => Some(*effect_id),
+                                _ => None,
+                            })
+                            .expect("failed Seal must schedule physical stop retry");
+                        assert_eq!(state.capture.run().map(|r| r.run_id), Some(b.run_id));
+                        assert!(!effects.iter().any(|e| matches!(
+                            e,
+                            CoordinatorEffect::Continuation(ContinuationEffect::SealPending { .. })
+                        )));
+                        let queued = reduce(
+                            &mut state,
+                            CoordinatorEvent::Intent(RecordingIntent::start(
+                                IntentSource::Frontend,
+                                None,
+                            )),
+                        );
+                        assert!(!queued
+                            .iter()
+                            .any(|e| matches!(e, CoordinatorEffect::PrepareCapture { .. })));
+                        reduce(
+                            &mut state,
+                            CoordinatorEvent::CaptureStopped {
+                                effect_id: retry,
+                                run_id: b.run_id,
+                                outcome: CaptureStopOutcome::Inactive,
+                            },
+                        );
+                    }
+                    assert_ne!(state.capture.run().map(|r| r.run_id), Some(b.run_id));
+                    assert!(!state.pending_episode.is_some_and(|p| p.run_id == b.run_id));
+                    assert!(state.validate().is_ok());
                 }
-                effects.extend(if seal_first { event(&mut state, completed) }
-                    else { event(&mut state, stopped) });
-                if matches!(outcome, CaptureStopOutcome::StillActive(_)) {
-                    let retry = effects.iter().find_map(|e| match e {
-                        CoordinatorEffect::StopRecording { effect_id, run_id, .. }
-                            if *run_id == b.run_id => Some(*effect_id), _ => None,
-                    }).expect("failed Seal must schedule physical stop retry");
-                    assert_eq!(state.capture.run().map(|r| r.run_id), Some(b.run_id));
-                    assert!(!effects.iter().any(|e| matches!(e,
-                        CoordinatorEffect::Continuation(ContinuationEffect::SealPending { .. }))));
-                    let queued = reduce(&mut state, CoordinatorEvent::Intent(
-                        RecordingIntent::start(IntentSource::Frontend, None)));
-                    assert!(!queued.iter().any(|e| matches!(e, CoordinatorEffect::PrepareCapture { .. })));
-                    reduce(&mut state, CoordinatorEvent::CaptureStopped { effect_id: retry,
-                        run_id: b.run_id, outcome: CaptureStopOutcome::Inactive });
-                }
-                assert_ne!(state.capture.run().map(|r| r.run_id), Some(b.run_id));
-                assert!(!state.pending_episode.is_some_and(|p| p.run_id == b.run_id));
-                assert!(state.validate().is_ok());
             }
-        }
         }
     }
 
@@ -909,92 +1035,263 @@ mod tests {
     fn pending_stop_retry_preserves_sealed_route_and_exact_retry_owner() {
         for cancel in [false, true] {
             let (mut state, a) = active();
-            let effects = reduce(&mut state, CoordinatorEvent::Intent(RecordingIntent::stop(IntentSource::Frontend, None)));
-            let stop_a = effects.iter().find_map(|e| match e { CoordinatorEffect::StopRecording { effect_id, .. } => Some(*effect_id), _ => None }).unwrap();
-            let effects = reduce(&mut state, CoordinatorEvent::CaptureStopped { effect_id: stop_a, run_id: a.run_id, outcome: CaptureStopOutcome::Inactive });
-            let (pause_id, key) = effects.iter().find_map(|e| match e {
-                CoordinatorEffect::Continuation(ContinuationEffect::Pause { effect_id, key, .. }) => Some((*effect_id, *key)), _ => None,
-            }).unwrap();
+            let effects = reduce(
+                &mut state,
+                CoordinatorEvent::Intent(RecordingIntent::stop(IntentSource::Frontend, None)),
+            );
+            let stop_a = effects
+                .iter()
+                .find_map(|e| match e {
+                    CoordinatorEffect::StopRecording { effect_id, .. } => Some(*effect_id),
+                    _ => None,
+                })
+                .unwrap();
+            let effects = reduce(
+                &mut state,
+                CoordinatorEvent::CaptureStopped {
+                    effect_id: stop_a,
+                    run_id: a.run_id,
+                    outcome: CaptureStopOutcome::Inactive,
+                },
+            );
+            let (pause_id, key) = effects
+                .iter()
+                .find_map(|e| match e {
+                    CoordinatorEffect::Continuation(ContinuationEffect::Pause {
+                        effect_id,
+                        key,
+                        ..
+                    }) => Some((*effect_id, *key)),
+                    _ => None,
+                })
+                .unwrap();
             let (prepare, b) = start(&mut state);
             prepared(&mut state, prepare, b, 22);
             assert!(matches!(state.capture, CaptureState::Buffering { .. }));
-            let intent = if cancel { RecordingIntent::toggle(IntentSource::Frontend, GestureId::new(901)) }
-                else { RecordingIntent::stop(IntentSource::Frontend, None) };
+            let intent = if cancel {
+                RecordingIntent::toggle(IntentSource::Frontend, GestureId::new(901))
+            } else {
+                RecordingIntent::stop(IntentSource::Frontend, None)
+            };
             let effects = reduce(&mut state, CoordinatorEvent::Intent(intent));
-            let seal = effects.iter().find_map(|e| match e {
-                CoordinatorEffect::Continuation(ContinuationEffect::SealPending { effect_id, .. }) => Some(*effect_id), _ => None,
-            }).unwrap();
-            let effects = event(&mut state, ContinuationEvent::PendingCaptureStopped { effect_id: seal,
-                run_id: b.run_id, generation: 22, outcome: CaptureStopOutcome::StillActive(ErrorCode(99)) });
-            let retry = effects.iter().find_map(|e| match e { CoordinatorEffect::StopRecording { effect_id, .. } => Some(*effect_id), _ => None }).unwrap();
-            assert_eq!(state.pending_capture_retry(retry, b.run_id), Some((22, cancel)));
+            let seal = effects
+                .iter()
+                .find_map(|e| match e {
+                    CoordinatorEffect::Continuation(ContinuationEffect::SealPending {
+                        effect_id,
+                        ..
+                    }) => Some(*effect_id),
+                    _ => None,
+                })
+                .unwrap();
+            let effects = event(
+                &mut state,
+                ContinuationEvent::PendingCaptureStopped {
+                    effect_id: seal,
+                    run_id: b.run_id,
+                    generation: 22,
+                    outcome: CaptureStopOutcome::StillActive(ErrorCode(99)),
+                },
+            );
+            let retry = effects
+                .iter()
+                .find_map(|e| match e {
+                    CoordinatorEffect::StopRecording { effect_id, .. } => Some(*effect_id),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                state.pending_capture_retry(retry, b.run_id),
+                Some((22, cancel))
+            );
             assert_eq!(state.pending_capture_retry(seal, b.run_id), None);
-            let effects = reduce(&mut state, CoordinatorEvent::CaptureStopped { effect_id: retry,
-                run_id: b.run_id, outcome: CaptureStopOutcome::StillActive(ErrorCode(100)) });
-            let retry2 = effects.iter().find_map(|e| match e { CoordinatorEffect::StopRecording { effect_id, attempt: 2, .. } => Some(*effect_id), _ => None }).unwrap();
+            let effects = reduce(
+                &mut state,
+                CoordinatorEvent::CaptureStopped {
+                    effect_id: retry,
+                    run_id: b.run_id,
+                    outcome: CaptureStopOutcome::StillActive(ErrorCode(100)),
+                },
+            );
+            let retry2 = effects
+                .iter()
+                .find_map(|e| match e {
+                    CoordinatorEffect::StopRecording {
+                        effect_id,
+                        attempt: 2,
+                        ..
+                    } => Some(*effect_id),
+                    _ => None,
+                })
+                .unwrap();
             assert_eq!(state.pending_capture_retry(retry, b.run_id), None);
-            assert_eq!(state.pending_capture_retry(retry2, b.run_id), Some((22, cancel)));
-            assert!(!effects.iter().any(|e| matches!(e, CoordinatorEffect::Continuation(ContinuationEffect::SealPending { .. }))));
-            reduce(&mut state, CoordinatorEvent::CaptureStopped { effect_id: retry2,
-                run_id: b.run_id, outcome: CaptureStopOutcome::Inactive });
+            assert_eq!(
+                state.pending_capture_retry(retry2, b.run_id),
+                Some((22, cancel))
+            );
+            assert!(!effects.iter().any(|e| matches!(
+                e,
+                CoordinatorEffect::Continuation(ContinuationEffect::SealPending { .. })
+            )));
+            reduce(
+                &mut state,
+                CoordinatorEvent::CaptureStopped {
+                    effect_id: retry2,
+                    run_id: b.run_id,
+                    outcome: CaptureStopOutcome::Inactive,
+                },
+            );
             if cancel {
                 assert!(state.pending_episode.is_none());
                 assert!(matches!(state.capture, CaptureState::Idle));
             } else {
                 assert!(state.pending_episode.unwrap().sealed);
-                assert!(matches!(state.capture, CaptureState::Buffering { run, generation: 22 } if run.run_id == b.run_id));
+                assert!(
+                    matches!(state.capture, CaptureState::Buffering { run, generation: 22 } if run.run_id == b.run_id)
+                );
             }
-            let effects = event(&mut state, ContinuationEvent::PauseFinished { effect_id: pause_id, key, pause_epoch: Some(1) });
+            let effects = event(
+                &mut state,
+                ContinuationEvent::PauseFinished {
+                    effect_id: pause_id,
+                    key,
+                    pause_epoch: Some(1),
+                },
+            );
             assert_eq!(effects.iter().any(|e| matches!(e, CoordinatorEffect::Continuation(ContinuationEffect::Continue { run, .. }) if run.run_id == b.run_id)), !cancel);
             assert!(state.validate().is_ok());
         }
     }
 
-    pub(crate) fn pending_continue_with_outstanding_seal() -> (CoordinatorState, RunContext, EffectId, ContinuationKey, u64, EffectId) {
+    pub(crate) fn pending_continue_with_outstanding_seal() -> (
+        CoordinatorState,
+        RunContext,
+        EffectId,
+        ContinuationKey,
+        u64,
+        EffectId,
+    ) {
         let (mut state, a) = active();
         pause(&mut state, a, 1);
         let (prepare, b) = start(&mut state);
         let effects = prepared(&mut state, prepare, b, 22);
         let (attach, key, _, generation) = continue_effect(&effects);
-        let effects = reduce(&mut state, CoordinatorEvent::Intent(RecordingIntent::stop(IntentSource::Frontend, None)));
-        let seal = effects.iter().find_map(|e| match e {
-            CoordinatorEffect::Continuation(ContinuationEffect::SealPending { effect_id, .. }) => Some(*effect_id), _ => None,
-        }).unwrap();
+        let effects = reduce(
+            &mut state,
+            CoordinatorEvent::Intent(RecordingIntent::stop(IntentSource::Frontend, None)),
+        );
+        let seal = effects
+            .iter()
+            .find_map(|e| match e {
+                CoordinatorEffect::Continuation(ContinuationEffect::SealPending {
+                    effect_id,
+                    ..
+                }) => Some(*effect_id),
+                _ => None,
+            })
+            .unwrap();
         (state, b, attach, key, generation, seal)
     }
 
-    pub(crate) fn pending_continue_with_failed_seal() -> (CoordinatorState, RunContext, EffectId, ContinuationKey, u64, EffectId) {
-        let (mut state, b, attach, key, generation, seal) = pending_continue_with_outstanding_seal();
-        let effects = event(&mut state, ContinuationEvent::PendingCaptureStopped { effect_id: seal,
-            run_id: b.run_id, generation, outcome: CaptureStopOutcome::StillActive(ErrorCode(99)) });
-        let retry = effects.iter().find_map(|e| match e { CoordinatorEffect::StopRecording { effect_id, .. } => Some(*effect_id), _ => None }).unwrap();
+    pub(crate) fn pending_continue_with_failed_seal() -> (
+        CoordinatorState,
+        RunContext,
+        EffectId,
+        ContinuationKey,
+        u64,
+        EffectId,
+    ) {
+        let (mut state, b, attach, key, generation, seal) =
+            pending_continue_with_outstanding_seal();
+        let effects = event(
+            &mut state,
+            ContinuationEvent::PendingCaptureStopped {
+                effect_id: seal,
+                run_id: b.run_id,
+                generation,
+                outcome: CaptureStopOutcome::StillActive(ErrorCode(99)),
+            },
+        );
+        let retry = effects
+            .iter()
+            .find_map(|e| match e {
+                CoordinatorEffect::StopRecording { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .unwrap();
         (state, b, attach, key, generation, retry)
     }
 
     #[test]
     fn attached_continue_preserves_physical_retry_identity_and_finalization() {
         for failed_retries in [0, 1, 3] {
-            let (mut state, b, attach, key, generation, mut retry) = pending_continue_with_failed_seal();
+            let (mut state, b, attach, key, generation, mut retry) =
+                pending_continue_with_failed_seal();
             let first_retry = retry;
             for _ in 0..failed_retries {
-                let effects = reduce(&mut state, CoordinatorEvent::CaptureStopped { effect_id: retry,
-                    run_id: b.run_id, outcome: CaptureStopOutcome::StillActive(ErrorCode(100)) });
+                let effects = reduce(
+                    &mut state,
+                    CoordinatorEvent::CaptureStopped {
+                        effect_id: retry,
+                        run_id: b.run_id,
+                        outcome: CaptureStopOutcome::StillActive(ErrorCode(100)),
+                    },
+                );
                 if let Some(next) = effects.iter().find_map(|e| match e {
-                    CoordinatorEffect::StopRecording { effect_id, .. } => Some(*effect_id), _ => None,
-                }) { retry = next; }
+                    CoordinatorEffect::StopRecording { effect_id, .. } => Some(*effect_id),
+                    _ => None,
+                }) {
+                    retry = next;
+                }
             }
             let before = state.capture;
-            let effects = event(&mut state, ContinuationEvent::ContinueFinished { effect_id: attach,
-                key, run_id: b.run_id, generation, outcome: ContinueAttachOutcome::Attached { context_revision: 7 } });
-            assert!(!effects.iter().any(|e| matches!(e, CoordinatorEffect::StopRecording { .. })));
+            let effects = event(
+                &mut state,
+                ContinuationEvent::ContinueFinished {
+                    effect_id: attach,
+                    key,
+                    run_id: b.run_id,
+                    generation,
+                    outcome: ContinueAttachOutcome::Attached {
+                        context_revision: 7,
+                    },
+                },
+            );
+            assert!(!effects
+                .iter()
+                .any(|e| matches!(e, CoordinatorEffect::StopRecording { .. })));
             let owner = match (before, state.capture) {
-                (CaptureState::Stopping { effect_id: old, attempts: n, .. },
-                 CaptureState::Stopping { effect_id, attempts, finalize_after: true, .. }) => {
-                    assert_eq!((old, n), (effect_id, attempts)); Some(effect_id)
+                (
+                    CaptureState::Stopping {
+                        effect_id: old,
+                        attempts: n,
+                        ..
+                    },
+                    CaptureState::Stopping {
+                        effect_id,
+                        attempts,
+                        finalize_after: true,
+                        ..
+                    },
+                ) => {
+                    assert_eq!((old, n), (effect_id, attempts));
+                    Some(effect_id)
                 }
-                (CaptureState::StopUncertain { active_effect: old, attempts: n, .. },
-                 CaptureState::StopUncertain { active_effect, attempts, finalize_after: true, .. }) => {
-                    assert_eq!((old, n), (active_effect, attempts)); active_effect
+                (
+                    CaptureState::StopUncertain {
+                        active_effect: old,
+                        attempts: n,
+                        ..
+                    },
+                    CaptureState::StopUncertain {
+                        active_effect,
+                        attempts,
+                        finalize_after: true,
+                        ..
+                    },
+                ) => {
+                    assert_eq!((old, n), (active_effect, attempts));
+                    active_effect
                 }
                 pair => panic!("physical owner replaced: {pair:?}"),
             };
@@ -1002,18 +1299,48 @@ mod tests {
             // Already-completed effects cannot settle the surviving owner.
             if first_retry != retry {
                 let before = state.capture;
-                reduce(&mut state, CoordinatorEvent::CaptureStopped { effect_id: first_retry,
-                    run_id: b.run_id, outcome: CaptureStopOutcome::Inactive });
+                reduce(
+                    &mut state,
+                    CoordinatorEvent::CaptureStopped {
+                        effect_id: first_retry,
+                        run_id: b.run_id,
+                        outcome: CaptureStopOutcome::Inactive,
+                    },
+                );
                 assert_eq!(state.capture, before);
             }
             if let Some(owner) = owner {
-                let effects = reduce(&mut state, CoordinatorEvent::CaptureStopped { effect_id: owner,
-                    run_id: b.run_id, outcome: CaptureStopOutcome::Inactive });
+                let effects = reduce(
+                    &mut state,
+                    CoordinatorEvent::CaptureStopped {
+                        effect_id: owner,
+                        run_id: b.run_id,
+                        outcome: CaptureStopOutcome::Inactive,
+                    },
+                );
                 assert!(matches!(state.capture, CaptureState::Idle));
-                assert_eq!(effects.iter().filter(|e| matches!(e, CoordinatorEffect::Continuation(ContinuationEffect::Pause { .. }))).count(), 1);
-                assert!(matches!(state.continuation.unwrap().phase, LogicalPhase::Pausing));
+                assert_eq!(
+                    effects
+                        .iter()
+                        .filter(|e| matches!(
+                            e,
+                            CoordinatorEffect::Continuation(ContinuationEffect::Pause { .. })
+                        ))
+                        .count(),
+                    1
+                );
+                assert!(matches!(
+                    state.continuation.unwrap().phase,
+                    LogicalPhase::Pausing
+                ));
             } else {
-                assert!(matches!(state.capture, CaptureState::StopUncertain { active_effect: None, .. }));
+                assert!(matches!(
+                    state.capture,
+                    CaptureState::StopUncertain {
+                        active_effect: None,
+                        ..
+                    }
+                ));
             }
             assert!(state.validate().is_ok());
         }
@@ -1027,27 +1354,85 @@ mod tests {
             let (prepare, b) = start(&mut state);
             let effects = prepared(&mut state, prepare, b, 22);
             let (attach, key, _, generation) = continue_effect(&effects);
-            let effects = reduce(&mut state, CoordinatorEvent::Intent(RecordingIntent::stop(IntentSource::Frontend, None)));
-            let seal = effects.iter().find_map(|e| match e {
-                CoordinatorEffect::Continuation(ContinuationEffect::SealPending { effect_id, .. }) => Some(*effect_id), _ => None,
-            }).unwrap();
-            let attached = ContinuationEvent::ContinueFinished { effect_id: attach, key,
-                run_id: b.run_id, generation, outcome: ContinueAttachOutcome::Attached { context_revision: 7 } };
-            if before_seal { event(&mut state, attached); }
-            let effects = event(&mut state, ContinuationEvent::PendingCaptureStopped { effect_id: seal,
-                run_id: b.run_id, generation, outcome: CaptureStopOutcome::StillActive(ErrorCode(99)) });
-            let retry = effects.iter().find_map(|e| match e { CoordinatorEffect::StopRecording { effect_id, .. } => Some(*effect_id), _ => None }).unwrap();
-            let mut effects = reduce(&mut state, CoordinatorEvent::CaptureStopped { effect_id: retry,
-                run_id: b.run_id, outcome: CaptureStopOutcome::Inactive });
+            let effects = reduce(
+                &mut state,
+                CoordinatorEvent::Intent(RecordingIntent::stop(IntentSource::Frontend, None)),
+            );
+            let seal = effects
+                .iter()
+                .find_map(|e| match e {
+                    CoordinatorEffect::Continuation(ContinuationEffect::SealPending {
+                        effect_id,
+                        ..
+                    }) => Some(*effect_id),
+                    _ => None,
+                })
+                .unwrap();
+            let attached = ContinuationEvent::ContinueFinished {
+                effect_id: attach,
+                key,
+                run_id: b.run_id,
+                generation,
+                outcome: ContinueAttachOutcome::Attached {
+                    context_revision: 7,
+                },
+            };
+            if before_seal {
+                event(&mut state, attached);
+            }
+            let effects = event(
+                &mut state,
+                ContinuationEvent::PendingCaptureStopped {
+                    effect_id: seal,
+                    run_id: b.run_id,
+                    generation,
+                    outcome: CaptureStopOutcome::StillActive(ErrorCode(99)),
+                },
+            );
+            let retry = effects
+                .iter()
+                .find_map(|e| match e {
+                    CoordinatorEffect::StopRecording { effect_id, .. } => Some(*effect_id),
+                    _ => None,
+                })
+                .unwrap();
+            let mut effects = reduce(
+                &mut state,
+                CoordinatorEvent::CaptureStopped {
+                    effect_id: retry,
+                    run_id: b.run_id,
+                    outcome: CaptureStopOutcome::Inactive,
+                },
+            );
             if !before_seal {
                 assert!(matches!(state.capture, CaptureState::Buffering { .. }));
                 effects.extend(event(&mut state, attached));
-                let stop = effects.iter().find_map(|e| match e { CoordinatorEffect::StopRecording { effect_id, .. } => Some(*effect_id), _ => None }).unwrap();
-                effects.extend(reduce(&mut state, CoordinatorEvent::CaptureStopped { effect_id: stop,
-                    run_id: b.run_id, outcome: CaptureStopOutcome::Inactive }));
+                let stop = effects
+                    .iter()
+                    .find_map(|e| match e {
+                        CoordinatorEffect::StopRecording { effect_id, .. } => Some(*effect_id),
+                        _ => None,
+                    })
+                    .unwrap();
+                effects.extend(reduce(
+                    &mut state,
+                    CoordinatorEvent::CaptureStopped {
+                        effect_id: stop,
+                        run_id: b.run_id,
+                        outcome: CaptureStopOutcome::Inactive,
+                    },
+                ));
             }
-            assert_eq!(effects.iter().filter(|e| matches!(e,
-                CoordinatorEffect::Continuation(ContinuationEffect::Pause { .. }))).count(), 1);
+            assert_eq!(
+                effects
+                    .iter()
+                    .filter(|e| matches!(
+                        e,
+                        CoordinatorEffect::Continuation(ContinuationEffect::Pause { .. })
+                    ))
+                    .count(),
+                1
+            );
             assert!(state.pending_episode.is_none());
             assert!(matches!(state.capture, CaptureState::Idle));
             assert!(state.validate().is_ok());
@@ -1056,25 +1441,73 @@ mod tests {
 
     #[test]
     fn late_teardown_disposes_already_sealed_b_in_both_completion_orders() {
-        for teardown in [CoordinatorEvent::ShutdownRequested, CoordinatorEvent::ForceOff(StopReason::SystemSleep)] {
+        for teardown in [
+            CoordinatorEvent::ShutdownRequested,
+            CoordinatorEvent::ForceOff(StopReason::SystemSleep),
+        ] {
             for dispose_first in [false, true] {
-                let (mut state, b, attach, key, generation, retry) = pending_continue_with_failed_seal();
-                reduce(&mut state, CoordinatorEvent::CaptureStopped { effect_id: retry, run_id: b.run_id, outcome: CaptureStopOutcome::Inactive });
+                let (mut state, b, attach, key, generation, retry) =
+                    pending_continue_with_failed_seal();
+                reduce(
+                    &mut state,
+                    CoordinatorEvent::CaptureStopped {
+                        effect_id: retry,
+                        run_id: b.run_id,
+                        outcome: CaptureStopOutcome::Inactive,
+                    },
+                );
                 assert!(state.pending_episode.unwrap().sealed);
                 let effects = reduce(&mut state, teardown);
-                let dispose = effects.iter().find_map(|e| match e {
-                    CoordinatorEffect::Continuation(ContinuationEffect::SealPending { effect_id, run_id, generation: g, cancel: true })
-                        if *run_id == b.run_id && *g == generation => Some(*effect_id), _ => None,
-                }).expect("sealed PCM still requires explicit cancellation disposal");
-                let finished = ContinuationEvent::ContinueFinished { effect_id: attach, key, run_id: b.run_id, generation, outcome: ContinueAttachOutcome::Cancelled };
-                let disposed = ContinuationEvent::PendingCaptureStopped { effect_id: dispose, run_id: b.run_id, generation, outcome: CaptureStopOutcome::Inactive };
-                let mut effects = if dispose_first { event(&mut state, disposed) } else { event(&mut state, finished) };
-                effects.extend(if dispose_first { event(&mut state, finished) } else { event(&mut state, disposed) });
+                let dispose = effects
+                    .iter()
+                    .find_map(|e| match e {
+                        CoordinatorEffect::Continuation(ContinuationEffect::SealPending {
+                            effect_id,
+                            run_id,
+                            generation: g,
+                            cancel: true,
+                        }) if *run_id == b.run_id && *g == generation => Some(*effect_id),
+                        _ => None,
+                    })
+                    .expect("sealed PCM still requires explicit cancellation disposal");
+                let finished = ContinuationEvent::ContinueFinished {
+                    effect_id: attach,
+                    key,
+                    run_id: b.run_id,
+                    generation,
+                    outcome: ContinueAttachOutcome::Cancelled,
+                };
+                let disposed = ContinuationEvent::PendingCaptureStopped {
+                    effect_id: dispose,
+                    run_id: b.run_id,
+                    generation,
+                    outcome: CaptureStopOutcome::Inactive,
+                };
+                let mut effects = if dispose_first {
+                    event(&mut state, disposed)
+                } else {
+                    event(&mut state, finished)
+                };
+                effects.extend(if dispose_first {
+                    event(&mut state, finished)
+                } else {
+                    event(&mut state, disposed)
+                });
                 assert!(state.pending_episode.is_none());
                 assert!(matches!(state.capture, CaptureState::Idle));
                 for effect in effects {
-                    if let CoordinatorEffect::FinalizeRecording { effect_id, run_id, .. } = effect {
-                        reduce(&mut state, CoordinatorEvent::FinalizeFinished { effect_id, run_id, outcome: FinalizeOutcome::Committed });
+                    if let CoordinatorEffect::FinalizeRecording {
+                        effect_id, run_id, ..
+                    } = effect
+                    {
+                        reduce(
+                            &mut state,
+                            CoordinatorEvent::FinalizeFinished {
+                                effect_id,
+                                run_id,
+                                outcome: FinalizeOutcome::Committed,
+                            },
+                        );
                     }
                 }
                 assert!(state.processing_jobs.is_empty());
@@ -1087,36 +1520,116 @@ mod tests {
     fn terminal_and_attempted_failure_preserve_active_and_exhausted_stop_owners() {
         for failures in [0, 1, 3] {
             for settlement in 0..7 {
-                let (mut state, b, attach, key, generation, mut retry) = pending_continue_with_failed_seal();
+                let (mut state, b, attach, key, generation, mut retry) =
+                    pending_continue_with_failed_seal();
                 for _ in 0..failures {
-                    let effects = reduce(&mut state, CoordinatorEvent::CaptureStopped { effect_id: retry, run_id: b.run_id, outcome: CaptureStopOutcome::StillActive(ErrorCode(100)) });
-                    if let Some(next) = effects.iter().find_map(|e| match e { CoordinatorEffect::StopRecording { effect_id, .. } => Some(*effect_id), _ => None }) { retry = next; }
+                    let effects = reduce(
+                        &mut state,
+                        CoordinatorEvent::CaptureStopped {
+                            effect_id: retry,
+                            run_id: b.run_id,
+                            outcome: CaptureStopOutcome::StillActive(ErrorCode(100)),
+                        },
+                    );
+                    if let Some(next) = effects.iter().find_map(|e| match e {
+                        CoordinatorEffect::StopRecording { effect_id, .. } => Some(*effect_id),
+                        _ => None,
+                    }) {
+                        retry = next;
+                    }
                 }
                 let mut expected = state.capture;
                 let owner = match &mut expected {
-                    CaptureState::Stopping { effect_id, finalize_after, .. } => { *finalize_after = true; Some(*effect_id) }
-                    CaptureState::StopUncertain { active_effect, finalize_after, .. } => { *finalize_after = true; *active_effect }
+                    CaptureState::Stopping {
+                        effect_id,
+                        finalize_after,
+                        ..
+                    } => {
+                        *finalize_after = true;
+                        Some(*effect_id)
+                    }
+                    CaptureState::StopUncertain {
+                        active_effect,
+                        finalize_after,
+                        ..
+                    } => {
+                        *finalize_after = true;
+                        *active_effect
+                    }
                     _ => unreachable!(),
                 };
-                let terminal = ContinuationEvent::TerminalObserved { logical_run_id: key.logical_run_id, connection_generation: key.connection_generation };
+                let terminal = ContinuationEvent::TerminalObserved {
+                    logical_run_id: key.logical_run_id,
+                    connection_generation: key.connection_generation,
+                };
                 let notification = match settlement {
-                    3 | 4 => CoordinatorEvent::RuntimeFailed { run_id: key.logical_run_id, error: ErrorCode(110) },
-                    5 | 6 => CoordinatorEvent::NegotiatedRuntimeFailed { run_id: key.logical_run_id, error: ErrorCode(110) },
+                    3 | 4 => CoordinatorEvent::RuntimeFailed {
+                        run_id: key.logical_run_id,
+                        error: ErrorCode(110),
+                    },
+                    5 | 6 => CoordinatorEvent::NegotiatedRuntimeFailed {
+                        run_id: key.logical_run_id,
+                        error: ErrorCode(110),
+                    },
                     _ => CoordinatorEvent::Continuation(terminal),
                 };
                 let mut effects = Vec::new();
-                if matches!(settlement, 0 | 3 | 5) { effects.extend(reduce(&mut state, notification)); }
-                effects.extend(event(&mut state, ContinuationEvent::ContinueFinished { effect_id: attach, key, run_id: b.run_id, generation,
-                    outcome: if settlement == 2 { ContinueAttachOutcome::AttemptedFailure(ErrorCode(101)) } else { ContinueAttachOutcome::Attached { context_revision: 7 } } }));
-                if matches!(settlement, 1 | 4 | 6) { effects.extend(reduce(&mut state, notification)); }
-                assert_eq!(state.capture, expected, "failures={failures}, settlement={settlement}");
-                assert!(!effects.iter().any(|e| matches!(e, CoordinatorEffect::StopRecording { .. } | CoordinatorEffect::FinalizeRecording { .. })));
+                if matches!(settlement, 0 | 3 | 5) {
+                    effects.extend(reduce(&mut state, notification));
+                }
+                effects.extend(event(
+                    &mut state,
+                    ContinuationEvent::ContinueFinished {
+                        effect_id: attach,
+                        key,
+                        run_id: b.run_id,
+                        generation,
+                        outcome: if settlement == 2 {
+                            ContinueAttachOutcome::AttemptedFailure(ErrorCode(101))
+                        } else {
+                            ContinueAttachOutcome::Attached {
+                                context_revision: 7,
+                            }
+                        },
+                    },
+                ));
+                if matches!(settlement, 1 | 4 | 6) {
+                    effects.extend(reduce(&mut state, notification));
+                }
+                assert_eq!(
+                    state.capture, expected,
+                    "failures={failures}, settlement={settlement}"
+                );
+                assert!(!effects.iter().any(|e| matches!(
+                    e,
+                    CoordinatorEffect::StopRecording { .. }
+                        | CoordinatorEffect::FinalizeRecording { .. }
+                )));
                 if let Some(owner) = owner {
-                    let effects = reduce(&mut state, CoordinatorEvent::CaptureStopped { effect_id: owner, run_id: b.run_id, outcome: CaptureStopOutcome::Inactive });
-                    assert_eq!(effects.iter().filter(|e| matches!(e, CoordinatorEffect::FinalizeRecording { .. })).count(), 1);
+                    let effects = reduce(
+                        &mut state,
+                        CoordinatorEvent::CaptureStopped {
+                            effect_id: owner,
+                            run_id: b.run_id,
+                            outcome: CaptureStopOutcome::Inactive,
+                        },
+                    );
+                    assert_eq!(
+                        effects
+                            .iter()
+                            .filter(|e| matches!(e, CoordinatorEffect::FinalizeRecording { .. }))
+                            .count(),
+                        1
+                    );
                     assert!(matches!(state.capture, CaptureState::Idle));
                 } else {
-                    assert!(matches!(state.capture, CaptureState::StopUncertain { active_effect: None, .. }));
+                    assert!(matches!(
+                        state.capture,
+                        CaptureState::StopUncertain {
+                            active_effect: None,
+                            ..
+                        }
+                    ));
                 }
                 assert!(state.validate().is_ok());
             }
@@ -1133,41 +1646,103 @@ mod tests {
                     let (prepare, b) = start(&mut state);
                     let effects = prepared(&mut state, prepare, b, 22);
                     let (attach, key, _, generation) = continue_effect(&effects);
-                    let effects = reduce(&mut state, CoordinatorEvent::Intent(
-                        RecordingIntent::stop(IntentSource::Frontend, None)));
-                    let seal = effects.iter().find_map(|e| match e {
-                        CoordinatorEffect::Continuation(ContinuationEffect::SealPending { effect_id, .. }) => Some(*effect_id),
-                        _ => None,
-                    }).unwrap();
-                    let attached = CoordinatorEvent::Continuation(ContinuationEvent::ContinueFinished {
-                        effect_id: attach, key, run_id: b.run_id, generation,
-                        outcome: ContinueAttachOutcome::Attached { context_revision: 7 },
-                    });
-                    let failure = if negotiated {
-                        CoordinatorEvent::NegotiatedRuntimeFailed { run_id: key.logical_run_id, error: ErrorCode(110) }
-                    } else {
-                        CoordinatorEvent::RuntimeFailed { run_id: key.logical_run_id, error: ErrorCode(110) }
-                    };
-                    let mut effects = reduce(&mut state, if attached_first { attached } else { failure });
-                    effects.extend(reduce(&mut state, if attached_first { failure } else { attached }));
-                    assert!(!effects.iter().any(|e| matches!(e,
-                        CoordinatorEffect::StopRecording { .. } | CoordinatorEffect::FinalizeRecording { .. })));
-                    assert_eq!(state.pending_episode.unwrap().seal_effect, Some(seal));
-                    assert!(matches!(state.capture, CaptureState::Recording { run } if run.run_id == b.run_id));
-                    let mut effects = event(&mut state, ContinuationEvent::PendingCaptureStopped {
-                        effect_id: seal, run_id: b.run_id, generation,
-                        outcome: if stop_fails { CaptureStopOutcome::StillActive(ErrorCode(99)) } else { CaptureStopOutcome::Inactive },
-                    });
-                    if stop_fails {
-                        assert!(!effects.iter().any(|e| matches!(e, CoordinatorEffect::FinalizeRecording { .. })));
-                        let retry = effects.iter().find_map(|e| match e {
-                            CoordinatorEffect::StopRecording { effect_id, attempt: 1, .. } => Some(*effect_id), _ => None,
-                        }).unwrap();
-                        effects = reduce(&mut state, CoordinatorEvent::CaptureStopped {
-                            effect_id: retry, run_id: b.run_id, outcome: CaptureStopOutcome::Inactive,
+                    let effects = reduce(
+                        &mut state,
+                        CoordinatorEvent::Intent(RecordingIntent::stop(
+                            IntentSource::Frontend,
+                            None,
+                        )),
+                    );
+                    let seal = effects
+                        .iter()
+                        .find_map(|e| match e {
+                            CoordinatorEffect::Continuation(ContinuationEffect::SealPending {
+                                effect_id,
+                                ..
+                            }) => Some(*effect_id),
+                            _ => None,
+                        })
+                        .unwrap();
+                    let attached =
+                        CoordinatorEvent::Continuation(ContinuationEvent::ContinueFinished {
+                            effect_id: attach,
+                            key,
+                            run_id: b.run_id,
+                            generation,
+                            outcome: ContinueAttachOutcome::Attached {
+                                context_revision: 7,
+                            },
                         });
+                    let failure = if negotiated {
+                        CoordinatorEvent::NegotiatedRuntimeFailed {
+                            run_id: key.logical_run_id,
+                            error: ErrorCode(110),
+                        }
+                    } else {
+                        CoordinatorEvent::RuntimeFailed {
+                            run_id: key.logical_run_id,
+                            error: ErrorCode(110),
+                        }
+                    };
+                    let mut effects =
+                        reduce(&mut state, if attached_first { attached } else { failure });
+                    effects.extend(reduce(
+                        &mut state,
+                        if attached_first { failure } else { attached },
+                    ));
+                    assert!(!effects.iter().any(|e| matches!(
+                        e,
+                        CoordinatorEffect::StopRecording { .. }
+                            | CoordinatorEffect::FinalizeRecording { .. }
+                    )));
+                    assert_eq!(state.pending_episode.unwrap().seal_effect, Some(seal));
+                    assert!(
+                        matches!(state.capture, CaptureState::Recording { run } if run.run_id == b.run_id)
+                    );
+                    let mut effects = event(
+                        &mut state,
+                        ContinuationEvent::PendingCaptureStopped {
+                            effect_id: seal,
+                            run_id: b.run_id,
+                            generation,
+                            outcome: if stop_fails {
+                                CaptureStopOutcome::StillActive(ErrorCode(99))
+                            } else {
+                                CaptureStopOutcome::Inactive
+                            },
+                        },
+                    );
+                    if stop_fails {
+                        assert!(!effects
+                            .iter()
+                            .any(|e| matches!(e, CoordinatorEffect::FinalizeRecording { .. })));
+                        let retry = effects
+                            .iter()
+                            .find_map(|e| match e {
+                                CoordinatorEffect::StopRecording {
+                                    effect_id,
+                                    attempt: 1,
+                                    ..
+                                } => Some(*effect_id),
+                                _ => None,
+                            })
+                            .unwrap();
+                        effects = reduce(
+                            &mut state,
+                            CoordinatorEvent::CaptureStopped {
+                                effect_id: retry,
+                                run_id: b.run_id,
+                                outcome: CaptureStopOutcome::Inactive,
+                            },
+                        );
                     }
-                    assert_eq!(effects.iter().filter(|e| matches!(e, CoordinatorEffect::FinalizeRecording { .. })).count(), 1);
+                    assert_eq!(
+                        effects
+                            .iter()
+                            .filter(|e| matches!(e, CoordinatorEffect::FinalizeRecording { .. }))
+                            .count(),
+                        1
+                    );
                     assert!(matches!(state.capture, CaptureState::Idle));
                     assert!(state.pending_episode.is_none());
                     assert!(state.validate().is_ok());
@@ -1178,22 +1753,36 @@ mod tests {
 
     #[test]
     fn teardown_cancels_inflight_continue_without_replacing_physical_retry() {
-        for teardown in [CoordinatorEvent::ShutdownRequested, CoordinatorEvent::ForceOff(StopReason::SystemSleep)] {
+        for teardown in [
+            CoordinatorEvent::ShutdownRequested,
+            CoordinatorEvent::ForceOff(StopReason::SystemSleep),
+        ] {
             for uncertain in [false, true] {
                 let (mut state, b, attach, _, _, retry) = pending_continue_with_failed_seal();
                 if uncertain {
-                    reduce(&mut state, CoordinatorEvent::CaptureStopped { effect_id: retry,
-                        run_id: b.run_id, outcome: CaptureStopOutcome::StillActive(ErrorCode(100)) });
+                    reduce(
+                        &mut state,
+                        CoordinatorEvent::CaptureStopped {
+                            effect_id: retry,
+                            run_id: b.run_id,
+                            outcome: CaptureStopOutcome::StillActive(ErrorCode(100)),
+                        },
+                    );
                 }
                 let owner = state.capture;
                 let effects = reduce(&mut state, teardown);
                 assert_eq!(state.capture, owner);
                 assert_eq!(effects.iter().filter(|e| matches!(e,
                     CoordinatorEffect::CancelStart { effect_id, run_id } if *effect_id == attach && *run_id == b.run_id)).count(), 1);
-                assert!(!effects.iter().any(|e| matches!(e, CoordinatorEffect::StopRecording { .. } |
-                    CoordinatorEffect::Continuation(ContinuationEffect::SealPending { .. }))));
+                assert!(!effects.iter().any(|e| matches!(
+                    e,
+                    CoordinatorEffect::StopRecording { .. }
+                        | CoordinatorEffect::Continuation(ContinuationEffect::SealPending { .. })
+                )));
                 let repeated = reduce(&mut state, teardown);
-                assert!(!repeated.iter().any(|e| matches!(e, CoordinatorEffect::CancelStart { .. })));
+                assert!(!repeated
+                    .iter()
+                    .any(|e| matches!(e, CoordinatorEffect::CancelStart { .. })));
                 assert_eq!(state.capture, owner);
                 assert!(state.validate().is_ok());
             }
@@ -1693,10 +2282,15 @@ mod tests {
             CoordinatorEffect::StopRecording { .. } | CoordinatorEffect::FinalizeRecording { .. }
         )));
         assert_eq!(state.capture.run().map(|r| r.run_id), Some(b.run_id));
-        event(&mut state, ContinuationEvent::PendingCaptureStopped {
-            effect_id: seal, run_id: b.run_id, generation,
-            outcome: CaptureStopOutcome::Inactive,
-        });
+        event(
+            &mut state,
+            ContinuationEvent::PendingCaptureStopped {
+                effect_id: seal,
+                run_id: b.run_id,
+                generation,
+                outcome: CaptureStopOutcome::Inactive,
+            },
+        );
         assert_eq!(state.capture, CaptureState::Idle);
         assert!(state.pending_episode.is_none());
     }

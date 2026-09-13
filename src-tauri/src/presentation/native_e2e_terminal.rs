@@ -6,32 +6,41 @@ use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 static OWNED: AtomicBool = AtomicBool::new(false);
 
 fn claim(owner: &AtomicBool) -> Result<(), String> {
-    owner.compare_exchange(false, true, SeqCst, SeqCst)
-        .map(|_| ()).map_err(|_| "terminal-handoff-duplicate".into())
+    owner
+        .compare_exchange(false, true, SeqCst, SeqCst)
+        .map(|_| ())
+        .map_err(|_| "terminal-handoff-duplicate".into())
 }
 
 fn request_valid(report: &Value, case: &str) -> bool {
     let a = &report["a"];
     let b = &report["b"];
-    report["mode"] == "after-write-case" && report["case"] == case &&
-        report["passed"] == false && report["final"].is_null() &&
-        report["errors"].as_array().is_some_and(|errors| errors.is_empty()) &&
-        a["logicalProviderRunId"].as_u64().is_some_and(|id| id > 0) &&
-        a["logicalProviderRunId"] == b["logicalProviderRunId"] &&
-        a["captureEpisode"]["generation"].as_u64().is_some() &&
-        b["captureEpisode"]["generation"].as_u64().is_some() &&
-        a["captureEpisode"]["generation"] != b["captureEpisode"]["generation"] &&
-        b["fixture"]["activeCaptures"] == 1 && b["fixture"]["captureStarts"] == 2 &&
-        b["fixture"]["firstBWrites"].as_array().is_some_and(|rows| rows.len() == 1)
+    report["mode"] == "after-write-case"
+        && report["case"] == case
+        && report["passed"] == false
+        && report["final"].is_null()
+        && report["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.is_empty())
+        && a["logicalProviderRunId"].as_u64().is_some_and(|id| id > 0)
+        && a["logicalProviderRunId"] == b["logicalProviderRunId"]
+        && a["captureEpisode"]["generation"].as_u64().is_some()
+        && b["captureEpisode"]["generation"].as_u64().is_some()
+        && a["captureEpisode"]["generation"] != b["captureEpisode"]["generation"]
+        && b["fixture"]["activeCaptures"] == 1
+        && b["fixture"]["captureStarts"] == 2
+        && b["fixture"]["firstBWrites"]
+            .as_array()
+            .is_some_and(|rows| rows.len() == 1)
 }
 
 fn current_b(b: &Value, current: &Value) -> bool {
-    current["logicalProviderRunId"] == b["logicalProviderRunId"] &&
-        current["captureEpisode"] == b["captureEpisode"] &&
-        current["windowEpoch"] == b["windowEpoch"] &&
-        current["fixture"]["activeCaptures"] == 1 &&
-        current["fixture"]["firstBWrites"] == b["fixture"]["firstBWrites"] &&
-        current["coordinatorTrace"] == b["coordinatorTrace"]
+    current["logicalProviderRunId"] == b["logicalProviderRunId"]
+        && current["captureEpisode"] == b["captureEpisode"]
+        && current["windowEpoch"] == b["windowEpoch"]
+        && current["fixture"]["activeCaptures"] == 1
+        && current["fixture"]["firstBWrites"] == b["fixture"]["firstBWrites"]
+        && current["coordinatorTrace"] == b["coordinatorTrace"]
 }
 
 // Wait for publication of the real terminal report and release, not only fake
@@ -39,17 +48,31 @@ fn current_b(b: &Value, current: &Value) -> bool {
 fn terminal_ready(a: &Value, b: &Value, current: &Value) -> bool {
     let s = &current["afterWriteService"];
     let r = &s["completedReport"];
-    let watermark = b["coordinatorTrace"].as_array().and_then(|t| t.last())
-        .and_then(|t| t["sequence"].as_u64()).unwrap_or(0);
-    let terminal = s["terminal"].as_array().is_some_and(|rows| rows.iter().any(|t|
-        t["runId"] == a["logicalProviderRunId"] &&
-        t["sequence"].as_u64().is_some_and(|seq| seq > watermark)));
-    current["fixture"]["activeProviders"] == 0 && current["fixture"]["activeCaptures"] == 0 &&
-        current["preparedCaptureTokenCount"] == 0 && s["status"] == "Idle" &&
-        s["owner"] == a["logicalProviderRunId"] && s["logicalProviderRunId"] == 0 &&
-        s["pausedContinuation"].is_null() && s["coordinatorIdle"] == true &&
-        s["pendingStart"] == false && s["processingJobs"] == 0 && s["continuationPending"] == false &&
-        r["run_id"] == a["logicalProviderRunId"] && r["provider_release"] == "released" && terminal
+    let watermark = b["coordinatorTrace"]
+        .as_array()
+        .and_then(|t| t.last())
+        .and_then(|t| t["sequence"].as_u64())
+        .unwrap_or(0);
+    let terminal = s["terminal"].as_array().is_some_and(|rows| {
+        rows.iter().any(|t| {
+            t["runId"] == a["logicalProviderRunId"]
+                && t["sequence"].as_u64().is_some_and(|seq| seq > watermark)
+        })
+    });
+    current["fixture"]["activeProviders"] == 0
+        && current["fixture"]["activeCaptures"] == 0
+        && current["preparedCaptureTokenCount"] == 0
+        && s["status"] == "Idle"
+        && s["owner"] == a["logicalProviderRunId"]
+        && s["logicalProviderRunId"] == 0
+        && s["pausedContinuation"].is_null()
+        && s["coordinatorIdle"] == true
+        && s["pendingStart"] == false
+        && s["processingJobs"] == 0
+        && s["continuationPending"] == false
+        && r["run_id"] == a["logicalProviderRunId"]
+        && r["provider_release"] == "released"
+        && terminal
 }
 
 // Private seam for deterministic failure schedules of this exact TEST driver.
@@ -66,21 +89,50 @@ trait TerminalIo: Send {
 struct NativeIo(AppHandle);
 #[async_trait]
 impl TerminalIo for NativeIo {
-    fn remaining(&self) -> Result<Duration, String> { native_diagnostic::remaining_terminal() }
-    fn phase(&self, phase: D, id: u64) -> Result<(), String> { native_diagnostic::js(phase, id) }
-    fn fail(&self) { native_diagnostic::assertion_failed(); }
+    fn remaining(&self) -> Result<Duration, String> {
+        native_diagnostic::remaining_terminal()
+    }
+    fn phase(&self, phase: D, id: u64) -> Result<(), String> {
+        native_diagnostic::js(phase, id)
+    }
+    fn fail(&self) {
+        native_diagnostic::assertion_failed();
+    }
     async fn state(&mut self) -> Result<Value, String> {
         native_e2e_state(self.0.clone(), self.0.state::<AppState>(), None).await
     }
     async fn dispatch(&mut self, case: &str) -> Result<(), String> {
         let app = &self.0;
         match case {
-            "after-write-stop" => { super::super::commands::stop_recording(app.state::<AppState>(), app.clone(), None).await?; }
+            "after-write-stop" => {
+                super::super::commands::stop_recording(app.state::<AppState>(), app.clone(), None)
+                    .await?;
+            }
             "after-write-close" => native_e2e_close_recording(app.clone())?,
-            "after-write-hold" => native_e2e_hotkey(app.clone(), app.state::<AppState>(), HotkeyAction::Release, None).await?,
+            "after-write-hold" => {
+                native_e2e_hotkey(
+                    app.clone(),
+                    app.state::<AppState>(),
+                    HotkeyAction::Release,
+                    None,
+                )
+                .await?
+            }
             "after-write-toggle" => {
-                native_e2e_hotkey(app.clone(), app.state::<AppState>(), HotkeyAction::Press, None).await?;
-                native_e2e_hotkey(app.clone(), app.state::<AppState>(), HotkeyAction::Release, None).await?;
+                native_e2e_hotkey(
+                    app.clone(),
+                    app.state::<AppState>(),
+                    HotkeyAction::Press,
+                    None,
+                )
+                .await?;
+                native_e2e_hotkey(
+                    app.clone(),
+                    app.state::<AppState>(),
+                    HotkeyAction::Release,
+                    None,
+                )
+                .await?;
             }
             _ => return Err("terminal-dispatch-case".into()),
         }
@@ -92,7 +144,8 @@ impl TerminalIo for NativeIo {
 }
 async fn observe(io: &mut impl TerminalIo, id: u64) -> Result<Value, String> {
     io.phase(D::StateBefore, id)?;
-    let result = tokio::time::timeout(Duration::from_secs(2), io.state()).await
+    let result = tokio::time::timeout(Duration::from_secs(2), io.state())
+        .await
         .map_err(|_| "terminal-observation-timeout".to_string())?
         .map_err(|_| "terminal-observation-error".to_string())?;
     // Native acknowledgement: no hidden WebView scheduling dependency.
@@ -108,22 +161,35 @@ pub(super) fn accept(app: AppHandle, report: Value, id: u64) -> Result<(), Strin
         claim(&OWNED)?;
         let case = std::env::var("VOICETEXT_NATIVE_CONTINUATION_CASE")
             .map_err(|_| "terminal-handoff-case".to_string())?;
-        if id == 0 || serde_json::to_vec(&report).map_err(|_| "terminal-handoff-json")?.len() > 1024 * 1024 ||
-            !request_valid(&report, &case) || native_diagnostic::observation_pending() {
+        if id == 0
+            || serde_json::to_vec(&report)
+                .map_err(|_| "terminal-handoff-json")?
+                .len()
+                > 1024 * 1024
+            || !request_valid(&report, &case)
+            || native_diagnostic::observation_pending()
+        {
             return Err("terminal-handoff-invalid".into());
         }
         native_diagnostic::remaining_terminal()?;
         tauri::async_runtime::spawn(run(app, report, case, id));
         Ok(())
     })();
-    if result.is_err() { native_diagnostic::assertion_failed(); }
+    if result.is_err() {
+        native_diagnostic::assertion_failed();
+    }
     result
 }
 
 async fn run(app: AppHandle, report: Value, case: String, id: u64) {
     let _ = drive(&mut NativeIo(app), report, &case, id).await;
 }
-async fn drive(io: &mut impl TerminalIo, mut report: Value, case: &str, mut id: u64) -> Result<(), String> {
+async fn drive(
+    io: &mut impl TerminalIo,
+    mut report: Value,
+    case: &str,
+    mut id: u64,
+) -> Result<(), String> {
     let result: Result<(), String> = async {
         io.remaining()?;
         let current = observe(io, id).await?;
@@ -135,7 +201,8 @@ async fn drive(io: &mut impl TerminalIo, mut report: Value, case: &str, mut id: 
         }
         io.remaining()?;
         io.phase(D::StopBefore, id)?;
-        tokio::time::timeout(Duration::from_secs(2), io.dispatch(case)).await
+        tokio::time::timeout(Duration::from_secs(2), io.dispatch(case))
+            .await
             .map_err(|_| "terminal-dispatch-timeout".to_string())?
             .map_err(|_| "terminal-dispatch-error".to_string())?;
         io.phase(D::StopAfter, id)?;
@@ -153,7 +220,8 @@ async fn drive(io: &mut impl TerminalIo, mut report: Value, case: &str, mut id: 
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         Ok(())
-    }.await;
+    }
+    .await;
     if let Err(error) = result {
         report["passed"] = json!(false);
         report["errors"].as_array_mut().unwrap().push(json!(error));
@@ -164,7 +232,10 @@ async fn drive(io: &mut impl TerminalIo, mut report: Value, case: &str, mut id: 
     if io.phase(D::FinishBefore, id).is_err() {
         report["passed"] = json!(false);
         if report["errors"].as_array().unwrap().is_empty() {
-            report["errors"].as_array_mut().unwrap().push(json!("terminal-finish-marker-error"));
+            report["errors"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("terminal-finish-marker-error"));
         }
     }
     let finished = tokio::time::timeout(Duration::from_secs(5), io.finish(report)).await;
@@ -187,7 +258,11 @@ mod tests {
     }
     #[test]
     fn empty_or_mismatched_request_cannot_dispatch() {
-        for value in [Value::Null, json!({}), json!({"mode":"after-write-case","case":"after-write-close"})] {
+        for value in [
+            Value::Null,
+            json!({}),
+            json!({"mode":"after-write-case","case":"after-write-close"}),
+        ] {
             assert!(!request_valid(&value, "after-write-toggle"));
         }
     }
@@ -209,7 +284,8 @@ mod tests {
         assert!(request_valid(&report, "after-write-toggle"));
         assert!(!request_valid(&report, "after-write-close"));
         for (pointer, value) in [
-            ("/errors", json!(["prior-error"])), ("/errors", Value::Null),
+            ("/errors", json!(["prior-error"])),
+            ("/errors", Value::Null),
             ("/b/logicalProviderRunId", json!(10)),
             ("/b/captureEpisode/generation", json!(1)),
             ("/b/fixture/activeCaptures", json!(0)),
@@ -225,9 +301,12 @@ mod tests {
         let b = valid_request()["b"].clone();
         assert!(current_b(&b, &b));
         for (pointer, value) in [
-            ("/logicalProviderRunId", json!(10)), ("/captureEpisode/generation", json!(3)),
-            ("/windowEpoch", json!(5)), ("/coordinatorTrace", json!([{"sequence":9}])),
-            ("/fixture/activeCaptures", json!(0)), ("/fixture/firstBWrites", json!([])),
+            ("/logicalProviderRunId", json!(10)),
+            ("/captureEpisode/generation", json!(3)),
+            ("/windowEpoch", json!(5)),
+            ("/coordinatorTrace", json!([{"sequence":9}])),
+            ("/fixture/activeCaptures", json!(0)),
+            ("/fixture/firstBWrites", json!([])),
         ] {
             let mut changed = b.clone();
             *changed.pointer_mut(pointer).unwrap() = value;
@@ -239,10 +318,14 @@ mod tests {
     async fn rejected_handoff_preserves_observation_without_dispatch_or_replay() {
         let request = valid_request();
         let mut io = TestIo::new(Fault::None);
-        io.request["b"]["coordinatorTrace"].as_array_mut().unwrap().push(
-            json!({"sequence":9,"phase":"WindowCompleted"}));
+        io.request["b"]["coordinatorTrace"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"sequence":9,"phase":"WindowCompleted"}));
         let rejected = io.request["b"].clone();
-        drive(&mut io, request.clone(), "after-write-toggle", 1).await.unwrap();
+        drive(&mut io, request.clone(), "after-write-toggle", 1)
+            .await
+            .unwrap();
         assert_eq!(io.dispatches, 0);
         assert_eq!(io.finishes, 1);
         let report = io.report.unwrap();
@@ -253,16 +336,40 @@ mod tests {
     }
 
     #[derive(Clone, Copy, PartialEq, Debug)]
-    enum Fault { None, Preexisting, StateError, StatePending, DispatchError, DispatchPending,
-        FutureError, NeverTerminal, FinishError, FinishPending }
+    enum Fault {
+        None,
+        Preexisting,
+        StateError,
+        StatePending,
+        DispatchError,
+        DispatchPending,
+        FutureError,
+        NeverTerminal,
+        FinishError,
+        FinishPending,
+    }
     struct TestIo {
-        fault: Fault, report: Option<Value>, request: Value, reads: usize, dispatches: usize,
-        finishes: usize, failed: AtomicBool, deadline: tokio::time::Instant,
+        fault: Fault,
+        report: Option<Value>,
+        request: Value,
+        reads: usize,
+        dispatches: usize,
+        finishes: usize,
+        failed: AtomicBool,
+        deadline: tokio::time::Instant,
     }
     impl TestIo {
         fn new(fault: Fault) -> Self {
-            Self { fault, report: None, request: valid_request(), reads: 0, dispatches: 0,
-                finishes: 0, failed: AtomicBool::new(false), deadline: tokio::time::Instant::now() + Duration::from_secs(10) }
+            Self {
+                fault,
+                report: None,
+                request: valid_request(),
+                reads: 0,
+                dispatches: 0,
+                finishes: 0,
+                failed: AtomicBool::new(false),
+                deadline: tokio::time::Instant::now() + Duration::from_secs(10),
+            }
         }
         fn terminal(&self) -> Value {
             json!({"fixture":{"activeProviders":0,"activeCaptures":0},"preparedCaptureTokenCount":0,
@@ -279,18 +386,28 @@ mod tests {
             if self.fault == Fault::Preexisting || self.failed.load(SeqCst) {
                 return Err("terminal-diagnostic-failed".into());
             }
-            self.deadline.checked_duration_since(tokio::time::Instant::now())
-                .filter(|d| !d.is_zero()).ok_or("terminal-deadline-expired".into())
+            self.deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .filter(|d| !d.is_zero())
+                .ok_or("terminal-deadline-expired".into())
         }
         fn phase(&self, phase: D, _: u64) -> Result<(), String> {
-            if self.failed.load(SeqCst) || (self.fault == Fault::FutureError && matches!(phase, D::Terminal)) {
+            if self.failed.load(SeqCst)
+                || (self.fault == Fault::FutureError && matches!(phase, D::Terminal))
+            {
                 Err("terminal-diagnostic-failed".into())
-            } else { Ok(()) }
+            } else {
+                Ok(())
+            }
         }
-        fn fail(&self) { self.failed.store(true, SeqCst); }
+        fn fail(&self) {
+            self.failed.store(true, SeqCst);
+        }
         async fn state(&mut self) -> Result<Value, String> {
             self.reads += 1;
-            if self.reads == 1 { return Ok(self.request["b"].clone()); }
+            if self.reads == 1 {
+                return Ok(self.request["b"].clone());
+            }
             match self.fault {
                 Fault::StateError => Err("private framework details must not escape".into()),
                 Fault::StatePending => std::future::pending().await,
@@ -322,23 +439,50 @@ mod tests {
             (Fault::None, None, 1, 0),
             (Fault::Preexisting, Some("terminal-diagnostic-failed"), 0, 0),
             (Fault::StateError, Some("terminal-observation-error"), 1, 0),
-            (Fault::StatePending, Some("terminal-observation-timeout"), 1, 2),
+            (
+                Fault::StatePending,
+                Some("terminal-observation-timeout"),
+                1,
+                2,
+            ),
             (Fault::DispatchError, Some("terminal-dispatch-error"), 1, 0),
-            (Fault::DispatchPending, Some("terminal-dispatch-timeout"), 1, 2),
+            (
+                Fault::DispatchPending,
+                Some("terminal-dispatch-timeout"),
+                1,
+                2,
+            ),
             (Fault::FutureError, Some("terminal-diagnostic-failed"), 1, 0),
-            (Fault::NeverTerminal, Some("terminal-deadline-expired"), 1, 10),
+            (
+                Fault::NeverTerminal,
+                Some("terminal-deadline-expired"),
+                1,
+                10,
+            ),
         ] {
             let mut io = TestIo::new(fault);
             let started = tokio::time::Instant::now();
             let report = io.request.clone();
-            assert!(drive(&mut io, report, "after-write-toggle", 1).await.is_ok());
+            assert!(drive(&mut io, report, "after-write-toggle", 1)
+                .await
+                .is_ok());
             assert_eq!(io.dispatches, dispatches, "{fault:?}");
             assert_eq!(io.finishes, 1, "{fault:?}");
             let report = io.report.as_ref().unwrap();
             assert_eq!(report["passed"], json!(expected.is_none()), "{fault:?}");
-            assert_eq!(report["errors"], expected.map_or(json!([]), |code| json!([code])), "{fault:?}");
-            assert_eq!(started.elapsed(), Duration::from_secs(duration), "{fault:?}");
-            if matches!(fault, Fault::StateError | Fault::StatePending) { assert_eq!(io.reads, 2); }
+            assert_eq!(
+                report["errors"],
+                expected.map_or(json!([]), |code| json!([code])),
+                "{fault:?}"
+            );
+            assert_eq!(
+                started.elapsed(),
+                Duration::from_secs(duration),
+                "{fault:?}"
+            );
+            if matches!(fault, Fault::StateError | Fault::StatePending) {
+                assert_eq!(io.reads, 2);
+            }
         }
     }
     #[tokio::test(start_paused = true)]
@@ -347,10 +491,19 @@ mod tests {
             let mut io = TestIo::new(fault);
             let report = io.request.clone();
             let started = tokio::time::Instant::now();
-            assert_eq!(drive(&mut io, report, "after-write-toggle", 1).await.unwrap_err(), "terminal-finish-error");
-            assert_eq!(io.dispatches, 1); assert_eq!(io.finishes, 1);
+            assert_eq!(
+                drive(&mut io, report, "after-write-toggle", 1)
+                    .await
+                    .unwrap_err(),
+                "terminal-finish-error"
+            );
+            assert_eq!(io.dispatches, 1);
+            assert_eq!(io.finishes, 1);
             assert!(io.failed.load(SeqCst));
-            assert_eq!(started.elapsed(), Duration::from_secs(if fault == Fault::FinishPending { 5 } else { 0 }));
+            assert_eq!(
+                started.elapsed(),
+                Duration::from_secs(if fault == Fault::FinishPending { 5 } else { 0 })
+            );
         }
     }
     #[tokio::test(start_paused = true)]
@@ -359,10 +512,16 @@ mod tests {
         let deadline = io.deadline;
         tokio::time::advance(Duration::from_secs(10)).await;
         let report = io.request.clone();
-        drive(&mut io, report, "after-write-toggle", 1).await.unwrap();
+        drive(&mut io, report, "after-write-toggle", 1)
+            .await
+            .unwrap();
         assert_eq!(io.deadline, deadline);
-        assert_eq!(io.reads, 0); assert_eq!(io.dispatches, 0); assert_eq!(io.finishes, 1);
-        assert_eq!(io.report.unwrap()["errors"], json!(["terminal-deadline-expired"]));
+        assert_eq!(io.reads, 0);
+        assert_eq!(io.dispatches, 0);
+        assert_eq!(io.finishes, 1);
+        assert_eq!(
+            io.report.unwrap()["errors"],
+            json!(["terminal-deadline-expired"])
+        );
     }
-
 }

@@ -4,11 +4,11 @@
 mod native_diagnostic;
 #[path = "native_e2e_terminal.rs"]
 mod native_terminal;
-use native_diagnostic::Phase as D;
 use super::AppState;
 use crate::domain::*;
 use crate::infrastructure::continuation_context::observation;
 use async_trait::async_trait;
+use native_diagnostic::Phase as D;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -34,23 +34,46 @@ struct FakePhysicalKeys {
     overflow: bool,
 }
 static PHYSICAL_KEYS: OnceLock<Arc<Mutex<FakePhysicalKeys>>> = OnceLock::new();
-static PHYSICAL_HANDLES: Mutex<[Option<super::recording_hotkey_gestures::PressHandle>; 2]> = Mutex::new([None, None]);
-const PHYSICAL_CHORD: super::commands::PhysicalHotkeyChord = super::commands::PhysicalHotkeyChord { key: 7, modifiers: 3 };
+static PHYSICAL_HANDLES: Mutex<[Option<super::recording_hotkey_gestures::PressHandle>; 2]> =
+    Mutex::new([None, None]);
+const PHYSICAL_CHORD: super::commands::PhysicalHotkeyChord = super::commands::PhysicalHotkeyChord {
+    key: 7,
+    modifiers: 3,
+};
 
 static REAL_KEYBOARD_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub(super) fn physical_real_read() {
-    if PHYSICAL_KEYS.get().is_some() { REAL_KEYBOARD_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }
+    if PHYSICAL_KEYS.get().is_some() {
+        REAL_KEYBOARD_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
-pub(super) fn physical_event(kind: &str, handle: Option<super::recording_hotkey_gestures::PressHandle>, observation: &str, result: &str) {
-    let Some(keys) = PHYSICAL_KEYS.get() else { return; };
+pub(super) fn physical_event(
+    kind: &str,
+    handle: Option<super::recording_hotkey_gestures::PressHandle>,
+    observation: &str,
+    result: &str,
+) {
+    let Some(keys) = PHYSICAL_KEYS.get() else {
+        return;
+    };
     let mut keys = keys.lock().unwrap();
-    let sample = if observation == "NotRead" { None } else { keys.observations.len().checked_sub(1) };
+    let sample = if observation == "NotRead" {
+        None
+    } else {
+        keys.observations.len().checked_sub(1)
+    };
     // Commands emits watcher evidence only on terminal Up/stale branches.
     let watcher_finished = if kind == "watcher" { Some(true) } else { None };
     let event = json!({"kind":kind,"sample":sample,"watcherFinished":watcher_finished,"handle":handle.map(|h| json!({"gesture":h.gesture_id().sequence(),
         "watcher":h.watcher_generation().value()})),"observation":observation,"result":result});
-    if keys.events.last() == Some(&event) { return; }
-    if keys.events.len() < 128 { keys.events.push(event); } else { keys.overflow = true; }
+    if keys.events.last() == Some(&event) {
+        return;
+    }
+    if keys.events.len() < 128 {
+        keys.events.push(event);
+    } else {
+        keys.overflow = true;
+    }
 }
 
 pub(super) fn physical_chord_reader() -> Option<super::commands::ChordReader> {
@@ -59,13 +82,19 @@ pub(super) fn physical_chord_reader() -> Option<super::commands::ChordReader> {
         let mut keys = keys.lock().unwrap();
         let observation = if keys.available {
             chord.sample_with(|key| keys.down.contains(&key))
-        } else { super::recording_hotkey_gestures::PhysicalObservation::Unavailable };
+        } else {
+            super::recording_hotkey_gestures::PhysicalObservation::Unavailable
+        };
         if keys.observations.len() < 256 {
             let down = keys.down.clone();
             let row = json!({"key":chord.key,"modifiers":chord.modifiers,
                 "downKeys":down,"observation":format!("{observation:?}"),"source":"fake"});
-            if keys.observations.last() != Some(&row) { keys.observations.push(row); }
-        } else { keys.overflow = true; }
+            if keys.observations.last() != Some(&row) {
+                keys.observations.push(row);
+            }
+        } else {
+            keys.overflow = true;
+        }
         observation
     }))
 }
@@ -73,49 +102,96 @@ pub(super) fn physical_chord_reader() -> Option<super::commands::ChordReader> {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum PhysicalAction {
-    Set { available: bool, #[serde(rename = "downKeys")] down_keys: Vec<u16> },
-    Callback { state: String },
-    WatcherStep { #[serde(rename = "savedHandle")] saved_handle: String },
+    Set {
+        available: bool,
+        #[serde(rename = "downKeys")]
+        down_keys: Vec<u16>,
+    },
+    Callback {
+        state: String,
+    },
+    WatcherStep {
+        #[serde(rename = "savedHandle")]
+        saved_handle: String,
+    },
 }
 
-fn physical_action(app: &AppHandle, state: &AppState, action: PhysicalAction) -> Result<(), String> {
-    if !event_case("E42") || RESULT_PATH.get().is_none() || live_mode() ||
-        state.recording_intent_coordinator_mode != super::state::RecordingIntentCoordinatorMode::Desired {
+fn physical_action(
+    app: &AppHandle,
+    state: &AppState,
+    action: PhysicalAction,
+) -> Result<(), String> {
+    if !event_case("E42")
+        || RESULT_PATH.get().is_none()
+        || live_mode()
+        || state.recording_intent_coordinator_mode
+            != super::state::RecordingIntentCoordinatorMode::Desired
+    {
         return Err("physical keyboard fixture requires validated isolated fake E42".into());
     }
     match action {
-        PhysicalAction::Set { available, mut down_keys } => {
-            if down_keys.len() > 9 || down_keys.iter().any(|key| ![7,55,54,56,60,58,61,59,62].contains(key)) {
+        PhysicalAction::Set {
+            available,
+            mut down_keys,
+        } => {
+            if down_keys.len() > 9
+                || down_keys
+                    .iter()
+                    .any(|key| ![7, 55, 54, 56, 60, 58, 61, 59, 62].contains(key))
+            {
                 return Err("physical fixture key set is outside bounded chord".into());
             }
             if PHYSICAL_KEYS.get().is_none() {
                 let gestures = state.recording_hotkey_gestures.lock().unwrap();
-                if gestures.active_press().is_some() { return Err("install physical fixture before first press".into()); }
-                PHYSICAL_KEYS.set(Arc::new(Mutex::new(FakePhysicalKeys::default())))
+                if gestures.active_press().is_some() {
+                    return Err("install physical fixture before first press".into());
+                }
+                PHYSICAL_KEYS
+                    .set(Arc::new(Mutex::new(FakePhysicalKeys::default())))
                     .map_err(|_| "physical fixture already installed")?;
             }
-            down_keys.sort_unstable(); down_keys.dedup();
+            down_keys.sort_unstable();
+            down_keys.dedup();
             let mut keys = PHYSICAL_KEYS.get().unwrap().lock().unwrap();
-            keys.available = available; keys.down = down_keys;
+            keys.available = available;
+            keys.down = down_keys;
         }
         PhysicalAction::Callback { state: callback } => {
-            if PHYSICAL_KEYS.get().is_none() { return Err("physical fixture not installed".into()); }
-            let pressed = match callback.as_str() { "pressed" => true, "released" => false, _ => return Err("invalid physical callback".into()) };
+            if PHYSICAL_KEYS.get().is_none() {
+                return Err("physical fixture not installed".into());
+            }
+            let pressed = match callback.as_str() {
+                "pressed" => true,
+                "released" => false,
+                _ => return Err("invalid physical callback".into()),
+            };
             dispatch_hotkey(app, pressed);
-            let handle = state.recording_hotkey_gestures.lock().unwrap().active_press();
+            let handle = state
+                .recording_hotkey_gestures
+                .lock()
+                .unwrap()
+                .active_press();
             if pressed {
                 if let Some(handle) = handle {
                     let mut slots = PHYSICAL_HANDLES.lock().unwrap();
                     if !slots.contains(&Some(handle)) {
-                        let slot = slots.iter_mut().find(|slot| slot.is_none()).ok_or("physical fixture accepts only A and B")?;
+                        let slot = slots
+                            .iter_mut()
+                            .find(|slot| slot.is_none())
+                            .ok_or("physical fixture accepts only A and B")?;
                         *slot = Some(handle);
                     }
                 }
             }
         }
         PhysicalAction::WatcherStep { saved_handle } => {
-            let slot = match saved_handle.as_str() { "A" => 0, "B" => 1, _ => return Err("unknown saved physical handle".into()) };
-            let handle = PHYSICAL_HANDLES.lock().unwrap()[slot].ok_or("physical handle not saved")?;
+            let slot = match saved_handle.as_str() {
+                "A" => 0,
+                "B" => 1,
+                _ => return Err("unknown saved physical handle".into()),
+            };
+            let handle =
+                PHYSICAL_HANDLES.lock().unwrap()[slot].ok_or("physical handle not saved")?;
             let reader = physical_chord_reader().ok_or("physical fixture not installed")?;
             super::commands::desired_hotkey_watch_step(app, handle, PHYSICAL_CHORD, &reader);
         }
@@ -133,7 +209,9 @@ async fn wait_for_reader_arm(
     struct CancelOnDrop(Option<fn()>);
     impl Drop for CancelOnDrop {
         fn drop(&mut self) {
-            if let Some(cancelled) = self.0.take() { cancelled(); }
+            if let Some(cancelled) = self.0.take() {
+                cancelled();
+            }
         }
     }
     let mut guard = CancelOnDrop(Some(cancelled));
@@ -154,25 +232,41 @@ mod reader_arm_wait_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     static CANCELS: AtomicUsize = AtomicUsize::new(0);
-    fn cancelled() { CANCELS.fetch_add(1, Ordering::SeqCst); }
+    fn cancelled() {
+        CANCELS.fetch_add(1, Ordering::SeqCst);
+    }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn ready_receiver_cannot_override_expired_deadline() {
-        fn no_cancel() { panic!("completed wait must disarm cancellation"); }
+        fn no_cancel() {
+            panic!("completed wait must disarm cancellation");
+        }
         // A timely queue consumed late and a late queue are both rejected.
         for queued_before_deadline in [true, false] {
             let (tx, rx) = tokio::sync::oneshot::channel();
             let mut tx = Some(tx);
-            let mut task = tokio_test::task::spawn(wait_for_reader_arm(rx, no_cancel, tokio::time::Instant::now() + Duration::from_secs(2)));
+            let mut task = tokio_test::task::spawn(wait_for_reader_arm(
+                rx,
+                no_cancel,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            ));
             assert!(task.poll().is_pending());
-            if queued_before_deadline { tx.take().unwrap().send(Ok(())).unwrap(); }
+            if queued_before_deadline {
+                tx.take().unwrap().send(Ok(())).unwrap();
+            }
             tokio::time::advance(Duration::from_secs(2) + Duration::from_millis(1)).await;
-            if let Some(tx) = tx { tx.send(Ok(())).unwrap(); }
+            if let Some(tx) = tx {
+                tx.send(Ok(())).unwrap();
+            }
             // No waiter poll intervened: both its timer and receiver are ready.
             assert_eq!(task.poll(), std::task::Poll::Ready(Err(())));
         }
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let mut task = tokio_test::task::spawn(wait_for_reader_arm(rx, no_cancel, tokio::time::Instant::now() + Duration::from_secs(2)));
+        let mut task = tokio_test::task::spawn(wait_for_reader_arm(
+            rx,
+            no_cancel,
+            tokio::time::Instant::now() + Duration::from_secs(2),
+        ));
         assert!(task.poll().is_pending());
         tokio::time::advance(Duration::from_secs(1)).await;
         tx.send(Ok(())).unwrap();
@@ -182,7 +276,11 @@ mod reader_arm_wait_tests {
         let mut task = tokio_test::task::spawn(wait_for_reader_arm(rx, no_cancel, deadline));
         tokio::time::advance(Duration::from_secs(2)).await;
         tx.send(Ok(())).unwrap();
-        assert_eq!(task.poll(), std::task::Poll::Ready(Err(())), "first poll cannot restart the arm budget");
+        assert_eq!(
+            task.poll(),
+            std::task::Poll::Ready(Err(())),
+            "first poll cannot restart the arm budget"
+        );
     }
 
     // Exercises the actual completion future, not native AX or worker shutdown.
@@ -191,7 +289,11 @@ mod reader_arm_wait_tests {
         fn require_send<T: Send>(_: &T) {}
         for outcome in [Ok(()), Err("original bind failure".to_string())] {
             let (tx, rx) = tokio::sync::oneshot::channel();
-            let future = wait_for_reader_arm(rx, cancelled, tokio::time::Instant::now() + Duration::from_secs(2));
+            let future = wait_for_reader_arm(
+                rx,
+                cancelled,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            );
             require_send(&future);
             let mut task = tokio_test::task::spawn(future);
             assert!(task.poll().is_pending());
@@ -202,11 +304,27 @@ mod reader_arm_wait_tests {
         }
         let (tx, rx) = tokio::sync::oneshot::channel();
         drop(tx);
-        assert_eq!(wait_for_reader_arm(rx, cancelled, tokio::time::Instant::now() + Duration::from_secs(2)).await, Err(()));
+        assert_eq!(
+            wait_for_reader_arm(
+                rx,
+                cancelled,
+                tokio::time::Instant::now() + Duration::from_secs(2)
+            )
+            .await,
+            Err(())
+        );
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         let start = std::time::Instant::now();
-        assert_eq!(wait_for_reader_arm(rx, cancelled, tokio::time::Instant::now() + Duration::from_secs(2)).await, Err(()));
+        assert_eq!(
+            wait_for_reader_arm(
+                rx,
+                cancelled,
+                tokio::time::Instant::now() + Duration::from_secs(2)
+            )
+            .await,
+            Err(())
+        );
         assert!(start.elapsed() >= Duration::from_secs(2));
         assert!(tx.send(Ok(())).is_err());
         assert_eq!(CANCELS.load(Ordering::SeqCst), 0);
@@ -214,9 +332,15 @@ mod reader_arm_wait_tests {
         // Drop pending, including success queued but not yet consumed.
         for queued_success in [false, true] {
             let (tx, rx) = tokio::sync::oneshot::channel();
-            let mut task = tokio_test::task::spawn(wait_for_reader_arm(rx, cancelled, tokio::time::Instant::now() + Duration::from_secs(2)));
+            let mut task = tokio_test::task::spawn(wait_for_reader_arm(
+                rx,
+                cancelled,
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            ));
             assert!(task.poll().is_pending());
-            if queued_success { tx.send(Ok(())).unwrap(); }
+            if queued_success {
+                tx.send(Ok(())).unwrap();
+            }
             drop(task);
         }
         assert_eq!(CANCELS.load(Ordering::SeqCst), 2);
@@ -229,27 +353,41 @@ mod reader_arm_wait_tests {
 mod synthetic_readback {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
-    struct Worker { stop: Arc<AtomicBool>, handle: std::thread::JoinHandle<()> }
+    struct Worker {
+        stop: Arc<AtomicBool>,
+        handle: std::thread::JoinHandle<()>,
+    }
     static WORKER: Mutex<Option<Worker>> = Mutex::new(None);
     static USED: AtomicBool = AtomicBool::new(false);
     static DATA: OnceLock<Mutex<Value>> = OnceLock::new();
-    fn data() -> &'static Mutex<Value> { DATA.get_or_init(|| Mutex::new(json!({
+    fn data() -> &'static Mutex<Value> {
+        DATA.get_or_init(|| Mutex::new(json!({
         "armed":false,"stopped":false,"workerJoined":false,"valid":false,"records":[],"maxSamplingGapMs":0,
-        "clock":"native-process-monotonic-observation","samplingGapDefinition":"current read end minus previous read start; conservative sample spacing","error":null}))) }
+        "clock":"native-process-monotonic-observation","samplingGapDefinition":"current read end minus previous read start; conservative sample spacing","error":null})))
+    }
     fn retain_failure(d: &mut Value, reason: &str) {
         d["valid"] = json!(false);
         if d["diagnostics"]["firstFatal"].is_null() {
-            d["diagnostics"]["firstFatal"] = json!({"error":reason,"atMs":observation::now_ms(),"metadata":null});
+            d["diagnostics"]["firstFatal"] =
+                json!({"error":reason,"atMs":observation::now_ms(),"metadata":null});
         }
-        if d["error"].is_null() { d["error"] = json!(reason); d["failedAtMs"] = json!(observation::now_ms()); }
-        else { d["shutdownError"] = json!(reason); }
+        if d["error"].is_null() {
+            d["error"] = json!(reason);
+            d["failedAtMs"] = json!(observation::now_ms());
+        } else {
+            d["shutdownError"] = json!(reason);
+        }
     }
-    fn fail(reason: &str) { retain_failure(&mut data().lock().unwrap(), reason); }
+    fn fail(reason: &str) {
+        retain_failure(&mut data().lock().unwrap(), reason);
+    }
     fn merge_diagnostics(d: &mut Value, mut next: Value) {
         let mut fatal = d["diagnostics"]["firstFatal"].clone();
         if !fatal.is_null() {
-            if fatal["metadata"].is_null() && fatal["atMs"] == next["firstFatal"]["atMs"]
-                && fatal["error"] == next["firstFatal"]["error"] {
+            if fatal["metadata"].is_null()
+                && fatal["atMs"] == next["firstFatal"]["atMs"]
+                && fatal["error"] == next["firstFatal"]["error"]
+            {
                 fatal["metadata"] = next["firstFatal"]["metadata"].clone();
             }
             next["firstFatal"] = fatal;
@@ -257,14 +395,20 @@ mod synthetic_readback {
         d["diagnostics"] = next;
     }
     // Publish the original failure before native metadata, which may never return.
-    fn publish_diagnostics(state: &Mutex<Value>, reason: Option<&str>, diagnostics: Value,
-        enrich: impl FnOnce() -> Value) {
+    fn publish_diagnostics(
+        state: &Mutex<Value>,
+        reason: Option<&str>,
+        diagnostics: Value,
+        enrich: impl FnOnce() -> Value,
+    ) {
         let first = {
             let mut d = state.lock().unwrap();
             let first = reason.is_some() && d["diagnostics"]["firstFatal"].is_null();
             merge_diagnostics(&mut d, diagnostics);
             if let Some(reason) = reason {
-                if d["error"].is_null() { retain_failure(&mut d, reason); }
+                if d["error"].is_null() {
+                    retain_failure(&mut d, reason);
+                }
             }
             first
         };
@@ -278,47 +422,75 @@ mod synthetic_readback {
         let diagnostics = Reader::diagnostics(reason);
         publish_diagnostics(data(), reason, diagnostics, Reader::enrich_failure_metadata);
     }
-    pub fn snapshot() -> Value { data().lock().unwrap().clone() }
+    pub fn snapshot() -> Value {
+        data().lock().unwrap().clone()
+    }
     pub fn preparation_interval(name: &str, start: f64) {
         data().lock().unwrap()[name] = json!([start, observation::now_ms()]);
     }
     fn record(d: &mut Value, text: String, start: f64, end: f64) -> Result<(), String> {
-        if !start.is_finite() || !end.is_finite() || start < 0.0 || end < start { return Err("native clock reset".into()); }
+        if !start.is_finite() || !end.is_finite() || start < 0.0 || end < start {
+            return Err("native clock reset".into());
+        }
         let rows = d["records"].as_array_mut().unwrap();
         if let Some(last) = rows.last_mut() {
             let previous_end = last["lastReadEndMs"].as_f64().unwrap();
-            if start < previous_end { return Err("native clock reset".into()); }
+            if start < previous_end {
+                return Err("native clock reset".into());
+            }
             let gap = end - last["lastReadStartMs"].as_f64().unwrap();
             if last["text"] == text {
-                last["lastReadStartMs"] = json!(start); last["lastReadEndMs"] = json!(end);
+                last["lastReadStartMs"] = json!(start);
+                last["lastReadEndMs"] = json!(end);
                 last["samples"] = json!(last["samples"].as_u64().unwrap() + 1);
-                last["maxSamplingGapMs"] = json!(gap.max(last["maxSamplingGapMs"].as_f64().unwrap()));
+                last["maxSamplingGapMs"] =
+                    json!(gap.max(last["maxSamplingGapMs"].as_f64().unwrap()));
                 d["maxSamplingGapMs"] = json!(gap.max(d["maxSamplingGapMs"].as_f64().unwrap()));
                 return Ok(());
             }
         }
-        if rows.len() >= 512 || text.encode_utf16().count() > 4096 { return Err("readback overflow".into()); }
-        let gap = rows.last().map_or(0.0, |r| end - r["lastReadStartMs"].as_f64().unwrap());
+        if rows.len() >= 512 || text.encode_utf16().count() > 4096 {
+            return Err("readback overflow".into());
+        }
+        let gap = rows
+            .last()
+            .map_or(0.0, |r| end - r["lastReadStartMs"].as_f64().unwrap());
         rows.push(json!({"sequence":rows.len(),"text":text,"readStartMs":start,"readEndMs":end,
             "lastReadStartMs":start,"lastReadEndMs":end,"samples":1,"maxSamplingGapMs":gap,"identityValid":true}));
-        if serde_json::to_vec(&rows).unwrap().len() > 256 * 1024 { rows.pop(); return Err("readback byte overflow".into()); }
+        if serde_json::to_vec(&rows).unwrap().len() > 256 * 1024 {
+            rows.pop();
+            return Err("readback byte overflow".into());
+        }
         d["maxSamplingGapMs"] = json!(gap.max(d["maxSamplingGapMs"].as_f64().unwrap()));
         Ok(())
     }
     // Caller holds DATA throughout the guard and initial publication.
-    fn publish_read(d: &mut Value, signal: &AtomicBool, initial: bool, deadline: Option<std::time::Instant>,
-        text: String, start: f64, end: f64, identity: impl FnOnce() -> Value,
+    fn publish_read(
+        d: &mut Value,
+        signal: &AtomicBool,
+        initial: bool,
+        deadline: Option<std::time::Instant>,
+        text: String,
+        start: f64,
+        end: f64,
+        identity: impl FnOnce() -> Value,
     ) -> Result<(), String> {
         if initial && (signal.load(Ordering::SeqCst) || !d["error"].is_null()) {
             return Err("reader arming cancelled".into());
         }
-        if initial && !text.is_empty() { return Err("initial owned read must be empty".into()); }
+        if initial && !text.is_empty() {
+            return Err("initial owned read must be empty".into());
+        }
         record(d, text, start, end)?;
         if initial {
             d["identity"] = identity();
             if let Some(deadline) = deadline {
-                crate::infrastructure::auto_paste::synthetic_readiness::admit(std::time::Instant::now(),
-                    deadline, signal.load(Ordering::SeqCst) || !d["error"].is_null(), 0)?;
+                crate::infrastructure::auto_paste::synthetic_readiness::admit(
+                    std::time::Instant::now(),
+                    deadline,
+                    signal.load(Ordering::SeqCst) || !d["error"].is_null(),
+                    0,
+                )?;
             }
             d["armed"] = json!(true);
             d["armedAtMs"] = json!(observation::now_ms());
@@ -328,15 +500,22 @@ mod synthetic_readback {
     }
     // Stage all text/identity work while DATA is locked. The last clock sample
     // is the publication linearization point; rejected candidates never escape.
-    fn publish_read_result(d: &mut Value, read: Result<String, String>,
-        deadline: std::time::Instant, now: impl Fn() -> std::time::Instant,
+    fn publish_read_result(
+        d: &mut Value,
+        read: Result<String, String>,
+        deadline: std::time::Instant,
+        now: impl Fn() -> std::time::Instant,
         publish: impl FnOnce(&mut Value, String) -> Result<(), String>,
     ) -> Result<(), String> {
         let text = read?; // Preserve the native failure instead of replacing it.
-        if now() >= deadline { return Err("read-deadline".into()); }
+        if now() >= deadline {
+            return Err("read-deadline".into());
+        }
         let mut candidate = d.clone();
         publish(&mut candidate, text)?;
-        if now() >= deadline { return Err("read-deadline".into()); }
+        if now() >= deadline {
+            return Err("read-deadline".into());
+        }
         // Swap is allocation/destruction-free at the locked commit boundary.
         std::mem::swap(d, &mut candidate);
         if now() >= deadline {
@@ -345,8 +524,12 @@ mod synthetic_readback {
         }
         Ok(())
     }
-    fn arm_clock_interval(origin: std::time::Instant, before: std::time::Instant,
-        sampled_ms: f64, after: std::time::Instant) -> Value {
+    fn arm_clock_interval(
+        origin: std::time::Instant,
+        before: std::time::Instant,
+        sampled_ms: f64,
+        after: std::time::Instant,
+    ) -> Value {
         let lower = sampled_ms - after.duration_since(origin).as_secs_f64() * 1000.0;
         let upper = sampled_ms - before.duration_since(origin).as_secs_f64() * 1000.0;
         json!({"originBoundsMs":[lower,upper],"deadlineBoundsMs":[lower+2000.0,upper+2000.0],
@@ -374,7 +557,10 @@ mod synthetic_readback {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
-    fn captured_read(read: Result<String, String>, capture: impl FnOnce(Option<&str>)) -> Result<String, String> {
+    fn captured_read(
+        read: Result<String, String>,
+        capture: impl FnOnce(Option<&str>),
+    ) -> Result<String, String> {
         capture(read.as_ref().err().map(String::as_str));
         read // Native failures precede every success-only cancellation/deadline gate.
     }
@@ -383,35 +569,71 @@ mod synthetic_readback {
         read_deadline: std::time::Instant,
         ack: std::sync::mpsc::Sender<Result<(), String>>,
     }
-    fn accept_arm(state: &Mutex<Value>, signal: &AtomicBool, candidate: ArmCandidate,
-        shared_deadline: tokio::time::Instant) -> Result<(), String> {
+    fn accept_arm(
+        state: &Mutex<Value>,
+        signal: &AtomicBool,
+        candidate: ArmCandidate,
+        shared_deadline: tokio::time::Instant,
+    ) -> Result<(), String> {
         accept_arm_with_hook(state, signal, candidate, shared_deadline, |_| {})
     }
-    fn accept_arm_with_hook(state: &Mutex<Value>, signal: &AtomicBool, mut candidate: ArmCandidate,
-        shared_deadline: tokio::time::Instant, mut commit_hook: impl FnMut(bool)) -> Result<(), String> {
+    fn accept_arm_with_hook(
+        state: &Mutex<Value>,
+        signal: &AtomicBool,
+        mut candidate: ArmCandidate,
+        shared_deadline: tokio::time::Instant,
+        mut commit_hook: impl FnMut(bool),
+    ) -> Result<(), String> {
         let mut d = state.lock().unwrap();
         let result = (|| {
-            if let Some(error) = d["error"].as_str() { return Err(error.to_owned()); }
-            if signal.load(Ordering::SeqCst) { return Err("reader arming cancelled".into()); }
+            if let Some(error) = d["error"].as_str() {
+                return Err(error.to_owned());
+            }
+            if signal.load(Ordering::SeqCst) {
+                return Err("reader arming cancelled".into());
+            }
             // Build under the same lock, retaining concurrent diagnostic metadata.
             let mut committed = d.clone();
-            for key in ["records", "identity", "armed", "armedAtMs", "valid", "maxSamplingGapMs"] {
+            for key in [
+                "records",
+                "identity",
+                "armed",
+                "armedAtMs",
+                "valid",
+                "maxSamplingGapMs",
+            ] {
                 match candidate.value.as_object_mut().unwrap().remove(key) {
-                    Some(value) => { committed.as_object_mut().unwrap().insert(key.into(), value); }
-                    None => { committed.as_object_mut().unwrap().remove(key); }
+                    Some(value) => {
+                        committed.as_object_mut().unwrap().insert(key.into(), value);
+                    }
+                    None => {
+                        committed.as_object_mut().unwrap().remove(key);
+                    }
                 }
             }
-            let cutoff = shared_deadline.min(tokio::time::Instant::from_std(candidate.read_deadline));
-            if tokio::time::Instant::now() >= cutoff { return Err("read-deadline".into()); }
+            let cutoff =
+                shared_deadline.min(tokio::time::Instant::from_std(candidate.read_deadline));
+            if tokio::time::Instant::now() >= cutoff {
+                return Err("read-deadline".into());
+            }
             commit_hook(false);
-            if signal.load(Ordering::SeqCst) { return Err("reader arming cancelled".into()); }
+            if signal.load(Ordering::SeqCst) {
+                return Err("reader arming cancelled".into());
+            }
             std::mem::swap(&mut *d, &mut committed);
             commit_hook(true);
             let cancelled = signal.load(Ordering::SeqCst);
-            if cancelled || tokio::time::Instant::now() >= cutoff || candidate.ack.send(Ok(())).is_err() {
+            if cancelled
+                || tokio::time::Instant::now() >= cutoff
+                || candidate.ack.send(Ok(())).is_err()
+            {
                 std::mem::swap(&mut *d, &mut committed);
-                return Err(if cancelled { "reader arming cancelled" }
-                    else { "reader acceptance expired or disconnected" }.into());
+                return Err(if cancelled {
+                    "reader arming cancelled"
+                } else {
+                    "reader acceptance expired or disconnected"
+                }
+                .into());
             }
             Ok(())
         })();
@@ -422,41 +644,53 @@ mod synthetic_readback {
         }
         result
     }
-    async fn receive_arm(rx: tokio::sync::oneshot::Receiver<Result<ArmCandidate, String>>,
-        signal: &AtomicBool, deadline: tokio::time::Instant) -> Result<(), String> {
+    async fn receive_arm(
+        rx: tokio::sync::oneshot::Receiver<Result<ArmCandidate, String>>,
+        signal: &AtomicBool,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), String> {
         struct CancelOnDrop(bool);
         impl Drop for CancelOnDrop {
-            fn drop(&mut self) { if self.0 { cancel_arm(); } }
+            fn drop(&mut self) {
+                if self.0 {
+                    cancel_arm();
+                }
+            }
         }
         let mut guard = CancelOnDrop(true);
         let result = match tokio::time::timeout_at(deadline, rx).await {
             Ok(Ok(Ok(candidate))) => accept_arm(data(), signal, candidate, deadline),
             Ok(Ok(Err(error))) => Err(error),
-            _ => Err(data().lock().unwrap()["error"].as_str()
-                .unwrap_or("reader arming timeout").to_owned()),
+            _ => Err(data().lock().unwrap()["error"]
+                .as_str()
+                .unwrap_or("reader arming timeout")
+                .to_owned()),
         };
         guard.0 = false;
         result
     }
     pub async fn arm(path: PathBuf) -> Result<(), String> {
         let (rx, deadline, cancel_signal) = {
-        let mut slot = WORKER.lock().unwrap();
-        if slot.is_some() || USED.swap(true, Ordering::SeqCst) { return Err("reader already used".into()); }
-        data().lock().unwrap()["prepareStartMs"] = json!(observation::now_ms());
-        let cancel = Arc::new(AtomicBool::new(false)); let signal = cancel.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let origin = std::time::Instant::now();
-        let deadline = origin + Duration::from_secs(2);
-        let before = std::time::Instant::now();
-        let sampled_ms = observation::now_ms();
-        let after = std::time::Instant::now();
-        let anchor = arm_clock_interval(origin, before, sampled_ms, after);
-        {
-            let mut d = data().lock().unwrap();
-            d["armDeadlineMs"] = anchor["conservativeOriginDeadlineMs"].clone();
-            d["armClockConversion"] = anchor;
-        }
-        let handle = std::thread::Builder::new().name("synthetic-ax-reader".into()).spawn(move || {
+            let mut slot = WORKER.lock().unwrap();
+            if slot.is_some() || USED.swap(true, Ordering::SeqCst) {
+                return Err("reader already used".into());
+            }
+            data().lock().unwrap()["prepareStartMs"] = json!(observation::now_ms());
+            let cancel = Arc::new(AtomicBool::new(false));
+            let signal = cancel.clone();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let origin = std::time::Instant::now();
+            let deadline = origin + Duration::from_secs(2);
+            let before = std::time::Instant::now();
+            let sampled_ms = observation::now_ms();
+            let after = std::time::Instant::now();
+            let anchor = arm_clock_interval(origin, before, sampled_ms, after);
+            {
+                let mut d = data().lock().unwrap();
+                d["armDeadlineMs"] = anchor["conservativeOriginDeadlineMs"].clone();
+                d["armClockConversion"] = anchor;
+            }
+            let handle = std::thread::Builder::new().name("synthetic-ax-reader".into()).spawn(move || {
             extern "C" { fn pthread_threadid_np(thread: *mut std::ffi::c_void, id: *mut u64) -> i32; }
             let mut native_thread_id = 0u64;
             let thread_id_code = unsafe { pthread_threadid_np(std::ptr::null_mut(), &mut native_thread_id) };
@@ -526,20 +760,29 @@ mod synthetic_readback {
             }
             data().lock().unwrap()["stopped"] = json!(true);
         }).map_err(|e| e.to_string())?;
-        *slot = Some(Worker { stop: cancel.clone(), handle });
-        (rx, deadline, cancel)
+            *slot = Some(Worker {
+                stop: cancel.clone(),
+                handle,
+            });
+            (rx, deadline, cancel)
         }; // WORKER guard leaves lexical scope before await (Tauri future must be Send).
         let dispatch_start = data().lock().unwrap()["prepareStartMs"].as_f64().unwrap();
         preparation_interval("armDispatchMs", dispatch_start);
-        let result = receive_arm(rx, &cancel_signal, tokio::time::Instant::from_std(deadline)).await;
-        if let Err(reason) = &result { fail(reason); stop(); }
+        let result =
+            receive_arm(rx, &cancel_signal, tokio::time::Instant::from_std(deadline)).await;
+        if let Err(reason) = &result {
+            fail(reason);
+            stop();
+        }
         result
     }
 
     fn cancel_arm() {
         {
             let slot = WORKER.lock().unwrap();
-            if let Some(worker) = slot.as_ref() { worker.stop.store(true, Ordering::SeqCst); }
+            if let Some(worker) = slot.as_ref() {
+                worker.stop.store(true, Ordering::SeqCst);
+            }
         }
         fail("reader arming cancelled");
         // Keep the existing synchronous bounded stop/join and retained ownership.
@@ -557,13 +800,17 @@ mod synthetic_readback {
             if !worker.handle.is_finished() {
                 preparation_interval("stopJoinMs", stop_start);
                 data().lock().unwrap()["joinOutcome"] = json!("timeout-worker-retained");
-                fail("reader join timeout; worker retained, restart forbidden"); return;
+                fail("reader join timeout; worker retained, restart forbidden");
+                return;
             }
             let joined = slot.take().unwrap().handle.join().is_ok();
             preparation_interval("stopJoinMs", stop_start);
             data().lock().unwrap()["workerJoined"] = json!(true);
-            data().lock().unwrap()["joinOutcome"] = json!(if joined { "joined" } else { "joined-panic" });
-            if !joined { fail("reader panic"); }
+            data().lock().unwrap()["joinOutcome"] =
+                json!(if joined { "joined" } else { "joined-panic" });
+            if !joined {
+                fail("reader panic");
+            }
         }
     }
     #[cfg(test)]
@@ -577,11 +824,21 @@ mod synthetic_readback {
                 let origin = tokio::time::Instant::now();
                 let (ack, accepted) = std::sync::mpsc::channel();
                 let (tx, rx) = tokio::sync::oneshot::channel();
-                tx.send(ArmCandidate { value: json!({"armed":true,"valid":true}),
-                    read_deadline: (origin + Duration::from_millis(200)).into_std(), ack }).ok().unwrap();
+                tx.send(ArmCandidate {
+                    value: json!({"armed":true,"valid":true}),
+                    read_deadline: (origin + Duration::from_millis(200)).into_std(),
+                    ack,
+                })
+                .ok()
+                .unwrap();
                 tokio::time::advance(Duration::from_millis(delay)).await;
                 assert_eq!(state.lock().unwrap()["armed"], false);
-                let result = accept_arm(&state, &signal, rx.await.unwrap(), origin + Duration::from_secs(2));
+                let result = accept_arm(
+                    &state,
+                    &signal,
+                    rx.await.unwrap(),
+                    origin + Duration::from_secs(2),
+                );
                 assert_eq!(result.is_ok(), delay == 199);
                 assert_eq!(state.lock().unwrap()["armed"], delay == 199);
                 assert_eq!(accepted.try_recv().unwrap().is_ok(), delay == 199);
@@ -589,13 +846,19 @@ mod synthetic_readback {
         }
         #[test]
         fn native_error_precedes_diagnostic_cancellation() {
-            for error in ["AXFocusedUIElement: native-error code=Some(-25204)", "owned editor/window changed"] {
+            for error in [
+                "AXFocusedUIElement: native-error code=Some(-25204)",
+                "owned editor/window changed",
+            ] {
                 let state = Mutex::new(json!({"armed":false,"valid":false,"error":null}));
                 let signal = AtomicBool::new(false);
                 let result = captured_read(Err(error.into()), |reason| {
                     publish_diagnostics(&state, reason, json!({}), || json!({}));
                     signal.store(true, Ordering::SeqCst);
-                }).and_then(|_| -> Result<String, String> { panic!("native failure reached success gates") });
+                })
+                .and_then(|_| -> Result<String, String> {
+                    panic!("native failure reached success gates")
+                });
                 assert_eq!(result, Err(error.into()));
                 assert!(signal.load(Ordering::SeqCst));
                 assert_eq!(state.lock().unwrap()["error"], error);
@@ -607,18 +870,32 @@ mod synthetic_readback {
                 let state = Mutex::new(json!({"armed":false,"valid":false,"error":null}));
                 let signal = AtomicBool::new(false);
                 let (ack, accepted) = std::sync::mpsc::channel();
-                let result = accept_arm_with_hook(&state, &signal, ArmCandidate {
-                    value: json!({"armed":true,"valid":true,"identity":{},"armedAtMs":1,"records":[]}),
-                    read_deadline: std::time::Instant::now() + Duration::from_millis(200), ack },
-                    tokio::time::Instant::now() + Duration::from_secs(2), |after_swap| {
-                        if after_swap == cancel_after_swap { signal.store(true, Ordering::SeqCst); }
-                    });
+                let result = accept_arm_with_hook(
+                    &state,
+                    &signal,
+                    ArmCandidate {
+                        value: json!({"armed":true,"valid":true,"identity":{},"armedAtMs":1,"records":[]}),
+                        read_deadline: std::time::Instant::now() + Duration::from_millis(200),
+                        ack,
+                    },
+                    tokio::time::Instant::now() + Duration::from_secs(2),
+                    |after_swap| {
+                        if after_swap == cancel_after_swap {
+                            signal.store(true, Ordering::SeqCst);
+                        }
+                    },
+                );
                 assert_eq!(result, Err("reader arming cancelled".into()));
-                assert_eq!(accepted.try_recv().unwrap(), Err("reader arming cancelled".into()));
+                assert_eq!(
+                    accepted.try_recv().unwrap(),
+                    Err("reader arming cancelled".into())
+                );
                 let d = state.lock().unwrap();
                 assert_eq!(d["armed"], false);
                 assert_eq!(d["valid"], false);
-                for key in ["identity", "armedAtMs", "records", "maxSamplingGapMs"] { assert!(d.get(key).is_none()); }
+                for key in ["identity", "armedAtMs", "records", "maxSamplingGapMs"] {
+                    assert!(d.get(key).is_none());
+                }
             }
         }
         #[test]
@@ -628,13 +905,21 @@ mod synthetic_readback {
             let signal = AtomicBool::new(false);
             let (ack, accepted) = std::sync::mpsc::channel();
             drop(accepted);
-            let result = accept_arm(&state, &signal, ArmCandidate {
-                value: json!({"armed":true,"valid":true,"identity":{},"armedAtMs":1,"records":[]}),
-                read_deadline: std::time::Instant::now() + Duration::from_millis(200), ack },
-                tokio::time::Instant::now() + Duration::from_secs(2));
+            let result = accept_arm(
+                &state,
+                &signal,
+                ArmCandidate {
+                    value: json!({"armed":true,"valid":true,"identity":{},"armedAtMs":1,"records":[]}),
+                    read_deadline: std::time::Instant::now() + Duration::from_millis(200),
+                    ack,
+                },
+                tokio::time::Instant::now() + Duration::from_secs(2),
+            );
             assert!(result.is_err());
             let d = state.lock().unwrap();
-            for key in ["identity", "armedAtMs", "records", "maxSamplingGapMs"] { assert!(d.get(key).is_none()); }
+            for key in ["identity", "armedAtMs", "records", "maxSamplingGapMs"] {
+                assert!(d.get(key).is_none());
+            }
             assert_eq!(d["armed"], false);
             assert_eq!(d["valid"], false);
         }
@@ -645,26 +930,53 @@ mod synthetic_readback {
             for initial in [true, false] {
                 for offset in [199_999_999, 200_000_000, 200_000_001] {
                     for delayed_publication in [false, true] {
-                        let now = std::cell::Cell::new(if delayed_publication { origin } else {
+                        let now = std::cell::Cell::new(if delayed_publication {
+                            origin
+                        } else {
                             origin + Duration::from_nanos(offset)
                         });
                         let mut d = json!({"armed":false,"valid":false,"error":null,"records":[],"maxSamplingGapMs":0});
                         let previous = d.clone();
-                        let result = publish_read_result(&mut d, Ok(String::new()), deadline, || now.get(),
+                        let result = publish_read_result(
+                            &mut d,
+                            Ok(String::new()),
+                            deadline,
+                            || now.get(),
                             |candidate, text| {
-                                publish_read(candidate, &AtomicBool::new(false), initial, None, text, 1.0, 2.0, || json!({"pid":42}))?;
+                                publish_read(
+                                    candidate,
+                                    &AtomicBool::new(false),
+                                    initial,
+                                    None,
+                                    text,
+                                    1.0,
+                                    2.0,
+                                    || json!({"pid":42}),
+                                )?;
                                 now.set(origin + Duration::from_nanos(offset));
                                 Ok(())
-                            });
+                            },
+                        );
                         assert_eq!(result.is_ok(), offset < 200_000_000);
-                        if result.is_err() { assert_eq!(d, previous); }
-                        else { assert_eq!(d["records"].as_array().unwrap().len(), 1); }
+                        if result.is_err() {
+                            assert_eq!(d, previous);
+                        } else {
+                            assert_eq!(d["records"].as_array().unwrap().len(), 1);
+                        }
                     }
                 }
             }
             let mut d = json!({"error":"first terminal"});
-            assert_eq!(publish_read_result(&mut d, Err("native code=-25204".into()), deadline,
-                || deadline, |_, _| panic!("failed read cannot publish")), Err("native code=-25204".into()));
+            assert_eq!(
+                publish_read_result(
+                    &mut d,
+                    Err("native code=-25204".into()),
+                    deadline,
+                    || deadline,
+                    |_, _| panic!("failed read cannot publish")
+                ),
+                Err("native code=-25204".into())
+            );
             assert_eq!(d["error"], "first terminal");
         }
         #[test]
@@ -673,8 +985,8 @@ mod synthetic_readback {
             let before = origin + Duration::from_millis(100);
             let after = origin + Duration::from_millis(140);
             let anchor = arm_clock_interval(origin, before, 1140.0, after);
-            assert_eq!(anchor["originBoundsMs"], json!([1000.0,1040.0]));
-            assert_eq!(anchor["deadlineBoundsMs"], json!([3000.0,3040.0]));
+            assert_eq!(anchor["originBoundsMs"], json!([1000.0, 1040.0]));
+            assert_eq!(anchor["deadlineBoundsMs"], json!([3000.0, 3040.0]));
             for publication_delay in [0, 500, 2500] {
                 let publication = after + Duration::from_millis(publication_delay);
                 assert!(publication >= after);
@@ -685,25 +997,65 @@ mod synthetic_readback {
         }
         #[test]
         fn publication_rechecks_deadline_and_cancel_after_identity() {
-            assert!(publish_read(&mut json!({"error":null}), &AtomicBool::new(false), true, None,
-                "nonempty".into(), 1.0, 2.0, || panic!("nonempty initial read")).is_err());
+            assert!(publish_read(
+                &mut json!({"error":null}),
+                &AtomicBool::new(false),
+                true,
+                None,
+                "nonempty".into(),
+                1.0,
+                2.0,
+                || panic!("nonempty initial read")
+            )
+            .is_err());
             for expired in [false, true] {
                 let signal = AtomicBool::new(false);
                 let mut d = json!({"armed":false,"valid":false,"error":null,"records":[],"maxSamplingGapMs":0});
-                let deadline = std::time::Instant::now() + if expired { Duration::ZERO } else { Duration::from_secs(2) };
-                assert!(publish_read(&mut d, &signal, true, Some(deadline), String::new(), 1.0, 2.0,
-                    || { if !expired { signal.store(true, Ordering::SeqCst); } json!({}) }).is_err());
-                assert_eq!(d["valid"], false); assert_eq!(d["armed"], false);
+                let deadline = std::time::Instant::now()
+                    + if expired {
+                        Duration::ZERO
+                    } else {
+                        Duration::from_secs(2)
+                    };
+                assert!(publish_read(
+                    &mut d,
+                    &signal,
+                    true,
+                    Some(deadline),
+                    String::new(),
+                    1.0,
+                    2.0,
+                    || {
+                        if !expired {
+                            signal.store(true, Ordering::SeqCst);
+                        }
+                        json!({})
+                    }
+                )
+                .is_err());
+                assert_eq!(d["valid"], false);
+                assert_eq!(d["armed"], false);
             }
         }
         #[test]
         fn initial_and_later_read_errors_never_retry() {
-            for reason in ["AXFocusedUIElement: native-error code=Some(-25204)",
-                "owned document changed", "owned editor/window changed", "AX element type"] {
+            for reason in [
+                "AXFocusedUIElement: native-error code=Some(-25204)",
+                "owned document changed",
+                "owned editor/window changed",
+                "AX element type",
+            ] {
                 let mut calls = 0;
-                let result = read_loop(&AtomicBool::new(false), || { calls += 1; Err(reason.into()) },
-                    |read, _, _| read.map(|_| ()));
-                assert_eq!(result, Err(reason.into())); assert_eq!(calls, 1);
+                let result = read_loop(
+                    &AtomicBool::new(false),
+                    || {
+                        calls += 1;
+                        Err(reason.into())
+                    },
+                    |read, _, _| read.map(|_| ()),
+                );
+                assert_eq!(result, Err(reason.into()));
+                assert_eq!(calls, 1);
             }
         }
         #[test]
@@ -717,8 +1069,16 @@ mod synthetic_readback {
                 ready_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
                 // Deliberately model fail() before stop() has set the signal.
-                publish_read(&mut worker_state.lock().unwrap(), &AtomicBool::new(false),
-                    true, None, String::new(), 1.0, 2.0, || panic!("invalid identity publication"))
+                publish_read(
+                    &mut worker_state.lock().unwrap(),
+                    &AtomicBool::new(false),
+                    true,
+                    None,
+                    String::new(),
+                    1.0,
+                    2.0,
+                    || panic!("invalid identity publication"),
+                )
             });
             ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
             let first = {
@@ -727,7 +1087,10 @@ mod synthetic_readback {
                 d.clone()
             };
             release_tx.send(()).unwrap();
-            assert_eq!(worker.join().unwrap(), Err("reader arming cancelled".into()));
+            assert_eq!(
+                worker.join().unwrap(),
+                Err("reader arming cancelled".into())
+            );
             assert_eq!(*state.lock().unwrap(), first);
         }
 
@@ -738,8 +1101,10 @@ mod synthetic_readback {
             assert!(WORKER.lock().unwrap().is_none());
             assert!(!USED.swap(true, Ordering::SeqCst));
             for (queued, retained, prior_failure) in [
-                (false, false, false), (true, false, false),
-                (true, false, true), (false, true, true),
+                (false, false, false),
+                (true, false, false),
+                (true, false, true),
+                (false, true, true),
             ] {
                 *data().lock().unwrap() = json!({"armed":false,"valid":false,
                     "error":null,"records":[],"maxSamplingGapMs":0});
@@ -755,47 +1120,114 @@ mod synthetic_readback {
                     let (ack, _accepted) = std::sync::mpsc::channel();
                     if queued {
                         let mut candidate = data().lock().unwrap().clone();
-                        publish_read(&mut candidate, &worker_signal, true, None,
-                            String::new(), 1.0, 2.0, || json!({"test":true})).unwrap();
-                        tx.take().unwrap().send(Ok(ArmCandidate { value: candidate,
-                            read_deadline: std::time::Instant::now() + Duration::from_millis(200), ack })).ok().unwrap();
+                        publish_read(
+                            &mut candidate,
+                            &worker_signal,
+                            true,
+                            None,
+                            String::new(),
+                            1.0,
+                            2.0,
+                            || json!({"test":true}),
+                        )
+                        .unwrap();
+                        tx.take()
+                            .unwrap()
+                            .send(Ok(ArmCandidate {
+                                value: candidate,
+                                read_deadline: std::time::Instant::now()
+                                    + Duration::from_millis(200),
+                                ack,
+                            }))
+                            .ok()
+                            .unwrap();
                     }
                     ready_tx.send(()).unwrap();
-                    if retained { release_rx.recv().unwrap(); }
-                    while !worker_signal.load(Ordering::SeqCst) { std::thread::yield_now(); }
+                    if retained {
+                        release_rx.recv().unwrap();
+                    }
+                    while !worker_signal.load(Ordering::SeqCst) {
+                        std::thread::yield_now();
+                    }
                     if !queued {
-                        assert_eq!(publish_read(&mut data().lock().unwrap(), &worker_signal,
-                            true, None, String::new(), 1.0, 2.0, || panic!("cancelled publication")),
-                            Err("reader arming cancelled".into()));
+                        assert_eq!(
+                            publish_read(
+                                &mut data().lock().unwrap(),
+                                &worker_signal,
+                                true,
+                                None,
+                                String::new(),
+                                1.0,
+                                2.0,
+                                || panic!("cancelled publication")
+                            ),
+                            Err("reader arming cancelled".into())
+                        );
                     }
                     data().lock().unwrap()["stopped"] = json!(true);
                 });
-                *WORKER.lock().unwrap() = Some(Worker { stop: signal.clone(), handle });
-                let mut task = tokio_test::task::spawn(receive_arm(rx, &signal, tokio::time::Instant::now() + Duration::from_secs(2)));
+                *WORKER.lock().unwrap() = Some(Worker {
+                    stop: signal.clone(),
+                    handle,
+                });
+                let mut task = tokio_test::task::spawn(receive_arm(
+                    rx,
+                    &signal,
+                    tokio::time::Instant::now() + Duration::from_secs(2),
+                ));
                 assert!(task.poll().is_pending());
                 begin_tx.send(()).unwrap();
                 ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
                 assert_eq!(snapshot()["valid"], false);
-                if prior_failure { fail("first failure before cancellation"); }
+                if prior_failure {
+                    fail("first failure before cancellation");
+                }
                 let first_at = snapshot()["failedAtMs"].clone();
                 drop(task);
                 assert!(signal.load(Ordering::SeqCst));
                 let d = snapshot();
                 assert_eq!(d["valid"], false);
                 assert_eq!(d["armed"], false);
-                assert_eq!(d["error"], if prior_failure { "first failure before cancellation" }
-                    else { "reader arming cancelled" });
-                if prior_failure { assert_eq!(d["failedAtMs"], first_at); }
+                assert_eq!(
+                    d["error"],
+                    if prior_failure {
+                        "first failure before cancellation"
+                    } else {
+                        "reader arming cancelled"
+                    }
+                );
+                if prior_failure {
+                    assert_eq!(d["failedAtMs"], first_at);
+                }
                 assert_eq!(WORKER.lock().unwrap().is_some(), retained);
-                assert_eq!(d["joinOutcome"], if retained { "timeout-worker-retained" } else { "joined" });
+                assert_eq!(
+                    d["joinOutcome"],
+                    if retained {
+                        "timeout-worker-retained"
+                    } else {
+                        "joined"
+                    }
+                );
                 assert_eq!(arm(PathBuf::new()).await, Err("reader already used".into()));
                 if retained {
                     release_tx.send(()).unwrap();
                     // Ensure the next stop joins, without changing production scheduling.
                     let join_limit = std::time::Instant::now() + Duration::from_secs(2);
                     loop {
-                        assert!(std::time::Instant::now() < join_limit, "released worker must exit");
-                        if WORKER.lock().unwrap().as_ref().unwrap().handle.is_finished() { break; }
+                        assert!(
+                            std::time::Instant::now() < join_limit,
+                            "released worker must exit"
+                        );
+                        if WORKER
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .unwrap()
+                            .handle
+                            .is_finished()
+                        {
+                            break;
+                        }
                         std::thread::yield_now();
                     }
                     stop();
@@ -812,7 +1244,8 @@ mod synthetic_readback {
         fn suspended_metadata_keeps_snapshot_and_timeout_available() {
             for armed in [false, true] {
                 let state = Arc::new(Mutex::new(json!({"armed":armed,"valid":true,"error":null})));
-                state.lock().unwrap()["readiness"] = json!({"firstTransient":{"code":-25204},"terminalCause":{"code":-25205}});
+                state.lock().unwrap()["readiness"] =
+                    json!({"firstTransient":{"code":-25204},"terminalCause":{"code":-25205}});
                 let readiness = state.lock().unwrap()["readiness"].clone();
                 let worker_state = state.clone();
                 let (entered_tx, entered_rx) = std::sync::mpsc::channel();
@@ -820,15 +1253,22 @@ mod synthetic_readback {
                 let fatal = json!({"error":"original AX error","atMs":12,"operation":{"code":-25204},"metadata":null});
                 let diagnostics = json!({"firstFatal":fatal});
                 let worker = std::thread::spawn(move || {
-                    publish_diagnostics(&worker_state, Some("original AX error"), diagnostics.clone(), || {
-                        entered_tx.send(()).unwrap();
-                        release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-                        diagnostics
-                    });
+                    publish_diagnostics(
+                        &worker_state,
+                        Some("original AX error"),
+                        diagnostics.clone(),
+                        || {
+                            entered_tx.send(()).unwrap();
+                            release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                            diagnostics
+                        },
+                    );
                 });
                 entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
                 // try_lock fails immediately if enrichment accidentally retains DATA.
-                let mut snapshot = state.try_lock().expect("snapshot available during metadata");
+                let mut snapshot = state
+                    .try_lock()
+                    .expect("snapshot available during metadata");
                 assert_eq!(snapshot["valid"], false);
                 assert_eq!(snapshot["error"], "original AX error");
                 assert_eq!(snapshot["diagnostics"]["firstFatal"], fatal);
@@ -853,14 +1293,21 @@ mod synthetic_readback {
                 let mut d = json!({"armed":armed,"valid":true,"error":null});
                 retain_failure(&mut d, "AXFocusedUIElement: native-error code=Some(-25204)");
                 let fatal = d["diagnostics"]["firstFatal"].clone();
-                for next in [json!({"firstFatal":null}), json!({"firstFatal":{"error":"later failure","atMs":99}})] {
-                    merge_diagnostics(&mut d, next); assert_eq!(d["diagnostics"]["firstFatal"], fatal);
+                for next in [
+                    json!({"firstFatal":null}),
+                    json!({"firstFatal":{"error":"later failure","atMs":99}}),
+                ] {
+                    merge_diagnostics(&mut d, next);
+                    assert_eq!(d["diagnostics"]["firstFatal"], fatal);
                 }
                 let at = d["failedAtMs"].clone();
                 retain_failure(&mut d, "reader join timeout");
                 assert_eq!(d["armed"], armed);
                 assert_eq!(d["valid"], false);
-                assert_eq!(d["error"], "AXFocusedUIElement: native-error code=Some(-25204)");
+                assert_eq!(
+                    d["error"],
+                    "AXFocusedUIElement: native-error code=Some(-25204)"
+                );
                 assert_eq!(d["failedAtMs"], at);
                 assert_eq!(d["shutdownError"], "reader join timeout");
             }
@@ -916,7 +1363,9 @@ mod synthetic_readback {
             assert_eq!(d["maxSamplingGapMs"].as_f64(), Some(25.0));
             assert!(record(&mut d, "X".into(), 1.0, 2.0).is_err());
             assert!(record(&mut d, "x".repeat(4097), 60.0, 65.0).is_err());
-            for i in 2..512 { record(&mut d, i.to_string(), (i*30) as f64, (i*30+5) as f64).unwrap(); }
+            for i in 2..512 {
+                record(&mut d, i.to_string(), (i * 30) as f64, (i * 30 + 5) as f64).unwrap();
+            }
             assert!(record(&mut d, "overflow".into(), 20000.0, 20005.0).is_err());
         }
     }
@@ -1067,30 +1516,59 @@ fn decode_audio_marker(samples: &[i16]) -> Option<AudioMarker> {
 }
 // E63 only: validate every signed-i16 sample, including marker amplitudes and tail.
 fn observe_full_pcm(counters: &mut Counters, seam: &str, chunk: &AudioChunk, marker: AudioMarker) {
-    let valid = chunk.sample_rate == 16000 && chunk.channels == 1 && chunk.data.len() == 320
+    let valid = chunk.sample_rate == 16000
+        && chunk.channels == 1
+        && chunk.data.len() == 320
         && chunk.data.iter().enumerate().all(|(i, sample)| {
             let expected = if i < AUDIO_MARKER_BITS {
-                let word = [AUDIO_MARKER_MAGIC, marker.capture_generation as u32, marker.sequence as u32][i / 32];
-                if (word >> (31 - i % 32)) & 1 == 1 { 6000 } else { -6000 }
-            } else if i % 32 < 16 { 5000 } else { -5000 };
+                let word = [
+                    AUDIO_MARKER_MAGIC,
+                    marker.capture_generation as u32,
+                    marker.sequence as u32,
+                ][i / 32];
+                if (word >> (31 - i % 32)) & 1 == 1 {
+                    6000
+                } else {
+                    -6000
+                }
+            } else if i % 32 < 16 {
+                5000
+            } else {
+                -5000
+            };
             *sample == expected
         });
-    if !valid { record_marker_violation(counters, format!("full PCM mismatch at {seam}")); }
-    if let Some(row) = counters.full_pcm.iter_mut().find(|r| r["seam"] == seam && r["captureGeneration"] == marker.capture_generation) {
+    if !valid {
+        record_marker_violation(counters, format!("full PCM mismatch at {seam}"));
+    }
+    if let Some(row) = counters
+        .full_pcm
+        .iter_mut()
+        .find(|r| r["seam"] == seam && r["captureGeneration"] == marker.capture_generation)
+    {
         row["chunks"] = json!(row["chunks"].as_u64().unwrap() + 1);
         row["samples"] = json!(row["samples"].as_u64().unwrap() + chunk.data.len() as u64);
         row["valid"] = json!(row["valid"] == true && valid);
     } else if counters.full_pcm.len() < MAX_RECORDED_GENERATIONS * 2 {
-        counters.full_pcm.push(json!({"seam": seam, "captureGeneration": marker.capture_generation,
-            "chunks": 1, "samples": chunk.data.len(), "valid": valid}));
-    } else { counters.observation_overflow = true; }
+        counters.full_pcm.push(
+            json!({"seam": seam, "captureGeneration": marker.capture_generation,
+            "chunks": 1, "samples": chunk.data.len(), "valid": valid}),
+        );
+    } else {
+        counters.observation_overflow = true;
+    }
 }
 #[cfg(test)]
 #[test]
 fn full_pcm_rejects_intact_header_truncation_and_equal_length_corruption() {
     for generation in [1, 2] {
-        let marker = AudioMarker { capture_generation: generation, sequence: 3 };
-        let mut samples = (0..320).map(|i| if i % 32 < 16 { 5000 } else { -5000 }).collect::<Vec<_>>();
+        let marker = AudioMarker {
+            capture_generation: generation,
+            sequence: 3,
+        };
+        let mut samples = (0..320)
+            .map(|i| if i % 32 < 16 { 5000 } else { -5000 })
+            .collect::<Vec<_>>();
         encode_audio_marker(&mut samples, marker);
         for seam in ["capture", "provider"] {
             for mutation in 0..5 {
@@ -1114,14 +1592,27 @@ fn full_pcm_rejects_intact_header_truncation_and_equal_length_corruption() {
 }
 
 fn after_write_case() -> bool {
-    ["after-write-stop", "after-write-hold", "after-write-close", "after-write-toggle"].iter().any(|name| event_case(name))
+    [
+        "after-write-stop",
+        "after-write-hold",
+        "after-write-close",
+        "after-write-toggle",
+    ]
+    .iter()
+    .any(|name| event_case(name))
 }
 async fn after_write_service(state: &AppState) -> Value {
     let diagnostic_id = native_diagnostic::id();
     native_diagnostic::mark(D::FixtureBefore, diagnostic_id);
     let service = &state.transcription_service;
-    let owner = fixture().counters.lock().unwrap().first_b_writes.first()
-        .and_then(|r| r["logicalRunId"].as_u64()).unwrap_or_else(|| service.logical_provider_run_id());
+    let owner = fixture()
+        .counters
+        .lock()
+        .unwrap()
+        .first_b_writes
+        .first()
+        .and_then(|r| r["logicalRunId"].as_u64())
+        .unwrap_or_else(|| service.logical_provider_run_id());
     native_diagnostic::mark(D::FixtureAfter, diagnostic_id);
     native_diagnostic::mark(D::StatusBefore, diagnostic_id);
     let status = service.get_status().await;
@@ -1133,7 +1624,10 @@ async fn after_write_service(state: &AppState) -> Value {
     let paused = service.paused_continuation_snapshot().await;
     native_diagnostic::mark(D::PausedAfter, diagnostic_id);
     native_diagnostic::mark(D::CoordinatorBefore, diagnostic_id);
-    let coordinator = state.recording_intent_coordinator.lock().unwrap_or_else(|p| p.into_inner());
+    let coordinator = state
+        .recording_intent_coordinator
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     native_diagnostic::mark(D::CoordinatorAfter, diagnostic_id);
     let projection = coordinator.projection();
     native_diagnostic::mark(D::EpisodeBefore, diagnostic_id);
@@ -1188,14 +1682,21 @@ pub(super) fn live_mode() -> bool {
             == Some("test-elevenlabs-stability-20260906")
 }
 
-static DIAGNOSTIC_EFFECT_REFUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static DIAGNOSTIC_EFFECT_REFUSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 fn diagnostic_refuses_effect() -> bool {
-    if !reader_preparation() { return false; }
+    if !reader_preparation() {
+        return false;
+    }
     DIAGNOSTIC_EFFECT_REFUSED.store(true, std::sync::atomic::Ordering::SeqCst);
     true
 }
 fn reader_preparation() -> bool {
-    RESULT_PATH.get().is_some() && std::env::var("VOICETEXT_NATIVE_READER_PREPARATION").ok().as_deref() == Some("unpaid-v1")
+    RESULT_PATH.get().is_some()
+        && std::env::var("VOICETEXT_NATIVE_READER_PREPARATION")
+            .ok()
+            .as_deref()
+            == Some("unpaid-v1")
 }
 
 fn qualification_live() -> bool {
@@ -1206,16 +1707,38 @@ fn qualification_live() -> bool {
 }
 
 fn event_case(name: &str) -> bool {
-    RESULT_PATH.get().is_some() && continuation_mode() && !live_mode()
-        && std::env::var("VOICETEXT_NATIVE_CONTINUATION_CASE").ok().as_deref() == Some(name)
+    RESULT_PATH.get().is_some()
+        && continuation_mode()
+        && !live_mode()
+        && std::env::var("VOICETEXT_NATIVE_CONTINUATION_CASE")
+            .ok()
+            .as_deref()
+            == Some(name)
 }
 
 fn capture_event(shared: &Fixture, kind: &str, generation: u64) {
-    if !["E04", "E41", "E42", "after-write-stop", "after-write-hold", "after-write-close", "after-write-toggle"].iter().any(|name| event_case(name)) { return; }
+    if ![
+        "E04",
+        "E41",
+        "E42",
+        "after-write-stop",
+        "after-write-hold",
+        "after-write-close",
+        "after-write-toggle",
+    ]
+    .iter()
+    .any(|name| event_case(name))
+    {
+        return;
+    }
     let mut counters = shared.counters.lock().unwrap();
     if counters.capture_events.len() < 64 {
-        counters.capture_events.push(json!({"kind": kind, "generation": generation, "atMs": observation::now_ms()}));
-    } else { counters.observation_overflow = true; }
+        counters
+            .capture_events
+            .push(json!({"kind": kind, "generation": generation, "atMs": observation::now_ms()}));
+    } else {
+        counters.observation_overflow = true;
+    }
 }
 
 fn continuation_mode() -> bool {
@@ -1330,8 +1853,16 @@ pub fn validate_launch(identifier: &str) -> Result<(), String> {
         );
     }
     if let Some(mode) = std::env::var_os("VOICETEXT_NATIVE_READER_PREPARATION") {
-        if mode != std::ffi::OsStr::new("unpaid-v1") || ["VOICETEXT_NATIVE_LIVE", "VOICETEXT_NATIVE_CONTINUATION",
-            "VOICETEXT_NATIVE_TERMINAL", "VOICETEXT_QUALIFICATION_ENDPOINT"].iter().any(|key| std::env::var_os(key).is_some()) {
+        if mode != std::ffi::OsStr::new("unpaid-v1")
+            || [
+                "VOICETEXT_NATIVE_LIVE",
+                "VOICETEXT_NATIVE_CONTINUATION",
+                "VOICETEXT_NATIVE_TERMINAL",
+                "VOICETEXT_QUALIFICATION_ENDPOINT",
+            ]
+            .iter()
+            .any(|key| std::env::var_os(key).is_some())
+        {
             return Err("unpaid preparation cannot combine runtime modes".into());
         }
     }
@@ -1339,10 +1870,15 @@ pub fn validate_launch(identifier: &str) -> Result<(), String> {
         .set(result)
         .map_err(|_| "native fixture already initialized")?;
     if after_write_case() && !live_mode() {
-        let case = if event_case("after-write-hold") { native_diagnostic::Case::Hold }
-            else if event_case("after-write-close") { native_diagnostic::Case::Close }
-            else if event_case("after-write-toggle") { native_diagnostic::Case::Toggle }
-            else { native_diagnostic::Case::Stop };
+        let case = if event_case("after-write-hold") {
+            native_diagnostic::Case::Hold
+        } else if event_case("after-write-close") {
+            native_diagnostic::Case::Close
+        } else if event_case("after-write-toggle") {
+            native_diagnostic::Case::Toggle
+        } else {
+            native_diagnostic::Case::Stop
+        };
         native_diagnostic::start(RESULT_PATH.get().unwrap().parent().unwrap(), case)?;
     }
     log::info!("{MARKER}: isolated native fixture validated");
@@ -1353,7 +1889,9 @@ pub fn setup(app: &AppHandle) -> Result<(), String> {
     if after_write_case() && !live_mode() {
         use tauri::Listener;
         // Installed before A and retained through publication; no hidden-JS error gap.
-        app.listen("transcription:error", |_| native_diagnostic::assertion_failed());
+        app.listen("transcription:error", |_| {
+            native_diagnostic::assertion_failed()
+        });
     }
     let state = app.state::<AppState>();
     tauri::async_runtime::block_on(async {
@@ -1362,7 +1900,8 @@ pub fn setup(app: &AppHandle) -> Result<(), String> {
         if reader_preparation() {
             let mut config = state.config.write().await;
             config.stt = crate::domain::SttConfig::new(crate::domain::SttProviderType::Backend);
-            config.stt.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
+            config.stt.backend_streaming_provider =
+                crate::domain::BackendStreamingProvider::ElevenLabs;
             config.stt.backend_url = Some("ws://127.0.0.1:51866".into());
             config.stt.backend_auth_token = Some("dev-local-token".into());
             config.stt.language = "ru".into();
@@ -1492,8 +2031,12 @@ fn qualification_source(shared: &Fixture, config: AudioConfig) -> AudioResult<Qu
         gate,
     })
 }
-fn record_source_interval(previous: &mut Option<(std::time::Instant, usize)>, frames: usize,
-    checked: &mut u64, violations: &mut u64) {
+fn record_source_interval(
+    previous: &mut Option<(std::time::Instant, usize)>,
+    frames: usize,
+    checked: &mut u64,
+    violations: &mut u64,
+) {
     let now = std::time::Instant::now();
     if let Some((last, previous_frames)) = previous {
         *checked += 1;
@@ -1535,7 +2078,12 @@ async fn emit_qualification_source(
         if index > 0 {
             let gap_start = observation::now_ms();
             for _ in 0..6 {
-                record_source_interval(&mut previous_emission, 320, &mut intervals, &mut violations);
+                record_source_interval(
+                    &mut previous_emission,
+                    320,
+                    &mut intervals,
+                    &mut violations,
+                );
                 on_chunk(AudioChunk::new(vec![0; 320], 16000, 1));
                 {
                     let mut counters = shared.counters.lock().unwrap();
@@ -1552,7 +2100,12 @@ async fn emit_qualification_source(
         let mut emitted = 0;
         for samples in pcm.chunks(320) {
             let at = observation::now_ms();
-            record_source_interval(&mut previous_emission, samples.len(), &mut intervals, &mut violations);
+            record_source_interval(
+                &mut previous_emission,
+                samples.len(),
+                &mut intervals,
+                &mut violations,
+            );
             on_chunk(AudioChunk::new(samples.to_vec(), 16000, 1));
             emitted += samples.len();
             {
@@ -1582,11 +2135,26 @@ impl Drop for CaptureLease {
     fn drop(&mut self) {
         let mut counters = self.0.counters.lock().unwrap();
         counters.active_captures -= 1;
-        if ["E04", "E41", "E42", "after-write-stop", "after-write-hold", "after-write-close", "after-write-toggle"].iter().any(|name| event_case(name)) {
+        if [
+            "E04",
+            "E41",
+            "E42",
+            "after-write-stop",
+            "after-write-hold",
+            "after-write-close",
+            "after-write-toggle",
+        ]
+        .iter()
+        .any(|name| event_case(name))
+        {
             let released_at = observation::now_ms();
             if counters.capture_events.len() < 64 {
-                counters.capture_events.push(json!({"kind": "capture-off", "generation": self.1, "atMs": released_at}));
-            } else { counters.observation_overflow = true; }
+                counters.capture_events.push(
+                    json!({"kind": "capture-off", "generation": self.1, "atMs": released_at}),
+                );
+            } else {
+                counters.observation_overflow = true;
+            }
         }
     }
 }
@@ -1603,7 +2171,9 @@ impl AudioCapture for FixtureCapture {
         Ok(())
     }
     async fn start_capture(&mut self, on_chunk: AudioChunkCallback) -> AudioResult<()> {
-        if diagnostic_refuses_effect() { return Err(AudioError::Capture("diagnostic forbids capture".into())); }
+        if diagnostic_refuses_effect() {
+            return Err(AudioError::Capture("diagnostic forbids capture".into()));
+        }
         if self.task.is_some() {
             return Err(AudioError::Capture(
                 "fixture capture already running".into(),
@@ -1650,7 +2220,8 @@ impl AudioCapture for FixtureCapture {
             let mut counters = self.shared.counters.lock().unwrap();
             counters.capture_starts += 1;
             counters.active_captures += 1;
-            counters.max_active_captures = counters.max_active_captures.max(counters.active_captures);
+            counters.max_active_captures =
+                counters.max_active_captures.max(counters.active_captures);
             if let Some(pressed_at) = pressed_at {
                 if counters.capture_start_latencies_ms.len() < MAX_RECORDED_GENERATIONS {
                     counters
@@ -1717,7 +2288,12 @@ impl AudioCapture for FixtureCapture {
                 encode_audio_marker(&mut samples, marker);
                 let mut counters = shared.counters.lock().unwrap();
                 if after_write_case() {
-                    observe_full_pcm(&mut counters, "capture", &AudioChunk::new(samples.clone(), config.sample_rate, config.channels), marker);
+                    observe_full_pcm(
+                        &mut counters,
+                        "capture",
+                        &AudioChunk::new(samples.clone(), config.sample_rate, config.channels),
+                        marker,
+                    );
                 }
                 counters.audio_chunks += 1;
                 if let Some(range) = counters
@@ -1761,8 +2337,21 @@ impl AudioCapture for FixtureCapture {
                 capture_event(&self.shared, "stop-entered", generation);
                 // Keep the actual capture task/lease alive until the test releases A.
                 // Timeout fails closed and still releases the task below.
-                let released = tokio::time::timeout(Duration::from_secs(3), self.shared.capture_stop_release.notified()).await.is_ok();
-                capture_event(&self.shared, if released { "stop-released" } else { "stop-timeout" }, generation);
+                let released = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    self.shared.capture_stop_release.notified(),
+                )
+                .await
+                .is_ok();
+                capture_event(
+                    &self.shared,
+                    if released {
+                        "stop-released"
+                    } else {
+                        "stop-timeout"
+                    },
+                    generation,
+                );
             }
             task.abort();
             let _ = task.await;
@@ -1782,7 +2371,11 @@ impl AudioCapture for FixtureCapture {
 pub struct FixtureFactory(pub Arc<Fixture>);
 impl SttProviderFactory for FixtureFactory {
     fn create(&self, _config: &SttConfig) -> SttResult<Box<dyn SttProvider>> {
-        if diagnostic_refuses_effect() { return Err(SttError::Processing("diagnostic forbids provider creation".into())); }
+        if diagnostic_refuses_effect() {
+            return Err(SttError::Processing(
+                "diagnostic forbids provider creation".into(),
+            ));
+        }
         let mut counters = self.0.counters.lock().unwrap();
         counters.active_providers += 1;
         counters.max_active_providers =
@@ -1844,7 +2437,11 @@ impl FixtureProvider {
         final_result: TranscriptionCallback,
         resume: bool,
     ) -> SttResult<()> {
-        if diagnostic_refuses_effect() { return Err(SttError::Processing("diagnostic forbids provider start/resume".into())); }
+        if diagnostic_refuses_effect() {
+            return Err(SttError::Processing(
+                "diagnostic forbids provider start/resume".into(),
+            ));
+        }
         let (delay, fail) = {
             let mut timing = self.shared.timing.lock().unwrap();
             let fail = timing.fail_next_start;
@@ -1959,7 +2556,9 @@ impl SttProvider for FixtureProvider {
         self.begin(partial, final_result, false).await
     }
     async fn send_audio(&mut self, chunk: &AudioChunk) -> SttResult<()> {
-        if diagnostic_refuses_effect() { return Err(SttError::Processing("diagnostic forbids audio".into())); }
+        if diagnostic_refuses_effect() {
+            return Err(SttError::Processing("diagnostic forbids audio".into()));
+        }
         self.progress_drain();
         if !self.alive || self.partial.is_none() || self.terminal.lock().unwrap().is_some() {
             return Err(SttError::Processing("audio outside fixture session".into()));
@@ -2004,7 +2603,9 @@ impl SttProvider for FixtureProvider {
                 "native fixture capture marker has no run association".into(),
             ));
         };
-        if after_write_case() { observe_full_pcm(&mut counters, "provider", chunk, marker); }
+        if after_write_case() {
+            observe_full_pcm(&mut counters, "provider", chunk, marker);
+        }
         counters.provider_audio_chunks += 1;
         counters.provider_pcm_bytes += (chunk.data.len() * 2) as u64;
         self.continuation.bytes += (chunk.data.len() * 2) as u64;
@@ -2252,7 +2853,11 @@ impl SttProvider for FixtureProvider {
         chunk: &AudioChunk,
         fence: &ContinuationWriteFence,
     ) -> SttResult<ContinuationFirstWrite> {
-        if diagnostic_refuses_effect() { return Err(SttError::Processing("diagnostic forbids first audio".into())); }
+        if diagnostic_refuses_effect() {
+            return Err(SttError::Processing(
+                "diagnostic forbids first audio".into(),
+            ));
+        }
         if fence.revoked() || chunk.data.is_empty() {
             return Ok(ContinuationFirstWrite::NotStarted);
         }
@@ -2356,7 +2961,9 @@ pub fn native_e2e_close_recording(app_handle: AppHandle) -> Result<(), String> {
     if RESULT_PATH.get().is_none()
         || !continuation_mode()
         || !matches!(
-            std::env::var("VOICETEXT_NATIVE_CONTINUATION_CASE").ok().as_deref(),
+            std::env::var("VOICETEXT_NATIVE_CONTINUATION_CASE")
+                .ok()
+                .as_deref(),
             Some("seal-close") | Some("after-write-close")
         )
     {
@@ -2404,7 +3011,12 @@ pub async fn native_e2e_configure(
         }
         // Recording can precede ServerMessage::Ready. This is the last async
         // observation before release, including current receiver/error/closed guards.
-        if state.transcription_service.native_e2e_transport_observation().await != Some((true, true)) {
+        if state
+            .transcription_service
+            .native_e2e_transport_observation()
+            .await
+            != Some((true, true))
+        {
             return Err("source gate requires actual current-connection Server Ready".into());
         }
         let shared = fixture();
@@ -2466,9 +3078,12 @@ pub async fn native_e2e_configure(
                 .and_then(|s| s.parse::<u16>().ok())
                 .filter(|p| *p > 1024 && *p != 51866)
                 .ok_or("invalid isolated qualification endpoint")?;
-            let expected = if reader_preparation() { "ws://127.0.0.1:51867".to_string() }
-                else { std::env::var("VOICETEXT_QUALIFICATION_ENDPOINT")
-                    .map_err(|_| "missing trusted runner endpoint")? };
+            let expected = if reader_preparation() {
+                "ws://127.0.0.1:51867".to_string()
+            } else {
+                std::env::var("VOICETEXT_QUALIFICATION_ENDPOINT")
+                    .map_err(|_| "missing trusted runner endpoint")?
+            };
             if endpoint != expected {
                 return Err("endpoint differs from trusted runner config".into());
             }
@@ -2543,33 +3158,71 @@ pub async fn native_e2e_hotkey(
     action: HotkeyAction,
     physical: Option<PhysicalAction>,
 ) -> Result<(), String> {
-    if diagnostic_refuses_effect() { return Err("diagnostic forbids hotkeys".into()); }
-    if let Some(physical) = physical { return physical_action(&app, state.inner(), physical); }
+    if diagnostic_refuses_effect() {
+        return Err("diagnostic forbids hotkeys".into());
+    }
+    if let Some(physical) = physical {
+        return physical_action(&app, state.inner(), physical);
+    }
     if matches!(action, HotkeyAction::ReleaseCaptureStop) {
-        if !event_case("E04") { return Err("capture stop release requires isolated E04".into()); }
+        if !event_case("E04") {
+            return Err("capture stop release requires isolated E04".into());
+        }
         fixture().capture_stop_release.notify_one();
         return Ok(());
     }
-    if matches!(action, HotkeyAction::SaveCaptureEvents | HotkeyAction::StaleKeyRelease | HotkeyAction::StaleVad | HotkeyAction::CurrentVad) {
-        use super::recording_intent_coordinator::{CoordinatorEvent, IntentSource, RecordingIntent};
-        if !event_case("E41") { return Err("capture event injection requires isolated E41".into()); }
+    if matches!(
+        action,
+        HotkeyAction::SaveCaptureEvents
+            | HotkeyAction::StaleKeyRelease
+            | HotkeyAction::StaleVad
+            | HotkeyAction::CurrentVad
+    ) {
+        use super::recording_intent_coordinator::{
+            CoordinatorEvent, IntentSource, RecordingIntent,
+        };
+        if !event_case("E41") {
+            return Err("capture event injection requires isolated E41".into());
+        }
         let shared = fixture();
         let event = {
-            let coordinator = state.recording_intent_coordinator.lock().unwrap_or_else(|p| p.into_inner());
+            let coordinator = state
+                .recording_intent_coordinator
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             if matches!(action, HotkeyAction::SaveCaptureEvents) {
-                let vad = coordinator.current_capture_stop(IntentSource::Vad).ok_or("no current capture")?;
-                let gesture = coordinator.trace().filter(|entry| entry.source == Some(IntentSource::HoldHotkey))
-                    .filter_map(|entry| entry.gesture_id).last().ok_or("no actual hold gesture")?;
+                let vad = coordinator
+                    .current_capture_stop(IntentSource::Vad)
+                    .ok_or("no current capture")?;
+                let gesture = coordinator
+                    .trace()
+                    .filter(|entry| entry.source == Some(IntentSource::HoldHotkey))
+                    .filter_map(|entry| entry.gesture_id)
+                    .last()
+                    .ok_or("no actual hold gesture")?;
                 // The exact normalized HoldEnded shape, retaining A's actual gesture token.
-                let key = CoordinatorEvent::Intent(RecordingIntent::stop(IntentSource::HoldHotkey, Some(gesture)));
+                let key = CoordinatorEvent::Intent(RecordingIntent::stop(
+                    IntentSource::HoldHotkey,
+                    Some(gesture),
+                ));
                 *shared.saved_capture_events.lock().unwrap() = Some([key, vad]);
                 return Ok(());
             }
             if matches!(action, HotkeyAction::CurrentVad) {
-                coordinator.current_capture_stop(IntentSource::Vad).ok_or("no current capture")?
+                coordinator
+                    .current_capture_stop(IntentSource::Vad)
+                    .ok_or("no current capture")?
             } else {
-                let saved = shared.saved_capture_events.lock().unwrap().ok_or("capture events not saved")?;
-                saved[if matches!(action, HotkeyAction::StaleKeyRelease) { 0 } else { 1 }]
+                let saved = shared
+                    .saved_capture_events
+                    .lock()
+                    .unwrap()
+                    .ok_or("capture events not saved")?;
+                saved[if matches!(action, HotkeyAction::StaleKeyRelease) {
+                    0
+                } else {
+                    1
+                }]
             }
         };
         super::commands::dispatch_recording_coordinator_event(app, event);
@@ -2679,7 +3332,9 @@ pub async fn native_e2e_hotkey(
 }
 
 fn dispatch_hotkey(app: &AppHandle, pressed: bool) {
-    if diagnostic_refuses_effect() { return; }
+    if diagnostic_refuses_effect() {
+        return;
+    }
     use tauri_plugin_global_shortcut::ShortcutState;
     {
         let fixture = fixture();
@@ -2696,9 +3351,16 @@ fn dispatch_hotkey(app: &AppHandle, pressed: bool) {
         *fixture().last_hotkey_press_at.lock().unwrap() = Some(std::time::Instant::now());
     }
     if PHYSICAL_KEYS.get().is_some() {
-        super::commands::handle_recording_shortcut_event_with_chord(app,
-            if pressed { ShortcutState::Pressed } else { ShortcutState::Released },
-            None, Some(PHYSICAL_CHORD));
+        super::commands::handle_recording_shortcut_event_with_chord(
+            app,
+            if pressed {
+                ShortcutState::Pressed
+            } else {
+                ShortcutState::Released
+            },
+            None,
+            Some(PHYSICAL_CHORD),
+        );
         return;
     }
     super::commands::handle_recording_shortcut_event(
@@ -2712,7 +3374,11 @@ fn dispatch_hotkey(app: &AppHandle, pressed: bool) {
     );
 }
 #[tauri::command]
-pub async fn native_e2e_state(app: AppHandle, state: State<'_, AppState>, stop_readback: Option<bool>) -> Result<Value, String> {
+pub async fn native_e2e_state(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    stop_readback: Option<bool>,
+) -> Result<Value, String> {
     let diagnostic_id = native_diagnostic::id();
     native_diagnostic::mark(D::StateEntry, diagnostic_id);
     let result: Result<Value, String> = async {
@@ -2866,7 +3532,14 @@ pub async fn native_e2e_state(app: AppHandle, state: State<'_, AppState>, stop_r
     native_diagnostic::mark(D::FixtureAfter, diagnostic_id);
     Ok(result)
     }.await;
-    native_diagnostic::returned(if result.is_ok() { D::StateReturn } else { D::StateError }, diagnostic_id);
+    native_diagnostic::returned(
+        if result.is_ok() {
+            D::StateReturn
+        } else {
+            D::StateError
+        },
+        diagnostic_id,
+    );
     result
 }
 #[tauri::command]
@@ -2885,32 +3558,47 @@ pub async fn native_e2e_prepare_live_target() -> Result<String, String> {
     if (!live_mode() && !reader_preparation()) || RESULT_PATH.get().is_none() {
         return Err("live target requires validated opt-in fixture".into());
     }
-    let directory = RESULT_PATH.get().and_then(|p| p.parent()).ok_or("missing isolated directory")?;
+    let directory = RESULT_PATH
+        .get()
+        .and_then(|p| p.parent())
+        .ok_or("missing isolated directory")?;
     let target = directory.join("p4-textedit-a.txt");
     // Publish ownership before any GUI effect, even when open/activation later fails.
-    let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&target)
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
         .map_err(|e| e.to_string())?;
     let target = std::fs::canonicalize(&target).map_err(|e| e.to_string())?;
     #[cfg(target_os = "macos")]
     {
-        use std::os::unix::fs::MetadataExt;
         use std::io::Write;
+        use std::os::unix::fs::MetadataExt;
         let metadata = file.metadata().map_err(|e| e.to_string())?;
-        let mut journal = std::fs::OpenOptions::new().write(true).create_new(true)
-            .open(directory.join("owned-document.json")).map_err(|e| e.to_string())?;
+        let mut journal = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(directory.join("owned-document.json"))
+            .map_err(|e| e.to_string())?;
         journal.write_all(&serde_json::to_vec(&json!({"marker":MARKER,"path":target,
             "appPid":std::process::id(),"device":metadata.dev().to_string(),"inode":metadata.ino().to_string()}))
             .map_err(|e| e.to_string())?).and_then(|_| journal.sync_all()).map_err(|e| e.to_string())?;
     }
     drop(file);
-    let quoted = serde_json::to_string(target.to_str().ok_or("invalid document path")?).map_err(|e| e.to_string())?;
+    let quoted = serde_json::to_string(target.to_str().ok_or("invalid document path")?)
+        .map_err(|e| e.to_string())?;
     // These markers contain no document data. Their receipt brackets completion;
     // it is not a timestamp inside TextEdit or evidence of AX causality.
     let script = format!("tell application \"TextEdit\"\nset d to open POSIX file {quoted}\nif (path of d) is not {quoted} then error \"TEST document path mismatch\"\nlog \"TEST-owned-open-complete\"\nactivate\nlog \"TEST-owned-activate-complete\"\nreturn name of d\nend tell");
     let script_start = observation::now_ms();
-    let mut child = tokio::process::Command::new("/usr/bin/osascript").arg("-e").arg(script)
-        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
-        .kill_on_drop(true).spawn().map_err(|e| e.to_string())?;
+    let mut child = tokio::process::Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(script)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| e.to_string())?;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt};
     let stderr = child.stderr.take().ok_or("missing script stderr")?;
     let mut lines = tokio::io::BufReader::new(stderr.take(8192)).lines();
@@ -2926,21 +3614,40 @@ pub async fn native_e2e_prepare_live_target() -> Result<String, String> {
             activated = true;
             #[cfg(target_os = "macos")]
             synthetic_readback::preparation_interval("ownedActivateCompletionMs", script_start);
-        } else { script_error.push_str(&line); script_error.push('\n'); }
+        } else {
+            script_error.push_str(&line);
+            script_error.push('\n');
+        }
     }
     let output = child.wait_with_output().await.map_err(|e| e.to_string())?;
-    if !output.status.success() || !open || !activated { return Err(format!("owned document open/activate failed: {:?}; {script_error}", output.status.code())); }
+    if !output.status.success() || !open || !activated {
+        return Err(format!(
+            "owned document open/activate failed: {:?}; {script_error}",
+            output.status.code()
+        ));
+    }
     #[cfg(target_os = "macos")]
-    if qualification_live() || reader_preparation() { synthetic_readback::arm(target).await?; }
+    if qualification_live() || reader_preparation() {
+        synthetic_readback::arm(target).await?;
+    }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Test scheduling must not depend on timers in an occluded WKWebView.
 #[tauri::command]
-pub async fn native_e2e_delay(duration_ms: u64, diagnostic_phase: Option<String>, invoke_id: Option<u64>) -> Result<(), String> {
+pub async fn native_e2e_delay(
+    duration_ms: u64,
+    diagnostic_phase: Option<String>,
+    invoke_id: Option<u64>,
+) -> Result<(), String> {
     if let Some(phase) = diagnostic_phase {
-        if duration_ms != 0 { return Err("phase marker requires zero delay".into()); }
-        return native_diagnostic::js(D::parse(&phase).ok_or("unknown diagnostic phase")?, invoke_id.ok_or("invoke ID required")?);
+        if duration_ms != 0 {
+            return Err("phase marker requires zero delay".into());
+        }
+        return native_diagnostic::js(
+            D::parse(&phase).ok_or("unknown diagnostic phase")?,
+            invoke_id.ok_or("invoke ID required")?,
+        );
     }
     let diagnostic_id = native_diagnostic::id();
     native_diagnostic::mark(D::DelayEntry, diagnostic_id);
@@ -2955,7 +3662,9 @@ pub async fn native_e2e_delay(duration_ms: u64, diagnostic_phase: Option<String>
 
 fn write_native_progress(report: Value, mut native_state: Value) -> Result<(), String> {
     // Full raw readback remains in state RPC and final evidence; heartbeat is bounded.
-    if let Some(reader) = native_state.get_mut("nativeReadback") { reader.as_object_mut().unwrap().remove("records"); }
+    if let Some(reader) = native_state.get_mut("nativeReadback") {
+        reader.as_object_mut().unwrap().remove("records");
+    }
     let report = serde_json::to_string(&json!({"report":report,"state":native_state}))
         .map_err(|e| e.to_string())?;
     // Includes the bounded 15ms native wake samples (at most about 9.2s).
@@ -3152,7 +3861,11 @@ fn native_wake_sample(state: &Value, elapsed_ms: u64) -> Value {
 }
 
 #[tauri::command]
-pub fn native_e2e_terminal_handoff(app: AppHandle, report: Value, invoke_id: u64) -> Result<(), String> {
+pub fn native_e2e_terminal_handoff(
+    app: AppHandle,
+    report: Value,
+    invoke_id: u64,
+) -> Result<(), String> {
     native_terminal::accept(app, report, invoke_id)
 }
 
@@ -3303,7 +4016,8 @@ pub async fn native_e2e_finish(
     if let Err(error) = &result {
         if native_diagnostic::active() {
             let bytes = serde_json::to_vec(&json!({"passed":false,"qualificationPassed":false,
-                "cleanupErrors":[error],"submittedReport":"native-submitted-report.json"})).unwrap_or_default();
+                "cleanupErrors":[error],"submittedReport":"native-submitted-report.json"}))
+            .unwrap_or_default();
             native_diagnostic::finish_error(RESULT_PATH.get().unwrap().parent().unwrap(), &bytes);
         }
     }
@@ -3961,7 +4675,13 @@ mod evidence_numeric_roundtrip_tests {
             let wire = serde_json::to_string(&fixture).unwrap();
             let echoed: serde_json::Value = serde_json::from_str(&wire).unwrap();
             assert_eq!(fixture, echoed);
-            assert_eq!(timestamp.to_bits(), echoed["captureEvents"][0]["atMs"].as_f64().unwrap().to_bits());
+            assert_eq!(
+                timestamp.to_bits(),
+                echoed["captureEvents"][0]["atMs"]
+                    .as_f64()
+                    .unwrap()
+                    .to_bits()
+            );
         }
     }
 }

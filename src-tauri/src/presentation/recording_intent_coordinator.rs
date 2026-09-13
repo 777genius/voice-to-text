@@ -2054,12 +2054,16 @@ fn apply_active_capture_stop(
     phase: &mut TracePhase,
 ) {
     let run = match state.capture {
-        CaptureState::Stopping { run, effect_id: owner, .. }
-        | CaptureState::StopUncertain { run, active_effect: Some(owner), .. }
-            if run.run_id == run_id && owner == effect_id =>
-        {
-            run
+        CaptureState::Stopping {
+            run,
+            effect_id: owner,
+            ..
         }
+        | CaptureState::StopUncertain {
+            run,
+            active_effect: Some(owner),
+            ..
+        } if run.run_id == run_id && owner == effect_id => run,
         _ => {
             *phase = TracePhase::StaleCompletion;
             return;
@@ -2068,7 +2072,9 @@ fn apply_active_capture_stop(
     match outcome {
         CaptureStopOutcome::Inactive | CaptureStopOutcome::FailedButInactive(_) => {
             let retained_pending = continuation::complete_pending_capture_retry(state, run);
-            if !retained_pending { state.capture = CaptureState::Idle; }
+            if !retained_pending {
+                state.capture = CaptureState::Idle;
+            }
             clear_recoverable_fault(state, run_id);
             if finalize_after {
                 begin_finalize(state, run_id, 1, effects);

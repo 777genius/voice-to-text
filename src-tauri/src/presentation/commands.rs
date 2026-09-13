@@ -687,28 +687,43 @@ struct CoordinatorRunStartSpec {
 // Retire only that receiver's routing token; this is not microphone-release proof.
 pub(crate) async fn retire_consumed_prepared_capture(
     service: &crate::application::TranscriptionService,
-    tokens: &std::sync::Mutex<std::collections::BTreeMap<u64, crate::application::PreparedCaptureToken>>,
+    tokens: &std::sync::Mutex<
+        std::collections::BTreeMap<u64, crate::application::PreparedCaptureToken>,
+    >,
     token: crate::application::PreparedCaptureToken,
 ) -> bool {
-    if service.retains_prepared_capture(token).await { return false; }
+    if service.retains_prepared_capture(token).await {
+        return false;
+    }
     let mut tokens = tokens.lock().unwrap_or_else(|p| p.into_inner());
-    if tokens.get(&token.run_id).is_some_and(|stored| *stored == token) {
+    if tokens
+        .get(&token.run_id)
+        .is_some_and(|stored| *stored == token)
+    {
         tokens.remove(&token.run_id);
     }
     true
 }
 
 pub(crate) fn retire_prepared_capture_after_stop(
-    tokens: &std::sync::Mutex<std::collections::BTreeMap<u64, crate::application::PreparedCaptureToken>>,
+    tokens: &std::sync::Mutex<
+        std::collections::BTreeMap<u64, crate::application::PreparedCaptureToken>,
+    >,
     run_id: u64,
     capture_still_active: bool,
     pending_retry: Option<(u64, bool)>,
 ) {
-    if capture_still_active || matches!(pending_retry, Some((_, false))) { return; }
+    if capture_still_active || matches!(pending_retry, Some((_, false))) {
+        return;
+    }
     let mut tokens = tokens.lock().unwrap_or_else(|p| p.into_inner());
-    if pending_retry.is_none_or(|(generation, _)|
-        tokens.get(&run_id).is_some_and(|token| token.generation == generation))
-    { tokens.remove(&run_id); }
+    if pending_retry.is_none_or(|(generation, _)| {
+        tokens
+            .get(&run_id)
+            .is_some_and(|token| token.generation == generation)
+    }) {
+        tokens.remove(&run_id);
+    }
 }
 
 pub(crate) fn register_recording_effect_cancellations(
@@ -1409,8 +1424,11 @@ fn execute_recording_coordinator_effect(
                 let Some(state) = app_handle.try_state::<AppState>() else {
                     return;
                 };
-                let pending_retry = state.recording_intent_coordinator.lock()
-                    .unwrap_or_else(|p| p.into_inner()).pending_capture_retry(effect_id, run_id);
+                let pending_retry = state
+                    .recording_intent_coordinator
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .pending_capture_retry(effect_id, run_id);
                 let mode = *state.active_recording_mode.read().await;
                 let result = if mode == Some(RecordingMode::LiveTranslation) {
                     stop_recording_and_emit_idle_if_current(
@@ -1425,9 +1443,18 @@ fn execute_recording_coordinator_effect(
                     )
                     .await
                 } else if let Some((generation, cancel)) = pending_retry {
-                    state.transcription_service.stop_pending_capture(
-                        crate::application::PreparedCaptureToken { run_id: run_id.get(), generation }, cancel)
-                        .await.map(|_| "Pending capture stopped".to_string()).map_err(|e| e.to_string())
+                    state
+                        .transcription_service
+                        .stop_pending_capture(
+                            crate::application::PreparedCaptureToken {
+                                run_id: run_id.get(),
+                                generation,
+                            },
+                            cancel,
+                        )
+                        .await
+                        .map(|_| "Pending capture stopped".to_string())
+                        .map_err(|e| e.to_string())
                 } else {
                     state
                         .transcription_service
@@ -1450,8 +1477,14 @@ fn execute_recording_coordinator_effect(
                 };
                 if let Some((generation, true)) = pending_retry.filter(|_| !capture_still_active) {
                     {
-                        let mut tokens = state.prepared_capture_tokens.lock().unwrap_or_else(|p| p.into_inner());
-                        if tokens.get(&run_id.get()).is_some_and(|token| token.generation == generation) {
+                        let mut tokens = state
+                            .prepared_capture_tokens
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner());
+                        if tokens
+                            .get(&run_id.get())
+                            .is_some_and(|token| token.generation == generation)
+                        {
                             tokens.remove(&run_id.get());
                         }
                     }
@@ -1478,8 +1511,12 @@ fn execute_recording_coordinator_effect(
                 }
                 // An ordinary pending Stop seals audio; its token is still needed
                 // if Continue refuses and B must connect through the cold route.
-                retire_prepared_capture_after_stop(&state.prepared_capture_tokens,
-                    run_id.get(), capture_still_active, pending_retry);
+                retire_prepared_capture_after_stop(
+                    &state.prepared_capture_tokens,
+                    run_id.get(),
+                    capture_still_active,
+                    pending_retry,
+                );
                 drop(state);
                 if reason == recording_intent::StopReason::VadTimeout {
                     let _ = app_handle.emit("vad-silence-timeout", ());
@@ -2652,7 +2689,10 @@ async fn start_live_translation_recording(
         .await;
         return Err(error);
     }
-    match service.start_translation_cancellable(translation_cfg, callbacks, cancelled).await {
+    match service
+        .start_translation_cancellable(translation_cfg, callbacks, cancelled)
+        .await
+    {
         Ok(()) => {
             // active session/mode were claimed before service startup. Do not write
             // them again here: a runtime error may already have cleared that state.
@@ -2660,9 +2700,13 @@ async fn start_live_translation_recording(
         }
         Err(LiveTranslationError::Cancelled) => {
             restore_or_clear_failed_start_state_if_current(
-                state, session_id, RecordingMode::LiveTranslation,
-                displaced_session_id, displaced_recording_mode,
-            ).await;
+                state,
+                session_id,
+                RecordingMode::LiveTranslation,
+                displaced_session_id,
+                displaced_recording_mode,
+            )
+            .await;
             Err("Recording start cancelled".into())
         }
         Err(err) => {

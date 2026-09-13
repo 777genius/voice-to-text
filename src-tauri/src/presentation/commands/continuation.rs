@@ -235,8 +235,12 @@ pub(super) fn execute(app: AppHandle, effect: Effect) {
                                 // First-write failure consumes B irreversibly. Retire
                                 // its routing token without claiming physical release.
                                 if retire_consumed_prepared_capture(
-                                    &service, &state.prepared_capture_tokens, token,
-                                ).await {
+                                    &service,
+                                    &state.prepared_capture_tokens,
+                                    token,
+                                )
+                                .await
+                                {
                                     finish_registration(state.inner(), run.run_id).await;
                                 }
                                 recording_intent::ContinueAttachOutcome::AttemptedFailure(

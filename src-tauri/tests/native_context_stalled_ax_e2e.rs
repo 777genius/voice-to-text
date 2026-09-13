@@ -3,46 +3,93 @@
 #[path = "native_ax_stall_support/native.rs"]
 mod native;
 use anyhow::{ensure, Result};
-use app_lib::{application::services::TranscriptionService, domain::{
-    AudioCapture, AudioCaptureIdentity, AudioChunk, AudioChunkCallback, AudioConfig,
-    AudioResult, SttConfig, SttError, SttProvider, SttProviderFactory, SttResult,
-    ports::{ContextValidation as V, ContinuationContextGuard}}, infrastructure::{
-    auto_paste::{get_active_app_target, AutoPasteTarget},
-    continuation_context::{ContinuationContextManager, GuardedPasteOutcome as P}}};
+use app_lib::{
+    application::services::TranscriptionService,
+    domain::{
+        ports::{ContextValidation as V, ContinuationContextGuard},
+        AudioCapture, AudioCaptureIdentity, AudioChunk, AudioChunkCallback, AudioConfig,
+        AudioResult, SttConfig, SttError, SttProvider, SttProviderFactory, SttResult,
+    },
+    infrastructure::{
+        auto_paste::{get_active_app_target, AutoPasteTarget},
+        continuation_context::{ContinuationContextManager, GuardedPasteOutcome as P},
+    },
+};
 use async_trait::async_trait;
 use futures_util::FutureExt;
-use std::{sync::{Arc, Mutex, atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst}},
-    time::{Duration, Instant}, process::Stdio, path::PathBuf};
+use std::{
+    path::PathBuf,
+    process::Stdio,
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant},
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 const SECOND: Duration = Duration::from_secs(1);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Stage { Preflight, FixtureReady, PrepareCapture, ResponsiveControl, StoppedValidation,
-    DrainControl, RawStoppedControl, Recovery, CaptureCleanup, SupervisorCleanup }
+enum Stage {
+    Preflight,
+    FixtureReady,
+    PrepareCapture,
+    ResponsiveControl,
+    StoppedValidation,
+    DrainControl,
+    RawStoppedControl,
+    Recovery,
+    CaptureCleanup,
+    SupervisorCleanup,
+}
 struct FailureEvidence {
     stage: std::cell::Cell<Stage>,
     primary: std::cell::Cell<Option<Stage>>,
     cleanup: std::cell::Cell<Option<Stage>>,
 }
 impl FailureEvidence {
-    fn new() -> Self { Self { stage: std::cell::Cell::new(Stage::Preflight),
-        primary: std::cell::Cell::new(None), cleanup: std::cell::Cell::new(None) } }
-    fn at(&self, stage: Stage) { self.stage.set(stage); }
-    fn fail(&self) { if self.primary.get().is_none() { self.primary.set(Some(self.stage.get())); } }
+    fn new() -> Self {
+        Self {
+            stage: std::cell::Cell::new(Stage::Preflight),
+            primary: std::cell::Cell::new(None),
+            cleanup: std::cell::Cell::new(None),
+        }
+    }
+    fn at(&self, stage: Stage) {
+        self.stage.set(stage);
+    }
+    fn fail(&self) {
+        if self.primary.get().is_none() {
+            self.primary.set(Some(self.stage.get()));
+        }
+    }
     fn cleanup_failed(&self, stage: Stage) {
-        if self.cleanup.get().is_none() { self.cleanup.set(Some(stage)); }
+        if self.cleanup.get().is_none() {
+            self.cleanup.set(Some(stage));
+        }
     }
     fn emit(&self) {
         // Fixed enum codes only: never format framework errors, content or panic payloads.
-        eprintln!("AX_FAILURE_PRIMARY={:?} AX_CLEANUP_FAILURE={:?}", self.primary.get(), self.cleanup.get());
+        eprintln!(
+            "AX_FAILURE_PRIMARY={:?} AX_CLEANUP_FAILURE={:?}",
+            self.primary.get(),
+            self.cleanup.get()
+        );
     }
 }
 #[test]
 fn fixed_failure_evidence_keeps_primary_and_cleanup_separate() {
-    for stage in [Stage::ResponsiveControl, Stage::StoppedValidation, Stage::SupervisorCleanup] {
+    for stage in [
+        Stage::ResponsiveControl,
+        Stage::StoppedValidation,
+        Stage::SupervisorCleanup,
+    ] {
         let evidence = FailureEvidence::new();
-        evidence.at(stage); evidence.fail();
-        evidence.at(Stage::CaptureCleanup); evidence.cleanup_failed(Stage::CaptureCleanup);
-        evidence.fail(); evidence.cleanup_failed(Stage::SupervisorCleanup);
+        evidence.at(stage);
+        evidence.fail();
+        evidence.at(Stage::CaptureCleanup);
+        evidence.cleanup_failed(Stage::CaptureCleanup);
+        evidence.fail();
+        evidence.cleanup_failed(Stage::SupervisorCleanup);
         assert_eq!(evidence.primary.get(), Some(stage));
         assert_eq!(evidence.cleanup.get(), Some(Stage::CaptureCleanup));
     }
@@ -54,16 +101,25 @@ struct Observations {
     overflow: bool,
 }
 struct Synthetic {
-    config: AudioConfig, identity: Option<AudioCaptureIdentity>,
-    active: Arc<AtomicBool>, thread: Option<std::thread::JoinHandle<()>>,
+    config: AudioConfig,
+    identity: Option<AudioCaptureIdentity>,
+    active: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
     observations: Arc<Mutex<Observations>>,
 }
 #[async_trait]
 impl AudioCapture for Synthetic {
-    async fn initialize(&mut self, config: AudioConfig) -> AudioResult<()> { self.config = config; Ok(()) }
-    fn set_capture_identity(&mut self, identity: Option<AudioCaptureIdentity>) { self.identity = identity; }
+    async fn initialize(&mut self, config: AudioConfig) -> AudioResult<()> {
+        self.config = config;
+        Ok(())
+    }
+    fn set_capture_identity(&mut self, identity: Option<AudioCaptureIdentity>) {
+        self.identity = identity;
+    }
     async fn start_capture(&mut self, callback: AudioChunkCallback) -> AudioResult<()> {
-        let owner = self.identity.ok_or_else(|| app_lib::domain::AudioError::Internal("identity".into()))?;
+        let owner = self
+            .identity
+            .ok_or_else(|| app_lib::domain::AudioError::Internal("identity".into()))?;
         let active = self.active.clone();
         active.store(true, SeqCst);
         let observations = self.observations.clone();
@@ -76,8 +132,11 @@ impl AudioCapture for Synthetic {
                 callback(chunk);
                 let end = Instant::now();
                 let mut o = observations.lock().unwrap();
-                if o.callbacks.len() < 6000 { o.callbacks.push((start, end, owner, stamp)); }
-                else { o.overflow = true; }
+                if o.callbacks.len() < 6000 {
+                    o.callbacks.push((start, end, owner, stamp));
+                } else {
+                    o.overflow = true;
+                }
                 drop(o);
                 std::thread::sleep(Duration::from_millis(5));
             }
@@ -88,16 +147,25 @@ impl AudioCapture for Synthetic {
     async fn stop_capture(&mut self) -> AudioResult<()> {
         self.active.store(false, SeqCst);
         if let Some(thread) = self.thread.take() {
-            tokio::task::spawn_blocking(move || thread.join()).await
+            tokio::task::spawn_blocking(move || thread.join())
+                .await
                 .map_err(|_| app_lib::domain::AudioError::Internal("join".into()))?
                 .map_err(|_| app_lib::domain::AudioError::Internal("callback".into()))?;
         }
         Ok(())
     }
-    fn is_capturing(&self) -> bool { self.active.load(SeqCst) }
-    fn config(&self) -> AudioConfig { self.config }
+    fn is_capturing(&self) -> bool {
+        self.active.load(SeqCst)
+    }
+    fn config(&self) -> AudioConfig {
+        self.config
+    }
 }
-impl Drop for Synthetic { fn drop(&mut self) { self.active.store(false, SeqCst); } }
+impl Drop for Synthetic {
+    fn drop(&mut self) {
+        self.active.store(false, SeqCst);
+    }
+}
 struct NoProvider(Arc<AtomicUsize>);
 impl SttProviderFactory for NoProvider {
     fn create(&self, _: &SttConfig) -> SttResult<Box<dyn SttProvider>> {
@@ -106,7 +174,8 @@ impl SttProviderFactory for NoProvider {
     }
 }
 struct Supervisor {
-    child: tokio::process::Child, input: Option<tokio::process::ChildStdin>,
+    child: tokio::process::Child,
+    input: Option<tokio::process::ChildStdin>,
     output: tokio::process::ChildStdout,
 }
 impl Supervisor {
@@ -115,48 +184,95 @@ impl Supervisor {
             let mut bytes = Vec::new();
             loop {
                 let b = self.output.read_u8().await?;
-                if b == b'\n' { break; }
+                if b == b'\n' {
+                    break;
+                }
                 ensure!(b.is_ascii() && bytes.len() < 160, "protocol bound");
                 bytes.push(b);
             }
             Ok(String::from_utf8(bytes)?)
-        }).await?
+        })
+        .await?
     }
     async fn command(&mut self, command: &str, expected: &str) -> Result<()> {
-        let input = self.input.as_mut().ok_or_else(|| anyhow::anyhow!("supervisor closed"))?;
+        let input = self
+            .input
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("supervisor closed"))?;
         input.write_all(command.as_bytes()).await?;
         input.write_all(b"\n").await?;
-        ensure!(self.line(SECOND * 4).await? == expected, "supervisor acknowledgement");
+        ensure!(
+            self.line(SECOND * 4).await? == expected,
+            "supervisor acknowledgement"
+        );
         Ok(())
     }
 }
-fn confirmed(p: P) -> bool { matches!(p, P::Confirmed { .. }) }
-fn valid(v: V) -> bool { matches!(v, V::Valid { .. }) }
-fn front(target: &AutoPasteTarget) -> Result<()> {
-    ensure!(get_active_app_target().as_ref() == Some(target), "focus precondition"); Ok(())
+fn confirmed(p: P) -> bool {
+    matches!(p, P::Confirmed { .. })
 }
-async fn exercise(s: &mut Supervisor, target: AutoPasteTarget, evidence: &FailureEvidence) -> Result<()> {
+fn valid(v: V) -> bool {
+    matches!(v, V::Valid { .. })
+}
+fn front(target: &AutoPasteTarget) -> Result<()> {
+    ensure!(
+        get_active_app_target().as_ref() == Some(target),
+        "focus precondition"
+    );
+    Ok(())
+}
+async fn exercise(
+    s: &mut Supervisor,
+    target: AutoPasteTarget,
+    evidence: &FailureEvidence,
+) -> Result<()> {
     evidence.at(Stage::PrepareCapture);
     let manager = ContinuationContextManager::new();
-    ensure!(valid(manager.capture(1, None, false).await), "sentinel registration");
+    ensure!(
+        valid(manager.capture(1, None, false).await),
+        "sentinel registration"
+    );
     let observations = Arc::new(Mutex::new(Observations::default()));
     let providers = Arc::new(AtomicUsize::new(0));
     let errors = Arc::new(AtomicUsize::new(0));
-    let service = TranscriptionService::new(Box::new(Synthetic {
-        config: AudioConfig::default(), identity: None, active: Arc::new(AtomicBool::new(false)),
-        thread: None, observations: observations.clone(),
-    }), Arc::new(NoProvider(providers.clone())));
+    let service = TranscriptionService::new(
+        Box::new(Synthetic {
+            config: AudioConfig::default(),
+            identity: None,
+            active: Arc::new(AtomicBool::new(false)),
+            thread: None,
+            observations: observations.clone(),
+        }),
+        Arc::new(NoProvider(providers.clone())),
+    );
     service.set_continuation_context_guard(Arc::new(manager.clone()));
     service.initialize_audio(AudioConfig::default()).await?;
     let meters = observations.clone();
     let errs = errors.clone();
     let episode = Instant::now();
-    let token = service.prepare_recording_capture(100, SttConfig::default(), Arc::new(move |sample, _| {
-        let mut o = meters.lock().unwrap();
-        if o.meters.len() < 1000 { o.meters.push((Instant::now(), sample.owner, sample.captured_at_ms)); }
-        else { o.overflow = true; }
-    }), Arc::new(|_, _| {}), Arc::new(move |_| { errs.fetch_add(1, SeqCst); })).await?;
-    let owner = AudioCaptureIdentity { run_id: token.run_id, generation: token.generation };
+    let token = service
+        .prepare_recording_capture(
+            100,
+            SttConfig::default(),
+            Arc::new(move |sample, _| {
+                let mut o = meters.lock().unwrap();
+                if o.meters.len() < 1000 {
+                    o.meters
+                        .push((Instant::now(), sample.owner, sample.captured_at_ms));
+                } else {
+                    o.overflow = true;
+                }
+            }),
+            Arc::new(|_, _| {}),
+            Arc::new(move |_| {
+                errs.fetch_add(1, SeqCst);
+            }),
+        )
+        .await?;
+    let owner = AudioCaptureIdentity {
+        run_id: token.run_id,
+        generation: token.generation,
+    };
     let result = std::panic::AssertUnwindSafe(async {
         tokio::time::sleep(Duration::from_millis(120)).await;
         let probe = native::Probe::new(target.pid);
@@ -231,22 +347,40 @@ async fn exercise(s: &mut Supervisor, target: AutoPasteTarget, evidence: &Failur
         }
         Ok::<_, anyhow::Error>(())
     }).catch_unwind().await;
-    if !matches!(&result, Ok(Ok(()))) { evidence.fail(); }
+    if !matches!(&result, Ok(Ok(()))) {
+        evidence.fail();
+    }
     evidence.at(Stage::CaptureCleanup);
     // Run on both ordinary failure and panic. Original error always wins over cleanup errors.
     let cleanup = async {
         tokio::time::timeout(SECOND, service.cancel_prepared_capture(token)).await??;
-        ensure!(!service.capture_is_active_for_run(token.run_id).await, "capture cleanup");
-        for id in 2..18 { manager.release(id).await; }
-        ensure!(confirmed(manager.guarded_copy(1, 1000, String::new()).await), "cleanup drain");
+        ensure!(
+            !service.capture_is_active_for_run(token.run_id).await,
+            "capture cleanup"
+        );
+        for id in 2..18 {
+            manager.release(id).await;
+        }
+        ensure!(
+            confirmed(manager.guarded_copy(1, 1000, String::new()).await),
+            "cleanup drain"
+        );
         manager.release(1).await;
         ensure!(episode.elapsed() < Duration::from_secs(30), "episode bound");
-        ensure!(errors.load(SeqCst) == 0 && providers.load(SeqCst) == 0, "final counters");
+        ensure!(
+            errors.load(SeqCst) == 0 && providers.load(SeqCst) == 0,
+            "final counters"
+        );
         Ok::<_, anyhow::Error>(())
     };
     let cleaned = tokio::time::timeout(SECOND * 5, cleanup).await;
-    if !matches!(&cleaned, Ok(Ok(()))) { evidence.cleanup_failed(Stage::CaptureCleanup); }
-    match result { Ok(result) => result?, Err(_) => anyhow::bail!("driver panic") }
+    if !matches!(&cleaned, Ok(Ok(()))) {
+        evidence.cleanup_failed(Stage::CaptureCleanup);
+    }
+    match result {
+        Ok(result) => result?,
+        Err(_) => anyhow::bail!("driver panic"),
+    }
     cleaned??;
     Ok(())
 }
@@ -258,33 +392,82 @@ fn real_ax_stalled_owned_target() {
     use cocoa::base::id;
     use objc::{class, msg_send, sel, sel_impl};
     struct Pool(id);
-    impl Drop for Pool { fn drop(&mut self) { unsafe { let _: () = msg_send![self.0, drain]; } } }
+    impl Drop for Pool {
+        fn drop(&mut self) {
+            unsafe {
+                let _: () = msg_send![self.0, drain];
+            }
+        }
+    }
     let _pool = Pool(unsafe { msg_send![class!(NSAutoreleasePool), new] });
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     let evidence = FailureEvidence::new();
     let result = runtime.block_on(async {
-        ensure!(std::env::var("VT_REAL_AX_SYNTHETIC").as_deref() == Ok("1"), "opt in");
+        ensure!(
+            std::env::var("VT_REAL_AX_SYNTHETIC").as_deref() == Ok("1"),
+            "opt in"
+        );
         let directory = PathBuf::from(std::env::var("VT_AX_STALL_DIR")?);
-        ensure!(directory.is_absolute() && directory.to_string_lossy().is_ascii()
-            && directory.parent() == Some(std::path::Path::new("/tmp")) && !directory.exists(), "new private path");
+        ensure!(
+            directory.is_absolute()
+                && directory.to_string_lossy().is_ascii()
+                && directory.parent() == Some(std::path::Path::new("/tmp"))
+                && !directory.exists(),
+            "new private path"
+        );
         let mut child = tokio::process::Command::new("/usr/bin/python3")
-            .arg("-I").arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/native_ax_stall_support/supervisor.py"))
-            .arg(directory).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
-        let mut supervisor = Supervisor { input: child.stdin.take(), output: child.stdout.take().unwrap(), child };
+            .arg("-I")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/native_ax_stall_support/supervisor.py"
+            ))
+            .arg(directory)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let mut supervisor = Supervisor {
+            input: child.stdin.take(),
+            output: child.stdout.take().unwrap(),
+            child,
+        };
         let outcome = std::panic::AssertUnwindSafe(async {
             evidence.at(Stage::FixtureReady);
             let ready = supervisor.line(SECOND * 28).await?;
             let fields: Vec<_> = ready.split(' ').collect();
-            ensure!(fields.len() == 3 && fields[0] == "READY", "fixture readiness");
+            ensure!(
+                fields.len() == 3 && fields[0] == "READY",
+                "fixture readiness"
+            );
             let pid: i32 = fields[1].parse()?;
-            ensure!(pid > 0 && fields[2].starts_with("org.voicetext.synthetic.ax."), "fixture identity");
-            exercise(&mut supervisor, AutoPasteTarget { pid, bundle_id: fields[2].into() }, &evidence).await?;
+            ensure!(
+                pid > 0 && fields[2].starts_with("org.voicetext.synthetic.ax."),
+                "fixture identity"
+            );
+            exercise(
+                &mut supervisor,
+                AutoPasteTarget {
+                    pid,
+                    bundle_id: fields[2].into(),
+                },
+                &evidence,
+            )
+            .await?;
             evidence.at(Stage::SupervisorCleanup);
             let done = supervisor.command("DONE", "CLEAN").await;
-            if done.is_err() { evidence.cleanup_failed(Stage::SupervisorCleanup); }
+            if done.is_err() {
+                evidence.cleanup_failed(Stage::SupervisorCleanup);
+            }
             done
-        }).catch_unwind().await;
-        if !matches!(&outcome, Ok(Ok(()))) { evidence.fail(); }
+        })
+        .catch_unwind()
+        .await;
+        if !matches!(&outcome, Ok(Ok(()))) {
+            evidence.fail();
+        }
         evidence.at(Stage::SupervisorCleanup);
         // Closing private command pipe independently triggers CONT/cleanup after failure/panic.
         supervisor.input.take();
@@ -292,10 +475,16 @@ fn real_ax_stalled_owned_target() {
         if !matches!(&reaped, Ok(Ok(status)) if status.success()) {
             evidence.cleanup_failed(Stage::SupervisorCleanup);
         }
-        match outcome { Ok(r) => r?, Err(_) => anyhow::bail!("driver panic") }
+        match outcome {
+            Ok(r) => r?,
+            Err(_) => anyhow::bail!("driver panic"),
+        }
         ensure!(reaped??.success(), "supervisor cleanup");
         Ok::<_, anyhow::Error>(())
     });
-    if result.is_err() { evidence.fail(); evidence.emit(); }
+    if result.is_err() {
+        evidence.fail();
+        evidence.emit();
+    }
     assert!(result.is_ok(), "UNQUALIFIED: bounded native harness failed");
 }

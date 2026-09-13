@@ -1868,9 +1868,13 @@ impl SttProvider for BackendProvider {
                                                 }
                                             }
                                         }
-                                        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+                                        #[cfg(all(
+                                            debug_assertions,
+                                            feature = "native-window-e2e"
+                                        ))]
                                         {
-                                            continuation.lock().unwrap().native_e2e_error_seen = true;
+                                            continuation.lock().unwrap().native_e2e_error_seen =
+                                                true;
                                         }
                                         log::error!("Server error: {} - {}", code, message);
                                         server_error_reported = server_error_closes_stream(&code);
@@ -2671,9 +2675,13 @@ impl SttProvider for BackendProvider {
     fn native_e2e_transport_observation(&self) -> Option<(bool, bool)> {
         // is_connection_alive is a *paused reuse* probe, not active transport readiness.
         let retained = self.ws_write.is_some();
-        let ready = retained && self.is_streaming
+        let ready = retained
+            && self.is_streaming
             && !self.is_closed.load(Ordering::SeqCst)
-            && self.receiver_task.as_ref().is_some_and(|task| !task.is_finished())
+            && self
+                .receiver_task
+                .as_ref()
+                .is_some_and(|task| !task.is_finished())
             && {
                 let transport = self.continuation.lock().unwrap();
                 transport.ready_seen && !transport.native_e2e_error_seen
@@ -2749,7 +2757,10 @@ mod tests {
             let mut socket = accept_async(stream).await.unwrap();
             let _config = socket.next().await.unwrap().unwrap();
             while let Some(message) = messages.recv().await {
-                socket.send(Message::Text(message.to_string().into())).await.unwrap();
+                socket
+                    .send(Message::Text(message.to_string().into()))
+                    .await
+                    .unwrap();
             }
         });
         let mut provider = BackendProvider::new();
@@ -2757,27 +2768,55 @@ mod tests {
         config.backend_url = Some(url);
         config.backend_auth_token = Some("test-token".into());
         provider.initialize(&config).await.unwrap();
-        provider.start_stream(Arc::new(|_| {}), Arc::new(|_| {}), Arc::new(|_| {}), Arc::new(|_, _| {})).await.unwrap();
+        provider
+            .start_stream(
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .unwrap();
         // This is exactly the point where the service is allowed to set Recording.
-        assert_eq!(provider.native_e2e_transport_observation(), Some((false, true)));
+        assert_eq!(
+            provider.native_e2e_transport_observation(),
+            Some((false, true))
+        );
         send.send(serde_json::json!({"type":"ready", "session_id":"r2-ready", "accepted_capabilities":[]})).await.unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
             while provider.native_e2e_transport_observation() != Some((true, true)) {
                 tokio::task::yield_now().await;
             }
-        }).await.unwrap();
-        send.send(serde_json::json!({"type":"error", "code":"test_error", "message":"test failure"})).await.unwrap();
+        })
+        .await
+        .unwrap();
+        send.send(
+            serde_json::json!({"type":"error", "code":"test_error", "message":"test failure"}),
+        )
+        .await
+        .unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
             while !provider.continuation.lock().unwrap().native_e2e_error_seen {
                 tokio::task::yield_now().await;
             }
-        }).await.unwrap();
-        assert_eq!(provider.native_e2e_transport_observation(), Some((false, true)));
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            provider.native_e2e_transport_observation(),
+            Some((false, true))
+        );
         // A stale Ready bit must not overcome explicit closure either.
         provider.is_closed.store(true, Ordering::SeqCst);
-        assert_eq!(provider.native_e2e_transport_observation(), Some((false, true)));
+        assert_eq!(
+            provider.native_e2e_transport_observation(),
+            Some((false, true))
+        );
         provider.abort().await.unwrap();
-        assert_eq!(provider.native_e2e_transport_observation(), Some((false, false)));
+        assert_eq!(
+            provider.native_e2e_transport_observation(),
+            Some((false, false))
+        );
         peer.abort();
         let _ = peer.await;
     }

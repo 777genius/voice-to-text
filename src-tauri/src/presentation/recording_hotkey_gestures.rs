@@ -991,18 +991,18 @@ mod tests {
     #[test]
     fn unavailable_latch_never_borrows_new_mapped_registration() {
         let mut normalizer = RecordingHotkeyGestureNormalizer::new();
-        let a = accepted(normalizer.press_observed(
-            PhysicalHotkeyMode::Hold, PhysicalObservation::Unavailable,
-        ));
+        let a = accepted(
+            normalizer.press_observed(PhysicalHotkeyMode::Hold, PhysicalObservation::Unavailable),
+        );
         let mapped = Some((7, 3));
         assert_eq!(normalizer.observation_binding(mapped), None);
-        assert_eq!(normalizer.press_observed(
-            PhysicalHotkeyMode::Hold, PhysicalObservation::Unavailable,
-        ), PressResult::Duplicate);
+        assert_eq!(
+            normalizer.press_observed(PhysicalHotkeyMode::Hold, PhysicalObservation::Unavailable,),
+            PressResult::Duplicate
+        );
         assert_eq!(normalizer.active_press(), Some(a.handle));
         assert_eq!(normalizer.observation_binding(mapped), None);
         normalizer.release_observed(Some(a.handle), PhysicalObservation::Unavailable);
         assert_eq!(normalizer.observation_binding(mapped), mapped);
     }
-
 }
