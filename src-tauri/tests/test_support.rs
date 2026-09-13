@@ -17,7 +17,10 @@ pub fn classify_error_type(err: &SttError) -> &'static str {
     match err {
         SttError::Authentication(_) => "authentication",
         SttError::Configuration(_) => "configuration",
-        SttError::Processing(_) | SttError::Unsupported(_) | SttError::Internal(_) => "processing",
+        SttError::Processing(_)
+        | SttError::Unsupported(_)
+        | SttError::Internal(_)
+        | SttError::ContinuationAudioNotStarted => "processing",
         SttError::Connection(conn) => match conn.details.category {
             Some(SttConnectionCategory::Timeout) => "timeout",
             Some(SttConnectionCategory::LimitExceeded) => "limit_exceeded",
