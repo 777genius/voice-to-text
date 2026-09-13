@@ -3998,6 +3998,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     recordingDesiredOn,
     recordingStartPending,
     recordingIntentRunId,
+    recordingIntentFaultRunId: computed(() => recordingIntentFaultRunId.value),
     recordingIntentRevision,
     captureReadiness,
     captureRunId,

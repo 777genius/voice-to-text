@@ -429,6 +429,92 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     },
   );
 
+  it.each(['startFailed', 'stopUncertain'])(
+    'preserves pending B %s over A recovery while A still owns the transcript tail', async (fault) => {
+      const wrapper = mountRecordingPopover((store) => {
+        vi.spyOn(store, 'deliveryRecovery', 'get').mockReturnValue([
+          { sessionId: 1, transcript: 'A tail', unconfirmedText: 'A tail' },
+        ]);
+      });
+      const store = useTranscriptionStore();
+      await waitForListenerCount('recording:intent-projection', 1);
+      await waitForListenerCount('recording:status', 1);
+      await emitTauriEvent('recording:status', { session_id: 1, status: 'Recording' });
+      await emitTauriEvent('recording:status', { session_id: 1, status: 'Processing' });
+      await emitTauriEvent('recording:intent-projection', {
+        runId: 2, intentRevision: 2, status: 'Processing', desiredOn: true,
+        pendingStart: true, processingJobs: 1, shutdownRequested: false,
+      });
+      expect(store.sessionId).toBe(1);
+      expect(store.recordingIntentRunId).toBe(2);
+      expect(store.recordingStartPending).toBe(true);
+      await emitTauriEvent('recording:intent-projection', {
+        runId: null, faultRunId: 2, intentRevision: 3, status: 'Error', desiredOn: false,
+        pendingStart: false, processingJobs: 1, shutdownRequested: false, fault,
+      });
+      expect(store.sessionId).toBe(1);
+      expect(store.recordingIntentRunId).toBeNull();
+      expect(store.recordingStartPending).toBe(false);
+      expect(store.recordingIntentFaultRunId).toBe(2);
+      const faultText = store.errorSummary;
+      expect(faultText).toBeTruthy();
+      const expectFaultSurface = () => {
+        expect(store.status).toBe(RecordingStatus.Error);
+        expect(document.querySelector('.mini-transcription-text')?.textContent?.trim()).toBe(faultText);
+        expect(document.querySelector('[data-testid="mini-error-details"]')).not.toBeNull();
+        expect(document.querySelector('[data-testid="mini-copy-recovery"]')).not.toBeNull();
+      };
+      await nextTick();
+      expectFaultSurface();
+      // Same-revision cleanup and the old run's tail must not reclaim B's fault.
+      await emitTauriEvent('recording:intent-projection', {
+        runId: 2, intentRevision: 3, status: 'Processing', desiredOn: false,
+        pendingStart: false, processingJobs: 1, shutdownRequested: false,
+      });
+      await emitTauriEvent('recording:status', { session_id: 1, status: 'Idle' });
+      await nextTick();
+      expectFaultSurface();
+      document.querySelector<HTMLButtonElement>('[data-testid="mini-copy-recovery"]')!.click();
+      await flushMicrotasks();
+      expect(invokeMock).toHaveBeenCalledWith('copy_to_clipboard_native', { text: 'A tail' });
+      expectFaultSurface();
+      wrapper.unmount();
+    },
+  );
+
+  it.each(['retry', 'device', 'license'])(
+    'keeps B %s and details actions alongside A recovery copy', async (action) => {
+      const wrapper = mountRecordingPopover((store) => {
+        vi.spyOn(store, 'deliveryRecovery', 'get').mockReturnValue([
+          { sessionId: 1, transcript: 'A tail', unconfirmedText: 'A tail' },
+        ]);
+        vi.spyOn(store, 'canReconnect', 'get').mockReturnValue(action === 'retry');
+        vi.spyOn(store, 'canOpenSettingsForDevice', 'get').mockReturnValue(action === 'device');
+        vi.spyOn(store, 'canActivateLicense', 'get').mockReturnValue(action === 'license');
+      });
+      const store = useTranscriptionStore();
+      store.sessionId = 2;
+      store.status = RecordingStatus.Error;
+      store.error = 'B current error';
+      await nextTick();
+      expect(document.querySelector('.mini-transcription-text')?.textContent).toContain('B current error');
+      expect(document.querySelector('[data-testid="mini-copy-recovery"]')).not.toBeNull();
+      expect(document.querySelector('[data-testid="mini-error-details"]')).not.toBeNull();
+      expect(document.querySelector('[title="Reconnect"]') !== null).toBe(action === 'retry');
+      expect(document.querySelector('[title="Open settings"]') !== null).toBe(action === 'device');
+      expect(document.querySelector('[title="Activate license"]') !== null).toBe(action === 'license');
+      document.querySelector<HTMLButtonElement>('[data-testid="mini-copy-recovery"]')!.click();
+      await flushMicrotasks();
+      expect(invokeMock).toHaveBeenCalledWith('copy_to_clipboard_native', { text: 'A tail' });
+      document.querySelector<HTMLButtonElement>('[data-testid="mini-error-details"]')!.click();
+      await flushMicrotasks();
+      expect(invokeMock).toHaveBeenCalledWith('show_error_details_window', {
+        summary: 'B current error', details: store.errorFullText,
+      });
+      wrapper.unmount();
+    },
+  );
+
   it('shows mini action buttons only when native cursor is over the mini window', async () => {
     const wrapper = mountRecordingPopover();
     await flushMicrotasks();

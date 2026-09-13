@@ -183,11 +183,13 @@ const miniCurrentDisplayText = computed(() => {
   return '';
 });
 
+// A pending successor can fault while sessionId still owns the older transcript tail.
 // Session status retains the display owner after terminal cleanup clears sessionId.
 // Old recovery stays in the actions, but cannot take a newer run's surface.
 const showMiniRecoveryWarning = computed(() => {
   if (!store.deliveryRecovery.length) return false;
   const displayRunId = (store.recordingDesiredOn ? store.recordingIntentRunId : null)
+    ?? (hasMiniError.value ? store.recordingIntentFaultRunId : null)
     ?? store.sessionId ?? store.lastAcceptedRecordingStatus?.session_id;
   const newerDisplayOwnsSurface = miniCurrentDisplayText.value && displayRunId != null
     && store.deliveryRecovery.every(
@@ -1154,7 +1156,7 @@ const minimizeWindow = async (event?: Event) => {
                 @click="store.copyRecoveryText(recovery.unconfirmedText)"
               ><span class="mdi mdi-content-copy"></span></button>
             </template>
-            <template v-else-if="hasMiniError">
+            <template v-if="hasMiniError">
               <button
                 v-if="store.canReconnect"
                 class="mini-icon-button"
@@ -1190,7 +1192,7 @@ const minimizeWindow = async (event?: Event) => {
                 <span class="mdi mdi-key-outline"></span>
               </button>
             </template>
-            <template v-else>
+            <template v-else-if="!store.deliveryRecovery.length">
               <UpdateIndicator compact @click="openUpdateDialog" />
               <button
                 v-if="authStore.isAuthenticated"
