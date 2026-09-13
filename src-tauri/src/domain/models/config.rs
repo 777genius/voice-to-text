@@ -107,6 +107,9 @@ impl FromStr for BackendStreamingProvider {
 /// Configuration for STT provider
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SttConfig {
+    /// Native target qualification frozen before provider capability selection.
+    #[serde(skip)]
+    pub(crate) continuation_target_eligible: bool,
     /// Provider type
     pub provider: SttProviderType,
 
@@ -171,6 +174,7 @@ fn default_keep_alive_ttl_secs() -> u64 {
 impl Default for SttConfig {
     fn default() -> Self {
         Self {
+            continuation_target_eligible: false,
             provider: SttProviderType::default(),
             language: "ru".to_string(),
             auto_detect_language: false,

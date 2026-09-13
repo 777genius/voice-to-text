@@ -72,7 +72,7 @@ const recordingHotkey = computed(() => formatHotkeyForDisplay(appConfigStore.rec
 const hasMiniError = computed(() =>
   Boolean(store.error || store.hasError || store.incomingTranslationError)
 );
-const showMiniActions = computed(() => isMiniActionsVisible.value || hasMiniError.value);
+const showMiniActions = computed(() => isMiniActionsVisible.value || hasMiniError.value || store.deliveryRecovery.length > 0);
 const hasMiniTranslationText = computed(() =>
   store.activeRecordingMode === 'live_translation' && store.translationText.trim().length > 0
 );
@@ -94,6 +94,7 @@ const hasMiniIncomingTranslation = computed(() =>
 const hasMiniReadyCapture = computed(() =>
   !hasMiniError.value && (
     store.isCaptureReady ||
+    (store.activeRecordingMode === 'live_translation' && store.isRecording) ||
     (!store.hasCaptureReadinessProtocol && store.isRecording) ||
     store.incomingTranslationStatus === 'Recording'
   )
@@ -139,6 +140,7 @@ const shouldShowMiniHotkeyPrompt = computed(() =>
   !hasMiniIncomingTranslation.value &&
   !store.error &&
   !store.hasError &&
+  !store.deliveryRecovery.length &&
   recordingHotkey.value.length > 0
 );
 
@@ -158,6 +160,7 @@ function normalizeMiniTranscriptText(...parts: string[]): string {
 }
 
 const miniDisplayText = computed(() => {
+  if (store.deliveryRecovery.length) return 'Automatic insertion stopped. Check the target before pasting unconfirmed text.';
   if (hasMiniError.value) {
     return store.incomingTranslationError || store.errorSummary;
   }
@@ -202,7 +205,7 @@ function alignMiniTextToEnd() {
     const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
 
     isMiniTextOverflowing.value = shouldShowText && maxScroll > 1;
-    el.scrollLeft = shouldShowText && !hasMiniError.value ? maxScroll : 0;
+    el.scrollLeft = shouldShowText && !hasMiniError.value && !store.deliveryRecovery.length ? maxScroll : 0;
   });
 }
 
@@ -1112,9 +1115,9 @@ const minimizeWindow = async (event?: Event) => {
             class="mini-transcription-text"
             :class="{
               recording: hasMiniRecognizedText,
-              placeholder: !hasMiniRecognizedText && !hasMiniError,
+              placeholder: !hasMiniRecognizedText && !hasMiniError && !store.deliveryRecovery.length,
               prompt: shouldShowMiniHotkeyPrompt,
-              error: store.hasError || Boolean(store.error),
+              error: store.hasError || Boolean(store.error) || store.deliveryRecovery.length > 0,
               overflowing: isMiniTextOverflowing,
             }"
             :title="miniDisplayText || miniHotkeyPrompt"
@@ -1125,7 +1128,18 @@ const minimizeWindow = async (event?: Event) => {
           </div>
 
           <div class="mini-actions no-drag">
-            <template v-if="hasMiniError">
+            <template v-if="store.deliveryRecovery.length">
+              <button
+                v-for="recovery in store.deliveryRecovery"
+                :key="recovery.sessionId ?? 0"
+                class="mini-icon-button"
+                data-testid="mini-copy-recovery"
+                title="Copy unconfirmed text"
+                aria-label="Copy unconfirmed text"
+                @click="store.copyRecoveryText(recovery.unconfirmedText)"
+              ><span class="mdi mdi-content-copy"></span></button>
+            </template>
+            <template v-else-if="hasMiniError">
               <button
                 v-if="store.canReconnect"
                 class="mini-icon-button"

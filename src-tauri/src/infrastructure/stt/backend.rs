@@ -1508,7 +1508,7 @@ impl SttProvider for BackendProvider {
                     CAPABILITY_FINALIZE_ACK.to_string(),
                     CAPABILITY_FINALIZE_OUTCOME.to_string(),
                 ];
-                if self.continuation_opted_in {
+                if self.continuation_opted_in && config.continuation_target_eligible {
                     offered.push(CAPABILITY_PAUSE_CONTINUE.to_string());
                 }
                 offered
@@ -1525,7 +1525,8 @@ impl SttProvider for BackendProvider {
         let finalize_report = self.finalize_report.clone();
         let outcome_negotiated = self.outcome_negotiated.clone();
         let offered_outcome = provider_name == "elevenlabs";
-        let offered_continuation = offered_outcome && self.continuation_opted_in;
+        let offered_continuation =
+            offered_outcome && self.continuation_opted_in && config.continuation_target_eligible;
         let continuation = self.continuation.clone();
         let connection_generation = self.connection_generation;
         let delivery = self.delivery.clone();
@@ -3088,14 +3089,29 @@ mod tests {
 
     #[tokio::test]
     async fn ready_metadata_precedes_first_stable_callback_without_projection() {
-        for continuation in [false, true] {
+        for (continuation, eligible, opted_in) in [
+            (false, true, true),
+            (true, true, true),
+            (true, false, true),
+            (true, true, false),
+        ] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("ws://{}", listener.local_addr().unwrap());
             let (release, held) = tokio::sync::oneshot::channel::<()>();
             let server = tokio::spawn(async move {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-                ws.next().await.unwrap().unwrap(); // config
+                let wire = ws.next().await.unwrap().unwrap();
+                let wire: serde_json::Value =
+                    serde_json::from_str(wire.to_text().unwrap()).unwrap();
+                assert_eq!(
+                    wire["capabilities"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|c| c == CAPABILITY_PAUSE_CONTINUE),
+                    eligible && opted_in
+                );
                 let mut capabilities = vec![CAPABILITY_FINALIZE_OUTCOME];
                 if continuation {
                     capabilities.push(CAPABILITY_PAUSE_CONTINUE);
@@ -3117,7 +3133,8 @@ mod tests {
             config.backend_auth_token = Some("fake-only".into());
             config.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
             let mut provider = BackendProvider::new();
-            provider.continuation_opted_in = true;
+            provider.continuation_opted_in = opted_in;
+            config.continuation_target_eligible = eligible;
             provider.initialize(&config).await.unwrap();
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
             provider
@@ -3137,7 +3154,10 @@ mod tests {
                 .unwrap();
             assert_eq!(first.text, "first");
             assert!(first.completion_v1);
-            assert_eq!(first.continuation_delivery, continuation);
+            assert_eq!(
+                first.continuation_delivery,
+                continuation && eligible && opted_in
+            );
             let _ = release.send(());
             server.await.unwrap();
         }
@@ -3240,6 +3260,7 @@ mod tests {
             config.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
             let mut provider = BackendProvider::new();
             provider.continuation_opted_in = true;
+            config.continuation_target_eligible = true;
             provider.initialize(&config).await.unwrap();
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
             provider

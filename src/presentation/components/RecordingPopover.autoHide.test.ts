@@ -339,6 +339,43 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     document.body.innerHTML = '';
   });
 
+  it('keeps the mini outgoing translation meter active after capture protocol discovery', async () => {
+    const wrapper = mountRecordingPopover();
+    const store = useTranscriptionStore();
+    store.activeRecordingMode = 'live_translation';
+    store.status = RecordingStatus.Recording;
+    store.sessionId = 41;
+    vi.spyOn(store, 'hasCaptureReadinessProtocol', 'get').mockReturnValue(true);
+    await nextTick();
+    expect(document.querySelector('.mini-status-dot')?.classList.contains('recording')).toBe(true);
+    wrapper.unmount();
+  });
+
+  it.each([true, false])('shows guarded recovery and copies only after explicit action (mini %s)', async (mini) => {
+    appConfigMock.showMiniRecordingWindow = mini;
+    const wrapper = mountRecordingPopover();
+    const store = useTranscriptionStore();
+    vi.spyOn(store, 'deliveryRecovery', 'get').mockReturnValue([
+      { sessionId: 1, transcript: 'confirmed unconfirmed', unconfirmedText: 'unconfirmed' },
+    ]);
+    await nextTick();
+    // Trigger rendering after the computed recovery fixture changes.
+    store.finalText = 'confirmed unconfirmed';
+    await nextTick();
+    const warning = document.querySelector(mini ? '.mini-transcription-text' : '.error-container');
+    expect(warning?.textContent).toContain('Automatic insertion stopped.');
+    const button = mini
+      ? document.querySelector<HTMLButtonElement>('[data-testid="mini-copy-recovery"]')
+      : [...document.querySelectorAll<HTMLButtonElement>('.error-action-button')]
+        .find(button => button.textContent?.includes('Copy unconfirmed text'));
+    expect(button).toBeTruthy();
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'copy_to_clipboard_native')).toHaveLength(0);
+    button!.click();
+    await flushMicrotasks();
+    expect(invokeMock).toHaveBeenCalledWith('copy_to_clipboard_native', { text: 'unconfirmed' });
+    wrapper.unmount();
+  });
+
   it('shows mini action buttons only when native cursor is over the mini window', async () => {
     const wrapper = mountRecordingPopover();
     await flushMicrotasks();

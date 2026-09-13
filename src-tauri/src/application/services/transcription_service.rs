@@ -1074,9 +1074,12 @@ impl TranscriptionService {
             let Some(prepared) = slot.as_ref().filter(|p| p.token == token) else {
                 return Ok(Cancelled);
             };
+            // Eligibility belongs to the frozen run, never to persisted settings.
+            let mut current_config = self.get_config_snapshot();
+            current_config.continuation_target_eligible = config.continuation_target_eligible;
             if !self.continuation_policy_matches(paused.logical_run_id, token.run_id)
                 || prepared.config != config
-                || self.get_config_snapshot() != config
+                || current_config != config
                 || self.invalidate_keep_alive_on_stop.load(Ordering::Acquire)
             {
                 return Ok(Unsent(ConfigChanged));
@@ -1216,11 +1219,13 @@ impl TranscriptionService {
                 && (p.accounting.sealed.load(Ordering::Acquire)
                     || self.capture_token_is_current(token))
         });
+        let mut current_config = self.get_config_snapshot();
+        current_config.continuation_target_eligible = config.continuation_target_eligible;
         if !permitted
             || !eligible
             || cancelled.load(Ordering::Acquire)
             || Instant::now() >= paused.deadline()
-            || self.get_config_snapshot() != config
+            || current_config != config
             || self.invalidate_keep_alive_on_stop.load(Ordering::Acquire)
             || self.provider_run_id.load(Ordering::Acquire) as u64 != paused.logical_run_id
         {
@@ -4806,6 +4811,7 @@ mod tests {
         service.set_continuation_context_guard(guard);
         let mut config = SttConfig::new(SttProviderType::Backend);
         config.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
+        config.continuation_target_eligible = true;
         config.backend_auth_token = Some("fixture-account".into());
         service.update_config(config).await.unwrap();
         let mut requested = crate::domain::AppConfig::default();
@@ -4934,6 +4940,7 @@ mod tests {
             config.backend_url = Some(url);
             config.backend_auth_token = Some("local-test".into());
             config.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
+            config.continuation_target_eligible = true;
             service.update_config(config.clone()).await.unwrap();
             let token = service
                 .prepare_recording_capture(
@@ -5254,6 +5261,7 @@ mod tests {
             config.backend_url = Some(url);
             config.backend_auth_token = Some("local-test".into());
             config.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
+            config.continuation_target_eligible = true;
             service.update_config(config).await.unwrap();
             service.register_continuation_policy(101, &Default::default()).await;
             let mut state = c::CoordinatorState::with_next_run_id_for_test(101);
@@ -5563,6 +5571,31 @@ mod tests {
             )
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn frozen_eligible_run_continues_with_unqualified_persisted_settings() {
+        let (service, _, _, _) = continuation_service_fixture(false, 0, None).await;
+        service.stop_capture_for_run(101).await.unwrap();
+        let paused = service
+            .pause_for_continuation(101, Instant::now())
+            .await
+            .unwrap();
+        let token = prepare_continued_b(&service).await;
+        service.seal_prepared_capture(token).await.unwrap();
+        // Persisted/user settings cannot carry native target eligibility. Both
+        // prepared episodes retain their independently frozen qualified target.
+        let mut settings = service.get_config_snapshot();
+        settings.continuation_target_eligible = false;
+        service.update_config(settings).await.unwrap();
+        assert!(matches!(
+            service
+                .continue_prepared_capture(token, paused, Instant::now(), Default::default())
+                .await
+                .unwrap(),
+            ContinueCaptureOutcome::Attached { .. }
+        ));
+        service.finalize_provider_for_run(101).await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
@@ -7234,6 +7267,7 @@ mod tests {
             config.backend_url = Some(url);
             config.backend_auth_token = Some("local-test".into());
             config.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
+            config.continuation_target_eligible = true;
             service.update_config(config.clone()).await.unwrap();
             let token = service
                 .prepare_recording_capture(

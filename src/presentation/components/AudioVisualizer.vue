@@ -26,6 +26,10 @@ const { bars } = useAudioVisualizer(active, {
   source: props.source,
   getOwner: () => {
     if (!transcription) return null;
+    if (transcription.activeRecordingMode === 'live_translation' && transcription.sessionId !== null &&
+        (transcription.isStarting || transcription.isRecording)) {
+      return { runId: transcription.sessionId, kind: 'translation' };
+    }
     if (transcription.isCaptureReady && transcription.captureRunId !== null) {
       return { runId: transcription.captureRunId, kind: 'capture', captureGeneration: transcription.captureGeneration };
     }

@@ -63,6 +63,18 @@ fn error_details_from_stt(err: &SttError) -> Option<TranscriptionErrorDetailsPay
 
 const TRANSCRIPT_EVENT_QUEUE_CAPACITY: usize = 128;
 const MAX_TRANSCRIPT_EVENT_TEXT_BYTES: usize = 64 * 1024;
+fn initial_continuation_target_eligible(target: Option<&AutoPasteTarget>) -> bool {
+    cfg!(target_os = "macos")
+        && target.is_some_and(crate::infrastructure::auto_paste::continuation_app_qualified)
+}
+
+fn transcript_delivery_deadline(started: tokio::time::Instant) -> tokio::time::Instant {
+    started
+        + crate::application::TranscriptionService::maximum_stop_cleanup_timeout()
+            .saturating_add(TRANSCRIPT_DELIVERY_RESERVE)
+}
+
+const TRANSCRIPT_DELIVERY_RESERVE: Duration = Duration::from_secs(1);
 const RECORDING_SHUTDOWN_FINALIZATION_GRACE: Duration = Duration::from_secs(2);
 const AUTO_PASTE_TARGET_RETENTION: usize = 32;
 
@@ -1160,7 +1172,7 @@ fn execute_recording_coordinator_effect(
                 run.revision.get(),
                 run.policy.version
             );
-            let stt_config = config.as_ref().map(|config| config.stt.clone());
+            let mut stt_config = config.as_ref().map(|config| config.stt.clone());
             if config.as_ref().is_some_and(|config| config.auto_paste_text) {
                 bind_or_capture_auto_paste_target_for_run(
                     state.inner(),
@@ -1170,6 +1182,11 @@ fn execute_recording_coordinator_effect(
             }
             if !run.policy.show_panel_on_start {
                 continuation::capture_without_panel(&app_handle, run);
+            }
+            if let Some(stt) = stt_config.as_mut() {
+                stt.continuation_target_eligible = initial_continuation_target_eligible(
+                    resolve_auto_paste_target(state.inner(), Some(run.run_id.get())).as_ref(),
+                );
             }
             drop(state);
             tauri::async_runtime::spawn(async move {
@@ -1539,7 +1556,7 @@ fn execute_recording_coordinator_effect(
                 let finalize_started_at = Instant::now();
                 // One clock covers audio drain, provider stop/abort, and Rust
                 // consumer delivery. A wedged consumer cannot retain B forever.
-                let deadline = tokio::time::Instant::now() + Duration::from_millis(31_500);
+                let deadline = transcript_delivery_deadline(tokio::time::Instant::now());
                 let (provider_result, report) = match app_handle.try_state::<AppState>() {
                     Some(state) => {
                         let result = state
@@ -11408,6 +11425,57 @@ mod tests {
         };
         let (flush, ()) = tokio::join!(barrier.flush(), consumer);
         assert_eq!(flush, Ok(()));
+    }
+
+    #[test]
+    fn initial_continuation_qualification_keeps_other_targets_on_legacy_delivery() {
+        assert!(!initial_continuation_target_eligible(None));
+        for bundle in [
+            "com.apple.TextEdit",
+            "com.apple.TextEdit.other",
+            "com.google.Chrome",
+        ] {
+            for pid in [0, 42] {
+                let target = AutoPasteTarget {
+                    bundle_id: bundle.into(),
+                    pid,
+                };
+                assert_eq!(
+                    initial_continuation_target_eligible(Some(&target)),
+                    cfg!(target_os = "macos") && bundle == "com.apple.TextEdit" && pid > 0
+                );
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transcript_delivery_reserve_survives_maximum_provider_cleanup() {
+        let started = tokio::time::Instant::now();
+        let cleanup = crate::application::TranscriptionService::maximum_stop_cleanup_timeout();
+        let deadline = transcript_delivery_deadline(started);
+        // Simulate the longest legal cleanup without sleeping or scheduler jitter.
+        tokio::time::advance(cleanup).await;
+        let cleanup_finished = tokio::time::Instant::now();
+        assert!(cleanup_finished > started + Duration::from_millis(31_500));
+        assert_eq!(deadline - cleanup_finished, TRANSCRIPT_DELIVERY_RESERVE);
+        assert!(TRANSCRIPT_DELIVERY_RESERVE <= RECORDING_SHUTDOWN_FINALIZATION_GRACE);
+        let (tx, rx) = transcript_event_channel(1);
+        let barrier = TranscriptDeliveryBarrierPort {
+            sender: tx,
+            delivery: Arc::new(Mutex::new(RunTranscriptDelivery::default())),
+        };
+        let consumer = async {
+            let Some(TranscriptEvent::Barrier(completion)) = rx.recv().await else {
+                panic!("expected delivery barrier");
+            };
+            tokio::time::sleep(TRANSCRIPT_DELIVERY_RESERVE / 2).await;
+            completion.send(()).unwrap();
+        };
+        let (result, ()) = tokio::join!(barrier.flush_until(deadline), consumer);
+        assert_eq!(result, Ok(()));
+        // A consumer that never acknowledges still expires within the reserve.
+        assert!(barrier.flush_until(deadline).await.is_err());
+        assert_eq!(tokio::time::Instant::now(), deadline);
     }
 
     #[tokio::test]
