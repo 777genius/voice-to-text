@@ -740,6 +740,7 @@ impl AssemblyAIProvider {
                             let transcription = Transcription {
                                 delivery_seq: None,
                                 completion_v1: false,
+                                continuation_delivery: false,
                                 timing_known: true,
                                 text: text.to_string(),
                                 confidence: json["end_of_turn_confidence"]
@@ -764,6 +765,7 @@ impl AssemblyAIProvider {
                             let transcription = Transcription {
                                 delivery_seq: None,
                                 completion_v1: false,
+                                continuation_delivery: false,
                                 timing_known: true,
                                 text: text.to_string(),
                                 confidence: json["end_of_turn_confidence"]

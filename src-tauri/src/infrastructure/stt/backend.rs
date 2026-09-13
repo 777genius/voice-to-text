@@ -1546,6 +1546,7 @@ impl SttProvider for BackendProvider {
             let mut server_error_reported = false;
             let mut finalize_text_results_seen = 0usize;
             let mut last_delivery_seq = 0u64;
+            let mut continuation_delivery = false;
 
             while let Some(msg_result) = read.next().await {
                 match msg_result {
@@ -1572,6 +1573,7 @@ impl SttProvider for BackendProvider {
                                                     .iter()
                                                     .any(|c| c == CAPABILITY_FINALIZE_OUTCOME)
                                             {
+                                                continuation_delivery = true;
                                                 negotiation.session = Some(ContinuationSession {
                                                     connection_generation,
                                                     provider_session_id: session_id.clone(),
@@ -1692,6 +1694,7 @@ impl SttProvider for BackendProvider {
                                             start_ms.unwrap_or(0) as f64 / 1000.0,
                                             duration_ms.unwrap_or(0) as f64 / 1000.0,
                                         );
+                                        transcription.continuation_delivery = continuation_delivery;
                                         transcription.completion_v1 =
                                             outcome_negotiated.load(Ordering::SeqCst);
                                         if let Some(conf) = confidence {
@@ -1721,6 +1724,7 @@ impl SttProvider for BackendProvider {
                                         last_delivery_seq = delivery_seq;
                                         let mut transcription = Transcription::final_result(text);
                                         transcription.delivery_seq = Some(delivery_seq);
+                                        transcription.continuation_delivery = continuation_delivery;
                                         transcription.completion_v1 = true;
                                         transcription.confidence = confidence;
                                         let cb = callbacks_state
@@ -1758,6 +1762,7 @@ impl SttProvider for BackendProvider {
                                                 start_ms.unwrap_or(0) as f64 / 1000.0,
                                                 duration_ms as f64 / 1000.0,
                                             );
+                                        transcription.continuation_delivery = continuation_delivery;
                                         transcription.completion_v1 =
                                             outcome_negotiated.load(Ordering::SeqCst);
                                         if let Some(conf) = confidence {
@@ -3040,6 +3045,63 @@ mod tests {
         assert!(provider.is_closed.load(Ordering::SeqCst));
         drop(leases);
         assert!(provider.continuation.lock().unwrap().waiters.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ready_metadata_precedes_first_stable_callback_without_projection() {
+        for continuation in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}", listener.local_addr().unwrap());
+            let (release, held) = tokio::sync::oneshot::channel::<()>();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                ws.next().await.unwrap().unwrap(); // config
+                let mut capabilities = vec![CAPABILITY_FINALIZE_OUTCOME];
+                if continuation {
+                    capabilities.push(CAPABILITY_PAUSE_CONTINUE);
+                }
+                ws.send(Message::Text(serde_json::json!({
+                    "type": "ready", "session_id": "ordered", "accepted_capabilities": capabilities
+                }).to_string().into())).await.unwrap();
+                // No capture, coordinator, or projection observer gets to select
+                // delivery mode between Ready and this first output callback.
+                ws.send(Message::Text(
+                    r#"{"type":"stable","delivery_seq":1,"text":"first"}"#.into(),
+                ))
+                .await
+                .unwrap();
+                let _ = held.await;
+            });
+            let mut config = SttConfig::new(SttProviderType::Backend);
+            config.backend_url = Some(url);
+            config.backend_auth_token = Some("fake-only".into());
+            config.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
+            let mut provider = BackendProvider::new();
+            provider.continuation_opted_in = true;
+            provider.initialize(&config).await.unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            provider
+                .start_stream(
+                    Arc::new(|_| {}),
+                    Arc::new(move |t| {
+                        tx.send(t).unwrap();
+                    }),
+                    Arc::new(|_| {}),
+                    Arc::new(|_, _| {}),
+                )
+                .await
+                .unwrap();
+            let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(first.text, "first");
+            assert!(first.completion_v1);
+            assert_eq!(first.continuation_delivery, continuation);
+            let _ = release.send(());
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]

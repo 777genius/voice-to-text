@@ -389,6 +389,25 @@ describe('transcription connect-retry reliability', () => {
     store.cleanup();
   });
 
+  it.each([true, false])('routes the first stable delivery before projection using explicit continuation mode %s', async (continuation) => {
+    appConfigMock.autoPasteText = true;
+    invokeMock.mockImplementation((cmd: string) => Promise.resolve(cmd === 'auto_paste_continuation_text' ? {status: 'confirmed', revision: 1} : undefined));
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({payload: {session_id: 1, status: 'Recording'}});
+    await handlers.get('transcription:final')({payload: {
+      session_id: 1, delivery_seq: 1, text: 'first', timestamp: 0, start: 0, duration: 0,
+      completion_v1: true, continuation_delivery: continuation,
+    }});
+    const calls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_continuation_text' || cmd === 'auto_paste_text');
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toBe(continuation ? 'auto_paste_continuation_text' : 'auto_paste_text');
+    if (continuation) {
+      handlers.get('recording:intent-projection')({payload: {intentRevision: 1, runId: 1, logicalRunId: 1, continuationPhase: 'active', desiredOn: true, pendingStart: false, status: 'Recording'}});
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text')).toHaveLength(0);
+    }
+    store.cleanup();
+  });
+
   it('retains negotiated logical text across a new capture episode and confirms deltas once', async () => {
     appConfigMock.autoPasteText = true;
     appConfigMock.autoCopyToClipboard = true;

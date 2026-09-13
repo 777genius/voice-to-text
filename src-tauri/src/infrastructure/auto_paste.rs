@@ -3515,6 +3515,26 @@ fn activate_continuation_target(target: &AutoPasteTarget) -> Result<()> {
     Ok(())
 }
 
+// Qualification is deliberately explicit: AX support alone is insufficient.
+pub(crate) fn continuation_app_qualified(target: &AutoPasteTarget) -> bool {
+    target.bundle_id == "com.apple.TextEdit" && target.pid > 0
+}
+
+fn publish_continuation_copy(
+    clipboard: &mut impl ClipboardAccess,
+    text: &str,
+    revision: u64,
+) -> super::continuation_context::GuardedPasteOutcome {
+    use super::continuation_context::{begin_effect, GuardedPasteOutcome};
+    if !begin_effect() {
+        return GuardedPasteOutcome::Unavailable;
+    }
+    match clipboard.set_text(text) {
+        Ok(()) => GuardedPasteOutcome::Confirmed { revision },
+        Err(_) => GuardedPasteOutcome::Uncertain,
+    }
+}
+
 // Terminal automatic copy shares the guarded executor, never the legacy IPC.
 pub(crate) fn continuation_copy(
     text: &str,
@@ -3538,8 +3558,10 @@ pub(crate) fn continuation_copy(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (text, revision);
-        GuardedPasteOutcome::Unavailable
+        let Ok(mut clipboard) = SystemClipboard::new() else {
+            return GuardedPasteOutcome::Unavailable;
+        };
+        publish_continuation_copy(&mut clipboard, text, revision)
     }
 }
 
@@ -5033,6 +5055,9 @@ mod continuation_native {
     }
     impl ContinuationNativeContext {
         pub(crate) fn capture(target: AutoPasteTarget) -> Result<Self> {
+            if !continuation_app_qualified(&target) {
+                anyhow::bail!("application is not qualified for continuation");
+            }
             let _budget =
                 crate::infrastructure::continuation_context::NativeEligibilityBudget::start();
             if !check_accessibility_permission() || !frontmost_app_matches_target(&target) {
@@ -5212,6 +5237,71 @@ mod continuation_native {
             }
             self.expected = next;
             GuardedPasteOutcome::Confirmed { revision: 0 }
+        }
+    }
+}
+
+#[cfg(test)]
+mod continuation_remediation_tests {
+    use super::*;
+
+    #[test]
+    fn qualification_requires_textedit_not_merely_an_ax_capable_app() {
+        for (bundle, expected) in [
+            ("com.apple.TextEdit", true),
+            ("com.apple.Notes", false),
+            ("com.google.Chrome", false),
+            ("com.apple.TextEdit.other", false),
+            ("", false),
+        ] {
+            assert_eq!(
+                continuation_app_qualified(&AutoPasteTarget {
+                    bundle_id: bundle.into(),
+                    pid: 123
+                }),
+                expected
+            );
+        }
+        assert!(!continuation_app_qualified(&AutoPasteTarget {
+            bundle_id: "com.apple.TextEdit".into(),
+            pid: 0
+        }));
+    }
+
+    #[test]
+    fn platform_copy_publishes_once_and_classifies_write_failure_as_uncertain() {
+        struct Clipboard {
+            writes: Vec<String>,
+            fail: bool,
+        }
+        impl ClipboardAccess for Clipboard {
+            fn get_text(&mut self) -> Result<String> {
+                panic!("copy does not read or restore")
+            }
+            fn set_text(&mut self, text: &str) -> Result<()> {
+                self.writes.push(text.into());
+                if self.fail {
+                    anyhow::bail!("publication may have partially succeeded");
+                }
+                Ok(())
+            }
+        }
+        for fail in [false, true] {
+            let mut clipboard = Clipboard {
+                writes: vec![],
+                fail,
+            };
+            assert_eq!(
+                publish_continuation_copy(&mut clipboard, "final text", 7),
+                if fail {
+                    super::super::continuation_context::GuardedPasteOutcome::Uncertain
+                } else {
+                    super::super::continuation_context::GuardedPasteOutcome::Confirmed {
+                        revision: 7,
+                    }
+                }
+            );
+            assert_eq!(clipboard.writes, ["final text"]);
         }
     }
 }

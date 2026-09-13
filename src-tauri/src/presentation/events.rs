@@ -71,6 +71,7 @@ pub struct PartialTranscriptionPayload {
     pub duration: f64,
     pub delivery_seq: Option<u64>,
     pub timing_known: bool,
+    pub continuation_delivery: bool,
     pub completion_v1: bool, // длительность utterance в секундах (от Deepgram)
 }
 
@@ -86,6 +87,7 @@ impl PartialTranscriptionPayload {
             delivery_seq: t.delivery_seq,
             timing_known: t.timing_known,
             completion_v1: t.completion_v1,
+            continuation_delivery: t.continuation_delivery,
         }
     }
 }
@@ -104,6 +106,7 @@ pub struct FinalTranscriptionPayload {
     pub duration: f64,
     pub delivery_seq: Option<u64>,
     pub timing_known: bool,
+    pub continuation_delivery: bool,
     pub completion_v1: bool,
 }
 
@@ -120,6 +123,7 @@ impl FinalTranscriptionPayload {
             delivery_seq: t.delivery_seq,
             timing_known: t.timing_known,
             completion_v1: t.completion_v1,
+            continuation_delivery: t.continuation_delivery,
         }
     }
 }

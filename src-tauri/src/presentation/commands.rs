@@ -3820,6 +3820,21 @@ async fn start_recording_checked(
 
     tokio::spawn(async move {
         while let Some(event) = transcript_rx.recv().await {
+            let continuation_delivery = match &event {
+                TranscriptEvent::Partial(t) | TranscriptEvent::Final(t) => t.continuation_delivery,
+                _ => false,
+            };
+            if continuation_delivery {
+                // The provider reader stamps immutable Ready metadata before
+                // enqueueing output. Publish native authorization before emit,
+                // without waiting for the independently scheduled projection.
+                if let Some(policy) = history_service.continuation_policy(session_id) {
+                    accepted_delivery_runs
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .accept(session_id, policy.auto_copy);
+                }
+            }
             match event {
                 TranscriptEvent::Partial(transcription) => {
                     if run_delivery

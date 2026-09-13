@@ -9,6 +9,10 @@ pub struct Transcription {
     #[serde(default)]
     pub completion_v1: bool,
 
+    /// Immutable Pause/Continue mode negotiated before transcript callbacks.
+    #[serde(default)]
+    pub continuation_delivery: bool,
+
     #[serde(default)]
     pub timing_known: bool,
 
@@ -39,6 +43,7 @@ impl Transcription {
         Self {
             delivery_seq: None,
             completion_v1: false,
+            continuation_delivery: false,
             timing_known: false,
             text,
             is_final,

@@ -21,6 +21,7 @@ export interface PartialTranscriptionPayload {
   text: string;
   timestamp: number;
   completion_v1?: boolean;
+  continuation_delivery?: boolean;
   delivery_seq?: number | null;
   timing_known?: boolean;
   is_segment_final: boolean; // true когда сегмент финализирован (но речь продолжается)
@@ -30,6 +31,7 @@ export interface PartialTranscriptionPayload {
 
 export interface FinalTranscriptionPayload {
   completion_v1?: boolean;
+  continuation_delivery?: boolean;
   delivery_seq?: number | null;
   timing_known?: boolean;
   session_id: number;

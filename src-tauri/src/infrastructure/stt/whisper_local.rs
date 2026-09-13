@@ -216,6 +216,7 @@ mod whisper_impl {
             let transcription = Transcription {
                 delivery_seq: None,
                 completion_v1: false,
+                continuation_delivery: false,
                 timing_known: true,
                 text: transcription_result,
                 is_final: true,

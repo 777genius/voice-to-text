@@ -193,6 +193,7 @@ pub fn run() {
             presentation::native_e2e::native_e2e_close_recording,
             #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
             presentation::native_e2e::native_e2e_finish,
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
             presentation::native_e2e::native_e2e_terminal_handoff,
             #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
             presentation::native_e2e::native_e2e_progress,

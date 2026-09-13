@@ -1279,6 +1279,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       ledger = captureAutoPasteLedger(payload.session_id);
     }
     if (ledger.terminal || payload.delivery_seq <= ledger.lastDeliverySeq) return Promise.resolve(false);
+    // Ordered provider metadata precedes the first effect, even if the intent
+    // projection is still queued. Completion support alone does not select mode.
+    ledger.continuation ||= payload.continuation_delivery === true;
     ledger.negotiated = true;
     if (pendingStopFinalization?.sessionId === payload.session_id) clearHotkeyStopFinalizeTimer();
     ledger.lastDeliverySeq = payload.delivery_seq;
@@ -1761,6 +1764,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
           if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:partial')) {
             return;
+          }
+          if (event.payload.continuation_delivery === true) {
+            captureAutoPasteLedger(event.payload.session_id).continuation = true;
           }
           if (event.payload.completion_v1 === true) {
             captureAutoPasteLedger(event.payload.session_id).negotiated = true;

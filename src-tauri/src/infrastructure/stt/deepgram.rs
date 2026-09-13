@@ -1846,6 +1846,7 @@ impl DeepgramProvider {
                                 let transcription = Transcription {
                                     delivery_seq: None,
                                     completion_v1: false,
+                                    continuation_delivery: false,
                                     timing_known: true,
                                     text: text.to_string(),
                                     confidence,
@@ -1895,6 +1896,7 @@ impl DeepgramProvider {
                                     on_final(Transcription {
                                         delivery_seq: None,
                                         completion_v1: false,
+                                        continuation_delivery: false,
                                         timing_known: true,
                                         text: String::new(),
                                         confidence: None,

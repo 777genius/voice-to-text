@@ -559,7 +559,10 @@ impl<N: NativeContext> Run<N> {
             match native.validate() {
                 ContextValidation::Valid { .. } => {}
                 result => {
-                    self.invalid = true;
+                    // Exhausting an eligibility budget denies only this probe.
+                    if native_timeout_seconds().is_some() {
+                        self.invalid = true;
+                    }
                     return result;
                 }
             }
@@ -729,7 +732,11 @@ impl ContinuationContextManager {
                                     target
                                         .clone()
                                         .and_then(|target| {
-                                            ContinuationNativeContext::capture(target).ok()
+                                            super::auto_paste::continuation_app_qualified(&target)
+                                                .then(|| {
+                                                    ContinuationNativeContext::capture(target).ok()
+                                                })
+                                                .flatten()
                                         })
                                         .map(Some)
                                 } else {
@@ -793,24 +800,20 @@ impl ContinuationContextManager {
                             } else {
                                 ContextValidation::Unavailable
                             };
-                            if reply.is_closed()
-                                || std::time::Instant::now() >= deadline
-                                || !worker_registry.lock().unwrap().allowed(id)
-                                || !matches!(result, ContextValidation::Valid { .. })
-                            {
-                                worker_registry.lock().unwrap().refuse(id);
-                                let _ = reply.send(
-                                    if matches!(result, ContextValidation::Valid { .. }) {
-                                        ContextValidation::Unavailable
-                                    } else {
-                                        result
-                                    },
-                                );
-                            } else {
-                                if reply.send(result).is_err() {
-                                    worker_registry.lock().unwrap().refuse(id);
-                                }
+                            if reply.is_closed() || std::time::Instant::now() >= deadline {
+                                continue;
                             }
+                            if !matches!(result, ContextValidation::Valid { .. }) {
+                                worker_registry.lock().unwrap().refuse(id);
+                            }
+                            let result = if !worker_registry.lock().unwrap().allowed(id)
+                                && matches!(result, ContextValidation::Valid { .. })
+                            {
+                                ContextValidation::Unavailable
+                            } else {
+                                result
+                            };
+                            let _ = reply.send(result);
                         }
                         Command::Paste(id, seq, text, execution, reply)
                         | Command::Copy(id, seq, text, execution, reply) => {
@@ -992,27 +995,15 @@ impl ContinuationContextGuard for ContinuationContextManager {
             .try_send(Command::Validate(logical_run_id, deadline, tx))
             .is_err()
         {
-            self.registry.lock().unwrap().refuse(logical_run_id);
             return ContextValidation::Unavailable;
         }
-        let mut caller = Caller(
-            Execution {
-                id: logical_run_id,
-                deadline,
-                canceled: Arc::new(AtomicBool::new(false)),
-                attempted: Arc::new(AtomicBool::new(false)),
-                #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
-                trace: None,
-                registry: self.registry.clone(),
-            },
-            true,
-        );
+        // Eligibility owns only this reply, never the in-flight paste or run.
+        // Dropping/expiring the probe closes the reply without retiring its owner.
         let result = validation_reply(rx, tokio::time::Instant::from_std(deadline)).await;
-        if matches!(result, ContextValidation::Valid { .. }) {
-            if !self.registry.lock().unwrap().allowed(logical_run_id) {
-                return ContextValidation::Unavailable;
-            }
-            caller.1 = false;
+        if matches!(result, ContextValidation::Valid { .. })
+            && !self.registry.lock().unwrap().allowed(logical_run_id)
+        {
+            return ContextValidation::Unavailable;
         }
         result
     }
@@ -2027,72 +2018,66 @@ mod review2_tests {
     use super::*;
 
     #[tokio::test]
-    async fn failed_eligibility_admission_refuses_existing_run_and_never_registers_unknown() {
-        for capture in [false, true] {
-            for disconnected in [false, true] {
-                let (sender, receiver) = mpsc::sync_channel(MAX_QUEUE);
-                let registry = Arc::new(Mutex::new(Registry::default()));
-                assert!(registry.lock().unwrap().register(1));
-                let manager = ContinuationContextManager {
-                    sender: Arc::new(sender),
-                    registry,
-                };
+    async fn failed_capture_admission_refuses_existing_run_and_never_registers_unknown() {
+        for disconnected in [false, true] {
+            let (sender, receiver) = mpsc::sync_channel(MAX_QUEUE);
+            let registry = Arc::new(Mutex::new(Registry::default()));
+            assert!(registry.lock().unwrap().register(1));
+            let manager = ContinuationContextManager {
+                sender: Arc::new(sender),
+                registry,
+            };
+            for _ in 0..MAX_QUEUE {
+                let (tx, _) = oneshot::channel();
+                manager
+                    .sender
+                    .try_send(Command::Release(999, tx))
+                    .ok()
+                    .unwrap();
+            }
+            let receiver = if disconnected {
+                drop(receiver);
+                None
+            } else {
+                Some(receiver)
+            };
+            assert!(manager.registry.lock().unwrap().allowed(1));
+            for id in [1, 2] {
+                let result = manager.capture(id, None, false).await;
+                assert_eq!(result, ContextValidation::Unavailable);
+            }
+            assert!(!manager.registry.lock().unwrap().allowed(1));
+            assert!(!manager.registry.lock().unwrap().active.contains_key(&2));
+            assert_eq!(manager.registry.lock().unwrap().floor, 1);
+            if let Some(receiver) = receiver {
                 for _ in 0..MAX_QUEUE {
-                    let (tx, _) = oneshot::channel();
-                    manager
-                        .sender
-                        .try_send(Command::Release(999, tx))
-                        .ok()
-                        .unwrap();
+                    receiver.try_recv().unwrap();
                 }
-                let receiver = if disconnected {
-                    drop(receiver);
-                    None
-                } else {
-                    Some(receiver)
-                };
-                assert!(manager.registry.lock().unwrap().allowed(1));
-                for id in [1, 2] {
-                    let result = if capture {
-                        manager.capture(id, None, false).await
-                    } else {
-                        manager.validate(id).await
-                    };
-                    assert_eq!(result, ContextValidation::Unavailable);
-                }
-                assert!(!manager.registry.lock().unwrap().allowed(1));
-                assert!(!manager.registry.lock().unwrap().active.contains_key(&2));
-                assert_eq!(manager.registry.lock().unwrap().floor, 1);
-                if let Some(receiver) = receiver {
-                    for _ in 0..MAX_QUEUE {
-                        receiver.try_recv().unwrap();
+                // Admission now succeeds. Exercise the executor's authoritative
+                // pre-effect gate on each subsequent public delivery request.
+                let worker = std::thread::spawn(move || {
+                    for _ in 0..2 {
+                        let command = receiver.recv().unwrap();
+                        let (execution, reply) = match command {
+                            Command::Paste(_, _, _, execution, reply)
+                            | Command::Copy(_, _, _, execution, reply) => (execution, reply),
+                            _ => panic!("unexpected command"),
+                        };
+                        assert!(!execution.allowed());
+                        let _scope = ExecutionScope::enter(execution.clone());
+                        assert!(!begin_effect());
+                        reply.send(execution.outcome()).unwrap();
                     }
-                    // Admission now succeeds. Exercise the executor's authoritative
-                    // pre-effect gate on each subsequent public delivery request.
-                    let worker = std::thread::spawn(move || {
-                        for _ in 0..2 {
-                            let command = receiver.recv().unwrap();
-                            let (execution, reply) = match command {
-                                Command::Paste(_, _, _, execution, reply)
-                                | Command::Copy(_, _, _, execution, reply) => (execution, reply),
-                                _ => panic!("unexpected command"),
-                            };
-                            assert!(!execution.allowed());
-                            let _scope = ExecutionScope::enter(execution.clone());
-                            assert!(!begin_effect());
-                            reply.send(execution.outcome()).unwrap();
-                        }
-                    });
-                    assert_eq!(
-                        manager.guarded_copy(1, 1, "terminal".into()).await,
-                        GuardedPasteOutcome::Unavailable
-                    );
-                    assert_eq!(
-                        manager.guarded_paste(1, 2, "next".into()).await,
-                        GuardedPasteOutcome::Unavailable
-                    );
-                    worker.join().unwrap();
-                }
+                });
+                assert_eq!(
+                    manager.guarded_copy(1, 1, "terminal".into()).await,
+                    GuardedPasteOutcome::Unavailable
+                );
+                assert_eq!(
+                    manager.guarded_paste(1, 2, "next".into()).await,
+                    GuardedPasteOutcome::Unavailable
+                );
+                worker.join().unwrap();
             }
         }
     }
@@ -2198,5 +2183,78 @@ mod review2_tests {
             registry.lock().unwrap().refuse(1);
         }
         assert!(!begin_effect());
+    }
+}
+
+#[cfg(test)]
+mod remediation_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn queued_continue_timeout_and_abandonment_preserve_the_paste_owner() {
+        // Hold the serial executor at the own-paste wait using a channel, not
+        // scheduler timing. A queued eligibility request cannot overtake it.
+        let (sender, receiver) = mpsc::sync_channel(MAX_QUEUE);
+        let registry = Arc::new(Mutex::new(Registry::default()));
+        assert!(registry.lock().unwrap().register(1));
+        let manager = ContinuationContextManager {
+            sender: Arc::new(sender),
+            registry: registry.clone(),
+        };
+        let owner = Execution {
+            id: 1,
+            deadline: std::time::Instant::now() + REQUEST_TIMEOUT,
+            canceled: Arc::new(AtomicBool::new(false)),
+            attempted: Arc::new(AtomicBool::new(true)),
+            registry,
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            trace: None,
+        };
+        assert_eq!(manager.validate(1).await, ContextValidation::Unavailable);
+        let Command::Validate(_, _, expired) = receiver.try_recv().unwrap() else {
+            panic!()
+        };
+        assert!(expired.is_closed());
+        assert!(owner.allowed());
+
+        let mut probe = Box::pin(manager.validate(1));
+        assert!(matches!(
+            futures_util::poll!(&mut probe),
+            std::task::Poll::Pending
+        ));
+        drop(probe);
+        let Command::Validate(_, _, abandoned) = receiver.try_recv().unwrap() else {
+            panic!()
+        };
+        assert!(abandoned.is_closed());
+        assert!(owner.allowed());
+        let _scope = ExecutionScope::enter(owner);
+        assert!(begin_effect()); // Existing paste can still finish and restore.
+
+        let next = manager.validate(1);
+        let answer = async {
+            tokio::task::yield_now().await;
+            let Command::Validate(_, _, reply) = receiver.try_recv().unwrap() else {
+                panic!()
+            };
+            reply
+                .send(ContextValidation::Valid { revision: 1 })
+                .unwrap();
+        };
+        let (result, _) = tokio::join!(next, answer);
+        assert_eq!(result, ContextValidation::Valid { revision: 1 });
+    }
+
+    #[tokio::test]
+    async fn saturated_eligibility_queue_preserves_live_run() {
+        let (sender, _receiver) = mpsc::sync_channel(0);
+        let registry = Arc::new(Mutex::new(Registry::default()));
+        assert!(registry.lock().unwrap().register(1));
+        let manager = ContinuationContextManager {
+            sender: Arc::new(sender),
+            registry,
+        };
+        assert_eq!(manager.validate(1).await, ContextValidation::Unavailable);
+        assert!(manager.registry.lock().unwrap().allowed(1));
     }
 }

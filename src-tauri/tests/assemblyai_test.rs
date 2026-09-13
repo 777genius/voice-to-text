@@ -173,6 +173,7 @@ async fn test_assemblyai_callbacks() {
     let test_transcription = Transcription {
         delivery_seq: None,
         completion_v1: false,
+        continuation_delivery: false,
         timing_known: true,
         text: "test".to_string(),
         confidence: Some(0.95),
@@ -190,6 +191,7 @@ async fn test_assemblyai_callbacks() {
     let final_transcription = Transcription {
         delivery_seq: None,
         completion_v1: false,
+        continuation_delivery: false,
         timing_known: true,
         is_final: true,
         ..test_transcription
