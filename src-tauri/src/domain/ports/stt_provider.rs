@@ -26,6 +26,9 @@ pub enum SttError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("Continuation audio was positively not started; original drain remains authoritative")]
+    ContinuationAudioNotStarted,
 }
 
 /// Более структурированная информация о сетевой/WS ошибке.
@@ -93,11 +96,18 @@ impl SttConnectionError {
 /// Callback type for receiving transcription updates
 pub type TranscriptionCallback = Arc<dyn Fn(Transcription) + Send + Sync>;
 
+/// Provenance of the current meter sample, distinct from capture ownership.
+#[derive(Debug, Clone, Copy)]
+pub struct AudioMeterSample {
+    pub owner: super::AudioCaptureIdentity,
+    pub captured_at_ms: i64,
+}
+
 /// Callback type for receiving audio level updates (0.0 - 1.0)
-pub type AudioLevelCallback = Arc<dyn Fn(f32) + Send + Sync>;
+pub type AudioLevelCallback = Arc<dyn Fn(AudioMeterSample, f32) + Send + Sync>;
 
 /// Callback type for receiving audio spectrum updates (48 bars, each 0.0 - 1.0)
-pub type AudioSpectrumCallback = Arc<dyn Fn([f32; 48]) + Send + Sync>;
+pub type AudioSpectrumCallback = Arc<dyn Fn(AudioMeterSample, [f32; 48]) + Send + Sync>;
 
 /// Callback type for receiving errors (error message, error type)
 pub type ErrorCallback = Arc<dyn Fn(SttError) + Send + Sync>;
@@ -168,6 +178,72 @@ pub trait SttProvider: Send + Sync {
         ))
     }
 
+    /// Immutable actual-Ready negotiation, absent on legacy/DG or before Ready.
+    fn continuation_session(&self) -> Option<crate::domain::ContinuationSession> {
+        None
+    }
+
+    /// Retained negotiation identity for lifecycle observation after a connection
+    /// closes. This is not an audio/control admission permit.
+    fn continuation_lifecycle_session(&self) -> Option<crate::domain::ContinuationSession> {
+        self.continuation_session()
+    }
+
+    /// Receiver-owned lifecycle wakeups; callers inspect the immutable Ready or
+    /// terminal evidence after waking. Notifications never imply readiness alone.
+    fn continuation_lifecycle_notify(&self) -> Option<Arc<tokio::sync::Notify>> {
+        None
+    }
+
+    /// Distinct from legacy pause/resume: retains callbacks and cumulative ACK ledger.
+    /// One mutation, then bounded status recovery; never retries a mutation.
+    async fn continuation_control(
+        &mut self,
+        _session: &crate::domain::ContinuationSession,
+        _operation: crate::domain::ContinuationOperation,
+        _deadline: tokio::time::Instant,
+    ) -> SttResult<crate::domain::ContinuationControlResult> {
+        Err(SttError::Unsupported("EL continuation unavailable".into()))
+    }
+
+    fn continuation_not_started(&self) -> Option<crate::domain::ContinuationNotStartedEvidence> {
+        None
+    }
+
+    fn continuation_operation_identity(
+        &self,
+    ) -> Option<(String, crate::domain::ContinuationOperation)> {
+        None
+    }
+
+    /// First B must cross the actual writer, not merely enter its batching queue.
+    /// The transport marks attempted at its sink boundary after all pre-write waits.
+    async fn send_first_continuation_audio(
+        &mut self,
+        _session: &crate::domain::ContinuationSession,
+        _pause_epoch: u64,
+        _chunk: &AudioChunk,
+        _fence: &crate::domain::ContinuationWriteFence,
+    ) -> SttResult<crate::domain::ContinuationFirstWrite> {
+        Err(SttError::Unsupported(
+            "First continuation audio unavailable".into(),
+        ))
+    }
+
+    /// Evidence remains available after transport teardown.
+    fn finalize_evidence(&self) -> Option<crate::domain::models::ProviderFinalizeReport> {
+        None
+    }
+
+    fn audio_delivery_progress(&self) -> Option<crate::domain::models::AudioDeliveryProgress> {
+        None
+    }
+
+    /// Optional upper bound for coalescing already queued normalized PCM samples.
+    fn preferred_audio_batch_samples(&self) -> Option<usize> {
+        None
+    }
+
     /// Get provider name for identification
     fn name(&self) -> &str;
 
@@ -184,6 +260,13 @@ pub trait SttProvider: Send + Sync {
     /// Check if connection is currently alive (paused but not closed)
     fn is_connection_alive(&self) -> bool {
         false
+    }
+
+    /// TEST observation only: (actual Ready on current connection, local socket retained).
+    /// None is unknown and must never qualify a live trial.
+    #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+    fn native_e2e_transport_observation(&self) -> Option<(bool, bool)> {
+        None
     }
 
     /// Check if provider is online (cloud-based)

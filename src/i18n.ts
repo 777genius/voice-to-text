@@ -297,7 +297,7 @@ const messages = {
       microphoneStopUncertain:
         'The microphone could not be confirmed as stopped. Quit the app to release it safely, then reopen the app.',
       transcriptFinalizeFailed:
-        'The final transcript could not be delivered. Start a new recording to try again.',
+        "The recording could not finish cleanly. If a new recording is rejected, quit and reopen the app before trying again.",
       audioDeviceUnavailable:
         'Microphone is unavailable. Reconnect it and select it in your system sound settings, then try again.',
       audioDeviceNotFound:
@@ -722,7 +722,7 @@ const messages = {
       microphoneStopUncertain:
         'Не удалось подтвердить остановку микрофона. Закройте приложение, чтобы безопасно освободить микрофон, затем откройте его снова.',
       transcriptFinalizeFailed:
-        'Не удалось доставить финальный текст. Запустите новую запись, чтобы попробовать снова.',
+        "Не удалось корректно завершить запись. Если новая запись не запускается, полностью закройте приложение и откройте его снова.",
       audioDeviceUnavailable:
         'Микрофон недоступен. Подключите/переподключите его и выберите в настройках звука системы, затем попробуйте снова.',
       audioDeviceNotFound:
@@ -1147,7 +1147,7 @@ const messages = {
       microphoneStopUncertain:
         'No se pudo confirmar que el micrófono se detuvo. Cierre la aplicación para liberarlo de forma segura y vuelva a abrirla.',
       transcriptFinalizeFailed:
-        'No se pudo entregar la transcripción final. Inicie una nueva grabación para volver a intentarlo.',
+        "La grabación no pudo finalizar correctamente. Si no puede iniciar una nueva grabación, cierre la aplicación y vuelva a abrirla antes de intentarlo de nuevo.",
       audioDeviceUnavailable:
         'El micrófono no está disponible. Vuelva a conectarlo y selecciónelo en la configuración de sonido del sistema, luego inténtelo de nuevo.',
       audioDeviceNotFound:
@@ -1572,7 +1572,7 @@ const messages = {
       microphoneStopUncertain:
         "Impossible de confirmer l'arrêt du microphone. Quittez l'application pour le libérer en toute sécurité, puis rouvrez-la.",
       transcriptFinalizeFailed:
-        "La transcription finale n'a pas pu être livrée. Démarrez un nouvel enregistrement pour réessayer.",
+        "L'enregistrement n'a pas pu se terminer correctement. Si un nouvel enregistrement est refusé, quittez puis rouvrez l'application avant de réessayer.",
       audioDeviceUnavailable:
         'Le microphone est indisponible. Reconnectez-le et sélectionnez-le dans les réglages audio du système, puis réessayez.',
       audioDeviceNotFound:
@@ -1997,7 +1997,7 @@ const messages = {
       microphoneStopUncertain:
         'Das Beenden des Mikrofons konnte nicht bestätigt werden. Beenden Sie die App, um es sicher freizugeben, und öffnen Sie sie erneut.',
       transcriptFinalizeFailed:
-        'Das endgültige Transkript konnte nicht zugestellt werden. Starten Sie eine neue Aufnahme, um es erneut zu versuchen.',
+        "Die Aufnahme konnte nicht ordnungsgemäß beendet werden. Wenn eine neue Aufnahme abgelehnt wird, beenden und öffnen Sie die App erneut, bevor Sie es wieder versuchen.",
       audioDeviceUnavailable:
         'Mikrofon nicht verfügbar. Bitte neu verbinden und in den Sound-Einstellungen des Systems auswählen, dann erneut versuchen.',
       audioDeviceNotFound:
@@ -2422,7 +2422,7 @@ const messages = {
       microphoneStopUncertain:
         'Не вдалося підтвердити зупинку мікрофона. Закрийте застосунок, щоб безпечно звільнити мікрофон, а потім відкрийте його знову.',
       transcriptFinalizeFailed:
-        'Не вдалося доставити фінальний текст. Запустіть новий запис, щоб спробувати ще раз.',
+        "Не вдалося коректно завершити запис. Якщо новий запис не запускається, повністю закрийте застосунок і відкрийте його знову.",
       audioDeviceUnavailable:
         'Мікрофон недоступний. Під’єднайте/перепід’єднайте його та виберіть у налаштуваннях звуку системи, потім спробуйте ще раз.',
       audioDeviceNotFound:

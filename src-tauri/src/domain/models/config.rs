@@ -105,7 +105,7 @@ impl FromStr for BackendStreamingProvider {
 }
 
 /// Configuration for STT provider
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SttConfig {
     /// Provider type
     pub provider: SttProviderType,

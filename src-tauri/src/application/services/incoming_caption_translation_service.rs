@@ -271,6 +271,11 @@ impl From<SttError> for IncomingTranslationError {
             SttError::Configuration(msg) => Self::Configuration(msg),
             SttError::Authentication(msg) => Self::Authentication(msg),
             SttError::Connection(conn) => Self::Connection(conn.to_string()),
+            // Positive no-write disposition is not connection uncertainty or replay permission.
+            SttError::ContinuationAudioNotStarted => Self::Processing(
+                "Continuation audio was positively not started; original drain remains authoritative"
+                    .into(),
+            ),
             SttError::Processing(msg) | SttError::Unsupported(msg) | SttError::Internal(msg) => {
                 Self::Processing(msg)
             }
@@ -1574,6 +1579,16 @@ async fn wait_pending_translations(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continuation_not_started_is_processing_without_replay_permission() {
+        let error = IncomingTranslationError::from(SttError::ContinuationAudioNotStarted);
+        assert_eq!(error.error_type(), "processing");
+        assert!(
+            matches!(error, IncomingTranslationError::Processing(ref message)
+            if message == "Continuation audio was positively not started; original drain remains authoritative")
+        );
+    }
 
     #[tokio::test]
     async fn stt_operation_timeout_is_typed_as_connection_timeout() {

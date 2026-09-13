@@ -1,6 +1,9 @@
 <script setup lang="ts">
+import { recordNativeMeterRender } from '../../e2e/nativeMeterEvidence';
 import { onMounted, onUnmounted, ref, toRefs, watch } from 'vue';
 import { useAudioVisualizer, type AudioVisualizerSource } from '../../composables/useAudioVisualizer';
+import { useTranscriptionStore } from '../../stores/transcription';
+import { RecordingStatus } from '../../types';
 
 const props = defineProps<{
   active: boolean;
@@ -15,11 +18,27 @@ const renderFrameIntervalMs = isMiniVariant ? 50 : 40;
 const AUDIO_VISUALIZER_DEBUG = false;
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
+const transcription = props.source ? null : useTranscriptionStore();
 const containerRef = ref<HTMLElement | null>(null);
 
 const { bars } = useAudioVisualizer(active, {
   barCount: visualBarCount,
   source: props.source,
+  getOwner: () => {
+    if (!transcription) return null;
+    if (transcription.isCaptureReady && transcription.captureRunId !== null) {
+      return { runId: transcription.captureRunId, kind: 'capture', captureGeneration: transcription.captureGeneration };
+    }
+    if (transcription.incomingTranslationSessionId !== null &&
+        [RecordingStatus.Starting, RecordingStatus.Recording].includes(transcription.incomingTranslationStatus)) {
+      return { runId: transcription.incomingTranslationSessionId, kind: 'translation' };
+    }
+    if (!transcription.hasCaptureReadinessProtocol && transcription.sessionId !== null &&
+        (transcription.isStarting || transcription.isRecording)) {
+      return { runId: transcription.sessionId, kind: 'capture' };
+    }
+    return null;
+  },
   // Чуть спокойнее: вверх реагирует быстро, но без "перекача"
   attackSmoothing: 0.85,
   releaseSmoothing: 0.95,
@@ -252,6 +271,7 @@ function render() {
   }
 
   ctx.restore();
+  recordNativeMeterRender(bars.value);
 }
 
 function stopRenderLoop() {

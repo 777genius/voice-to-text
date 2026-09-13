@@ -1,3 +1,4 @@
+pub(crate) mod effective_capture;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use crate::application::services::{
 };
 use crate::application::TranscriptionService;
 use crate::domain::{
-    AppConfig, AudioCapture, AudioError, RecordingMode, Transcription, UiPreferences,
+    AppConfig, AudioCapture, AudioCaptureIdentity, AudioError, RecordingMode, UiPreferences,
 };
 #[cfg(not(all(debug_assertions, feature = "webdriver-e2e")))]
 use crate::infrastructure::audio::{
@@ -189,6 +190,72 @@ fn restore_vad_timeout_session_claim_if_unclaimed(
     );
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VadTimeoutEvent {
+    pub capture_identity: Option<AudioCaptureIdentity>,
+    pub legacy_session_id: u64,
+}
+
+fn is_current_vad_capture_identity(
+    identity: AudioCaptureIdentity,
+    token_is_current: bool,
+    active_run_id: Option<u64>,
+    buffering_generation: Option<u64>,
+) -> bool {
+    token_is_current
+        && active_run_id == Some(identity.run_id)
+        && buffering_generation.map_or(true, |generation| generation == identity.generation)
+}
+
+#[derive(Debug)]
+struct DeferredVadTimeoutFence {
+    identity: AudioCaptureIdentity,
+    terminal: bool,
+}
+
+impl DeferredVadTimeoutFence {
+    fn new(identity: AudioCaptureIdentity) -> Self {
+        Self {
+            identity,
+            terminal: false,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        token_is_current: bool,
+        active_run_id: Option<u64>,
+        buffering_generation: Option<u64>,
+        stop_already_started: bool,
+        coordinator_recording: bool,
+        service_status: crate::domain::RecordingStatus,
+    ) -> Option<AudioCaptureIdentity> {
+        if self.terminal {
+            return None;
+        }
+        if stop_already_started
+            || !is_current_vad_capture_identity(
+                self.identity,
+                token_is_current,
+                active_run_id,
+                buffering_generation,
+            )
+        {
+            self.terminal = true;
+            return None;
+        }
+        if coordinator_recording && service_status == crate::domain::RecordingStatus::Recording {
+            self.terminal = true;
+            return Some(self.identity);
+        }
+        None
+    }
+
+    fn is_terminal(&self) -> bool {
+        self.terminal
+    }
+}
+
 /// Global application state managed by Tauri
 ///
 /// This state is shared across all Tauri commands and can be accessed
@@ -196,6 +263,14 @@ fn restore_vad_timeout_session_claim_if_unclaimed(
 pub struct AppState {
     /// Main transcription service
     pub transcription_service: Arc<TranscriptionService>,
+
+    /// Shared bounded native executor for negotiated continuation validation and delivery.
+    pub continuation_context:
+        Arc<crate::infrastructure::continuation_context::ContinuationContextManager>,
+
+    /// Native-only accepted logical delivery membership, retained boundedly for late finals.
+    pub continuation_delivery_runs:
+        Arc<std::sync::Mutex<crate::domain::ContinuationDeliveryOwnership>>,
 
     /// Application configuration
     pub config: Arc<RwLock<AppConfig>>,
@@ -210,7 +285,7 @@ pub struct AppState {
     pub ui_preferences: Arc<RwLock<UiPreferences>>,
 
     /// Transcription history
-    pub history: Arc<RwLock<Vec<Transcription>>>,
+    pub history: Arc<RwLock<crate::domain::TranscriptionHistory>>,
 
     /// Latest partial transcription
     pub partial_transcription: Arc<RwLock<Option<String>>>,
@@ -223,8 +298,9 @@ pub struct AppState {
 
     /// Receiver для VAD silence timeout событий
     /// Используется в setup для установки обработчика
-    pub vad_timeout_tx: tokio::sync::mpsc::UnboundedSender<u64>,
-    pub vad_timeout_rx: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<u64>>>,
+    pub vad_timeout_tx: tokio::sync::mpsc::UnboundedSender<VadTimeoutEvent>,
+    pub vad_timeout_rx:
+        Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<VadTimeoutEvent>>>,
 
     /// VAD timeout handler task (для перезапуска при смене устройства)
     vad_handler_task: Arc<RwLock<Option<tauri::async_runtime::JoinHandle<()>>>>,
@@ -346,6 +422,13 @@ pub struct AppState {
     pub transcript_delivery_barriers:
         Arc<std::sync::Mutex<BTreeMap<u64, super::commands::TranscriptDeliveryBarrierPort>>>,
 
+    pub prepared_capture_tokens:
+        Arc<std::sync::Mutex<BTreeMap<u64, crate::application::PreparedCaptureToken>>>,
+
+    pub recording_capture_readiness_generation: AtomicU64,
+    pub recording_capture_readiness:
+        Arc<std::sync::Mutex<crate::presentation::events::RecordingCaptureReadinessPayload>>,
+
     /// `notify_one` retains a permit if shutdown reaches Idle before the waiter
     /// is registered.
     pub recording_shutdown_ready: Arc<tokio::sync::Notify>,
@@ -453,7 +536,13 @@ impl AppState {
                 let app_config = AppConfig::default();
                 let coordinator_policy = recording_intent_policy(&app_config, 0);
 
+                let continuation_context = Arc::new(
+                    crate::infrastructure::continuation_context::ContinuationContextManager::new(),
+                );
+                service.set_continuation_context_guard(continuation_context.clone());
                 return Self {
+                    continuation_context,
+                    continuation_delivery_runs: Arc::new(std::sync::Mutex::new(crate::domain::ContinuationDeliveryOwnership::default())),
                     transcription_service: service,
                     config: Arc::new(RwLock::new(app_config.clone())),
                     app_config_revision: Arc::new(RwLock::new(0)),
@@ -461,7 +550,7 @@ impl AppState {
                     auth_state_revision: Arc::new(RwLock::new(0)),
                     ui_preferences_revision: Arc::new(RwLock::new(0)),
                     ui_preferences: Arc::new(RwLock::new(UiPreferences::default())),
-                    history: Arc::new(RwLock::new(Vec::new())),
+                    history: Arc::new(RwLock::new(crate::domain::TranscriptionHistory::default())),
                     partial_transcription: Arc::new(RwLock::new(None)),
                     final_transcription: Arc::new(RwLock::new(None)),
                     microphone_test: Arc::new(RwLock::new(MicrophoneTestState::default())),
@@ -510,6 +599,18 @@ impl AppState {
                         BTreeMap::from([(0, app_config)]),
                     )),
                     transcript_delivery_barriers: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+                    prepared_capture_tokens: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+                    recording_capture_readiness_generation: AtomicU64::new(0),
+                    recording_capture_readiness: Arc::new(std::sync::Mutex::new(
+                        crate::presentation::events::RecordingCaptureReadinessPayload {
+                            capture_generation: None, logical_run_id: None, capture_episode_id: None, capture_ready: None, transport_ready: None,
+                            generation: 0,
+                            run_id: None,
+                            revision: None,
+                            state: crate::presentation::events::RecordingCaptureReadinessState::Unavailable,
+                            reason: crate::presentation::events::RecordingCaptureReadinessReason::Idle,
+                        },
+                    )),
                     recording_shutdown_ready: Arc::new(tokio::sync::Notify::new()),
                     recording_panel_intent_started_at: Arc::new(std::sync::Mutex::new(
                         BTreeMap::new(),
@@ -558,7 +659,13 @@ impl AppState {
                 let hold_to_record_runtime = app_config.hold_to_record;
                 let coordinator_policy = recording_intent_policy(&app_config, 0);
 
+                let continuation_context = Arc::new(
+                    crate::infrastructure::continuation_context::ContinuationContextManager::new(),
+                );
+                service.set_continuation_context_guard(continuation_context.clone());
                 return Self {
+                    continuation_context,
+                    continuation_delivery_runs: Arc::new(std::sync::Mutex::new(crate::domain::ContinuationDeliveryOwnership::default())),
                     transcription_service: service,
                     config: Arc::new(RwLock::new(app_config.clone())),
                     app_config_revision: Arc::new(RwLock::new(0)),
@@ -566,7 +673,7 @@ impl AppState {
                     auth_state_revision: Arc::new(RwLock::new(0)),
                     ui_preferences_revision: Arc::new(RwLock::new(0)),
                     ui_preferences: Arc::new(RwLock::new(UiPreferences::default())),
-                    history: Arc::new(RwLock::new(Vec::new())),
+                    history: Arc::new(RwLock::new(crate::domain::TranscriptionHistory::default())),
                     partial_transcription: Arc::new(RwLock::new(None)),
                     final_transcription: Arc::new(RwLock::new(None)),
                     microphone_test: Arc::new(RwLock::new(MicrophoneTestState::default())),
@@ -615,6 +722,18 @@ impl AppState {
                         BTreeMap::from([(0, app_config)]),
                     )),
                     transcript_delivery_barriers: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+                    prepared_capture_tokens: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+                    recording_capture_readiness_generation: AtomicU64::new(0),
+                    recording_capture_readiness: Arc::new(std::sync::Mutex::new(
+                        crate::presentation::events::RecordingCaptureReadinessPayload {
+                            capture_generation: None, logical_run_id: None, capture_episode_id: None, capture_ready: None, transport_ready: None,
+                            generation: 0,
+                            run_id: None,
+                            revision: None,
+                            state: crate::presentation::events::RecordingCaptureReadinessState::Unavailable,
+                            reason: crate::presentation::events::RecordingCaptureReadinessReason::Idle,
+                        },
+                    )),
                     recording_shutdown_ready: Arc::new(tokio::sync::Notify::new()),
                     recording_panel_intent_started_at: Arc::new(std::sync::Mutex::new(
                         BTreeMap::new(),
@@ -647,6 +766,14 @@ impl AppState {
         let (vad_tx, vad_rx) = tokio::sync::mpsc::unbounded_channel();
         let active_transcription_session_id = Arc::new(AtomicU64::new(0));
 
+        let effective_capture_identity =
+            Arc::new(std::sync::Mutex::new(system_audio.device_name()));
+        let system_audio = effective_capture::EffectiveCapture::new(
+            system_audio,
+            effective_capture_identity.clone(),
+            SystemAudioCapture::device_name,
+        );
+
         // Wrap system audio with VAD
         let mut vad_wrapper = VadCaptureWrapper::new_with_microphone_sensitivity(
             Box::new(system_audio),
@@ -657,24 +784,33 @@ impl AppState {
         // Устанавливаем callback который отправляет событие в channel
         let vad_tx_for_cb = vad_tx.clone();
         let active_session_id_for_vad = active_transcription_session_id.clone();
-        vad_wrapper.set_silence_timeout_callback(Arc::new(move || {
-            let session_id = active_session_id_for_vad.load(Ordering::Relaxed);
+        vad_wrapper.set_identified_silence_timeout_callback(Arc::new(move |capture_identity| {
+            let legacy_session_id = capture_identity
+                .is_none()
+                .then(|| active_session_id_for_vad.load(Ordering::Relaxed))
+                .unwrap_or(0);
             log::info!(
-                "VAD silence timeout triggered - sending notification (session_id={})",
-                session_id
+                "VAD silence timeout triggered - sending notification (capture_identity={:?}, legacy_session_id={})",
+                capture_identity,
+                legacy_session_id
             );
-            let _ = vad_tx_for_cb.send(session_id);
+            let _ = vad_tx_for_cb.send(VadTimeoutEvent {
+                capture_identity,
+                legacy_session_id,
+            });
         }));
 
         let audio_capture = Box::new(vad_wrapper);
         let stt_factory = Arc::new(DefaultSttProviderFactory::new());
 
-        let transcription_service =
-            Arc::new(TranscriptionService::new_with_microphone_sensitivity(
+        let transcription_service = Arc::new(
+            TranscriptionService::new_with_microphone_sensitivity_and_device(
                 audio_capture,
                 stt_factory,
                 microphone_sensitivity,
-            ));
+                effective_capture_identity,
+            ),
+        );
 
         log::info!(
             "AppState initialized with SystemAudioCapture + VAD (timeout: {}ms)",
@@ -693,13 +829,21 @@ impl AppState {
     fn from_recording_ports(
         transcription_service: Arc<TranscriptionService>,
         app_config: AppConfig,
-        vad_tx: tokio::sync::mpsc::UnboundedSender<u64>,
-        vad_rx: tokio::sync::mpsc::UnboundedReceiver<u64>,
+        vad_tx: tokio::sync::mpsc::UnboundedSender<VadTimeoutEvent>,
+        vad_rx: tokio::sync::mpsc::UnboundedReceiver<VadTimeoutEvent>,
         active_transcription_session_id: Arc<AtomicU64>,
     ) -> Self {
         let hold_to_record_runtime = app_config.hold_to_record;
         let coordinator_policy = recording_intent_policy(&app_config, 0);
+        let continuation_context = Arc::new(
+            crate::infrastructure::continuation_context::ContinuationContextManager::new(),
+        );
+        transcription_service.set_continuation_context_guard(continuation_context.clone());
         Self {
+            continuation_context,
+            continuation_delivery_runs: Arc::new(std::sync::Mutex::new(
+                crate::domain::ContinuationDeliveryOwnership::default(),
+            )),
             transcription_service,
             config: Arc::new(RwLock::new(app_config.clone())),
             app_config_revision: Arc::new(RwLock::new(0)),
@@ -707,7 +851,7 @@ impl AppState {
             auth_state_revision: Arc::new(RwLock::new(0)),
             ui_preferences_revision: Arc::new(RwLock::new(0)),
             ui_preferences: Arc::new(RwLock::new(UiPreferences::default())),
-            history: Arc::new(RwLock::new(Vec::new())),
+            history: Arc::new(RwLock::new(crate::domain::TranscriptionHistory::default())),
             partial_transcription: Arc::new(RwLock::new(None)),
             final_transcription: Arc::new(RwLock::new(None)),
             microphone_test: Arc::new(RwLock::new(MicrophoneTestState::default())),
@@ -753,6 +897,22 @@ impl AppState {
                 0, app_config,
             )]))),
             transcript_delivery_barriers: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            prepared_capture_tokens: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            recording_capture_readiness_generation: AtomicU64::new(0),
+            recording_capture_readiness: Arc::new(std::sync::Mutex::new(
+                crate::presentation::events::RecordingCaptureReadinessPayload {
+                    capture_generation: None,
+                    logical_run_id: None,
+                    capture_episode_id: None,
+                    capture_ready: None,
+                    transport_ready: None,
+                    generation: 0,
+                    run_id: None,
+                    revision: None,
+                    state: crate::presentation::events::RecordingCaptureReadinessState::Unavailable,
+                    reason: crate::presentation::events::RecordingCaptureReadinessReason::Idle,
+                },
+            )),
             recording_shutdown_ready: Arc::new(tokio::sync::Notify::new()),
             recording_panel_intent_started_at: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             recording_start_cancellations: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
@@ -783,15 +943,28 @@ impl AppState {
         let fixture = super::native_e2e::fixture();
         let service = Arc::new(TranscriptionService::new(
             Box::new(super::native_e2e::FixtureCapture::new(fixture.clone())),
-            Arc::new(super::native_e2e::FixtureFactory(fixture)),
+            if super::native_e2e::live_mode() {
+                Arc::new(crate::infrastructure::factory::DefaultSttProviderFactory::new())
+            } else {
+                Arc::new(super::native_e2e::FixtureFactory(fixture))
+            },
         ));
-        let config = AppConfig {
+        let mut config = AppConfig {
             auto_copy_to_clipboard: false,
             auto_paste_text: false,
             show_mini_recording_window: false,
             keep_recording_until_manual_stop: true,
             ..AppConfig::default()
         };
+        if super::native_e2e::live_mode() {
+            config.stt = crate::domain::SttConfig::new(crate::domain::SttProviderType::Backend);
+            config.stt.backend_streaming_provider =
+                crate::domain::BackendStreamingProvider::ElevenLabs;
+            config.stt.backend_url = Some("ws://127.0.0.1:51866".into());
+            config.stt.backend_auth_token = Some("dev-local-token".into());
+            config.stt.language = "ru".into();
+            config.stt.keep_connection_alive = false;
+        }
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         Self::from_recording_ports(service, config, tx, rx, Arc::new(AtomicU64::new(0)))
     }
@@ -889,7 +1062,11 @@ impl AppState {
             .ok()
     }
 
-    pub(crate) async fn apply_backend_auth_token_to_stt(&self, token: Option<String>) {
+    pub(crate) async fn apply_backend_auth_token_to_stt(
+        &self,
+        app_handle: &AppHandle,
+        token: Option<String>,
+    ) {
         let _guard = self.stt_config_guard.lock().await;
 
         // Best-effort: ошибки не должны блокировать UX, но они важны для диагностики.
@@ -909,6 +1086,12 @@ impl AppState {
         if let Err(e) = self.transcription_service.update_config(config).await {
             log::warn!("Failed to update transcription service config token: {}", e);
         }
+        let snapshot = self.config.read().await.clone();
+        let version = Self::bump_revision(&self.app_config_revision)
+            .await
+            .parse::<u64>()
+            .unwrap_or(0);
+        super::commands::sync_recording_intent_runtime(app_handle.clone(), &snapshot, version);
     }
 
     async fn emit_invalidation(
@@ -1173,7 +1356,9 @@ impl AppState {
 
                     // Clear STT token
                     if let Some(state) = app_handle_for_task.try_state::<AppState>() {
-                        state.apply_backend_auth_token_to_stt(None).await;
+                        state
+                            .apply_backend_auth_token_to_stt(&app_handle_for_task, None)
+                            .await;
                     }
 
                     break;
@@ -1261,7 +1446,10 @@ impl AppState {
                 // Update STT token best-effort
                 if let Some(state) = app_handle_for_task.try_state::<AppState>() {
                     state
-                        .apply_backend_auth_token_to_stt(Some(json.data.access_token))
+                        .apply_backend_auth_token_to_stt(
+                            &app_handle_for_task,
+                            Some(json.data.access_token),
+                        )
                         .await;
                 } else {
                     let _ = &service_for_task;
@@ -1302,16 +1490,178 @@ impl AppState {
         let handle = tauri::async_runtime::spawn(async move {
             let mut rx_guard = rx.lock().await;
 
-            while let Some(timeout_session_id) = rx_guard.recv().await {
+            while let Some(timeout_event) = rx_guard.recv().await {
                 log::info!(
-                    "VAD silence timeout detected - auto-stopping recording (session_id={})",
-                    timeout_session_id
+                    "VAD silence timeout detected (capture_identity={:?}, legacy_session_id={})",
+                    timeout_event.capture_identity,
+                    timeout_event.legacy_session_id
                 );
 
                 let Some(state) = app_handle.try_state::<AppState>() else {
                     log::warn!("VAD timeout ignored - app state is unavailable");
                     continue;
                 };
+                if state.recording_intent_coordinator_mode
+                    == RecordingIntentCoordinatorMode::Desired
+                {
+                    let Some(identity) = timeout_event.capture_identity else {
+                        log::warn!("VAD timeout ignored - desired capture has no run identity");
+                        continue;
+                    };
+                    let token = crate::application::PreparedCaptureToken {
+                        run_id: identity.run_id,
+                        generation: identity.generation,
+                    };
+                    let policy_version = {
+                        let coordinator = state
+                            .recording_intent_coordinator
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        let Some(run) = coordinator.capture.run() else {
+                            log::info!("VAD timeout ignored - capture is already idle");
+                            continue;
+                        };
+                        let buffering_generation = match coordinator.capture {
+                            super::recording_intent_coordinator::CaptureState::Buffering {
+                                generation,
+                                ..
+                            } => Some(generation),
+                            _ => None,
+                        };
+                        if !is_current_vad_capture_identity(
+                            identity,
+                            service.capture_token_is_current(token),
+                            Some(run.run_id.get()),
+                            buffering_generation,
+                        ) {
+                            log::info!(
+                                "VAD timeout ignored - coordinator owns a different capture (identity={:?}, active_run={})",
+                                identity,
+                                run.run_id.get()
+                            );
+                            continue;
+                        }
+                        run.policy.version
+                    };
+                    let frozen_manual_stop_only = state
+                        .recording_intent_policy_snapshots
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .get(&policy_version)
+                        .map(|config| config.keep_recording_until_manual_stop);
+                    let Some(frozen_manual_stop_only) = frozen_manual_stop_only else {
+                        log::warn!(
+                            "VAD timeout ignored - frozen policy is unavailable for run {}",
+                            identity.run_id
+                        );
+                        continue;
+                    };
+                    if frozen_manual_stop_only {
+                        log::info!(
+                            "VAD timeout ignored - frozen run policy requires manual stop (run_id={})",
+                            identity.run_id
+                        );
+                        continue;
+                    }
+
+                    // Negotiated pending PCM has a seal-and-drain route. Stop this
+                    // exact episode now; waiting for attachment keeps the mic live.
+                    let immediate_stop = {
+                        let coordinator = state
+                            .recording_intent_coordinator
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        if coordinator.continuation.is_some()
+                            && coordinator.capture_identity()
+                                == Some((
+                                    super::recording_intent_coordinator::RunId::new(
+                                        identity.run_id,
+                                    ),
+                                    identity.generation,
+                                ))
+                            && service.capture_token_is_current(token)
+                        {
+                            coordinator.current_capture_stop(
+                                super::recording_intent_coordinator::IntentSource::Vad,
+                            )
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(event) = immediate_stop {
+                        super::commands::dispatch_recording_coordinator_event(
+                            app_handle.clone(),
+                            event,
+                        );
+                        continue;
+                    }
+
+                    // During Buffering the timeout belongs to a captured phrase that has not
+                    // reached the provider yet. Defer stop until Recording so normal shutdown
+                    // drains the run-scoped FIFO instead of cancelling and discarding it.
+                    let mut fence = DeferredVadTimeoutFence::new(identity);
+                    loop {
+                        let capture = state
+                            .recording_intent_coordinator
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .capture;
+                        let active_run_id = capture.run().map(|run| run.run_id.get());
+                        let buffering_generation = match capture {
+                            super::recording_intent_coordinator::CaptureState::Buffering {
+                                generation,
+                                ..
+                            } => Some(generation),
+                            _ => None,
+                        };
+                        let stop_already_started = matches!(
+                            capture,
+                            super::recording_intent_coordinator::CaptureState::Stopping { .. }
+                                | super::recording_intent_coordinator::CaptureState::StopUncertain {
+                                    ..
+                                }
+                        );
+                        let coordinator_recording = matches!(
+                            capture,
+                            super::recording_intent_coordinator::CaptureState::Recording { .. }
+                        );
+                        let ready_identity = fence.observe(
+                            service.capture_token_is_current(token),
+                            active_run_id,
+                            buffering_generation,
+                            stop_already_started,
+                            coordinator_recording,
+                            service.get_status().await,
+                        );
+                        if let Some(ready_identity) = ready_identity {
+                            super::commands::dispatch_recording_coordinator_event(
+                                app_handle.clone(),
+                                super::recording_intent_coordinator::CoordinatorEvent::CaptureIntent {
+                                    intent: super::recording_intent_coordinator::RecordingIntent::stop_expected(
+                                        super::recording_intent_coordinator::IntentSource::Vad,
+                                        None,
+                                        Some(super::recording_intent_coordinator::RunId::new(
+                                            ready_identity.run_id,
+                                        )),
+                                    ),
+                                    generation: ready_identity.generation,
+                                },
+                            );
+                            break;
+                        }
+                        if fence.is_terminal() {
+                            log::info!(
+                                "Deferred VAD timeout dropped - coordinator capture changed (identity={:?})",
+                                identity
+                            );
+                            break;
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_millis(25)).await;
+                    }
+                    continue;
+                }
+
+                let timeout_session_id = timeout_event.legacy_session_id;
                 let _lifecycle_guard = state.recording_lifecycle_guard.lock().await;
                 let active_session_id = state.active_transcription_session_id.clone();
                 let config = state.config.clone();
@@ -1333,29 +1683,9 @@ impl AppState {
                     continue;
                 }
 
-                // Проверяем что действительно идет запись
                 let status = service.get_status().await;
                 if status != crate::domain::RecordingStatus::Recording {
                     log::debug!("VAD timeout ignored - not recording (status: {:?})", status);
-                    continue;
-                }
-
-                if state.recording_intent_coordinator_mode
-                    == RecordingIntentCoordinatorMode::Desired
-                {
-                    drop(_lifecycle_guard);
-                    super::commands::dispatch_recording_coordinator_event(
-                        app_handle.clone(),
-                        super::recording_intent_coordinator::CoordinatorEvent::Intent(
-                            super::recording_intent_coordinator::RecordingIntent::stop_expected(
-                                super::recording_intent_coordinator::IntentSource::Vad,
-                                None,
-                                Some(super::recording_intent_coordinator::RunId::new(
-                                    timeout_session_id,
-                                )),
-                            ),
-                        ),
-                    );
                     continue;
                 }
 
@@ -1477,6 +1807,27 @@ impl AppState {
         app_handle: tauri::AppHandle,
         force: bool,
     ) -> Result<(), String> {
+        let vad_timeout_ms = self.config.read().await.vad_silence_timeout_ms;
+        self.ensure_audio_capture_device_with_vad_timeout(
+            device_name,
+            app_handle,
+            force,
+            vad_timeout_ms,
+        )
+        .await
+    }
+
+    /// Ensures the capture wrapper uses the VAD timeout frozen for the owning run.
+    pub async fn ensure_audio_capture_device_with_vad_timeout(
+        &self,
+        device_name: Option<String>,
+        app_handle: tauri::AppHandle,
+        force: bool,
+        vad_timeout_ms: u64,
+    ) -> Result<(), String> {
+        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+        self.transcription_service
+            .set_effective_capture_device(Some("native-window-e2e".into()));
         let normalized_device_name = normalize_audio_capture_device_name(device_name);
         let cached_device = self.active_audio_capture_device.read().await.clone();
 
@@ -1501,8 +1852,12 @@ impl AppState {
             );
         }
 
-        self.recreate_audio_capture_with_device(normalized_device_name, app_handle)
-            .await
+        self.recreate_audio_capture_with_device_and_vad_timeout(
+            normalized_device_name,
+            app_handle,
+            vad_timeout_ms,
+        )
+        .await
     }
 
     /// Пересоздает audio capture с новым устройством (применяет selected_audio_device)
@@ -1512,10 +1867,27 @@ impl AppState {
         device_name: Option<String>,
         app_handle: tauri::AppHandle,
     ) -> Result<(), String> {
+        let vad_timeout_ms = self.config.read().await.vad_silence_timeout_ms;
+        self.recreate_audio_capture_with_device_and_vad_timeout(
+            device_name,
+            app_handle,
+            vad_timeout_ms,
+        )
+        .await
+    }
+
+    async fn recreate_audio_capture_with_device_and_vad_timeout(
+        &self,
+        device_name: Option<String>,
+        app_handle: tauri::AppHandle,
+        vad_timeout_ms: u64,
+    ) -> Result<(), String> {
         #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
         {
             // Retain deterministic capture; never enumerate/open a real audio device.
-            let _ = (device_name, app_handle);
+            let _ = (device_name, app_handle, vad_timeout_ms);
+            self.transcription_service
+                .set_effective_capture_device(Some("native-window-e2e".into()));
             return Ok(());
         }
         let normalized_device_name = normalize_audio_capture_device_name(device_name);
@@ -1553,12 +1925,17 @@ impl AppState {
             }
         };
 
-        // Получаем текущий VAD timeout из конфига
-        let vad_timeout_ms = self.config.read().await.vad_silence_timeout_ms;
-
         // Создаем VAD processor
         let vad = VadProcessor::new(Some(vad_timeout_ms), None)
             .map_err(|e| format!("Failed to create VAD processor: {}", e))?;
+
+        let effective_capture_identity =
+            self.transcription_service.effective_capture_device_source();
+        let system_audio = effective_capture::EffectiveCapture::new(
+            system_audio,
+            effective_capture_identity.clone(),
+            SystemAudioCapture::device_name,
+        );
 
         // Wrap system audio with VAD
         let mut vad_wrapper = VadCaptureWrapper::new_with_microphone_sensitivity(
@@ -1571,13 +1948,20 @@ impl AppState {
         // Receiver слушается единственным обработчиком, а при смене устройства меняется только callback.
         let vad_tx = self.vad_timeout_tx.clone();
         let active_session_id_for_vad = self.active_transcription_session_id.clone();
-        vad_wrapper.set_silence_timeout_callback(Arc::new(move || {
-            let session_id = active_session_id_for_vad.load(Ordering::Relaxed);
+        vad_wrapper.set_identified_silence_timeout_callback(Arc::new(move |capture_identity| {
+            let legacy_session_id = capture_identity
+                .is_none()
+                .then(|| active_session_id_for_vad.load(Ordering::Relaxed))
+                .unwrap_or(0);
             log::info!(
-                "VAD silence timeout triggered - sending notification (session_id={})",
-                session_id
+                "VAD silence timeout triggered - sending notification (capture_identity={:?}, legacy_session_id={})",
+                capture_identity,
+                legacy_session_id
             );
-            let _ = vad_tx.send(session_id);
+            let _ = vad_tx.send(VadTimeoutEvent {
+                capture_identity,
+                legacy_session_id,
+            });
         }));
 
         // Заменяем audio capture в TranscriptionService
@@ -1613,9 +1997,11 @@ impl Default for AppState {
 mod tests {
     use super::{
         audio_capture_device_cache_matches, claim_translation_shutdown, claim_vad_timeout_session,
-        is_current_vad_timeout_session, normalize_audio_capture_device_name,
-        restore_vad_timeout_session_claim_if_unclaimed, RecordingIntentCoordinatorMode,
+        is_current_vad_capture_identity, is_current_vad_timeout_session,
+        normalize_audio_capture_device_name, restore_vad_timeout_session_claim_if_unclaimed,
+        DeferredVadTimeoutFence, RecordingIntentCoordinatorMode,
     };
+    use crate::domain::{AudioCaptureIdentity, RecordingStatus};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     #[test]
@@ -1690,6 +2076,145 @@ mod tests {
         assert!(!is_current_vad_timeout_session(1, 0));
         assert!(!is_current_vad_timeout_session(1, 2));
         assert!(is_current_vad_timeout_session(2, 2));
+    }
+
+    #[test]
+    fn vad_capture_identity_rejects_old_generation_and_accepts_current_pending_capture() {
+        let old = AudioCaptureIdentity {
+            run_id: 17,
+            generation: 4,
+        };
+
+        assert!(!is_current_vad_capture_identity(
+            old,
+            true,
+            Some(17),
+            Some(5)
+        ));
+        assert!(is_current_vad_capture_identity(
+            AudioCaptureIdentity {
+                run_id: 17,
+                generation: 5,
+            },
+            true,
+            Some(17),
+            Some(5)
+        ));
+    }
+
+    #[test]
+    fn vad_capture_identity_rejects_recreated_wrapper_callback_for_new_run() {
+        let old_wrapper = AudioCaptureIdentity {
+            run_id: 17,
+            generation: 5,
+        };
+
+        assert!(!is_current_vad_capture_identity(
+            old_wrapper,
+            false,
+            Some(18),
+            Some(6)
+        ));
+    }
+
+    #[test]
+    fn vad_capture_identity_rejects_cancelled_pending_capture() {
+        let cancelled = AudioCaptureIdentity {
+            run_id: 19,
+            generation: 7,
+        };
+
+        assert!(!is_current_vad_capture_identity(
+            cancelled, false, None, None
+        ));
+    }
+
+    #[test]
+    fn pending_phrase_vad_waits_for_both_recording_states_and_dispatches_once() {
+        let identity = AudioCaptureIdentity {
+            run_id: 23,
+            generation: 8,
+        };
+        let mut fence = DeferredVadTimeoutFence::new(identity);
+
+        // The phrase is captured in the pending FIFO, but its provider is not ready.
+        assert_eq!(
+            fence.observe(true, Some(23), Some(8), false, false, RecordingStatus::Idle),
+            None
+        );
+        assert!(!fence.is_terminal());
+
+        // The service commits Recording before StartFinished reaches the coordinator. Stopping
+        // here would turn the coordinator's pending start into cancellation and lose the FIFO.
+        assert_eq!(
+            fence.observe(
+                true,
+                Some(23),
+                None,
+                false,
+                false,
+                RecordingStatus::Recording,
+            ),
+            None
+        );
+        assert!(!fence.is_terminal());
+
+        // Once both sides commit Recording, the ordinary run-scoped stop may drain the phrase.
+        assert_eq!(
+            fence.observe(
+                true,
+                Some(23),
+                None,
+                false,
+                true,
+                RecordingStatus::Recording,
+            ),
+            Some(identity)
+        );
+        assert!(fence.is_terminal());
+        assert_eq!(
+            fence.observe(
+                true,
+                Some(23),
+                None,
+                false,
+                true,
+                RecordingStatus::Recording,
+            ),
+            None,
+            "one VAD event must dispatch at most one stop"
+        );
+    }
+
+    #[test]
+    fn pending_phrase_vad_cancellation_becomes_terminal_without_stop() {
+        let identity = AudioCaptureIdentity {
+            run_id: 24,
+            generation: 9,
+        };
+        let mut fence = DeferredVadTimeoutFence::new(identity);
+
+        assert_eq!(
+            fence.observe(true, Some(24), Some(9), false, false, RecordingStatus::Idle),
+            None
+        );
+        assert_eq!(
+            fence.observe(false, None, None, false, false, RecordingStatus::Idle),
+            None
+        );
+        assert!(fence.is_terminal());
+        assert_eq!(
+            fence.observe(
+                true,
+                Some(25),
+                None,
+                false,
+                true,
+                RecordingStatus::Recording,
+            ),
+            None,
+            "a cancelled timeout cannot stop the replacement run"
+        );
     }
 
     #[test]

@@ -1,5 +1,8 @@
+import { closeOwnedDocument } from './helpers/nativeOwnedDocument.mjs';
+import { isDeepStrictEqual, promisify } from 'node:util';
+import { verifyQualificationTerminals, verifyQualificationSources, verifyQualificationConnections, liveTrials, readApprovedFixtures, validateHarnessConfig, exactInsertionEvidence } from './helpers/nativeContinuation.mjs';
 import { createWriteStream } from 'node:fs';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -11,23 +14,50 @@ const marker = 'VOICETEXT_NATIVE_WINDOW_E2E_V1';
 const excluded = /^(?:\.git|\.codex|\.claude|\.ssh|\.aws|\.npmrc|node_modules|target|dist|\.env(?:\..*)?|auth\.(?:json|toml)|credentials(?:\..*)?)$/i;
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
+export async function verifyPreparationArtifact(directory, resultPath, runtimeFailure) {
+  const verification = { mode: 'reader-preparation', qualificationPassed: false, passed: false,
+    resultPath, errors: runtimeFailure ? [String(runtimeFailure)] : [] };
+  try {
+    const envelope = JSON.parse(await readFile(resultPath, 'utf8'));
+    validatePreparationResult(envelope, directory);
+    verification.passed = !runtimeFailure;
+  } catch (error) { verification.errors.push(String(error)); }
+  await writeFile(path.join(directory, 'reader-preparation-verification.json'),
+    JSON.stringify(verification, null, 2), { flag: 'wx' });
+  if (!verification.passed) throw new Error(verification.errors.join('; '));
+  return verification;
+}
+
 export function parseArguments(args) {
   if (args.length === 0) return {};
+  if (args.length === 1 && args[0] === '--reader-preparation') return { readerPreparation: true };
+  if (args[0] === '--reuse-build' && path.isAbsolute(args[1] || '') &&
+      ['--qualification-live', '--continuation-case', '--reader-preparation'].includes(args[2])) {
+    return { ...parseArguments(args.slice(2)), reuseBuild: args[1] };
+  }
+  if (args.length === 3 && args[0] === '--qualification-live' && path.isAbsolute(args[1]) && liveTrials.some(t => t.id === args[2])) return { harnessConfig: args[1], trialId: args[2] };
+  if (args.length === 2 && args[0] === '--continuation-case' && ['after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle', 'seal-stop', 'seal-hold', 'seal-close', 'cancel', 'stale-epoch', 'terminal-before-write', 'E04', 'E41', 'E42'].includes(args[1])) return { continuationFake: true, continuationCase: args[1] };
+  if (args.length === 1 && args[0] === '--continuation-fake') return { continuationFake: true };
+  if (args.length === 1 && args[0] === '--terminal-cleanup') return { terminalCleanup: true };
+  if (args.length === 2 && args[0] === '--live-elevenlabs' && path.isAbsolute(args[1])) {
+    return { liveFixturePath: args[1] };
+  }
   if (args.length === 2 && args[0] === '--no-build' && path.isAbsolute(args[1])) {
     return { artifactDir: args[1] };
   }
-  throw new Error('Usage: node e2e-tests/run-native-window-e2e.mjs [--no-build /tmp/voicetext-native-e2e-XXXXXX]. Arbitrary binary/config flags are forbidden.');
+  throw new Error('Usage: node e2e-tests/run-native-window-e2e.mjs [--reuse-build /canonical/voicetext-native-e2e-XXXXXX (--reader-preparation | --qualification-live /absolute/backend.json TRIAL | --continuation-case CASE)] or existing fresh-build modes / --no-build (unpaid only). Arbitrary binary/config flags are forbidden.');
 }
 
 export async function validateArtifactDirectory(directory) {
   const canonical = await realpath(directory);
   const temporary = await realpath(os.tmpdir());
-  if (canonical !== path.resolve(directory) || path.dirname(canonical) !== temporary ||
+  if (canonical !== directory || path.dirname(canonical) !== temporary ||
       !/^voicetext-native-e2e-[a-zA-Z0-9]+$/.test(path.basename(canonical))) {
     throw new Error('Refusing a noncanonical or non-disposable native test directory');
   }
   const info = await stat(canonical);
   if (typeof process.getuid === 'function' && info.uid !== process.getuid()) throw new Error('Test directory belongs to another user');
+  if (!info.isDirectory() || (info.mode & 0o022)) throw new Error('Untrusted writable test directory');
   return canonical;
 }
 
@@ -52,47 +82,148 @@ export function sanitizedEnvironment(directory, inherited = process.env) {
   };
 }
 
-async function runOwned(command, args, options, timeoutMs, logPath, progressPath) {
+export function executionEnvironment(directory, options) {
+  const env = sanitizedEnvironment(directory);
+  if (options.readerPreparation) {
+    if (options.trialId || options.continuationFake || options.liveFixturePath || options.terminalCleanup || options.harnessConfig) throw new Error('Conflicting preparation mode');
+    env.VOICETEXT_NATIVE_READER_PREPARATION = 'unpaid-v1';
+  }
+  const trial = liveTrials.find(t => t.id === options.trialId);
+  if (trial || options.continuationFake) {
+    env.VOICETEXT_NATIVE_CONTINUATION = trial ? 'p4-live-v1' : 'p4-fake-v1';
+    if (!trial && options.continuationCase) env.VOICETEXT_NATIVE_CONTINUATION_CASE = options.continuationCase;
+    if (trial?.continuation || (!trial && options.continuationFake)) {
+      env.VOICETEXT_EL_PAUSE_CONTINUE_V1 = 'true';
+      env.VOICETEXT_EL_FINALIZE_OUTCOME_V1 = 'true';
+    }
+  }
+  return env;
+}
+
+export function createQualificationCollector(trial, proxyEvents, readEnvelope, now) {
+  let resultObservedMs;
+  return async (isNativeAlive = () => false) => {
+    let pending;
+    try { pending = await readEnvelope(); }
+    catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return false; throw error; }
+    const atMs = now();
+    resultObservedMs ??= atMs;
+    if (pending.marker !== marker || pending.passed !== true || pending.preTeardown?.normalStopReleased !== true ||
+        pending.preTeardown?.cleanupDeferredToRunner !== true || pending.report?.trial?.id !== trial.id)
+      throw new Error('Missing successful pre-teardown native normal-Stop evidence');
+    if (!isNativeAlive()) throw new Error('Native exited before normal-Stop closure collection');
+    const boundary = { event: 'qualification_pre_teardown', atMs, clock: 'runner-performance-now', nativeProcessAlive: true };
+    try { verifyQualificationConnections(trial, [...proxyEvents, boundary]); }
+    catch (error) { if (atMs - resultObservedMs < 5000) return false; throw error; }
+    proxyEvents.push(boundary);
+    return true;
+  };
+}
+
+export async function runOwned(command, args, options, timeoutMs, logPath, progressPath, collectBeforeTeardown, terminationPath) {
   const output = createWriteStream(logPath, { flags: 'wx' });
-  const child = spawn(command, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(command, args, { ...options, ...(terminationPath ? { detached: true } : {}), stdio: ['ignore', 'pipe', 'pipe'] });
+  const kill = signal => {
+    try { if (terminationPath && child.pid) process.kill(-child.pid, signal); else child.kill(signal); }
+    catch (error) { if (error.code !== 'ESRCH') throw error; }
+  };
+  let tearingDown = false, terminationRequested = false, force;
+  const requestTermination = () => {
+    if (tearingDown || terminationRequested) return;
+    terminationRequested = true;
+    kill('SIGTERM');
+    force = setTimeout(() => { if (!tearingDown) kill('SIGKILL'); }, 5000);
+  };
+  const interrupted = signal => {
+    if (tearingDown) return;
+    collectionError ??= new Error(`Runner interrupted: ${signal}`);
+    requestTermination();
+  };
+  const onInt = () => interrupted('SIGINT'), onTerm = () => interrupted('SIGTERM');
+  process.on('SIGINT', onInt); process.on('SIGTERM', onTerm);
   for (const stream of [child.stdout, child.stderr]) stream.on('data', (chunk) => {
     output.write(chunk);
     process.stdout.write(chunk);
   });
+  let collected = false; let collectionError; let collecting = false; let primaryFailure;
+  output.on('error', error => { if (!tearingDown) { collectionError ??= error; kill('SIGKILL'); } });
+  const collector = collectBeforeTeardown ? setInterval(async () => {
+    if (tearingDown || terminationRequested || collecting || collected || collectionError) return;
+    collecting = true;
+    try {
+      if (child.exitCode === null && child.signalCode === null && await collectBeforeTeardown(() => child.exitCode === null && child.signalCode === null)) {
+        if (tearingDown || terminationRequested) return;
+        if (child.exitCode !== null || child.signalCode !== null) throw new Error('Native exited during pre-teardown collection');
+        collected = true;
+        requestTermination();
+      }
+    } catch (error) { if (!tearingDown) { collectionError ??= error; requestTermination(); } }
+    finally { collecting = false; }
+  }, 25) : undefined;
   let timedOut = false;
-  let force;
   const started = Date.now();
   let lastProgress = started;
   const heartbeat = progressPath ? setInterval(async () => {
     try { const info = await stat(progressPath); lastProgress = Math.max(lastProgress, info.mtimeMs); } catch {}
+    if (tearingDown) return;
     const silenceLimit = lastProgress === started ? 45_000 : 60_000;
     if (!timedOut && Date.now() - lastProgress > silenceLimit) {
       timedOut = true;
-      child.kill('SIGTERM');
-      force = setTimeout(() => child.kill('SIGKILL'), 5_000);
+      collectionError ??= new Error(`${path.basename(command)} failed: progress timeout`);
+      requestTermination();
     }
   }, 5_000) : undefined;
   const timeout = setTimeout(() => {
+    if (tearingDown) return;
     timedOut = true;
-    child.kill('SIGTERM');
-    force = setTimeout(() => child.kill('SIGKILL'), 5_000);
+    collectionError ??= new Error(`${path.basename(command)} failed: runtime timeout`);
+    requestTermination();
   }, timeoutMs);
   try {
     const code = await new Promise((resolve, reject) => {
       child.once('error', reject);
       child.once('exit', (status, signal) => resolve({ status, signal }));
     });
-    if (timedOut || code.status !== 0) throw new Error(`${path.basename(command)} failed: ${JSON.stringify({ ...code, timedOut })}`);
-  } finally {
+    if (collectionError) throw collectionError;
+    if (collectBeforeTeardown && !collected) throw new Error('Native process exited before normal-Stop closure collection');
+    const expectedCollectedExit = collected && (code.status === 0 || ['SIGTERM', 'SIGKILL'].includes(code.signal));
+    if (timedOut || (collected ? !expectedCollectedExit : code.status !== 0)) throw new Error(`${path.basename(command)} failed: ${JSON.stringify({ ...code, timedOut })}`);
+  } catch (error) { primaryFailure = error; throw error; }
+  finally {
+    tearingDown = true;
+    try {
+    clearInterval(collector);
     clearTimeout(timeout);
     clearInterval(heartbeat);
     clearTimeout(force);
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-    await new Promise((resolve) => output.end(resolve));
+    if (child.pid && child.exitCode === null && child.signalCode === null) {
+      const exited = new Promise(resolve => child.once('exit', resolve));
+      kill('SIGKILL'); await exited;
+    }
+    if (terminationPath && child.pid) {
+      // Retire the owned process group, including an interrupted osascript child.
+      kill('SIGKILL');
+      let groupGone = false;
+      const deadline = performance.now() + 500;
+      do {
+        try { process.kill(-child.pid, 0); }
+        catch (error) { if (error.code === 'ESRCH') { groupGone = true; break; } throw error; }
+        await new Promise(resolve => setTimeout(resolve, 10));
+      } while (performance.now() < deadline);
+      await writeFile(terminationPath, JSON.stringify({ pid: child.pid,
+        exited: child.exitCode !== null || child.signalCode !== null, groupGone }), { flag: 'wx' });
+    }
+    } catch (error) {
+      if (primaryFailure) throw new AggregateError([primaryFailure, error], `${primaryFailure.message}; process cleanup: ${error.message}`, { cause: primaryFailure });
+      throw error;
+    } finally {
+      process.removeListener('SIGINT', onInt); process.removeListener('SIGTERM', onTerm);
+      await new Promise((resolve) => output.end(resolve));
+    }
   }
 }
 
-async function snapshotDigest(directory) {
+export async function snapshotDigest(directory) {
   const hash = createHash('sha256');
   async function visit(current) {
     const entries = await readdir(current, { withFileTypes: true });
@@ -110,20 +241,530 @@ async function snapshotDigest(directory) {
 
 export async function validateCachedBinary(directory) {
   await validateArtifactDirectory(directory);
+  await trustedArtifactEntry(path.join(directory, 'native-build.json'));
   const manifest = JSON.parse(await readFile(path.join(directory, 'native-build.json'), 'utf8'));
   if (manifest.marker !== marker || manifest.binary !== 'native-window-e2e' || !/^[a-f0-9]{64}$/.test(manifest.sourceSha256 || '') ||
       !/^com\.voicetotext\.app\.native-e2e\.[a-zA-Z0-9]+$/.test(manifest.identifier || '')) throw new Error('Invalid native build manifest');
   const binary = path.join(directory, manifest.binary);
+  await trustedArtifactEntry(binary);
   if (await realpath(binary) !== binary) throw new Error('Native binary cannot be a symlink');
   const bytes = await readFile(binary);
   if (digest(bytes) !== manifest.sha256 || !bytes.includes(Buffer.from(marker))) throw new Error('Native binary hash/feature marker mismatch');
   if (!bytes.includes(Buffer.from(manifest.identifier))) throw new Error('Native binary application identity mismatch');
+  const snapshot = path.join(directory, 'frontend');
+  await sourceInputFingerprint(snapshot, undefined, true);
+  if (await realpath(snapshot) !== snapshot || await snapshotDigest(snapshot) !== manifest.sourceSha256) {
+    throw new Error('Native source snapshot hash mismatch');
+  }
   return binary;
 }
 
+// Reuse v1 fingerprints the same source allowlist as the isolated build, with
+// length-framed paths/content. No source symlinks are silently dropped. The exact
+// schema outputs below differ only for inputs; snapshot integrity retains them.
+const reuseSchema = 'native-build-reuse-v1';
+const tauriConfigPath = 'src-tauri/tauri.conf.json';
+// Only these build outputs are omitted from INPUT comparison. snapshotDigest
+// still binds their bytes, and traversal still validates their types/trust.
+const generatedSchemas = new Set(['acl-manifests.json', 'capabilities.json',
+  'desktop-schema.json', 'macOS-schema.json'].map(name => `src-tauri/gen/schemas/${name}`));
+const generatedParents = new Set(['src-tauri/gen', 'src-tauri/gen/schemas']);
+async function trustedArtifactEntry(file, directory = false) {
+  const info = await lstat(file);
+  if (await realpath(file) !== file || !(directory ? info.isDirectory() : info.isFile()) ||
+      (typeof process.getuid === 'function' && info.uid !== process.getuid()) ||
+      (info.mode & 0o022) || (!directory && info.nlink !== 1)) {
+    throw new Error('Untrusted native artifact entry (symlink, ownership, permissions or hardlink)');
+  }
+}
+
+async function sourceInputEntries(directory, originalTauriConfig, trusted = false) {
+  if (await realpath(directory) !== directory) throw new Error('Noncanonical source input');
+
+  async function visit(current) {
+    const frames = [];
+    if (trusted) await trustedArtifactEntry(current, true);
+    const entries = await readdir(current, { withFileTypes: true });
+    entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+    for (const entry of entries) {
+      if (excluded.test(entry.name)) continue;
+      const file = path.join(current, entry.name);
+      const relative = path.relative(directory, file).split(path.sep).join('/');
+      if (entry.isDirectory()) {
+        if (generatedSchemas.has(relative)) throw new Error('Generated schema must be a regular file');
+        const children = await visit(file);
+        if (!generatedParents.has(relative) || children.length) frames.push(`directory:${relative}`, ...children);
+      }
+      else {
+        if (!entry.isFile()) throw new Error('Source input symlink or special file forbidden');
+        if (trusted) await trustedArtifactEntry(file);
+        if (generatedSchemas.has(relative)) continue;
+        frames.push(`file:${relative}`);
+        frames.push(relative === tauriConfigPath && originalTauriConfig !== undefined
+          ? originalTauriConfig : await readFile(file));
+      }
+    }
+    return frames;
+  }
+  return visit(directory);
+}
+
+export async function sourceInputFingerprint(directory, originalTauriConfig, trusted = false) {
+  const hash = createHash('sha256');
+  for (const bytes of await sourceInputEntries(directory, originalTauriConfig, trusted)) {
+    hash.update(`${Buffer.byteLength(bytes)}:`); hash.update(bytes);
+  }
+  return hash.digest('hex');
+}
+
+const allowedRunnerPaths = new Set([
+  'e2e-tests/helpers/nativeContinuation.mjs',
+  'e2e-tests/helpers/nativeContinuation.test.mjs',
+  'e2e-tests/helpers/nativeContinuationProxy.mjs',
+  'e2e-tests/helpers/nativeContinuationProxy.test.mjs',
+  'e2e-tests/helpers/nativeBuildReuse.test.mjs',
+  'e2e-tests/helpers/nativeQualificationGuards.test.mjs',
+  'e2e-tests/run-native-window-e2e.mjs',
+]);
+async function runnerEvidence(snapshot, checkout, originalTauriConfig) {
+  const entries = async (root, config, trusted) => {
+    const frames = await sourceInputEntries(root, config, trusted);
+    const result = new Map();
+    for (let i = 0; i < frames.length; i++) {
+      const key = frames[i];
+      result.set(key.slice(key.indexOf(':') + 1), key.startsWith('file:')
+        ? `file:${digest(frames[++i])}` : 'directory');
+    }
+    return result;
+  };
+  const original = await entries(snapshot, originalTauriConfig, true);
+  const current = await entries(checkout);
+  const allowedChangedPaths = [];
+  for (const name of [...new Set([...original.keys(), ...current.keys()])].sort()) {
+    if (original.get(name) === current.get(name)) continue;
+    if (!allowedRunnerPaths.has(name) ||
+        [original.get(name), current.get(name)].some(value => value === 'directory')) {
+      throw new Error('Source input fingerprint mismatch: rebuild the final integrated checkout');
+    }
+    allowedChangedPaths.push(name);
+  }
+  return { runnerSourceSha256: await sourceInputFingerprint(checkout), allowedChangedPaths };
+}
+
+function buildBinding(manifest) {
+  const { sha256, sourceSha256, sourceInputSha256, identifier } = manifest;
+  return { sha256, sourceSha256, sourceInputSha256, identifier };
+}
+
+export async function validateReusableBuild(directory, checkout) {
+  return validateReuseCandidate(directory, checkout, false);
+}
+
+async function validateReuseCandidate(directory, checkout, preparing) {
+  await validateCachedBinary(directory);
+  const manifest = JSON.parse(await readFile(path.join(directory, 'native-build.json'), 'utf8'));
+  if (manifest.schema !== reuseSchema || typeof manifest.originalTauriConfig !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(manifest.sourceInputSha256 || '') ||
+      !isDeepStrictEqual(manifest.buildOrigin, buildBinding(manifest))) {
+    throw new Error('Reuse requires fresh build provenance: rebuild with the final integrated runner');
+  }
+  if (manifest.reusedFrom !== undefined) {
+    await trustedArtifactEntry(path.join(directory, 'reuse-origin.json'));
+    const originBytes = await readFile(path.join(directory, 'reuse-origin.json'));
+    if (digest(originBytes) !== manifest.originManifestSha256 ||
+        !isDeepStrictEqual(buildBinding(JSON.parse(originBytes)), manifest.buildOrigin)) {
+      throw new Error('Reuse origin provenance mismatch');
+    }
+  }
+  const snapshot = path.join(directory, 'frontend');
+  const config = JSON.parse(await readFile(path.join(snapshot, tauriConfigPath), 'utf8'));
+  const expected = isolatedTauriConfig(JSON.parse(manifest.originalTauriConfig), manifest.identifier.split('.').at(-1));
+  if (!isDeepStrictEqual(config, expected)) throw new Error('Isolated Tauri configuration transformation mismatch');
+  if (await sourceInputFingerprint(snapshot, manifest.originalTauriConfig, true) !== manifest.sourceInputSha256) {
+    throw new Error('Source input fingerprint mismatch: rebuild the final integrated checkout');
+  }
+  const evidence = await runnerEvidence(snapshot, checkout, manifest.originalTauriConfig);
+  // Legacy artifacts can authorize preparation; launch requires fresh runner evidence
+  // whenever current source differs from the immutable build inputs.
+  if (!preparing && manifest.runnerSourceSha256 === undefined &&
+      manifest.allowedChangedPaths === undefined && evidence.allowedChangedPaths.length) {
+    throw new Error('Runner source evidence required for changed checkout');
+  }
+  if (manifest.runnerSourceSha256 !== undefined || manifest.allowedChangedPaths !== undefined) {
+    if (manifest.runnerSourceSha256 !== evidence.runnerSourceSha256 ||
+        !isDeepStrictEqual(manifest.allowedChangedPaths, evidence.allowedChangedPaths)) {
+      throw new Error('Runner source evidence mismatch');
+    }
+  }
+  return manifest;
+}
+
+export function assertUnpaidReplay(manifest) {
+  if (manifest.mode === 'reader-preparation') throw new Error('Preparation requires explicit --reuse-build ABS --reader-preparation');
+  if (['continuation-live', 'live-elevenlabs'].includes(manifest.mode)) {
+    throw new Error('Paid qualification cannot be replayed with --no-build');
+  }
+}
+
+export async function prepareReuseBuild(options, checkout) {
+  // Revalidate the public helper's selection too; no implicit default or matrix.
+  if (options.readerPreparation) executionEnvironment('/tmp', options);
+  else if (options.trialId) parseArguments(['--qualification-live', options.harnessConfig, options.trialId]);
+  else if (options.continuationCase) parseArguments(['--continuation-case', options.continuationCase]);
+  else throw new Error('Reuse requires one explicit trial or case');
+  const origin = await validateArtifactDirectory(options.reuseBuild);
+  const manifest = await validateReuseCandidate(origin, checkout, true);
+  const originBytes = await readFile(path.join(origin, 'native-build.json'));
+  if (!isDeepStrictEqual(JSON.parse(originBytes), manifest)) throw new Error('Build manifest changed during validation');
+  const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), 'voicetext-native-e2e-')));
+  await cp(path.join(origin, 'native-window-e2e'), path.join(directory, 'native-window-e2e'), { errorOnExist: true, force: false });
+  const snapshot = path.join(origin, 'frontend');
+  await cp(snapshot, path.join(directory, 'frontend'), { recursive: true, dereference: false,
+    filter: entry => !path.relative(snapshot, entry).split(path.sep).some(part => excluded.test(part)),
+  });
+  // Whitelist build provenance only. Runtime flags, endpoints, files and previous
+  // selection never cross this boundary. The embedded ID deliberately stays old.
+  await writeFile(path.join(directory, 'reuse-origin.json'), originBytes, { flag: 'wx' });
+  await writeFile(path.join(directory, 'native-build.json'), JSON.stringify({
+    schema: reuseSchema, marker, binary: 'native-window-e2e', ...buildBinding(manifest),
+    originalTauriConfig: manifest.originalTauriConfig, buildOrigin: manifest.buildOrigin,
+    reusedFrom: origin, originManifestSha256: digest(originBytes),
+    ...await runnerEvidence(snapshot, checkout, manifest.originalTauriConfig),
+    mode: options.readerPreparation ? 'reader-preparation' : options.trialId ? 'continuation-live' : 'continuation-fake',
+    trialId: options.trialId ?? null, continuationCase: options.continuationCase ?? null,
+  }), { flag: 'wx' });
+  // Validate both sides after copying and again in main immediately before effects.
+  const after = await validateReuseCandidate(origin, checkout, true);
+  if (!isDeepStrictEqual(after, manifest)) throw new Error('Build manifest changed during copy');
+  await validateReusableBuild(directory, checkout);
+  return directory;
+}
+
+export function validatePreparationResult(envelope, directory) {
+  const r = envelope?.report, f = envelope?.fixture, reader = envelope?.nativeReadback;
+  if (envelope?.marker !== marker || envelope.readerPreparation !== true || envelope.qualificationPassed !== false ||
+      envelope.passed !== true || r?.mode !== 'reader-preparation' || r.qualificationPassed !== false || r.passed !== true ||
+      r.preflightComplete !== true || r.unexpectedEvents !== 0 || envelope.diagnosticEffectRefused !== false ||
+      !Array.isArray(r.errors) || r.errors.length || r.error || r.observationMs < 5000 || !Number.isFinite(r.observationMs) ||
+      r.clockExchanges?.length !== 3 || r.clockExchanges.some(p => p.phase !== 'pre') ||
+      ['captureStarts', 'livePcmBytes', 'providerPcmBytes', 'providerStarts', 'providerResumes',
+       'activeCaptures', 'activeProviders', 'audioChunks', 'providerAudioChunks'].some(k => f?.[k] !== 0) ||
+      !Array.isArray(f?.intentObservations) || f.intentObservations.length || f.observationOverflow !== false ||
+      envelope.readerWorkerJoined !== true || reader?.stopped !== true || reader.armed !== true || reader.valid !== true ||
+      reader.error || reader.shutdownError || reader.records?.[0]?.text !== '' ||
+      reader.records.some(row => row.identityValid !== true || row.text !== '') ||
+      reader.identity?.path !== path.join(directory, 'p4-textedit-a.txt') || reader.identity?.bundle !== 'com.apple.TextEdit' ||
+      !Number.isSafeInteger(reader.identity?.pid) || reader.identity.pid <= 0 ||
+      envelope.ownedPath !== path.join(directory, 'p4-textedit-a.txt') ||
+      r.targetDocument !== 'p4-textedit-a.txt') throw new Error('Unpaid reader preparation readiness failed');
+  return r;
+}
+
+function markerFor(s) {
+  const rows = s.fixture.providerMarkers.filter(m => m.captureRunId === s.captureEpisode?.runId &&
+    m.captureFenceGeneration === s.captureEpisode?.generation);
+  return rows.length === 1 ? rows[0] : undefined;
+}
+function sameMarkerOwner(a, b) {
+  const x = markerFor(a), y = markerFor(b);
+  return !!x && !!y && x.captureGeneration === y.captureGeneration && x.captureRunId === y.captureRunId &&
+    x.captureFenceGeneration === y.captureFenceGeneration && x.providerSessionId === y.providerSessionId &&
+    x.firstSequence === y.firstSequence;
+}
+function markerAdvances(before, after) {
+  const a = markerFor(before), b = markerFor(after);
+  return !!a && !!b && a.captureGeneration === b.captureGeneration && a.captureRunId === b.captureRunId &&
+    a.captureFenceGeneration === b.captureFenceGeneration && a.providerSessionId === b.providerSessionId &&
+    a.firstSequence === b.firstSequence && b.count > a.count && b.lastSequence > a.lastSequence &&
+    b.count - a.count === b.lastSequence - a.lastSequence;
+}
+function currentStopApplied(before, after, source) {
+  const last = before.coordinatorTrace.slice(-1)[0]?.sequence ?? 0;
+  const gesture = before.coordinatorTrace.filter(t => t.source === 'Some(HoldHotkey)' && t.phase === 'IntentApplied' && t.desiredAfter.startsWith('On') && t.gesture != null).slice(-1)[0]?.gesture;
+  // The service retains the sealed episode while the logical provider is paused.
+  // Its identity is historical ownership, not proof that the microphone is active.
+  const episode = before.captureEpisode, marker = markerFor(before);
+  if (!episode || !marker || before.fixture.activeCaptures !== 1 ||
+      (after.captureEpisode != null && (after.captureEpisode.runId !== episode.runId ||
+        after.captureEpisode.generation !== episode.generation))) return false;
+  const events = after.fixture.captureEvents.filter(e => e.generation === marker.captureGeneration);
+  const released = events.filter(e => e.kind === 'capture-off');
+  const joined = events.filter(e => e.kind === 'capture-joined');
+  if (!Number.isFinite(before.nativeClockMs) || !Number.isFinite(after.nativeClockMs) ||
+      released.length !== 1 || joined.length !== 1 ||
+      !Number.isFinite(released[0].atMs) || !Number.isFinite(joined[0].atMs) ||
+      released[0].atMs < before.nativeClockMs || joined[0].atMs < released[0].atMs ||
+      joined[0].atMs > after.nativeClockMs) return false;
+  return after.fixture.activeCaptures === 0 && after.preparedCaptureTokenCount === 0 &&
+    after.coordinatorTrace.some(t => t.sequence > last &&
+      t.phase === 'IntentApplied' && t.source === source && t.desiredAfter === 'Off' &&
+      (source !== 'Some(HoldHotkey)' || (gesture != null && t.gesture === gesture)) &&
+      after.coordinatorTrace.some(e => e.sequence === t.sequence && e.phase === 'CaptureStopEnqueued' &&
+        e.runId === episode.runId) &&
+      after.coordinatorTrace.some(e => e.sequence > t.sequence && e.phase === 'CaptureStopped' &&
+        e.runId === episode.runId && e.desiredAfter === 'Off' && e.captureAfter === 'Idle'));
+}
+
+function requireAfterWrite(ok, message) { if (!ok) throw new Error(message); }
+function serviceTerminal(a, b, final) {
+  const s = final.afterWriteService, r = s?.completedReport, d = r?.audio, p = r?.provider;
+  const terminal = s?.terminal?.filter(t => t.runId === a.logicalProviderRunId);
+  return s?.owner === a.logicalProviderRunId && s.status === 'Idle' && s.logicalProviderRunId === 0 &&
+    s.pausedContinuation === null && s.coordinatorIdle === true && s.pendingStart === false &&
+    s.processingJobs === 0 && s.continuationPending === false &&
+    terminal?.length === 1 && terminal[0].sequence > (b.coordinatorTrace.at(-1)?.sequence ?? 0) &&
+    terminal[0].outcome === 'Some(FinalizeCommitted)' && terminal[0].error === null &&
+    r?.run_id === a.logicalProviderRunId && r.provider_release === 'released' && r.error === null &&
+    r.shared_failure === false && r.continuation_not_started === null &&
+    p?.reason === 'drained' && p.provider_release === 'released' && p.error == null &&
+    d?.reason === 'drained' && d.remaining_bytes === 0 && d.unknown_bytes === 0 &&
+    (d.unacknowledged_bytes === null || d.unacknowledged_bytes === 0) &&
+    Number.isSafeInteger(d.accepted_bytes) && d.accepted_bytes > 0 &&
+    d.accepted_bytes === d.read_bytes && d.read_bytes === d.submitted_bytes &&
+    d.submitted_bytes === final.fixture.fullPcm?.filter(r => r.seam === 'provider').reduce((n, r) => n + r.samples * 2, 0);
+}
+function verifyAfterWrite(a, b, final, selected) {
+  const x = markerFor(a), y = markerFor(b);
+  requireAfterWrite(x && y && x.captureGeneration === 1 && y.captureGeneration === 2 &&
+    b.fixture.activeCaptures === 1 && b.fixture.activeProviders === 1 && b.fixture.captureStops === 1 &&
+    x.providerSessionId > 0 && x.providerSessionId === y.providerSessionId &&
+    x.firstSequence === 1 && y.firstSequence === 1 && x.count > 0 && y.count > 0 &&
+    x.count === x.lastSequence && y.count === y.lastSequence && a.logicalProviderRunId > 0 &&
+    a.logicalProviderRunId === b.logicalProviderRunId && a.captureEpisode && b.captureEpisode &&
+    a.captureEpisode.generation !== b.captureEpisode.generation, 'B must continue A with distinct capture ownership');
+  const source = selected === 'after-write-hold' ? 'Some(HoldHotkey)' :
+    selected === 'after-write-toggle' ? 'Some(CarbonHotkey)' : 'Some(Frontend)';
+  requireAfterWrite(currentStopApplied(b, final, source), 'Current B event did not stop its epoch');
+  for (const s of [b, final]) {
+    const f = s.fixture;
+    requireAfterWrite(f.firstBWrites.length === 1 && f.firstBWrites[0].captureGeneration === y.captureGeneration &&
+      f.firstBWrites[0].logicalRunId === a.logicalProviderRunId && f.firstBWrites[0].pauseEpoch > 0 &&
+      f.controlResults.some(c => c.operation === 'continue' && c.delivered && c.result.decision === 'accepted' &&
+        c.result.pause_epoch === f.firstBWrites[0].pauseEpoch) &&
+      !f.controlResults.some(c => c.operation === 'restore'), 'Missing first B write or unexpected Restore');
+    requireAfterWrite(!f.observationOverflow && f.markerViolations.length === 0 && f.providerStarts === 1 &&
+      f.providerResumes === 0 && f.maxActiveProviders === 1 && f.maxActiveCaptures === 1 &&
+      f.captureStarts === 2, 'Invalid capture/provider evidence');
+  }
+  requireAfterWrite(serviceTerminal(a, b, final), 'Service terminal incomplete before finish');
+  const f = final.fixture;
+  requireAfterWrite(f.firstBWrites[0].pauseEpoch === b.fixture.firstBWrites[0].pauseEpoch, 'B write epoch changed');
+  for (const generation of [1, 2]) {
+    for (const kind of ['capture-start', 'capture-off', 'capture-joined']) {
+      requireAfterWrite(f.captureEvents.filter(e => e.generation === generation && e.kind === kind).length === 1,
+        'Missing or duplicate capture lifecycle');
+    }
+  }
+  requireAfterWrite(f.captureStops === 2 && f.activeCaptures === 0 && f.activeProviders === 0 &&
+    final.preparedCaptureTokenCount === 0 && f.finals === 1 &&
+    !f.captureEvents.some(e => e.kind === 'stop-timeout'), 'Terminal cleanup incomplete');
+  requireAfterWrite(f.fullPcm?.length === 4, 'Missing full PCM validation');
+  for (const generation of [1, 2]) for (const seam of ['capture', 'provider']) {
+    const rows = f.fullPcm.filter(r => r.captureGeneration === generation && r.seam === seam);
+    const range = (seam === 'capture' ? f.captureMarkers : f.providerMarkers).find(r => r.captureGeneration === generation);
+    requireAfterWrite(rows.length === 1 && rows[0].valid === true && rows[0].chunks === range?.count &&
+      rows[0].samples === rows[0].chunks * 320, 'Full PCM length, format or waveform mismatch');
+  }
+  requireAfterWrite(f.captureMarkers.length === 2 && f.providerMarkers.length === 2, 'Missing per-capture PCM evidence');
+  for (const owner of [x, y]) {
+    const emitted = f.captureMarkers.filter(m => m.captureGeneration === owner.captureGeneration);
+    const received = f.providerMarkers.filter(m => m.captureGeneration === owner.captureGeneration);
+    requireAfterWrite(emitted.length === 1 && received.length === 1, 'Ambiguous PCM generation');
+    const e = emitted[0], r = received[0];
+    requireAfterWrite(e.firstSequence === 1 && r.firstSequence === 1 && Number.isSafeInteger(e.count) &&
+      Number.isSafeInteger(r.count) && e.count > 0 &&
+      e.count === e.lastSequence && r.count === r.lastSequence && e.count === r.count &&
+      r.count >= owner.count && r.providerSessionId === owner.providerSessionId &&
+      r.captureRunId === owner.captureRunId && r.captureFenceGeneration === owner.captureFenceGeneration,
+      'Source PCM lost, replayed, discarded or reassigned');
+  }
+}
+export function validE42PhysicalEvidence(s) {
+  const p = s.physicalKeyboard;
+  if (!p || p.source !== 'fake' || p.realKeyboardReads !== 0 || p.overflow ||
+    p.observations.length > 256 || p.events.length > 128 ||
+    p.observations.some(o => o.source !== 'fake' || o.key !== 7 || o.modifiers !== 3 ||
+      o.observation !== (o.downKeys.includes(7) && (o.downKeys.includes(55) || o.downKeys.includes(54)) &&
+        (o.downKeys.includes(56) || o.downKeys.includes(60)) ? 'Down' : 'Up'))) return false;
+  if (p.events.some(e => e.kind === 'watcher' ? e.watcherFinished !== true : e.watcherFinished !== null)) return false;
+  if (p.events.some(e => e.observation === 'NotRead' ? e.sample !== null :
+    !Number.isInteger(e.sample) || e.sample == null || e.sample < 0 ||
+    p.observations[e.sample]?.observation !== e.observation)) return false;
+  const accepted = p.events.filter(e => e.kind === 'pressed' && e.result === 'Accepted');
+  if (accepted.length !== 2 || accepted.some(e => e.observation !== 'Down' || !e.handle ||
+    !Number.isSafeInteger(e.handle.gesture) || e.handle.gesture <= 0 ||
+    !Number.isSafeInteger(e.handle.watcher) || e.handle.watcher <= 0)) return false;
+  const [a, b] = accepted;
+  if (!s.coordinatorTrace.some(t => t.source === 'Some(HoldHotkey)' &&
+    t.gesture === b.handle.gesture && t.phase === 'IntentApplied' && t.desiredAfter === 'Off')) return false;
+  if (a.handle.gesture === b.handle.gesture || a.handle.watcher === b.handle.watcher) return false;
+  const matches = (e, owner, kind, observation, result) =>
+    e.kind === kind && e.observation === observation && e.result === result &&
+    e.handle?.gesture === owner.handle.gesture && e.handle?.watcher === owner.handle.watcher;
+  const rearm = p.events.findIndex(e => matches(e, a, 'watcher', 'Up', 'Rearmed'));
+  const duplicate = p.events.findIndex(e => matches(e, a, 'pressed', 'Down', 'Duplicate'));
+  const ignored = p.events.findIndex(e => matches(e, b, 'released', 'Down', 'Stale'));
+  const ended = p.events.findIndex(e => matches(e, b, 'watcher', 'Up', 'HoldEnded'));
+  const samples = p.events.flatMap(e => e.sample == null ? [] : [e.sample]);
+  if (samples.some((sample, i) => i > 0 && sample < samples[i - 1]) ||
+    duplicate <= p.events.indexOf(a) || duplicate >= rearm ||
+    ignored <= p.events.indexOf(b) || ended <= ignored) return false;
+  return rearm > p.events.indexOf(a) && rearm < p.events.indexOf(b) &&
+    p.events.some(e => matches(e, a, 'pressed', 'Down', 'Duplicate')) &&
+    p.events.slice(p.events.indexOf(b) + 1).some(e => matches(e, a, 'watcher', 'NotRead', 'Stale')) &&
+    p.events.slice(p.events.indexOf(b) + 1).some(e => matches(e, b, 'released', 'Down', 'Stale')) &&
+    p.events.slice(p.events.indexOf(b) + 1).some(e => matches(e, b, 'watcher', 'Up', 'HoldEnded')) &&
+    p.observations.filter(o => o.observation === 'Down').length >= 2 &&
+    p.observations.filter(o => o.observation === 'Up').length >= 2;
+}
+
 export function validateResult(envelope) {
+  if (envelope?.readerPreparation || envelope?.report?.mode === 'reader-preparation') throw new Error('Preparation is not qualification');
   const report = envelope?.report;
   const fixture = envelope?.fixture;
+  if (report?.error || (Array.isArray(report?.errors) && report.errors.length)) throw new Error("Native report retains failure evidence");
+  if (report?.mode === 'after-write-case') {
+    requireAfterWrite(envelope.marker === marker && envelope.passed === true && report.passed === true &&
+      ['after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle'].includes(report.case) &&
+      Array.isArray(report.errors) && report.errors.length === 0 &&
+      isDeepStrictEqual(fixture, report.final?.fixture) &&
+      isDeepStrictEqual(envelope.afterWriteServiceBefore, report.final?.afterWriteService) &&
+      isDeepStrictEqual(envelope.afterWriteServiceAfter, envelope.afterWriteServiceBefore), 'Invalid after-write envelope');
+    verifyAfterWrite(report.a, report.b, report.final, report.case);
+    return report;
+  }
+  if (report?.mode === 'native-event-case') {
+    const expected = { E04: 2, E41: 3, E42: 2 }[report.case];
+    if (!expected || envelope.marker !== marker || envelope.passed !== true || report.passed !== true ||
+      !Array.isArray(report.errors) || report.errors.length || !report.final ||
+      fixture?.captureStarts !== expected || fixture?.captureStops !== expected ||
+      fixture?.maxActiveCaptures !== 1 || fixture?.activeCaptures !== 0 || fixture?.activeProviders !== 0 ||
+      fixture?.observationOverflow !== false || fixture?.markerViolations?.length !== 0 ||
+      report.final.preparedCaptureTokenCount !== 0 ||
+      !Array.isArray(report.checkpoints) || report.checkpoints.length < 6 ||
+      (report.case === 'E04' && (!Number.isFinite(report.releaseToFirstPcmMs) || report.releaseToFirstPcmMs < 0 || report.releaseToFirstPcmMs > 250))) {
+      throw new Error('Incomplete native event evidence');
+    }
+    const point = label => {
+      const found = report.checkpoints.filter(p => p.label === label);
+      if (found.length !== 1 || !found[0].state?.fixture) throw new Error(`Missing native checkpoint: ${label}`);
+      return found[0].state;
+    };
+    const requireEvidence = (ok) => { if (!ok) throw new Error('Native event trace/effects mismatch'); };
+    const off = s => s.fixture.activeCaptures === 0 && s.preparedCaptureTokenCount === 0;
+    const recording = (s, n) => s.fixture.activeCaptures === 1 && s.fixture.captureStarts === n &&
+      s.fixture.providerMarkers?.some(m => m.captureGeneration === n && m.count > 0);
+    requireEvidence(recording(point('A recording'), 1));
+    requireEvidence(off(report.final) && report.final.fixture.activeProviders === 0 &&
+      report.final.fixture.captureStarts === expected && report.final.fixture.captureStops === expected &&
+      report.final.fixture.maxActiveCaptures === 1 && report.final.fixture.markerViolations?.length === 0);
+    requireEvidence(Array.isArray(fixture.captureEvents) && !fixture.captureEvents.some(e => e.kind === 'stop-timeout'));
+    if (report.case === 'E04') {
+      const held = point('B queued behind actual A');
+      requireEvidence(held.fixture.activeCaptures === 1 && held.fixture.captureStarts === 1 &&
+        held.fixture.captureEvents.some(e => e.kind === 'stop-entered') &&
+        !held.fixture.captureEvents.some(e => e.kind === 'capture-off' || e.generation === 2));
+      const b = point('B recording');
+      const started = b.fixture.captureEvents.find(e => e.kind === 'capture-start' && e.generation === 2);
+      const released = b.fixture.captureEvents.filter(e => e.kind === 'capture-off' && e.generation === 1);
+      const joined = b.fixture.captureEvents.filter(e => e.kind === 'capture-joined' && e.generation === 1);
+      const first = b.fixture.captureEvents.filter(e => e.kind === 'first-pcm' && e.generation === 2);
+      requireEvidence(recording(b, 2) && released.length === 1 && first.length === 1 && joined.length === 1 &&
+        started && released[0].atMs <= joined[0].atMs && joined[0].atMs <= started.atMs && started.atMs <= first[0].atMs &&
+        Number.isFinite(released[0].atMs) && Number.isFinite(first[0].atMs) &&
+        first[0].atMs - released[0].atMs === report.releaseToFirstPcmMs &&
+        b.fixture.providerMarkers.some(m => m.captureGeneration === 2 && m.firstSequence === 1 && m.count > 0));
+    } else if (report.case === 'E41') {
+      let previous = point('B recording');
+      requireEvidence(recording(previous, 2) && previous.captureEpisode != null);
+      for (const [label, source] of [['stale-key-release', 'Some(HoldHotkey)'], ['stale-vad', 'Some(Vad)']]) {
+        const before = point('before ' + label);
+        requireEvidence(recording(before, 2) && sameMarkerOwner(previous, before) && JSON.stringify(before.captureEpisode) === JSON.stringify(previous.captureEpisode));
+        previous = before;
+        const next = point(label);
+        const sequence = previous.coordinatorTrace.slice(-1)[0]?.sequence ?? 0;
+        requireEvidence(recording(next, 2) && JSON.stringify(next.captureEpisode) === JSON.stringify(previous.captureEpisode) &&
+          next.fixture.captureStops === previous.fixture.captureStops && markerAdvances(previous, next) &&
+          next.coordinatorTrace.some(t => t.sequence > sequence && t.phase === 'IntentRejected' && t.source === source));
+        previous = next;
+      }
+      const keyStopped = point('current key release stops B');
+      const vadStopped = point('current VAD stops C');
+      requireEvidence(off(keyStopped) && recording(point('C recording'), 3) && off(vadStopped) &&
+        currentStopApplied(point('before current key release'), keyStopped, 'Some(HoldHotkey)') &&
+        currentStopApplied(point('before current VAD'), vadStopped, 'Some(Vad)'));
+    } else {
+      const a = point('A recording'), b = point('next gesture recording');
+      const rearmed = point('A physical Up rearms'), held = point('delayed A release ignored');
+      const beforeUp = point('before B physical Up'), stopped = point('next gesture release off');
+      requireEvidence(rearmed.physicalKeyboard?.events.some(e =>
+        e.kind === 'watcher' && e.observation === 'Up' && e.result === 'Rearmed'));
+      requireEvidence(off(rearmed) && rearmed.fixture.captureStarts === 1 &&
+        validE42PhysicalEvidence(stopped) && sameMarkerOwner(b, held) && markerAdvances(b, held) &&
+        held.fixture.captureStops === b.fixture.captureStops &&
+        currentStopApplied(beforeUp, stopped, 'Some(HoldHotkey)'));
+      requireEvidence(fixture.providerResumes === 0 && report.final.fixture.providerResumes === 0 &&
+        report.checkpoints.every(p => p.state.fixture.providerResumes === 0) &&
+        a.fixture.providerStarts === 1 && b.fixture.providerStarts === 2 && markerFor(a) && markerFor(b) &&
+        markerFor(a).providerSessionId !== markerFor(b).providerSessionId);
+      const slept = point('sleep resources off');
+      requireEvidence(off(slept) && slept.fixture.activeProviders === 0 &&
+        slept.coordinatorTrace.some(t => t.reason === 'Some(SystemSleep)'));
+      for (const label of ['wake without phantom', 'wake remains off without key-up']) {
+        const s = point(label); requireEvidence(off(s) && s.fixture.captureStarts === 1 && s.fixture.activeProviders === 0);
+      }
+      requireEvidence(recording(point('next gesture recording'), 2) && off(point('next gesture release off')) &&
+        fixture.providerStarts === 2 && !fixture.controlResults.some(c => c.operation === 'continue') &&
+        report.final.coordinatorTrace.some(t => t.reason === 'Some(SystemSleep)'));
+    }
+    return report;
+  }
+  if (report?.mode === 'continuation-case') {
+    const fallback = ['stale-epoch', 'terminal-before-write'].includes(report.case);
+    if (envelope.marker !== marker || envelope.passed !== true || report.passed !== true ||
+      !['seal-stop', 'seal-hold', 'seal-close', 'cancel', 'stale-epoch', 'terminal-before-write'].includes(report.case) ||
+      (fallback ? report.fallbackAfterRefusal !== true : report.micReleasedBeforeAccepted !== true) || report.cleanup !== true ||
+      !Array.isArray(report.errors) || report.errors.length || fixture?.activeCaptures !== 0 ||
+      fixture?.activeProviders !== 0 || fixture?.captureStarts !== 2 || fixture?.captureStops !== 2 ||
+      fixture?.providerStarts !== (fallback ? 2 : 1) || fixture?.maxActiveProviders !== 1 || fixture?.providerResumes !== 0 || fixture?.finals !== (fallback ? 2 : 1) ||
+      fixture?.markerViolations?.length !== 0 ||
+      (fallback ? report.firstBWrites !== 0 : report.case === 'cancel' ? report.restored !== true || report.firstBWrites !== 0 : report.firstBWrites !== 1)) {
+      throw new Error('Incomplete native adversarial continuation evidence');
+    }
+    return report;
+  }
+  if (report?.mode === 'continuation-fake') {
+    if (envelope.marker !== marker || envelope.passed !== true || report.passed !== true ||
+        report.terminalCount !== 1 || report.stableDeliveries?.length !== 1 || report.final?.historyEntryCount !== 1 ||
+        report.completedCycles !== 50 || report.cycles?.length !== 50 ||
+        !Array.isArray(report.errors) || report.errors.length ||
+        !Number.isFinite(report.p95FirstPcmMs) || report.p95FirstPcmMs < 0 || report.p95FirstPcmMs > 250 ||
+        fixture?.activeCaptures !== 0 || fixture?.activeProviders !== 0 || fixture?.maxActiveProviders !== 1 ||
+        fixture?.captureStarts !== 51 || fixture?.captureStops !== 51 || fixture?.providerStarts !== 1 ||
+        fixture?.providerResumes !== 0 || fixture?.finals !== 1 || fixture?.markerViolations?.length !== 0 ||
+        report.final?.preparedCaptureTokenCount !== 0) throw new Error('Incomplete native continuation qualification');
+    return report;
+  }
+  if (report?.mode === 'terminal-cleanup') {
+    if (envelope.marker !== marker || envelope.passed !== true || report.passed !== true ||
+        report.sleepReleased !== true || report.wakeDidNotRestart !== true || report.explicitRestart !== true ||
+        report.holdSleepReleased !== true || report.retiredHoldReleaseIgnored !== true || report.holdRestartReleased !== true ||
+        report.deviceErrorObserved !== true || report.deviceReleased !== true ||
+        fixture?.captureStarts !== 5 || fixture?.captureStops !== 5 ||
+        fixture?.activeCaptures !== 0 || fixture?.activeProviders !== 0 || report.skipped) {
+      throw new Error('Native terminal cleanup evidence is incomplete');
+    }
+    return report;
+  }
+  if (report?.mode === 'live-elevenlabs') {
+    if (envelope.marker !== marker || envelope.passed !== true || report.passed !== true ||
+        report.pcmBytes !== 788288 || !report.targetDocument || !report.finalText ||
+        report.actualPasteVerified !== false || fixture?.captureStarts !== 1 ||
+        fixture?.captureStops !== 1 || fixture?.activeCaptures !== 0) {
+      throw new Error('Live native pipeline failed; actual OS content still requires external verification');
+    }
+    return report;
+  }
   if (envelope?.marker !== marker || envelope.passed !== true || !report || !fixture ||
       !Number.isFinite(report.elapsedMs) || report.elapsedMs < 180_000 || report.elapsedMs > 480_000 ||
       !Number.isSafeInteger(fixture.captureStarts) || fixture.captureStarts <= 0 ||
@@ -160,13 +801,51 @@ export function isolatedTauriConfig(original, suffix = randomUUID().replaceAll('
 export async function main(args = process.argv.slice(2)) {
   const options = parseArguments(args);
   if (process.platform !== 'darwin') throw new Error('Native macOS E2E requires macOS; unsupported platforms are failures, never passing skips');
-  const directory = options.artifactDir
+  const directory = options.reuseBuild ? await prepareReuseBuild(options, source) : options.artifactDir
     ? await validateArtifactDirectory(options.artifactDir)
     : await realpath(await mkdtemp(path.join(os.tmpdir(), 'voicetext-native-e2e-')));
-  const env = sanitizedEnvironment(directory);
+  let primaryFailure, interruption, completionMessage;
+  const onInterrupt = () => { interruption ??= new Error('Runner interrupted'); };
+  process.on('SIGINT', onInterrupt); process.on('SIGTERM', onInterrupt);
+  try {
+  const env = executionEnvironment(directory, options);
   await mkdir(env.HOME, { recursive: true });
+  const liveSha = '46b449e09435d1694fd118c2c78725fae3be0af414648b16ff005e3bb76cc472';
+  const trial = options.trialId ? liveTrials.find(t => t.id === options.trialId) : null;
+  let provenance;
+  if (trial) {
+    const configFile = await realpath(options.harnessConfig);
+    const info = await lstat(options.harnessConfig);
+    if (configFile !== options.harnessConfig || !info.isFile() || (typeof process.getuid === 'function' && info.uid !== process.getuid()) || (info.mode & 0o022)) throw new Error('Trusted harness config must be owned, canonical and not writable by others');
+    provenance = validateHarnessConfig(JSON.parse(await readFile(configFile, 'utf8')));
+    for (const fixture of await readApprovedFixtures(path.resolve(source, '../qualification-fixtures'))) await writeFile(path.join(directory, fixture.name), fixture.pcm, { flag: 'wx' });
+    await writeFile(path.join(directory, 'qualification-trial.json'), JSON.stringify(trial), { flag: 'wx' });
+    await writeFile(path.join(directory, 'backend-provenance.json'), JSON.stringify(provenance), { flag: 'wx' });
+  }
+  let liveMode = Boolean(options.liveFixturePath);
+  let terminalCleanup = Boolean(options.terminalCleanup);
+  let continuationFake = Boolean(options.continuationFake);
+  if (options.artifactDir) {
+    const cached = JSON.parse(await readFile(path.join(directory, 'native-build.json'), 'utf8'));
+    assertUnpaidReplay(cached);
+    liveMode = cached.mode === 'live-elevenlabs';
+    terminalCleanup = cached.mode === 'terminal-cleanup';
+    continuationFake = cached.mode === 'continuation-fake';
+    options.continuationCase = cached.continuationCase;
+  }
+  if (options.artifactDir && continuationFake) Object.assign(env, executionEnvironment(directory, { continuationFake, continuationCase: options.continuationCase }));
+  if (terminalCleanup) env.VOICETEXT_NATIVE_TERMINAL = 'test-elevenlabs-stability-20260906';
+  if (liveMode) {
+    const pcmPath = path.join(directory, 'synthetic.pcm');
+    const pcm = await readFile(options.liveFixturePath ?? pcmPath);
+    if (digest(pcm) !== liveSha) throw new Error('Live mode requires the exact approved synthetic PCM');
+    if (options.liveFixturePath) await writeFile(pcmPath, pcm, { flag: 'wx' });
+    env.VOICETEXT_NATIVE_LIVE = 'test-elevenlabs-stability-20260906';
+  }
   console.log(`[native-e2e] artifacts: ${directory}`);
-  if (!options.artifactDir) {
+  if (!options.artifactDir && !options.reuseBuild) {
+    const sourceInputSha256 = await sourceInputFingerprint(source);
+    const originalTauriConfig = await readFile(path.join(source, tauriConfigPath), 'utf8');
     const snapshot = path.join(directory, 'frontend');
     await cp(source, snapshot, { recursive: true, dereference: false,
       filter: async (entry) => !path.relative(source, entry).split(path.sep).some((part) => excluded.test(part)) && !(await lstat(entry)).isSymbolicLink(),
@@ -192,19 +871,116 @@ export async function main(args = process.argv.slice(2)) {
     // A concurrent build sharing the Cargo cache must never be silently bound to
     // this snapshot. Each isolated config has a unique embedded application ID.
     if (!binaryBytes.includes(Buffer.from(config.identifier))) throw new Error('Native binary application identity mismatch');
-    await writeFile(path.join(directory, 'native-build.json'), JSON.stringify({ marker, binary: path.basename(binary), sha256: digest(binaryBytes), identifier: config.identifier, sourceSha256 }));
+    const binding = { sha256: digest(binaryBytes), identifier: config.identifier, sourceSha256, sourceInputSha256 };
+    await writeFile(path.join(directory, 'native-build.json'), JSON.stringify({ schema: reuseSchema, marker,
+      binary: path.basename(binary), ...binding, buildOrigin: binding, originalTauriConfig,
+      trialId: trial?.id ?? null, continuationCase: options.continuationCase ?? null,
+      mode: options.readerPreparation ? 'reader-preparation' : trial ? 'continuation-live' : continuationFake ? 'continuation-fake' : liveMode ? 'live-elevenlabs' : terminalCleanup ? 'terminal-cleanup' : 'fixture' }));
   }
+  await validateReusableBuild(directory, source);
   const binary = await validateCachedBinary(directory);
   let runtimeFailure;
+  const proxyEvents = [];
+  const proxyStarted = performance.now();
+  const { startConfigDelayProxy } = trial ? await import('./helpers/nativeContinuationProxy.mjs') : {};
+  const proxy = trial ? await startConfigDelayProxy(provenance.endpoint, trial.configDelayMs, (event, details) => {
+    if (proxyEvents.length < 1024) proxyEvents.push({ event, ...details, atMs: performance.now() - proxyStarted });
+    else if (proxyEvents.length === 1024) proxyEvents.push({ event: 'fault_proxy_evidence_overflow' });
+  }) : null;
+  if (proxy) env.VOICETEXT_QUALIFICATION_ENDPOINT = proxy.url;
+  const collectBeforeTeardown = trial ? createQualificationCollector(trial, proxyEvents,
+    async () => JSON.parse(await readFile(env.VOICE_TO_TEXT_NATIVE_E2E_RESULT, 'utf8')),
+    () => performance.now() - proxyStarted) : undefined;
   try {
-    await runOwned(binary, [], { cwd: directory, env }, 480_000, path.join(directory, `native-runtime-${randomUUID()}.log`), path.join(directory, 'native-progress.jsonl'));
+    if (interruption) throw interruption;
+    // Event/preparation timeout: 30 seconds, then up to 5 seconds SIGTERM grace before SIGKILL.
+    await runOwned(binary, [], { cwd: directory, env }, options.readerPreparation || ['E04', 'E41', 'E42', 'after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle'].includes(options.continuationCase) ? 30_000 : 480_000, path.join(directory, `native-runtime-${randomUUID()}.log`), path.join(directory, 'native-progress.jsonl'), collectBeforeTeardown, path.join(directory, 'native-process-termination.json'));
   } catch (error) { runtimeFailure = error; }
+  finally {
+    if (proxy) {
+      try { await proxy.close(); }
+      catch (error) { runtimeFailure = runtimeFailure ? new AggregateError([runtimeFailure, error], `${runtimeFailure.message}; proxy cleanup: ${error.message}`, { cause: runtimeFailure }) : error; }
+      try { await writeFile(path.join(directory, 'proxy-evidence.json'), JSON.stringify({ clock: 'runner-performance-now', events: proxyEvents }, null, 2)); }
+      catch (error) { runtimeFailure = runtimeFailure ? new AggregateError([runtimeFailure, error], `${runtimeFailure.message}; proxy evidence: ${error.message}`, { cause: runtimeFailure }) : error; }
+    }
+  }
+  if (options.readerPreparation) {
+    await verifyPreparationArtifact(directory, env.VOICE_TO_TEXT_NATIVE_E2E_RESULT, runtimeFailure);
+    completionMessage = `[native-e2e] PREPARATION READY (unpaid; inconclusive nonreproduction; qualificationPassed=false) ${env.VOICE_TO_TEXT_NATIVE_E2E_RESULT}`;
+    return;
+  }
+  if (runtimeFailure && options.continuationCase?.startsWith('after-write-')) {
+    await writeFile(path.join(directory, 'runner-diagnostic-failure.json'), JSON.stringify({
+      passed: false, qualificationPassed: false, reason: 'owned-runtime-failed', overallBudgetMs: 30000,
+    }), { flag: 'wx' });
+  }
+  if (options.continuationCase?.startsWith('after-write-')) {
+    // A late full report cannot override an independent native failure.
+    try {
+      const failure = await readFile(path.join(directory, 'native-diagnostic-failure.json'), 'utf8');
+      throw new Error(`E63 native diagnostic failed: ${failure}`);
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
   let envelope;
   try { envelope = JSON.parse(await readFile(env.VOICE_TO_TEXT_NATIVE_E2E_RESULT, 'utf8')); }
   catch (error) { throw runtimeFailure || error; }
-  if (runtimeFailure) throw new Error(`${runtimeFailure.message}; native report: ${JSON.stringify(envelope)}`);
-  validateResult(envelope);
-  console.log(`[native-e2e] PASS ${env.VOICE_TO_TEXT_NATIVE_E2E_RESULT}`);
+  if (runtimeFailure) throw runtimeFailure;
+  if (trial) {
+    const verification = { passed: false, qualificationPassed: false, trialId: trial.id, actualPasteVerified: false };
+    try {
+      const report = envelope.report;
+      if (envelope.marker !== marker || envelope.passed !== true || report?.passed !== true || report.errors?.length || report.trial?.id !== trial.id) throw new Error('Native live qualification failed');
+      const target = path.join(directory, 'p4-textedit-a.txt');
+      const script = `tell application "TextEdit"\nset matches to every document whose path is ${JSON.stringify(target)}\nif (count matches) is not 1 then error "TEST document identity missing or ambiguous"\nreturn text of item 1 of matches\nend tell`;
+      const readbackStartMs = performance.now() - proxyStarted;
+      const { stdout } = await promisify(execFile)('/usr/bin/osascript', ['-e', script], { timeout: 5000, maxBuffer: 1024 * 1024 });
+      verification.readback = { clock: 'runner-performance-now', startMs: readbackStartMs, endMs: performance.now() - proxyStarted };
+      Object.assign(verification, exactInsertionEvidence(report.expectedInsertion, stdout.replace(/\n$/, ''), report.targetDocument));
+      Object.assign(verification, verifyQualificationConnections(trial, proxyEvents));
+      verifyQualificationSources(trial, report.final?.fixture);
+      verifyQualificationTerminals(trial, report.episodes, report.terminals);
+      const accepted = proxyEvents.filter(e => e.event === 'backend_control' && e.type === 'continue_result' && e.decision === 'accepted' && e.eligible_now === true);
+      if (trial.continuation && accepted.length !== 1) throw new Error('Exactly one eligible Continue acceptance required');
+      verification.continueOutcomes = proxyEvents.filter(e => e.event === 'backend_control');
+      // Upstream provider connect count must come from backend/native instrumentation, not socket inference.
+      verification.limitations = ['Provider handshake/Continue eligibility and native insertion timing require parent instrumentation; this is pipeline evidence only.'];
+      verification.passed = true;
+    } catch (error) { verification.error = String(error); throw error; }
+    finally { await writeFile(path.join(directory, 'qualification-verification.json'), JSON.stringify(verification, null, 2)); }
+  } else {
+    validateResult(envelope);
+    if (liveMode) {
+      const verification = { passed: false, qualificationPassed: false, actualPasteVerified: false };
+      let verificationFailure;
+      try {
+        const report = envelope.report;
+        const target = path.join(directory, 'p4-textedit-a.txt');
+        if (report.mode !== 'live-elevenlabs' || report.targetDocument !== path.basename(target)) throw new Error('Legacy live TEST document identity mismatch');
+        const script = `tell application "TextEdit"\nset matches to every document whose path is ${JSON.stringify(target)}\nif (count matches) is not 1 then error "TEST document identity missing or ambiguous"\nreturn text of item 1 of matches\nend tell`;
+        const { stdout } = await promisify(execFile)('/usr/bin/osascript', ['-e', script], { timeout: 5000, maxBuffer: 1024 * 1024 });
+        Object.assign(verification, exactInsertionEvidence(report.finalText, stdout.replace(/\n$/, ''), report.targetDocument));
+        verification.passed = true;
+      } catch (error) { verificationFailure = error; verification.error = String(error); throw error; }
+      finally {
+        try { await writeFile(path.join(directory, 'live-verification.json'), JSON.stringify(verification, null, 2)); }
+        catch (error) {
+          if (verificationFailure) throw new AggregateError([verificationFailure, error], `${verificationFailure.message}; verification evidence: ${error.message}`, { cause: verificationFailure });
+          throw error;
+        }
+      }
+    }
+  }
+  completionMessage = `[native-e2e] ${trial ? 'PIPELINE PASS, provider/latency qualification pending' : liveMode ? 'PIPELINE PASS, exact OS insertion verified; provider/latency qualification pending' : 'PASS'} ${env.VOICE_TO_TEXT_NATIVE_E2E_RESULT}`;
+  } catch (error) { primaryFailure = error; throw error; }
+  finally {
+    try { await closeOwnedDocument(directory); }
+    catch (cleanupError) {
+      if (primaryFailure) throw new AggregateError([primaryFailure, cleanupError], `${primaryFailure.message}; cleanup failed: ${cleanupError.message}`, { cause: primaryFailure });
+      throw cleanupError;
+    } finally { process.removeListener('SIGINT', onInterrupt); process.removeListener('SIGTERM', onInterrupt); }
+    if (!primaryFailure && interruption) throw interruption;
+    if (!primaryFailure && completionMessage) console.log(completionMessage);
+  }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

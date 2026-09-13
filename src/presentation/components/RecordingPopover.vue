@@ -69,7 +69,9 @@ const SUPPORT_ISSUES_URL = 'https://github.com/777genius/voice-to-text/issues';
 
 const recordingHotkey = computed(() => formatHotkeyForDisplay(appConfigStore.recordingHotkey));
 
-const hasMiniError = computed(() => Boolean(store.error || store.hasError));
+const hasMiniError = computed(() =>
+  Boolean(store.error || store.hasError || store.incomingTranslationError)
+);
 const showMiniActions = computed(() => isMiniActionsVisible.value || hasMiniError.value);
 const hasMiniTranslationText = computed(() =>
   store.activeRecordingMode === 'live_translation' && store.translationText.trim().length > 0
@@ -89,6 +91,45 @@ const showDuplexHeadsetWarning = computed(() =>
 const hasMiniIncomingTranslation = computed(() =>
   hasVisibleIncomingTranslation.value
 );
+const hasMiniReadyCapture = computed(() =>
+  !hasMiniError.value && (
+    store.isCaptureReady ||
+    (!store.hasCaptureReadinessProtocol && store.isRecording) ||
+    store.incomingTranslationStatus === 'Recording'
+  )
+);
+const hasMiniStartingCapture = computed(() =>
+  !hasMiniReadyCapture.value && (
+    store.recordingDesiredOn ||
+    store.isConnecting ||
+    store.isStarting ||
+    store.isRecording ||
+    store.incomingTranslationStatus === 'Starting'
+  )
+);
+const hasMiniProcessingCapture = computed(() =>
+  !hasMiniReadyCapture.value && (
+    store.isProcessing || store.incomingTranslationStatus === 'Processing'
+  )
+);
+const miniCaptureStatusText = computed(() => {
+  if (hasMiniError.value) {
+    return store.incomingTranslationError || store.errorSummary || t('main.errorGeneric');
+  }
+  if (hasMiniReadyCapture.value) {
+    if (!store.isCaptureReady) return t('main.listening');
+    if (store.captureReadiness?.reason === 'finalizing-previous') {
+      return `${t('main.listening')} ${t('main.processing')}`;
+    }
+    if (store.captureReadiness?.reason === 'connecting-provider') {
+      return `${t('main.listening')} ${t('main.connecting')}`;
+    }
+    return t('main.listening');
+  }
+  if (hasMiniProcessingCapture.value) return t('main.processing');
+  if (hasMiniStartingCapture.value) return t('main.starting');
+  return '';
+});
 const hasMiniRecognizedText = computed(() =>
   store.hasVisibleTranscriptionText || hasMiniTranslationText.value || hasMiniIncomingTranslationText.value
 );
@@ -118,7 +159,7 @@ function normalizeMiniTranscriptText(...parts: string[]): string {
 
 const miniDisplayText = computed(() => {
   if (hasMiniError.value) {
-    return store.errorSummary;
+    return store.incomingTranslationError || store.errorSummary;
   }
 
   const latestRecognized = normalizeMiniTranscriptText(
@@ -132,8 +173,10 @@ const miniDisplayText = computed(() => {
   if (latestRecognized) return latestRecognized;
   if (store.incomingTranslationText.trim()) return store.incomingTranslationText.trim();
   if (store.isIncomingTranslationActive) return t('main.incomingTranslationEmpty');
+  if (store.isCaptureReady) return t('main.listening');
   if (store.isConnecting) return t('main.connecting');
-  if (store.isStarting || store.isRecording) return t('main.listening');
+  if (store.isRecording && !store.hasCaptureReadinessProtocol) return t('main.listening');
+  if (store.isStarting || store.isRecording) return t('main.starting');
   if (store.isProcessing) return store.displayText;
   return '';
 });
@@ -297,6 +340,7 @@ let cancelledStartEpoch = -1;
 let pendingRustStart: { epoch: number; revision: number } | null = null;
 const pendingStartValidations = new Set<{ epoch: number }>();
 const hasPendingCurrentStart = () =>
+  store.isCaptureReady ||
   (store.recordingDesiredOn && store.recordingStartPending) ||
   [...pendingStartValidations].some(({ epoch }) => epoch === currentWindowEpoch);
 
@@ -804,6 +848,7 @@ watch([
   () => store.sessionId,
   () => store.recordingDesiredOn,
   () => store.recordingStartPending,
+  () => store.isCaptureReady,
   hasVisibleIncomingTranslation,
 ], () => {
   if (store.isStarting || store.isRecording || store.hasError || hasVisibleIncomingTranslation.value || hasPendingCurrentStart()) {
@@ -860,7 +905,7 @@ const handleToggle = async () => {
 
 // Обёртка для клика — запускает glow pulse эффект и переключает запись
 const onRecordClick = (e: MouseEvent) => {
-  glowColor.value = store.isRecording ? 'red' : 'blue';
+  glowColor.value = (store.isRecording || store.recordingDesiredOn) ? 'red' : 'blue';
   const btn = e.currentTarget as HTMLElement;
   btn.addEventListener('animationend', () => { glowColor.value = null; }, { once: true });
   handleToggle();
@@ -1042,7 +1087,7 @@ const minimizeWindow = async (event?: Event) => {
         <AudioVisualizer
           variant="mini"
           class="mini-audio-visualizer"
-          :active="store.isStarting || store.isRecording"
+          :active="hasMiniReadyCapture"
         />
         <div
           class="mini-popover-content"
@@ -1051,10 +1096,13 @@ const minimizeWindow = async (event?: Event) => {
         >
           <span
             class="mini-status-dot"
+            role="status"
+            :aria-label="miniCaptureStatusText"
+            :title="miniCaptureStatusText"
             :class="{
-              recording: store.isStarting || store.isRecording || store.incomingTranslationStatus === 'Recording',
-              starting: store.isConnecting || store.incomingTranslationStatus === 'Starting',
-              processing: store.isProcessing || store.incomingTranslationStatus === 'Processing',
+              recording: hasMiniReadyCapture,
+              starting: hasMiniStartingCapture,
+              processing: hasMiniProcessingCapture,
               error: store.hasError || Boolean(store.error) || Boolean(store.incomingTranslationError),
             }"
           ></span>
@@ -1212,6 +1260,13 @@ const minimizeWindow = async (event?: Event) => {
           {{ store.displayText }}
         </p>
 
+        <div v-for="recovery in store.deliveryRecovery" :key="recovery.sessionId ?? 0" class="error-container" role="status">
+          <p>Automatic insertion stopped. Check the target before pasting unconfirmed text.</p>
+          <pre class="no-drag" style="white-space: pre-wrap; user-select: text">{{ recovery.unconfirmedText }}</pre>
+          <button class="error-action-button no-drag" @click="store.copyRecoveryText(recovery.unconfirmedText)">Copy unconfirmed text</button>
+          <button class="error-action-button no-drag" @click="store.copyRecoveryText(recovery.transcript)">Copy full transcript</button>
+        </div>
+
         <div v-if="store.error || store.hasError" class="error-container">
           <div class="error-row">
             <div class="error-icon">⚠️</div>
@@ -1340,19 +1395,19 @@ const minimizeWindow = async (event?: Event) => {
       <!-- Controls -->
       <div class="controls">
         <button
-          v-ripple="{ class: store.isRecording ? 'text-red' : 'text-blue' }"
+          v-ripple="{ class: (store.isRecording || store.recordingDesiredOn) ? 'text-red' : 'text-blue' }"
           class="record-button no-drag"
           :class="{
-            recording: store.isRecording,
-            starting: store.isStarting,
-            processing: store.isProcessing,
+            recording: store.isRecording || store.recordingDesiredOn,
+            starting: store.isStarting && !store.recordingDesiredOn,
+            processing: store.isProcessing && !store.recordingDesiredOn,
             'glow-blue': glowColor === 'blue',
             'glow-red': glowColor === 'red',
           }"
-          :disabled="!isRecordingUiReady || store.isProcessing || store.isStarting"
+          :disabled="!isRecordingUiReady || ((store.isProcessing || store.isStarting) && !store.recordingDesiredOn && !store.canRequestContinuation)"
           @click="onRecordClick"
         >
-          <span v-if="store.isRecording" class="mdi mdi-stop"></span>
+          <span v-if="store.isRecording || store.recordingDesiredOn" class="mdi mdi-stop"></span>
           <span v-else-if="store.isProcessing" class="mdi mdi-cached record-icon-spin"></span>
           <span v-else class="mdi mdi-microphone"></span>
         </button>
