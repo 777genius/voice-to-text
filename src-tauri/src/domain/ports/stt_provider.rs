@@ -178,6 +178,11 @@ pub trait SttProvider: Send + Sync {
         ))
     }
 
+    /// Immutable delivery selection, retained through teardown. None means unknown.
+    fn continuation_delivery_mode(&self) -> Option<bool> {
+        Some(self.continuation_lifecycle_session().is_some())
+    }
+
     /// Immutable actual-Ready negotiation, absent on legacy/DG or before Ready.
     fn continuation_session(&self) -> Option<crate::domain::ContinuationSession> {
         None

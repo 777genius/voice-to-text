@@ -225,7 +225,7 @@ describe('transcription connect-retry reliability', () => {
     handlers.get('recording:intent-projection')({payload: {intentRevision: 1, runId: 1, logicalRunId: 1, continuationPhase: 'active', desiredOn: true, pendingStart: false, status: 'Recording'}});
     if (priorPaste) handlers.get('transcription:final')({payload: {session_id: 1, delivery_seq: 1, text: 'earlier', timestamp: 0, start: 0, duration: 0}});
     await flushMicrotasks();
-    const terminal = {session_id: 1, stable_snapshot: '', delivery_complete: true, report: null, error: null};
+    const terminal = {session_id: 1, continuation_delivery: false, stable_snapshot: '', delivery_complete: true, report: null, error: null};
     handlers.get('transcription:terminal')({payload: terminal});
     handlers.get('transcription:terminal')({payload: terminal});
     for (let i = 0; i < 10; i++) await flushMicrotasks();
@@ -261,7 +261,7 @@ describe('transcription connect-retry reliability', () => {
   it.each([null, 'deepgram'])('does not acknowledge legacy/DG terminal (%s)', async (provider) => {
     const {handlers, store} = await initializeStoreWithHandlers();
     await handlers.get('recording:status')({payload: {session_id: 1, status: 'Recording'}});
-    handlers.get('transcription:terminal')({payload: {session_id: 1, stable_snapshot: 'text', delivery_complete: true, report: provider ? {provider} : null, error: null}});
+    handlers.get('transcription:terminal')({payload: {session_id: 1, continuation_delivery: false, stable_snapshot: 'text', delivery_complete: true, report: provider ? {provider} : null, error: null}});
     for (let i = 0; i < 10; i++) await flushMicrotasks();
     expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'finish_continuation_delivery')).toEqual([]);
     store.cleanup();
@@ -408,6 +408,69 @@ describe('transcription connect-retry reliability', () => {
     store.cleanup();
   });
 
+  it.each([true, false, null, undefined])('recovers terminal-first text with mode %s before effects', async (mode) => {
+    appConfigMock.autoPasteText = true;
+    appConfigMock.autoCopyToClipboard = true;
+    invokeMock.mockImplementation((cmd: string) => Promise.resolve(
+      cmd === 'auto_paste_continuation_text' || cmd === 'copy_continuation_text'
+        ? {status: 'confirmed', revision: 1} : true));
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({payload: {session_id: 1, status: 'Recording'}});
+    const terminal = {session_id: 1, continuation_delivery: mode, stable_snapshot: 'recovered',
+      report: {run_id: 1, provider: {stable_snapshot: 'recovered'}}, delivery_complete: false, error: 'deadline'};
+    handlers.get('transcription:terminal')({payload: terminal});
+    handlers.get('transcription:terminal')({payload: {...terminal, continuation_delivery: !mode}});
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(store.finalText).toBe('recovered');
+    const commands = invokeMock.mock.calls.map(([cmd]) => cmd);
+    expect(commands.filter(cmd => cmd === 'auto_paste_continuation_text')).toHaveLength(mode === true ? 1 : 0);
+    expect(commands.filter(cmd => cmd === 'copy_continuation_text')).toHaveLength(mode === true ? 1 : 0);
+    expect(commands.filter(cmd => cmd === 'auto_paste_text')).toHaveLength(mode === false ? 1 : 0);
+    expect(commands.filter(cmd => cmd === 'copy_to_clipboard_native')).toHaveLength(mode === false ? 1 : 0);
+    expect(commands.filter(cmd => cmd === 'finish_continuation_delivery')).toHaveLength(mode === false ? 0 : 1);
+    store.cleanup();
+  });
+
+  it('rejects mismatched terminal reports and keeps old-run mode out of the active ledger', async () => {
+    appConfigMock.autoPasteText = true;
+    invokeMock.mockImplementation((cmd: string) => Promise.resolve(
+      cmd === 'auto_paste_continuation_text' ? {status: 'context_mismatch'} : true));
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({payload: {session_id: 1, status: 'Recording'}});
+    await handlers.get('recording:status')({payload: {session_id: 2, status: 'Recording'}});
+    const terminal = {session_id: 2, continuation_delivery: true, stable_snapshot: 'wrong',
+      report: {run_id: 1}, delivery_complete: true, error: null};
+    handlers.get('transcription:terminal')({payload: terminal});
+    handlers.get('transcription:terminal')({payload: {...terminal, session_id: 99, report: null}});
+    handlers.get('transcription:terminal')({payload: {...terminal, session_id: 1, stable_snapshot: 'old'}});
+    handlers.get('transcription:terminal')({payload: {...terminal, continuation_delivery: false,
+      stable_snapshot: 'active', report: {run_id: 2}}});
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(store.finalText).toBe('active');
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text').map(([, args]) => args))
+      .toEqual([{text: 'active', sessionId: 2}]);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_continuation_text').map(([, args]) => args.sessionId))
+      .toEqual([1]);
+    store.cleanup();
+  });
+
+  it('refuses conflicting terminal mode without downgrading an established continuation run', async () => {
+    appConfigMock.autoCopyToClipboard = true;
+    appConfigMock.autoPasteText = true;
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({payload: {session_id: 1, status: 'Recording'}});
+    await handlers.get('transcription:partial')({payload: {session_id: 1, text: '',
+      completion_v1: true, continuation_delivery: true, is_segment_final: false}});
+    handlers.get('transcription:terminal')({payload: {session_id: 1, continuation_delivery: false,
+      stable_snapshot: 'recover manually', report: null, error: null, delivery_complete: true}});
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(store.finalText).toBe('recover manually');
+    expect(invokeMock.mock.calls.filter(([cmd]) => ['auto_paste_text', 'copy_to_clipboard_native',
+      'auto_paste_continuation_text', 'copy_continuation_text'].includes(cmd))).toHaveLength(0);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'finish_continuation_delivery')).toHaveLength(1);
+    store.cleanup();
+  });
+
   it('retains negotiated logical text across a new capture episode and confirms deltas once', async () => {
     appConfigMock.autoPasteText = true;
     appConfigMock.autoCopyToClipboard = true;
@@ -483,7 +546,7 @@ describe('transcription connect-retry reliability', () => {
     await flushMicrotasks();
     await status(2);
     const tail = stable(1, 2, 'yes');
-    const terminal = { session_id: 1, stable_snapshot: 'yes yes', delivery_complete: true, report: null, error: null };
+    const terminal = { session_id: 1, continuation_delivery: false, stable_snapshot: 'yes yes', delivery_complete: true, report: null, error: null };
     handlers.get('transcription:terminal')({ payload: terminal });
     terminal.stable_snapshot = 'mutated';
     handlers.get('transcription:terminal')({ payload: { ...terminal, stable_snapshot: 'duplicate' } });
@@ -558,7 +621,7 @@ describe('transcription connect-retry reliability', () => {
       await vi.advanceTimersByTimeAsync(2000);
       expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'auto_paste_text')).toBe(false);
       handlers.get('transcription:terminal')({ payload: {
-        session_id: 1, stable_snapshot: 'confirmed', delivery_complete: false,
+        session_id: 1, continuation_delivery: false, stable_snapshot: 'confirmed', delivery_complete: false,
         report: { provider: { tail_evidence: 'unconfirmed' } }, error: 'deadline',
       } });
       await vi.advanceTimersByTimeAsync(0);
@@ -585,7 +648,7 @@ describe('transcription connect-retry reliability', () => {
     } });
     expect(store.finalText).toBe('one two');
     handlers.get('transcription:terminal')({ payload: {
-      session_id: 1, stable_snapshot: 'two', delivery_complete: true, report: null, error: null,
+      session_id: 1, continuation_delivery: false, stable_snapshot: 'two', delivery_complete: true, report: null, error: null,
     } });
     await flushMicrotasks();
     expect(store.finalText).toBe('one two');
@@ -610,7 +673,7 @@ describe('transcription connect-retry reliability', () => {
     } });
     await handlers.get('recording:status')({ payload: { session_id: 2, status: 'Recording' } });
     handlers.get('transcription:terminal')({ payload: {
-      session_id: 1, stable_snapshot: '', delivery_complete: true, report: null, error: null,
+      session_id: 1, continuation_delivery: false, stable_snapshot: '', delivery_complete: true, report: null, error: null,
     } });
     // A queued B stable delta acts as the existing ordered delivery barrier.
     await handlers.get('transcription:final')({ payload: {

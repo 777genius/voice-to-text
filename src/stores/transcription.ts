@@ -385,7 +385,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     interimSnapshot: string;
     lastDeliverySeq: number;
     negotiated: boolean;
-    continuation: boolean;
+    continuation: boolean | null;
     automaticDeliveryRefused: boolean;
     nativeDeliverySeq: number;
     nativeRevision: number;
@@ -1253,7 +1253,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     const ledger: AutoPasteSessionLedger = {
       sessionId, baseline: '', stableSnapshot: '', interimSnapshot: '', lastDeliverySeq: -1,
       negotiated: false, terminal: false, detached: false,
-      continuation: false, automaticDeliveryRefused: false, nativeDeliverySeq: 0, nativeRevision: 0,
+      continuation: null, automaticDeliveryRefused: false, nativeDeliverySeq: 0, nativeRevision: 0,
       autoCopy: autoCopyEnabled.value, autoPaste: autoPasteEnabled.value,
     };
     autoPasteLedgers.set(key, ledger);
@@ -1263,6 +1263,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       autoPasteLedgers.delete(oldestKey);
     }
     return ledger;
+  }
+
+  function applyDeliveryMode(ledger: AutoPasteSessionLedger, mode: boolean | null | undefined): void {
+    if (ledger.terminal || typeof mode !== 'boolean') return;
+    if (ledger.continuation !== null && ledger.continuation !== mode) {
+      ledger.automaticDeliveryRefused = true;
+      return;
+    }
+    ledger.continuation = mode;
   }
 
   // A delivery belongs to its run even when B already owns the visible buffers.
@@ -1281,7 +1290,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     if (ledger.terminal || payload.delivery_seq <= ledger.lastDeliverySeq) return Promise.resolve(false);
     // Ordered provider metadata precedes the first effect, even if the intent
     // projection is still queued. Completion support alone does not select mode.
-    ledger.continuation ||= payload.continuation_delivery === true;
+    applyDeliveryMode(ledger, payload.continuation_delivery);
     ledger.negotiated = true;
     if (pendingStopFinalization?.sessionId === payload.session_id) clearHotkeyStopFinalizeTimer();
     ledger.lastDeliverySeq = payload.delivery_seq;
@@ -1309,11 +1318,17 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   function acceptRunTerminal(payload: TranscriptionTerminalPayload): Promise<boolean> {
     if (!Number.isSafeInteger(payload.session_id) || payload.session_id <= 0) return Promise.resolve(false);
+    if (payload.report && payload.report.run_id !== undefined && payload.report.run_id !== payload.session_id) {
+      return Promise.resolve(false);
+    }
     const ledger = autoPasteLedgers.get(payload.session_id) ??
       (sessionId.value === payload.session_id ? captureAutoPasteLedger(payload.session_id) : undefined);
     if (!ledger || ledger.terminal) return Promise.resolve(false);
+    applyDeliveryMode(ledger, payload.continuation_delivery);
+    // Missing metadata cannot authorize legacy effects. Keep text recoverable.
+    if (ledger.continuation === null) ledger.automaticDeliveryRefused = true;
     ledger.terminal = true;
-    ledger.negotiated ||= !!payload.report?.provider;
+    ledger.negotiated ||= ledger.continuation === true || !!payload.report?.provider;
     // Legacy segment-finals arrive as partial events, so the Rust final-only
     // snapshot can omit stable prefixes already accumulated in this run's ledger.
     const stableSnapshot = ledger.stableSnapshot || payload.stable_snapshot;
@@ -1334,9 +1349,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
     // Completion quality never upgrades an interim. Even incomplete outcomes own
     // an immutable stable snapshot, copied/pasted through A's existing ledger.
-    return terminalSnapshot.trim() || (ledger.negotiated && ledger.continuation)
+    const acknowledgeTerminal = ledger.continuation !== false || payload.continuation_delivery === true;
+    return terminalSnapshot.trim() || acknowledgeTerminal
       ? enqueueTextDelivery('run_terminal', terminalSnapshot, ledger, ledger.autoCopy, ledger.autoPaste, null,
-          ledger.negotiated && ledger.continuation)
+          acknowledgeTerminal)
       : Promise.resolve(true);
   }
 
@@ -1765,9 +1781,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:partial')) {
             return;
           }
-          if (event.payload.continuation_delivery === true) {
-            captureAutoPasteLedger(event.payload.session_id).continuation = true;
-          }
+          applyDeliveryMode(captureAutoPasteLedger(event.payload.session_id),
+            event.payload.continuation_delivery);
           if (event.payload.completion_v1 === true) {
             captureAutoPasteLedger(event.payload.session_id).negotiated = true;
             if (pendingStopFinalization?.sessionId === event.payload.session_id) clearHotkeyStopFinalizeTimer();
@@ -2058,7 +2073,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
                 ['active', 'pausing', 'paused_reclaimable', 'continue_pending', 'active_awaiting_audio', 'finalizing', 'terminal'].includes(event.payload.continuationPhase ?? '')) {
               const ledger = captureAutoPasteLedger(Number(logicalId));
               continuationPhase.value = event.payload.continuationPhase ?? null;
-              ledger.continuation = true;
+              applyDeliveryMode(ledger, true);
               ledger.negotiated = true;
               if (pendingStopFinalization?.sessionId === logicalId) clearHotkeyStopFinalizeTimer();
             }

@@ -131,6 +131,7 @@ impl FinalTranscriptionPayload {
 /// Immutable result owned by this run, independent of the visible capture.
 #[derive(Debug, Clone, Serialize)]
 pub struct RunTerminalPayload {
+    pub continuation_delivery: Option<bool>,
     pub session_id: u64,
     pub stable_snapshot: String,
     pub delivery_complete: bool,
@@ -334,5 +335,30 @@ mod recording_window_payload_tests {
         let payload =
             serde_json::to_value(RecordingWindowLifecyclePayload { window_epoch: 17 }).unwrap();
         assert_eq!(payload, serde_json::json!({"windowEpoch": 17}));
+    }
+}
+
+#[cfg(test)]
+mod terminal_delivery_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_serializes_explicit_legacy_continuation_and_unknown_modes() {
+        for mode in [Some(false), Some(true), None] {
+            let payload = RunTerminalPayload {
+                continuation_delivery: mode,
+                session_id: 7,
+                stable_snapshot: "recovered".into(),
+                delivery_complete: false,
+                report: None,
+                error: None,
+            };
+            let json = serde_json::to_value(payload).unwrap();
+            assert_eq!(json["session_id"], 7);
+            assert_eq!(
+                json["continuation_delivery"],
+                serde_json::to_value(mode).unwrap()
+            );
+        }
     }
 }

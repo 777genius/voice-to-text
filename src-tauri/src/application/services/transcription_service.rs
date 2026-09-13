@@ -19,6 +19,7 @@ use crate::application::AudioSpectrumAnalyzer;
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct FinalizeReport {
+    pub continuation_delivery: Option<bool>,
     pub run_id: u64,
     pub audio: AudioDrainReport,
     pub provider: Option<crate::domain::ProviderFinalizeReport>,
@@ -378,6 +379,7 @@ pub struct TranscriptionService {
     paused_continuation: StdMutex<Option<PausedContinuation>>,
     processor_callbacks: StdMutex<Option<(ErrorCallback, ConnectionQualityCallback)>>,
     completed_report: Arc<RwLock<Option<FinalizeReport>>>,
+    provider_delivery_mode: Arc<RwLock<Option<bool>>>,
     provider_completion: Arc<RwLock<Option<crate::domain::ProviderFinalizeReport>>>,
     provider_delivery: Arc<RwLock<Option<crate::domain::AudioDeliveryProgress>>>,
     continuation_not_started: RwLock<Option<crate::domain::ContinuationNotStartedEvidence>>,
@@ -591,6 +593,7 @@ impl TranscriptionService {
             paused_continuation: StdMutex::new(None),
             processor_callbacks: StdMutex::new(None),
             completed_report: Arc::new(RwLock::new(None)),
+            provider_delivery_mode: Arc::new(RwLock::new(None)),
             provider_completion: Arc::new(RwLock::new(None)),
             provider_delivery: Arc::new(RwLock::new(None)),
             continuation_not_started: RwLock::new(None),
@@ -2021,6 +2024,7 @@ impl TranscriptionService {
         *self.processor_callbacks.lock().unwrap() =
             Some((on_error.clone(), on_connection_quality.clone()));
         *self.provider_completion.write().await = None;
+        *self.provider_delivery_mode.write().await = None;
         *self.provider_delivery.write().await = None;
 
         let dropped_chunks = Arc::new(AtomicUsize::new(0));
@@ -3058,6 +3062,7 @@ impl TranscriptionService {
                 .then(|| "Provider admission release remains unconfirmed".to_owned())
         });
         *self.completed_report.write().await = Some(FinalizeReport {
+            continuation_delivery: *self.provider_delivery_mode.read().await,
             run_id,
             audio,
             provider,
@@ -3111,6 +3116,12 @@ impl TranscriptionService {
     }
 
     async fn retain_provider_completion(&self, provider: &dyn SttProvider) {
+        if let Some(mode) = provider.continuation_delivery_mode() {
+            self.provider_delivery_mode
+                .write()
+                .await
+                .get_or_insert(mode);
+        }
         if let Some(disposition) = provider.continuation_not_started() {
             *self.continuation_not_started.write().await = Some(disposition);
         }
@@ -6849,6 +6860,27 @@ mod tests {
         assert!(service.completed_report_for_run(101).await.is_none());
         service.finalize_provider_for_run(101).await.unwrap();
         assert_eq!(log.lock().unwrap().stops, 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_first_report_retains_delivery_mode_and_run_identity() {
+        let (service, _, _, deliveries) = continuation_service_fixture(false, 0, None).await;
+        service.stop_capture_for_run(101).await.unwrap();
+        assert!(deliveries.lock().unwrap().is_empty());
+        service.finalize_provider_for_run(101).await.unwrap();
+        let report = service.completed_report_for_run(101).await.unwrap();
+        assert_eq!(report.continuation_delivery, Some(true));
+        assert_eq!(report.run_id, 101);
+        assert!(service.completed_report_for_run(102).await.is_none());
+        assert!(service.finalize_provider_for_run(102).await.is_err());
+        assert_eq!(
+            service
+                .completed_report_for_run(101)
+                .await
+                .unwrap()
+                .continuation_delivery,
+            Some(true)
+        );
     }
 
     #[tokio::test]

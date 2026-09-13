@@ -1613,15 +1613,26 @@ fn execute_recording_coordinator_effect(
                         stable_snapshot = provider.stable_snapshot.clone();
                     }
                     if let Some(state) = app_handle.try_state::<AppState>() {
-                        state
+                        let mut delivery = state
                             .continuation_delivery_runs
                             .lock()
-                            .unwrap_or_else(|p| p.into_inner())
-                            .terminal(run_id.get());
+                            .unwrap_or_else(|p| p.into_inner());
+                        if report.as_ref().and_then(|r| r.continuation_delivery) == Some(true) {
+                            if let Some(policy) = state
+                                .transcription_service
+                                .continuation_policy(run_id.get())
+                            {
+                                delivery.accept(run_id.get(), policy.auto_copy);
+                            }
+                        }
+                        delivery.terminal(run_id.get());
                     }
                     if let Err(emit_error) = app_handle.emit(
                         EVENT_TRANSCRIPTION_TERMINAL,
                         RunTerminalPayload {
+                            continuation_delivery: report
+                                .as_ref()
+                                .and_then(|r| r.continuation_delivery),
                             session_id: run_id.get(),
                             stable_snapshot,
                             delivery_complete,

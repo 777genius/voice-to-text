@@ -71,6 +71,7 @@ export interface FinalizeReport {
 }
 
 export interface TranscriptionTerminalPayload {
+  continuation_delivery?: boolean | null;
   session_id: number;
   stable_snapshot: string;
   delivery_complete: boolean;

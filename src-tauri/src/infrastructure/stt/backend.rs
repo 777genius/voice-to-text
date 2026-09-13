@@ -55,6 +55,7 @@ enum ContinuationAudioGate {
 }
 #[derive(Default)]
 struct ContinuationTransport {
+    offered: bool,
     ready_seen: bool,
     #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
     native_e2e_error_seen: bool,
@@ -945,6 +946,11 @@ impl Default for BackendProvider {
 
 #[async_trait]
 impl SttProvider for BackendProvider {
+    fn continuation_delivery_mode(&self) -> Option<bool> {
+        let negotiation = self.continuation.lock().unwrap();
+        (!negotiation.offered || negotiation.ready_seen).then_some(negotiation.session.is_some())
+    }
+
     fn continuation_session(&self) -> Option<ContinuationSession> {
         // Live eligibility is independent of paused idle reuse and keepalive policy.
         // Retain lifecycle identity below even after EOF, abort, or receiver failure.
@@ -1495,6 +1501,10 @@ impl SttProvider for BackendProvider {
             }
         });
 
+        let offered_continuation = provider_name == "elevenlabs"
+            && self.continuation_opted_in
+            && config.continuation_target_eligible;
+        self.continuation.lock().unwrap().offered = offered_continuation;
         let config_msg = ClientMessage::Config {
             protocol_v: 2,
             provider: provider_name.to_string(),
@@ -1508,7 +1518,7 @@ impl SttProvider for BackendProvider {
                     CAPABILITY_FINALIZE_ACK.to_string(),
                     CAPABILITY_FINALIZE_OUTCOME.to_string(),
                 ];
-                if self.continuation_opted_in && config.continuation_target_eligible {
+                if offered_continuation {
                     offered.push(CAPABILITY_PAUSE_CONTINUE.to_string());
                 }
                 offered
@@ -1525,8 +1535,6 @@ impl SttProvider for BackendProvider {
         let finalize_report = self.finalize_report.clone();
         let outcome_negotiated = self.outcome_negotiated.clone();
         let offered_outcome = provider_name == "elevenlabs";
-        let offered_continuation =
-            offered_outcome && self.continuation_opted_in && config.continuation_target_eligible;
         let continuation = self.continuation.clone();
         let connection_generation = self.connection_generation;
         let delivery = self.delivery.clone();
@@ -3155,6 +3163,10 @@ mod tests {
             assert_eq!(first.text, "first");
             assert!(first.completion_v1);
             assert_eq!(
+                provider.continuation_delivery_mode(),
+                Some(first.continuation_delivery)
+            );
+            assert_eq!(
                 first.continuation_delivery,
                 continuation && eligible && opted_in
             );
@@ -4395,6 +4407,27 @@ mod tests {
 
         assert_eq!(marker.load(Ordering::Relaxed), 2);
     }
+    #[test]
+    fn terminal_delivery_mode_retains_ready_selection_after_transport_closes() {
+        for accepted in [false, true] {
+            let provider = BackendProvider::new();
+            assert_eq!(provider.continuation_delivery_mode(), Some(false));
+            provider.continuation.lock().unwrap().offered = true;
+            assert_eq!(provider.continuation_delivery_mode(), None);
+            {
+                let mut ready = provider.continuation.lock().unwrap();
+                ready.ready_seen = true;
+                ready.session = accepted.then(|| ContinuationSession {
+                    connection_generation: 1,
+                    provider_session_id: "terminal-first".into(),
+                });
+            }
+            provider.is_closed.store(true, Ordering::SeqCst);
+            assert!(provider.continuation_session().is_none());
+            assert_eq!(provider.continuation_delivery_mode(), Some(accepted));
+        }
+    }
+
     #[test]
     fn delivery_ledger_handles_ack_before_writer_completion_and_duplicate_ack() {
         let mut ledger = DeliveryLedger::default();
