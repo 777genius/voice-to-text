@@ -1071,21 +1071,22 @@ pub(crate) fn sync_recording_intent_runtime(
 }
 
 pub(crate) async fn shutdown_recording_intent(app_handle: AppHandle) {
-    let Some(state) = app_handle.try_state::<AppState>() else {
-        return;
+    let (ready, force_off) = {
+        let Some(state) = app_handle.try_state::<AppState>() else {
+            return;
+        };
+        if state.recording_intent_coordinator_mode != RecordingIntentCoordinatorMode::Desired {
+            return;
+        }
+        let ready = state.recording_shutdown_ready.clone();
+        let force_off = state
+            .recording_hotkey_gestures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .force_off(super::recording_hotkey_gestures::ForceOffReason::Shutdown);
+        (ready, force_off)
     };
-    if state.recording_intent_coordinator_mode != RecordingIntentCoordinatorMode::Desired {
-        return;
-    }
-    let ready = state.recording_shutdown_ready.clone();
-    let mut gestures = state
-        .recording_hotkey_gestures
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let force_off = gestures.force_off(super::recording_hotkey_gestures::ForceOffReason::Shutdown);
     let submitted = submit_normalized_recording_gesture(app_handle.clone(), force_off);
-    drop(gestures);
-    drop(state);
     let shutdown_ready = ready.notified();
     tokio::pin!(shutdown_ready);
     shutdown_ready.as_mut().enable();
