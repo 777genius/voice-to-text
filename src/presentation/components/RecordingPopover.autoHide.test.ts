@@ -217,6 +217,8 @@ function mountRecordingPopover() {
           errorGeneric: 'Error',
           connecting: 'Connecting',
           listening: 'Listening',
+          starting: 'Starting',
+          processing: 'Processing',
           incomingTranslationEmpty: 'Incoming subtitles will appear here',
           incomingTranslation: 'Incoming translation',
           incomingTranslationMute: 'Mute translated audio',
@@ -492,6 +494,37 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     wrapper.unmount();
   });
 
+  it('does not replay the mini opening animation when capture becomes streaming', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:capture-readiness', 1);
+    await waitForListenerCount('recording:window-shown', 1);
+
+    await emitTauriEvent('recording:window-shown', {});
+    await vi.advanceTimersByTimeAsync(520);
+    expect(document.querySelector('.mini-opening')).toBeNull();
+
+    await emitTauriEvent('recording:intent-projection', {
+      runId: 20,
+      intentRevision: 4,
+      status: 'Starting',
+      desiredOn: true,
+      pendingStart: false,
+      processingJobs: 0,
+      shutdownRequested: false,
+    });
+    await emitTauriEvent('recording:capture-readiness', {
+      revision: 4,
+      runId: 21,
+      state: 'streaming',
+      reason: 'recording',
+      generation: 1,
+    });
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(document.querySelector('.mini-opening')).toBeNull();
+    wrapper.unmount();
+  });
+
   it('does not consume an opening epoch before mini layout is enabled', async () => {
     appConfigMock.showMiniRecordingWindow = false;
     const wrapper = mountRecordingPopover();
@@ -555,6 +588,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     expect(textInner!.textContent?.trim()).toBe('Incoming subtitles will appear here');
     expect(textInner!.textContent).not.toContain('Press');
     expect(statusDot!.classList.contains('recording')).toBe(true);
+    expect(statusDot!.getAttribute('aria-label')).toContain('Listening');
 
     store.incomingTranslationText = 'перевод собеседника';
     await nextTick();
@@ -564,6 +598,8 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     await nextTick();
     expect(textInner!.textContent?.trim()).toBe('temporary incoming translation failure');
     expect(statusDot!.classList.contains('error')).toBe(true);
+    expect(statusDot!.classList.contains('recording')).toBe(false);
+    expect(statusDot!.getAttribute('aria-label')).toContain('temporary incoming translation failure');
 
     wrapper.unmount();
   });
@@ -809,7 +845,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     wrapper.unmount();
   });
 
-  it('shows the listening placeholder immediately for a Rust-owned hotkey start', async () => {
+  it('shows honest starting state for a Rust-owned hotkey until capture is ready', async () => {
     const wrapper = mountRecordingPopover();
     await waitForListenerCount('hotkey:toggle-recording', 1);
 
@@ -828,12 +864,135 @@ describe('RecordingPopover mini auto-hide e2e', () => {
 
     const miniText = document.querySelector('.mini-transcription-text-inner')?.textContent ?? '';
     const statusDot = document.querySelector<HTMLElement>('.mini-status-dot');
-    expect(miniText).toContain('Listening');
+    expect(miniText).toContain('Starting');
     expect(miniText).not.toContain('Old transcript');
     expect(store.isStarting).toBe(true);
-    expect(statusDot?.classList.contains('recording')).toBe(true);
-    expect(statusDot?.classList.contains('starting')).toBe(false);
+    expect(statusDot?.classList.contains('recording')).toBe(false);
+    expect(statusDot?.classList.contains('starting')).toBe(true);
 
+    wrapper.unmount();
+  });
+
+  it('keeps authoritative Recording green when native readiness protocol is absent', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:status', 1);
+    const store = useTranscriptionStore();
+
+    await emitTauriEvent('recording:status', {
+      session_id: 70,
+      status: 'Recording',
+      stopped_via_hotkey: false,
+    });
+
+    const statusDot = document.querySelector<HTMLElement>('.mini-status-dot')!;
+    expect(store.hasCaptureReadinessProtocol).toBe(false);
+    expect(statusDot.classList.contains('recording')).toBe(true);
+    expect(statusDot.getAttribute('aria-label')).toContain('Listening');
+    expect(document.querySelector('.mini-transcription-text-inner')?.textContent).toContain('Listening');
+    wrapper.unmount();
+  });
+
+  it('turns green only for the current intent capture and exposes the transport phase', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:capture-readiness', 1);
+
+    await emitTauriEvent('recording:status', {
+      session_id: 90,
+      status: 'Recording',
+      stopped_via_hotkey: false,
+    });
+    await emitTauriEvent('recording:intent-projection', {
+      runId: 90,
+      intentRevision: 7,
+      status: 'Processing',
+      desiredOn: true,
+      pendingStart: false,
+      processingJobs: 1,
+      shutdownRequested: false,
+    });
+    await emitTauriEvent('recording:capture-readiness', {
+      revision: 7,
+      runId: 101,
+      state: 'buffering',
+      reason: 'finalizing-previous',
+      generation: 1,
+    });
+
+    const statusDot = document.querySelector<HTMLElement>('.mini-status-dot')!;
+    expect(statusDot.classList.contains('recording')).toBe(true);
+    expect(statusDot.classList.contains('starting')).toBe(false);
+    expect(statusDot.classList.contains('processing')).toBe(false);
+    expect(statusDot.getAttribute('aria-label')).toContain('Listening');
+    expect(statusDot.getAttribute('aria-label')).toContain('Processing');
+
+    await emitTauriEvent('recording:status', {
+      session_id: 90,
+      status: 'Processing',
+      stopped_via_hotkey: true,
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(hideWindowMock).not.toHaveBeenCalled();
+
+    await emitTauriEvent('recording:capture-readiness', {
+      revision: 6,
+      runId: 88,
+      state: 'unavailable',
+      reason: 'cancelled',
+      generation: 2,
+    });
+    expect(statusDot.classList.contains('recording')).toBe(true);
+
+    await emitTauriEvent('recording:capture-readiness', {
+      revision: 7,
+      runId: 101,
+      state: 'buffering',
+      reason: 'connecting-provider',
+      generation: 3,
+    });
+    expect(statusDot.getAttribute('aria-label')).toContain('Connecting');
+
+    await emitTauriEvent('recording:capture-readiness', {
+      revision: 7,
+      runId: 101,
+      state: 'unavailable',
+      reason: 'cancelled',
+      generation: 4,
+    });
+    expect(statusDot.classList.contains('recording')).toBe(false);
+    expect(statusDot.classList.contains('processing')).toBe(true);
+
+    wrapper.unmount();
+  });
+
+  it('keeps terminal error red even when the current capture was ready', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:capture-readiness', 1);
+    const store = useTranscriptionStore();
+
+    await emitTauriEvent('recording:intent-projection', {
+      runId: 42,
+      intentRevision: 12,
+      status: 'Starting',
+      desiredOn: true,
+      pendingStart: false,
+      processingJobs: 0,
+      shutdownRequested: false,
+    });
+    await emitTauriEvent('recording:capture-readiness', {
+      revision: 12,
+      runId: 77,
+      state: 'streaming',
+      reason: 'recording',
+      generation: 1,
+    });
+    store.status = RecordingStatus.Error;
+    store.error = 'capture failed';
+    await nextTick();
+
+    const statusDot = document.querySelector<HTMLElement>('.mini-status-dot')!;
+    expect(statusDot.classList.contains('recording')).toBe(false);
+    expect(statusDot.classList.contains('error')).toBe(true);
+    expect(statusDot.getAttribute('aria-label')).toContain('capture failed');
     wrapper.unmount();
   });
 

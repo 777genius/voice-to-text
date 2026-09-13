@@ -220,6 +220,9 @@ async fn test_deepgram_callbacks() {
 
     // Тестируем что callbacks можно вызывать
     let test_transcription = Transcription {
+        delivery_seq: None,
+        completion_v1: false,
+        timing_known: true,
         text: "Привет мир".to_string(),
         confidence: Some(0.95),
         is_final: false,
@@ -234,6 +237,9 @@ async fn test_deepgram_callbacks() {
     assert_eq!(partial_texts.lock().unwrap()[0], "Привет мир");
 
     let final_transcription = Transcription {
+        delivery_seq: None,
+        completion_v1: false,
+        timing_known: true,
         is_final: true,
         ..test_transcription
     };
@@ -524,8 +530,8 @@ async fn test_e2e_full_pipeline_with_deepgram() {
     service.initialize_audio(audio_config).await.unwrap();
 
     // Запускаем запись
-    let on_audio_level = Arc::new(|_level: f32| {});
-    let on_audio_spectrum = Arc::new(|_spectrum: [f32; 48]| {});
+    let on_audio_level = Arc::new(|_, _level: f32| {});
+    let on_audio_spectrum = Arc::new(|_, _spectrum: [f32; 48]| {});
     let on_error = noop_error();
 
     let result = service

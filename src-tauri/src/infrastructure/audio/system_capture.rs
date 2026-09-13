@@ -78,6 +78,7 @@ pub struct SystemAudioCapture {
     is_capturing: bool,
     options: SystemAudioCaptureOptions,
     callback_gate: CaptureCallbackGate,
+    terminal_error_callback: Option<crate::domain::AudioCaptureErrorCallback>,
 }
 
 #[derive(Clone, Default)]
@@ -131,8 +132,19 @@ fn emit_capture_chunk(callback_slot: &CaptureCallbackSlot, chunk: AudioChunk) {
 fn deactivate_capture_after_stream_error(
     callback_gate: &CaptureCallbackGate,
     callback_slot: &CaptureCallbackSlot,
-) {
-    callback_gate.stop_capture();
+    generation: u64,
+) -> bool {
+    // Claim only this stream generation. A late device error must not stop a
+    // replacement stream, nor mutate its running flag after winning this CAS.
+    let owned = callback_gate
+        .generation
+        .compare_exchange(
+            generation,
+            generation.wrapping_add(1),
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        )
+        .is_ok();
     match callback_slot.lock() {
         Ok(mut callback) => {
             *callback = None;
@@ -144,6 +156,7 @@ fn deactivate_capture_after_stream_error(
             );
         }
     }
+    owned
 }
 
 impl SystemAudioCapture {
@@ -200,6 +213,7 @@ impl SystemAudioCapture {
             is_capturing: false,
             options,
             callback_gate: CaptureCallbackGate::default(),
+            terminal_error_callback: None,
         })
     }
 
@@ -568,12 +582,22 @@ impl AudioCapture for SystemAudioCapture {
 
             let callback_gate_for_error = self.callback_gate.clone();
             let callback_slot_for_error = callback_slot.clone();
+            let terminal_error = self.terminal_error_callback.clone();
             let err_fn = move |err: cpal::StreamError| {
                 log::error!("Audio stream error: {}", err);
-                deactivate_capture_after_stream_error(
+                if deactivate_capture_after_stream_error(
                     &callback_gate_for_error,
                     &callback_slot_for_error,
-                );
+                    capture_generation,
+                ) {
+                    if let Some(callback) = terminal_error.as_ref() {
+                        let error =
+                            AudioError::Capture(format!("Native audio stream failed: {err}"));
+                        if catch_unwind(AssertUnwindSafe(|| callback(error))).is_err() {
+                            log::error!("Terminal audio error callback panicked");
+                        }
+                    }
+                }
             };
 
             let stream_result: AudioResult<Stream> = match sample_format {
@@ -689,6 +713,13 @@ impl AudioCapture for SystemAudioCapture {
         Ok(())
     }
 
+    fn set_terminal_error_callback(
+        &mut self,
+        callback: Option<crate::domain::AudioCaptureErrorCallback>,
+    ) {
+        self.terminal_error_callback = callback;
+    }
+
     fn is_capturing(&self) -> bool {
         self.is_capturing
     }
@@ -749,10 +780,40 @@ mod tests {
         let generation = gate.begin_capture();
         let callback_slot: CaptureCallbackSlot = Arc::new(Mutex::new(Some(Arc::new(|_chunk| {}))));
 
-        deactivate_capture_after_stream_error(&gate, &callback_slot);
+        assert!(deactivate_capture_after_stream_error(
+            &gate,
+            &callback_slot,
+            generation
+        ));
 
         assert!(!gate.should_emit(generation));
         assert!(callback_slot.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn stale_device_error_cannot_revoke_replacement_generation() {
+        let gate = CaptureCallbackGate::default();
+        let old = gate.begin_capture();
+        let old_slot: CaptureCallbackSlot = Arc::new(Mutex::new(Some(Arc::new(|_| {}))));
+        gate.stop_capture();
+        let current = gate.begin_capture();
+        assert!(!deactivate_capture_after_stream_error(
+            &gate, &old_slot, old
+        ));
+        assert!(old_slot.lock().unwrap().is_none());
+        assert!(gate.should_emit(current));
+        let current_slot: CaptureCallbackSlot = Arc::new(Mutex::new(Some(Arc::new(|_| {}))));
+        assert!(deactivate_capture_after_stream_error(
+            &gate,
+            &current_slot,
+            current
+        ));
+        assert!(!deactivate_capture_after_stream_error(
+            &gate,
+            &current_slot,
+            current
+        ));
+        assert!(!gate.should_emit(current));
     }
 
     #[test]

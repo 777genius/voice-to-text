@@ -142,11 +142,11 @@ fn noop_final() -> TranscriptionCallback {
 }
 
 fn noop_level() -> AudioLevelCallback {
-    Arc::new(|_| {})
+    Arc::new(|_, _| {})
 }
 
 fn noop_spectrum() -> AudioSpectrumCallback {
-    Arc::new(|_| {})
+    Arc::new(|_, _| {})
 }
 
 fn noop_error() -> ErrorCallback {

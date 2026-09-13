@@ -3,6 +3,15 @@ use serde::{Deserialize, Serialize};
 /// Represents the result of a speech-to-text transcription
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transcription {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_seq: Option<u64>,
+
+    #[serde(default)]
+    pub completion_v1: bool,
+
+    #[serde(default)]
+    pub timing_known: bool,
+
     /// The transcribed text
     pub text: String,
 
@@ -28,6 +37,9 @@ pub struct Transcription {
 impl Transcription {
     pub fn new(text: String, is_final: bool) -> Self {
         Self {
+            delivery_seq: None,
+            completion_v1: false,
+            timing_known: false,
             text,
             is_final,
             confidence: None,
@@ -49,6 +61,7 @@ impl Transcription {
     }
 
     pub fn with_timing(mut self, start: f64, duration: f64) -> Self {
+        self.timing_known = true;
         self.start = start;
         self.duration = duration;
         self

@@ -4,13 +4,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::domain::{
-    amplify_i16_samples, limited_microphone_gain, AudioCapture, AudioChunk, AudioChunkCallback,
-    AudioConfig, AudioResult,
+    amplify_i16_samples, limited_microphone_gain, AudioCapture, AudioCaptureIdentity, AudioChunk,
+    AudioChunkCallback, AudioConfig, AudioResult,
 };
 use crate::infrastructure::audio::{VadProcessor, VadResult};
 
 /// Callback type for silence timeout events
 pub type SilenceTimeoutCallback = Arc<dyn Fn() + Send + Sync>;
+pub type IdentifiedSilenceTimeoutCallback = Arc<dyn Fn(Option<AudioCaptureIdentity>) + Send + Sync>;
 
 const PENDING_STOP_GRACE: Duration = Duration::from_millis(300);
 
@@ -33,6 +34,8 @@ async fn run_silence_timer_worker(
     running: Arc<AtomicBool>,
     active_generation: Arc<AtomicU64>,
     silence_callback: Option<SilenceTimeoutCallback>,
+    identified_silence_callback: Option<IdentifiedSilenceTimeoutCallback>,
+    capture_identity: Option<AudioCaptureIdentity>,
 ) {
     let mut armed: Option<(u64, u64)> = None;
 
@@ -99,6 +102,9 @@ async fn run_silence_timer_worker(
                     if let Some(callback) = silence_callback.as_ref() {
                         callback();
                     }
+                    if let Some(callback) = identified_silence_callback.as_ref() {
+                        callback(capture_identity);
+                    }
                 }
             }
         }
@@ -120,6 +126,8 @@ pub struct VadCaptureWrapper {
     inner: Box<dyn AudioCapture>,
     vad: Arc<Mutex<VadProcessor>>,
     on_silence_timeout: Option<SilenceTimeoutCallback>,
+    on_identified_silence_timeout: Option<IdentifiedSilenceTimeoutCallback>,
+    next_capture_identity: Option<AudioCaptureIdentity>,
     audio_config: AudioConfig,
     silence_stop_state: Arc<Mutex<SilenceStopState>>,
     running: Arc<AtomicBool>, // Защита от "хвостов" callback после stop_capture
@@ -147,6 +155,8 @@ impl VadCaptureWrapper {
             inner,
             vad: Arc::new(Mutex::new(vad)),
             on_silence_timeout: None,
+            on_identified_silence_timeout: None,
+            next_capture_identity: None,
             audio_config: AudioConfig::default(),
             silence_stop_state: Arc::new(Mutex::new(SilenceStopState::default())),
             running: Arc::new(AtomicBool::new(false)),
@@ -161,6 +171,14 @@ impl VadCaptureWrapper {
     /// This callback is invoked ONCE when VAD detects configured silence timeout
     pub fn set_silence_timeout_callback(&mut self, callback: SilenceTimeoutCallback) {
         self.on_silence_timeout = Some(callback);
+    }
+
+    /// Registers a VAD callback carrying the exact identity frozen at physical capture start.
+    pub fn set_identified_silence_timeout_callback(
+        &mut self,
+        callback: IdentifiedSilenceTimeoutCallback,
+    ) {
+        self.on_identified_silence_timeout = Some(callback);
     }
 }
 
@@ -197,6 +215,8 @@ impl AudioCapture for VadCaptureWrapper {
 
         let vad = self.vad.clone();
         let silence_callback = self.on_silence_timeout.clone();
+        let identified_silence_callback = self.on_identified_silence_timeout.clone();
+        let capture_identity = self.next_capture_identity;
         let silence_stop_state = self.silence_stop_state.clone();
         let running = self.running.clone();
         let active_generation = self.capture_generation.clone();
@@ -208,6 +228,8 @@ impl AudioCapture for VadCaptureWrapper {
             running.clone(),
             active_generation.clone(),
             silence_callback,
+            identified_silence_callback,
+            capture_identity,
         )));
 
         // Frame buffer for accumulating exactly 480 samples (30ms @ 16kHz)
@@ -388,6 +410,7 @@ impl AudioCapture for VadCaptureWrapper {
             Err(err) => {
                 self.running.store(false, Ordering::SeqCst);
                 self.capture_generation.fetch_add(1, Ordering::SeqCst);
+                self.next_capture_identity = None;
                 if let Some(task) = self.silence_timer_task.take() {
                     task.abort();
                     let _ = task.await;
@@ -400,6 +423,7 @@ impl AudioCapture for VadCaptureWrapper {
     async fn stop_capture(&mut self) -> AudioResult<()> {
         self.running.store(false, Ordering::SeqCst);
         self.capture_generation.fetch_add(1, Ordering::SeqCst);
+        self.next_capture_identity = None;
         if let Ok(mut state) = self.silence_stop_state.lock() {
             state.pending_token = None;
         }
@@ -414,6 +438,18 @@ impl AudioCapture for VadCaptureWrapper {
         }
 
         self.inner.stop_capture().await
+    }
+
+    fn set_capture_identity(&mut self, identity: Option<AudioCaptureIdentity>) {
+        self.next_capture_identity = identity;
+        self.inner.set_capture_identity(identity);
+    }
+
+    fn set_terminal_error_callback(
+        &mut self,
+        callback: Option<crate::domain::AudioCaptureErrorCallback>,
+    ) {
+        self.inner.set_terminal_error_callback(callback);
     }
 
     fn is_capturing(&self) -> bool {
@@ -623,10 +659,10 @@ mod tests {
         let vad = VadProcessor::new(Some(90), None).expect("Failed to create VAD");
         let mut wrapper = VadCaptureWrapper::new(manual_capture, vad);
 
-        let silence_timeouts = Arc::new(AtomicUsize::new(0));
-        let timeout_counter = silence_timeouts.clone();
-        wrapper.set_silence_timeout_callback(Arc::new(move || {
-            timeout_counter.fetch_add(1, AtomicOrdering::SeqCst);
+        let timeout_identities = Arc::new(Mutex::new(Vec::new()));
+        let timeout_identities_cb = timeout_identities.clone();
+        wrapper.set_identified_silence_timeout_callback(Arc::new(move |identity| {
+            timeout_identities_cb.lock().unwrap().push(identity);
         }));
 
         let forwarded_chunks = Arc::new(AtomicUsize::new(0));
@@ -636,18 +672,32 @@ mod tests {
         });
 
         wrapper.initialize(AudioConfig::default()).await.unwrap();
+        let old_identity = AudioCaptureIdentity {
+            run_id: 11,
+            generation: 40,
+        };
+        wrapper.set_capture_identity(Some(old_identity));
         wrapper.start_capture(on_chunk.clone()).await.unwrap();
         let stale_callback = callback_slot.lock().unwrap().clone().unwrap();
         stale_callback(activity_then_silence_chunk());
 
         wrapper.stop_capture().await.unwrap();
+        let current_identity = AudioCaptureIdentity {
+            run_id: 12,
+            generation: 41,
+        };
+        wrapper.set_capture_identity(Some(current_identity));
         wrapper.start_capture(on_chunk).await.unwrap();
         let current_callback = callback_slot.lock().unwrap().clone().unwrap();
 
         stale_callback(activity_then_silence_chunk());
         current_callback(activity_then_silence_chunk());
         tokio::time::sleep(PENDING_STOP_GRACE + Duration::from_millis(50)).await;
-        assert_eq!(silence_timeouts.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(
+            timeout_identities.lock().unwrap().as_slice(),
+            &[Some(current_identity)],
+            "the callback must carry the identity frozen for the current physical start"
+        );
         assert!(forwarded_chunks.load(AtomicOrdering::SeqCst) > 0);
     }
 

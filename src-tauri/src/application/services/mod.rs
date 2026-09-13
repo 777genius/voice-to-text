@@ -1,3 +1,4 @@
+mod audio_drain;
 mod audio_spectrum;
 mod incoming_caption_translation_service;
 mod incoming_spoken_translation_service;
@@ -7,6 +8,7 @@ mod realtime_interpretation;
 mod transcription_service;
 mod translation_runtime_shutdown;
 
+pub use audio_drain::{AudioDrainReason, AudioDrainReport};
 pub use audio_spectrum::*;
 pub use incoming_caption_translation_service::{
     IncomingTranslationCallbacks, IncomingTranslationConfig, IncomingTranslationError,

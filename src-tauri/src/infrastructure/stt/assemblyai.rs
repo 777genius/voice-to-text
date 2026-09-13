@@ -738,6 +738,9 @@ impl AssemblyAIProvider {
                             log::info!("Final transcript: {}", text);
 
                             let transcription = Transcription {
+                                delivery_seq: None,
+                                completion_v1: false,
+                                timing_known: true,
                                 text: text.to_string(),
                                 confidence: json["end_of_turn_confidence"]
                                     .as_f64()
@@ -759,6 +762,9 @@ impl AssemblyAIProvider {
                             log::debug!("Partial transcript: {}", text);
 
                             let transcription = Transcription {
+                                delivery_seq: None,
+                                completion_v1: false,
+                                timing_known: true,
                                 text: text.to_string(),
                                 confidence: json["end_of_turn_confidence"]
                                     .as_f64()

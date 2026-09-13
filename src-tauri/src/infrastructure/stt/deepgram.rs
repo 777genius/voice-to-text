@@ -1844,6 +1844,9 @@ impl DeepgramProvider {
                                 // - is_final=true, speech_final=true: вся речь завершена
 
                                 let transcription = Transcription {
+                                    delivery_seq: None,
+                                    completion_v1: false,
+                                    timing_known: true,
                                     text: text.to_string(),
                                     confidence,
                                     is_final: is_final || closes_utterance,
@@ -1890,6 +1893,9 @@ impl DeepgramProvider {
                                 );
                                 call_deepgram_callback("final transcription", || {
                                     on_final(Transcription {
+                                        delivery_seq: None,
+                                        completion_v1: false,
+                                        timing_known: true,
                                         text: String::new(),
                                         confidence: None,
                                         is_final: true,
