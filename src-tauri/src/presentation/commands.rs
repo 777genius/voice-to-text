@@ -63,7 +63,15 @@ fn error_details_from_stt(err: &SttError) -> Option<TranscriptionErrorDetailsPay
 
 const TRANSCRIPT_EVENT_QUEUE_CAPACITY: usize = 128;
 const MAX_TRANSCRIPT_EVENT_TEXT_BYTES: usize = 64 * 1024;
-fn initial_continuation_target_eligible(target: Option<&AutoPasteTarget>) -> bool {
+pub(crate) fn initial_continuation_target_eligible(
+    auto_copy: bool,
+    auto_paste: bool,
+    target: Option<&AutoPasteTarget>,
+) -> bool {
+    // Copy-only delivery has no external target to bind or qualify (plan E39).
+    if !auto_paste {
+        return auto_copy;
+    }
     cfg!(target_os = "macos")
         && target.is_some_and(crate::infrastructure::auto_paste::continuation_app_qualified)
 }
@@ -1185,6 +1193,10 @@ fn execute_recording_coordinator_effect(
             }
             if let Some(stt) = stt_config.as_mut() {
                 stt.continuation_target_eligible = initial_continuation_target_eligible(
+                    config
+                        .as_ref()
+                        .is_some_and(|config| config.auto_copy_to_clipboard),
+                    config.as_ref().is_some_and(|config| config.auto_paste_text),
                     resolve_auto_paste_target(state.inner(), Some(run.run_id.get())).as_ref(),
                 );
             }
@@ -11439,8 +11451,16 @@ mod tests {
     }
 
     #[test]
+    fn initial_continuation_copy_only_needs_no_ax_target() {
+        assert!(initial_continuation_target_eligible(true, false, None));
+        assert!(!initial_continuation_target_eligible(false, false, None));
+        assert!(!initial_continuation_target_eligible(false, true, None));
+        assert!(!initial_continuation_target_eligible(true, true, None));
+    }
+
+    #[test]
     fn initial_continuation_qualification_keeps_other_targets_on_legacy_delivery() {
-        assert!(!initial_continuation_target_eligible(None));
+        assert!(!initial_continuation_target_eligible(true, true, None));
         for bundle in [
             "com.apple.TextEdit",
             "com.apple.TextEdit.other",
@@ -11452,7 +11472,7 @@ mod tests {
                     pid,
                 };
                 assert_eq!(
-                    initial_continuation_target_eligible(Some(&target)),
+                    initial_continuation_target_eligible(true, true, Some(&target)),
                     cfg!(target_os = "macos") && bundle == "com.apple.TextEdit" && pid > 0
                 );
             }

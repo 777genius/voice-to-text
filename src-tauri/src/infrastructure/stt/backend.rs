@@ -3097,7 +3097,19 @@ mod tests {
 
     #[tokio::test]
     async fn ready_metadata_precedes_first_stable_callback_without_projection() {
+        use crate::presentation::commands::initial_continuation_target_eligible;
+        let copy_only = initial_continuation_target_eligible(true, false, None);
+        let unqualified_paste = initial_continuation_target_eligible(true, true, None);
+        let no_delivery = initial_continuation_target_eligible(false, false, None);
+        assert!(copy_only);
+        assert!(!unqualified_paste);
+        assert!(!no_delivery);
         for (continuation, eligible, opted_in) in [
+            // Exercise the frozen policy qualification through actual Config/Ready.
+            (true, copy_only, true),
+            (true, copy_only, false),
+            (true, unqualified_paste, true),
+            (true, no_delivery, true),
             (false, true, true),
             (true, true, true),
             (true, false, true),

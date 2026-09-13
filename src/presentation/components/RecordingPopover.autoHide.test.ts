@@ -194,9 +194,10 @@ function lastRecordingWindowResizeCall() {
   return calls[calls.length - 1];
 }
 
-function mountRecordingPopover() {
+function mountRecordingPopover(setupStore?: (store: ReturnType<typeof useTranscriptionStore>) => void) {
   const pinia = createPinia();
   setActivePinia(pinia);
+  setupStore?.(useTranscriptionStore());
 
   const root = document.createElement('div');
   document.body.appendChild(root);
@@ -353,13 +354,14 @@ describe('RecordingPopover mini auto-hide e2e', () => {
 
   it.each([true, false])('shows guarded recovery and copies only after explicit action (mini %s)', async (mini) => {
     appConfigMock.showMiniRecordingWindow = mini;
-    const wrapper = mountRecordingPopover();
+    const wrapper = mountRecordingPopover((store) => {
+      vi.spyOn(store, 'deliveryRecovery', 'get').mockReturnValue([
+        { sessionId: 1, transcript: 'confirmed unconfirmed', unconfirmedText: 'unconfirmed' },
+      ]);
+    });
     const store = useTranscriptionStore();
-    vi.spyOn(store, 'deliveryRecovery', 'get').mockReturnValue([
-      { sessionId: 1, transcript: 'confirmed unconfirmed', unconfirmedText: 'unconfirmed' },
-    ]);
     await nextTick();
-    // Trigger rendering after the computed recovery fixture changes.
+    store.sessionId = 1;
     store.finalText = 'confirmed unconfirmed';
     await nextTick();
     const warning = document.querySelector(mini ? '.mini-transcription-text' : '.error-container');
@@ -375,6 +377,57 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     expect(invokeMock).toHaveBeenCalledWith('copy_to_clipboard_native', { text: 'unconfirmed' });
     wrapper.unmount();
   });
+
+  it.each(['transcript', 'starting', 'pending', 'processing', 'error', 'terminal'])(
+    'keeps old A recovery copyable while B owns mini %s', async (surface) => {
+      const wrapper = mountRecordingPopover((store) => {
+        vi.spyOn(store, 'deliveryRecovery', 'get').mockReturnValue([
+          { sessionId: 1, transcript: 'A confirmed unconfirmed', unconfirmedText: 'A unconfirmed' },
+        ]);
+      });
+      const store = useTranscriptionStore();
+      store.sessionId = 2;
+      store.status = RecordingStatus.Recording;
+      store.finalText = 'B current transcript';
+      if (surface === 'starting' || surface === 'pending' || surface === 'processing') {
+        store.finalText = '';
+        store.status = surface === 'processing' ? RecordingStatus.Processing : RecordingStatus.Starting;
+        if (surface === 'pending') {
+          store.sessionId = 1;
+          store.recordingIntentRunId = 2;
+          store.recordingDesiredOn = true;
+        }
+      } else if (surface === 'error') {
+        store.error = 'B failed';
+      } else if (surface === 'terminal') {
+        store.lastAcceptedRecordingStatus = { session_id: 2, status: RecordingStatus.Idle };
+        store.sessionId = null;
+        store.status = RecordingStatus.Idle;
+      }
+      await nextTick();
+      const text = document.querySelector('.mini-transcription-text');
+      expect(text?.textContent?.trim()).toBeTruthy();
+      expect(text?.textContent).not.toContain('Automatic insertion stopped');
+      if (surface === 'transcript' || surface === 'terminal') {
+        expect(text?.textContent).toContain('B current transcript');
+        expect(text?.classList.contains('error')).toBe(false);
+      }
+      const copy = document.querySelector<HTMLButtonElement>('[data-testid="mini-copy-recovery"]');
+      expect(copy).toBeTruthy();
+      copy!.click();
+      await flushMicrotasks();
+      expect(invokeMock).toHaveBeenCalledWith('copy_to_clipboard_native', { text: 'A unconfirmed' });
+      expect(store.deliveryRecovery).toHaveLength(1);
+      // With B's surface cleared, retained recovery becomes the useful idle display.
+      store.finalText = '';
+      store.recordingDesiredOn = false;
+      store.error = null;
+      store.status = RecordingStatus.Idle;
+      await nextTick();
+      expect(text?.textContent).toContain('Automatic insertion stopped');
+      wrapper.unmount();
+    },
+  );
 
   it('shows mini action buttons only when native cursor is over the mini window', async () => {
     const wrapper = mountRecordingPopover();

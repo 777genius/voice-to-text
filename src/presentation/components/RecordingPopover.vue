@@ -159,8 +159,7 @@ function normalizeMiniTranscriptText(...parts: string[]): string {
     .trim();
 }
 
-const miniDisplayText = computed(() => {
-  if (store.deliveryRecovery.length) return 'Automatic insertion stopped. Check the target before pasting unconfirmed text.';
+const miniCurrentDisplayText = computed(() => {
   if (hasMiniError.value) {
     return store.incomingTranslationError || store.errorSummary;
   }
@@ -180,9 +179,25 @@ const miniDisplayText = computed(() => {
   if (store.isConnecting) return t('main.connecting');
   if (store.isRecording && !store.hasCaptureReadinessProtocol) return t('main.listening');
   if (store.isStarting || store.isRecording) return t('main.starting');
-  if (store.isProcessing) return store.displayText;
+  if (store.isProcessing) return store.displayText || t('main.processing');
   return '';
 });
+
+// Session status retains the display owner after terminal cleanup clears sessionId.
+// Old recovery stays in the actions, but cannot take a newer run's surface.
+const showMiniRecoveryWarning = computed(() => {
+  if (!store.deliveryRecovery.length) return false;
+  const displayRunId = (store.recordingDesiredOn ? store.recordingIntentRunId : null)
+    ?? store.sessionId ?? store.lastAcceptedRecordingStatus?.session_id;
+  const newerDisplayOwnsSurface = miniCurrentDisplayText.value && displayRunId != null
+    && store.deliveryRecovery.every(
+      recovery => recovery.sessionId != null && recovery.sessionId < displayRunId,
+    );
+  return !newerDisplayOwnsSurface;
+});
+const miniDisplayText = computed(() => showMiniRecoveryWarning.value
+  ? 'Automatic insertion stopped. Check the target before pasting unconfirmed text.'
+  : miniCurrentDisplayText.value);
 
 const miniTranscriptionTextRef = ref<HTMLElement | null>(null);
 const isMiniTextOverflowing = ref(false);
@@ -205,7 +220,7 @@ function alignMiniTextToEnd() {
     const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
 
     isMiniTextOverflowing.value = shouldShowText && maxScroll > 1;
-    el.scrollLeft = shouldShowText && !hasMiniError.value && !store.deliveryRecovery.length ? maxScroll : 0;
+    el.scrollLeft = shouldShowText && !hasMiniError.value && !showMiniRecoveryWarning.value ? maxScroll : 0;
   });
 }
 
@@ -1115,9 +1130,9 @@ const minimizeWindow = async (event?: Event) => {
             class="mini-transcription-text"
             :class="{
               recording: hasMiniRecognizedText,
-              placeholder: !hasMiniRecognizedText && !hasMiniError && !store.deliveryRecovery.length,
+              placeholder: !hasMiniRecognizedText && !hasMiniError && !showMiniRecoveryWarning,
               prompt: shouldShowMiniHotkeyPrompt,
-              error: store.hasError || Boolean(store.error) || store.deliveryRecovery.length > 0,
+              error: store.hasError || Boolean(store.error) || showMiniRecoveryWarning,
               overflowing: isMiniTextOverflowing,
             }"
             :title="miniDisplayText || miniHotkeyPrompt"
