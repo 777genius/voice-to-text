@@ -387,6 +387,18 @@ pub struct TranscriptionService {
     legacy_run_sequence: AtomicU64,
 }
 
+/// Distinguishes intentional attach teardown from a real provider failure
+/// which may race the same cancellation flag.
+#[derive(Debug)]
+pub(crate) struct PreparedCaptureCancelled;
+
+impl std::fmt::Display for PreparedCaptureCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Provider connection cancelled")
+    }
+}
+impl std::error::Error for PreparedCaptureCancelled {}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PreparedCaptureToken {
     pub run_id: u64,
@@ -1529,7 +1541,7 @@ impl TranscriptionService {
         }
         if cancelled.load(Ordering::Acquire) {
             self.cancel_prepared_capture(token).await?;
-            anyhow::bail!("Prepared capture was cancelled");
+            return Err(anyhow::Error::new(PreparedCaptureCancelled));
         }
         let completed = {
             let start = self.start_recording_inner(
@@ -1587,7 +1599,7 @@ impl TranscriptionService {
             }
             drop(_connection_guard);
             stop_result?;
-            anyhow::bail!("Provider connection cancelled")
+            Err(anyhow::Error::new(PreparedCaptureCancelled))
         }
     }
 
@@ -1975,6 +1987,11 @@ impl TranscriptionService {
             if expected_token != prepared.token {
                 anyhow::bail!("Prepared capture token changed before provider connection");
             }
+            // Publish ownership before releasing the slot lock. Stop observes
+            // either the retained FIFO or this exact active episode, never neither.
+            *self.active_audio.write().await =
+                Some((prepared.token.run_id, prepared.accounting.clone()));
+            *self.active_episode.lock().unwrap() = Some(prepared.token);
             slot.take().expect("prepared capture checked above")
         };
         let PreparedCapture {
@@ -2016,8 +2033,6 @@ impl TranscriptionService {
         self.abort_audio_processor_task("starting a new recording")
             .await;
 
-        *self.active_audio.write().await = Some((token.run_id, accounting.clone()));
-        *self.active_episode.lock().unwrap() = Some(token);
         self.active_ack_base.store(0, Ordering::Release);
         *self.completed_episode_audio.lock().unwrap() = None;
         *self.paused_continuation.lock().unwrap() = None;
@@ -10120,6 +10135,7 @@ mod tests {
 
     struct DrainTestFactory {
         behavior: DrainTestSend,
+        start_gate: Option<(Arc<tokio::sync::Notify>, bool)>,
         preferred_samples: Option<usize>,
         sent: tokio::sync::mpsc::UnboundedSender<AudioChunk>,
         stops: Arc<AtomicUsize>,
@@ -10128,6 +10144,7 @@ mod tests {
 
     struct DrainTestProvider {
         behavior: DrainTestSend,
+        start_gate: Option<(Arc<tokio::sync::Notify>, bool)>,
         preferred_samples: Option<usize>,
         sent: tokio::sync::mpsc::UnboundedSender<AudioChunk>,
         stops: Arc<AtomicUsize>,
@@ -10138,6 +10155,7 @@ mod tests {
         fn create(&self, _config: &SttConfig) -> SttResult<Box<dyn SttProvider>> {
             Ok(Box::new(DrainTestProvider {
                 behavior: self.behavior,
+                start_gate: self.start_gate.clone(),
                 preferred_samples: self.preferred_samples,
                 sent: self.sent.clone(),
                 stops: self.stops.clone(),
@@ -10158,6 +10176,12 @@ mod tests {
             _on_error: ErrorCallback,
             _on_quality: ConnectionQualityCallback,
         ) -> SttResult<()> {
+            if let Some((gate, fail)) = &self.start_gate {
+                gate.notified().await;
+                if *fail {
+                    return Err(SttError::Processing("fixture handshake failure".into()));
+                }
+            }
             Ok(())
         }
         async fn send_audio(&mut self, chunk: &AudioChunk) -> SttResult<()> {
@@ -10202,6 +10226,14 @@ mod tests {
         behavior: DrainTestSend,
         preferred_samples: Option<usize>,
     ) -> DrainTestRun {
+        prepare_drain_test_with_start(behavior, preferred_samples, None).await
+    }
+
+    async fn prepare_drain_test_with_start(
+        behavior: DrainTestSend,
+        preferred_samples: Option<usize>,
+        start_gate: Option<(Arc<tokio::sync::Notify>, bool)>,
+    ) -> DrainTestRun {
         let callback = Arc::new(std::sync::Mutex::new(None));
         let (tx, sent) = tokio::sync::mpsc::unbounded_channel();
         let stops = Arc::new(AtomicUsize::new(0));
@@ -10210,6 +10242,7 @@ mod tests {
             Box::new(ManualAudioCapture::new(callback.clone())),
             Arc::new(DrainTestFactory {
                 behavior,
+                start_gate,
                 preferred_samples,
                 sent: tx,
                 stops: stops.clone(),
@@ -10258,6 +10291,148 @@ mod tests {
             .await
             .expect("ready/live audio must be submitted without waiting for a packet to fill")
             .expect("test provider packet")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cold_start_stop_preserves_fifo_across_attach_publication_and_finalizes_once() {
+        // Exercise both a retained FIFO and the slot-to-active publication edge.
+        for stop_before_attach in [true, false] {
+            let gate = Arc::new(tokio::sync::Notify::new());
+            let mut run = prepare_drain_test_with_start(
+                DrainTestSend::Record,
+                None,
+                Some((gate.clone(), false)),
+            )
+            .await;
+            (run.capture)(AudioChunk::new(vec![0; 480], 16000, 1));
+            (run.capture)(AudioChunk::new(vec![1200; 480], 16000, 1));
+            if stop_before_attach {
+                run.service
+                    .stop_pending_capture(run.token, false)
+                    .await
+                    .unwrap();
+                run.service
+                    .stop_pending_capture(run.token, false)
+                    .await
+                    .unwrap();
+            }
+            {
+                // Suspend exactly at active ownership publication. Stop must wait
+                // for that publication rather than losing/dropping the FIFO.
+                let publication = run.service.active_audio.write().await;
+                let connect = connect_drain_test(&run);
+                tokio::pin!(connect);
+                assert!(futures_util::poll!(connect.as_mut()).is_pending());
+                let stop = run.service.stop_pending_capture(run.token, false);
+                tokio::pin!(stop);
+                assert!(futures_util::poll!(stop.as_mut()).is_pending());
+                drop(publication);
+                assert!(futures_util::poll!(connect.as_mut()).is_pending());
+                stop.await.unwrap();
+                assert!(
+                    !run.service
+                        .capture_is_active_for_run(run.token.run_id)
+                        .await
+                );
+                assert_eq!(run.service.active_capture_episode(), Some(run.token));
+                run.service
+                    .stop_pending_capture(run.token, false)
+                    .await
+                    .unwrap();
+                // Attach stays alive until this one handshake resolves.
+                gate.notify_one();
+                connect.await;
+            }
+            assert_eq!(run.service.get_status().await, RecordingStatus::Processing);
+            run.service
+                .stop_capture_for_run(run.token.run_id)
+                .await
+                .unwrap();
+            run.service
+                .finalize_provider_for_run(run.token.run_id)
+                .await
+                .unwrap();
+            run.service
+                .finalize_provider_for_run(run.token.run_id)
+                .await
+                .unwrap();
+            let report = run
+                .service
+                .completed_report_for_run(run.token.run_id)
+                .await
+                .unwrap();
+            assert_eq!(report.audio.accepted_bytes, 1920);
+            assert_eq!(report.audio.submitted_bytes, 1920);
+            assert!(!report.audio.is_incomplete());
+            let mut samples = Vec::new();
+            while let Ok(packet) = run.sent.try_recv() {
+                samples.extend(packet.data);
+            }
+            assert_eq!(samples.len(), 960);
+            assert!(samples[..480].iter().all(|sample| *sample == 0));
+            assert!(samples[480..].iter().all(|sample| *sample > 0));
+            assert_eq!(run.stops.load(Ordering::SeqCst), 1);
+            assert_eq!(run.aborts.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cold_start_stopped_handshake_error_timeout_and_force_cancel_never_replay() {
+        for outcome in ["error", "error_racing_cancel", "timeout", "cancel"] {
+            let gate = Arc::new(tokio::sync::Notify::new());
+            let mut run = prepare_drain_test_with_start(
+                DrainTestSend::Record,
+                None,
+                Some((gate.clone(), outcome.starts_with("error"))),
+            )
+            .await;
+            (run.capture)(AudioChunk::new(vec![1200; 480], 16000, 1));
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let errors = Arc::new(AtomicUsize::new(0));
+            let observed = errors.clone();
+            {
+                let connect = run.service.connect_prepared_recording(
+                    run.token,
+                    Arc::new(|_| {}),
+                    Arc::new(|_| {}),
+                    Arc::new(|_, _| {}),
+                    Arc::new(|_, _| {}),
+                    Arc::new(move |_| {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                    }),
+                    Arc::new(|_, _| {}),
+                    cancelled.clone(),
+                );
+                tokio::pin!(connect);
+                assert!(futures_util::poll!(connect.as_mut()).is_pending());
+                run.service
+                    .stop_pending_capture(run.token, false)
+                    .await
+                    .unwrap();
+                match outcome {
+                    "error" => gate.notify_one(),
+                    "error_racing_cancel" => {
+                        gate.notify_one();
+                        cancelled.store(true, Ordering::Release);
+                    }
+                    "cancel" => cancelled.store(true, Ordering::Release),
+                    _ => {}
+                }
+                let error = connect.await.unwrap_err();
+                assert_eq!(error.is::<PreparedCaptureCancelled>(), outcome == "cancel");
+            }
+            assert!(
+                !run.service
+                    .capture_is_active_for_run(run.token.run_id)
+                    .await
+            );
+            assert_eq!(run.service.get_status().await, RecordingStatus::Idle);
+            assert!(run.sent.try_recv().is_err());
+            assert_eq!(run.stops.load(Ordering::SeqCst), 0);
+            assert_eq!(run.aborts.load(Ordering::SeqCst), 1);
+            assert_eq!(errors.load(Ordering::SeqCst), 0);
+            assert_eq!(run.service.logical_provider_run_id(), 0);
+        }
     }
 
     #[tokio::test]

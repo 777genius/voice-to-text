@@ -1288,31 +1288,9 @@ fn execute_recording_coordinator_effect(
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .insert(run_id, token);
-                    if cancelled.load(Ordering::Acquire) {
-                        log::info!(
-                            "pending_start_cancelled run_id={} capture_generation={}",
-                            run_id,
-                            token.generation
-                        );
-                        let stop_result = state
-                            .transcription_service
-                            .stop_capture_for_run(run_id)
-                            .await;
-                        if state
-                            .transcription_service
-                            .capture_is_active_for_run(run_id)
-                            .await
-                        {
-                            return Ok(token);
-                        }
-                        state
-                            .prepared_capture_tokens
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .remove(&run_id);
-                        stop_result.map_err(|error| error.to_string())?;
-                        return Err("recording capture preparation cancelled".to_string());
-                    }
+                    // Successful preparation is capture admission. Report it even
+                    // if Stop raced this completion: the reducer now seals and
+                    // delivers admitted PCM, or explicitly tears down a hard cancel.
                     Ok(token)
                 })
                 .await;
@@ -1350,6 +1328,49 @@ fn execute_recording_coordinator_effect(
                         outcome,
                     },
                 );
+            });
+        }
+        recording_intent::CoordinatorEffect::SealStartingCapture { run_id } => {
+            tauri::async_runtime::spawn(async move {
+                let Some(state) = app_handle.try_state::<AppState>() else {
+                    return;
+                };
+                let token = state
+                    .prepared_capture_tokens
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get(&run_id.get())
+                    .copied();
+                let Some(token) = token else {
+                    return;
+                };
+                // Only device-stop failure is retryable. This never restarts
+                // provider admission or replays a possibly accepted PCM write.
+                for attempt in 1..=3 {
+                    let result = state
+                        .transcription_service
+                        .stop_pending_capture(token, false)
+                        .await;
+                    if !state
+                        .transcription_service
+                        .capture_is_active_for_run(run_id.get())
+                        .await
+                    {
+                        return;
+                    }
+                    if attempt == 3 {
+                        let error = result
+                            .err()
+                            .map(|e| recording_intent_error_code(&e.to_string()))
+                            .unwrap_or(recording_intent::ErrorCode(1));
+                        drop(state);
+                        dispatch_recording_coordinator_event(
+                            app_handle,
+                            recording_intent::CoordinatorEvent::RuntimeFailed { run_id, error },
+                        );
+                        return;
+                    }
+                }
             });
         }
         recording_intent::CoordinatorEffect::CancelPrepare { .. }
@@ -4312,8 +4333,11 @@ async fn start_recording_checked(
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&session_id);
 
-        // Сначала transcription:error, потом recording:status=Error (во фронте есть логика suppression/retry).
-        on_error(stt);
+        // Explicit teardown is not a provider runtime failure. Its exact start
+        // effect still reports Cancelled and owns the required cleanup.
+        if !e.is::<crate::application::PreparedCaptureCancelled>() {
+            on_error(stt);
+        }
 
         return Err(error);
     }

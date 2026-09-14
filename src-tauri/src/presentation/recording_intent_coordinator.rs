@@ -492,6 +492,10 @@ pub enum CoordinatorEffect {
         effect_id: EffectId,
         run_id: RunId,
     },
+    /// Seal admitted PCM without cancelling the single pending provider attach.
+    SealStartingCapture {
+        run_id: RunId,
+    },
     StopRecording {
         effect_id: EffectId,
         run_id: RunId,
@@ -537,7 +541,8 @@ impl CoordinatorEffect {
             | Self::FinalizeRecording { effect_id, .. }
             | Self::ShowPanel { effect_id, .. }
             | Self::HidePanel { effect_id, .. } => Some(effect_id),
-            Self::ReleaseTranscriptBarrier { .. }
+            Self::SealStartingCapture { .. }
+            | Self::ReleaseTranscriptBarrier { .. }
             | Self::EmitProjection(_)
             | Self::ShutdownReady => None,
         }
@@ -1022,6 +1027,7 @@ pub struct CoordinatorState {
     pub desired_panel: PanelGoal,
     pub capture: CaptureState,
     capture_identity: Option<(RunId, u64)>,
+    hard_cancelled_prepare: Option<(EffectId, StopReason)>,
     pub continuation: Option<ContinuationRoute>,
     pending_episode: Option<PendingEpisode>,
     reserved_intent_run: Option<RunContext>,
@@ -1068,6 +1074,7 @@ impl CoordinatorState {
             desired_panel: PanelGoal::Preserve,
             capture: CaptureState::Idle,
             capture_identity: None,
+            hard_cancelled_prepare: None,
             continuation: None,
             pending_episode: None,
             reserved_intent_run: None,
@@ -1674,6 +1681,29 @@ fn apply_intent(state: &mut CoordinatorState, intent: RecordingIntent, phase: &m
 }
 
 fn force_off(state: &mut CoordinatorState, reason: StopReason) {
+    if matches!(
+        reason,
+        StopReason::RuntimeFailure | StopReason::SystemSleep | StopReason::Shutdown
+    ) {
+        if let CaptureState::Preparing { effect_id, .. } = state.capture {
+            // The disposition belongs to this admission, not the latest intent.
+            // A queued On must never resurrect its cancelled FIFO.
+            state.hard_cancelled_prepare = Some((effect_id, reason));
+        }
+    }
+    // A prior ordinary Stop requested sealing, not cancellation. Teardown must
+    // still be able to revoke that same in-flight provider admission.
+    if !matches!(
+        state.desired_stop_reason,
+        StopReason::RuntimeFailure | StopReason::SystemSleep | StopReason::Shutdown
+    ) {
+        if let CaptureState::Starting {
+            cancel_requested, ..
+        } = &mut state.capture
+        {
+            *cancel_requested = false;
+        }
+    }
     note_continuation_stop(state, false);
     // Teardown revokes even a previously sealed pending phrase. Ordinary Stop
     // retains it, but sleep/shutdown/failure cannot authorize later routing.
@@ -1758,6 +1788,11 @@ fn apply_runtime_failed(
     }
     set_recoverable_fault(state, CoordinatorFault::RuntimeFailed { run_id, error });
     force_off(state, StopReason::RuntimeFailure);
+    if !requires_terminal {
+        if let CaptureState::Starting { effect_id, .. } = capture {
+            effects.push(CoordinatorEffect::CancelStart { effect_id, run_id });
+        }
+    }
     if let CaptureState::Buffering { run, .. }
     | CaptureState::Starting { run, .. }
     | CaptureState::Recording { run } = capture
@@ -1822,10 +1857,45 @@ fn apply_prepare_finished(
     }
     state.in_flight.remove(&effect_id);
     state.remember_completion(effect_id, CompletedEffect::Prepare { run_id, outcome });
+    let hard_cancel_reason = state
+        .hard_cancelled_prepare
+        .filter(|(owner, _)| *owner == effect_id)
+        .map(|(_, reason)| reason);
+    if hard_cancel_reason.is_some() {
+        state.hard_cancelled_prepare = None;
+    }
     match outcome {
         PrepareOutcome::Succeeded { generation } => {
             state.capture_identity = Some((run_id, generation));
-            state.capture = CaptureState::Buffering { run, generation };
+            let stopped_after_admission = matches!(
+                state.capture,
+                CaptureState::Preparing {
+                    cancel_requested: true,
+                    ..
+                }
+            ) && !matches!(
+                state.desired_stop_reason,
+                StopReason::RuntimeFailure | StopReason::SystemSleep | StopReason::Shutdown
+            ) && state.continuation.is_none()
+                && state.processing_jobs.is_empty();
+            if let Some(reason) = hard_cancel_reason {
+                start_active_stop(state, run, reason, false, effects);
+            } else if stopped_after_admission {
+                let start_id = state.next_effect();
+                state.capture = CaptureState::Starting {
+                    run,
+                    effect_id: start_id,
+                    cancel_requested: true,
+                };
+                register_effect(state, start_id, PendingEffect::Start { run });
+                effects.push(CoordinatorEffect::SealStartingCapture { run_id });
+                effects.push(CoordinatorEffect::StartRecording {
+                    effect_id: start_id,
+                    run,
+                });
+            } else {
+                state.capture = CaptureState::Buffering { run, generation };
+            }
         }
         PrepareOutcome::Cancelled => {
             state.capture = CaptureState::Idle;
@@ -1906,9 +1976,22 @@ fn apply_start_finished(
 
     match outcome {
         StartOutcome::Succeeded => {
+            let stop_requested = matches!(
+                state.capture,
+                CaptureState::Starting {
+                    cancel_requested: true,
+                    ..
+                }
+            );
             state.pending_episode = None;
-            state.capture = CaptureState::Recording { run };
             clear_recoverable_fault(state, run_id);
+            if stop_requested {
+                // A newer On cannot reopen a sealed FIFO. Drain this exact run;
+                // reconciliation admits the queued replacement after release.
+                start_active_stop(state, run, state.desired_stop_reason, true, effects);
+            } else {
+                state.capture = CaptureState::Recording { run };
+            }
         }
         StartOutcome::Cancelled => {
             state.capture = CaptureState::Idle;
@@ -2499,10 +2582,19 @@ fn reconcile_capture(state: &mut CoordinatorState, effects: &mut Vec<Coordinator
                 effect_id,
                 cancel_requested: true,
             };
-            effects.push(CoordinatorEffect::CancelStart {
-                effect_id,
-                run_id: run.run_id,
-            });
+            if run.policy.capture_mode != CaptureMode::Dictation
+                || matches!(
+                    state.desired_stop_reason,
+                    StopReason::RuntimeFailure | StopReason::SystemSleep | StopReason::Shutdown
+                )
+            {
+                effects.push(CoordinatorEffect::CancelStart {
+                    effect_id,
+                    run_id: run.run_id,
+                });
+            } else {
+                effects.push(CoordinatorEffect::SealStartingCapture { run_id: run.run_id });
+            }
         }
         (DesiredRecording::Off, CaptureState::Buffering { run, .. }) => {
             start_active_stop(state, run, state.desired_stop_reason, false, effects);
@@ -2692,7 +2784,8 @@ fn trace_enqueued_effects(state: &mut CoordinatorState, effects: &[CoordinatorEf
             CoordinatorEffect::StartRecording { run, .. } => {
                 (TracePhase::StartEnqueued, Some(run.run_id), None, None)
             }
-            CoordinatorEffect::CancelStart { run_id, .. } => {
+            CoordinatorEffect::CancelStart { run_id, .. }
+            | CoordinatorEffect::SealStartingCapture { run_id } => {
                 (TracePhase::EffectEnqueued, Some(run_id), None, None)
             }
             CoordinatorEffect::FinalizeRecording { run_id, .. } => {
@@ -3111,9 +3204,28 @@ mod tests {
             &mut state,
             intent(IntentKind::Stop, IntentSource::CarbonHotkey, 2),
         );
-        assert!(off_effects.iter().any(|effect| matches!(
+        assert!(!off_effects
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::CancelStart { .. })));
+        assert!(matches!(
+            state.capture,
+            CaptureState::Starting {
+                effect_id,
+                cancel_requested: true,
+                ..
+            } if effect_id == start_id
+        ));
+        assert_eq!(state.projection().status, ProjectionStatus::Processing);
+        assert!(
+            off_effects.contains(&CoordinatorEffect::SealStartingCapture { run_id: run.run_id })
+        );
+        let duplicate_stop = reduce(
+            &mut state,
+            intent(IntentKind::Stop, IntentSource::CarbonHotkey, 3),
+        );
+        assert!(!duplicate_stop.iter().any(|effect| matches!(
             effect,
-            CoordinatorEffect::CancelStart { effect_id, .. } if *effect_id == start_id
+            CoordinatorEffect::SealStartingCapture { .. } | CoordinatorEffect::CancelStart { .. }
         )));
 
         let completion = complete_start(&mut state, start_id, run.run_id);
@@ -3123,6 +3235,174 @@ mod tests {
         assert!(!duplicate
             .iter()
             .any(|effect| matches!(effect, CoordinatorEffect::StopRecording { .. })));
+    }
+
+    #[test]
+    fn stop_racing_successful_capture_admission_seals_then_connects() {
+        let mut state = CoordinatorState::default();
+        let effects = reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::CarbonHotkey, 1),
+        );
+        let (effect_id, run) = effects
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::PrepareCapture { effect_id, run } => Some((*effect_id, *run)),
+                _ => None,
+            })
+            .unwrap();
+        reduce(
+            &mut state,
+            intent(IntentKind::Stop, IntentSource::CarbonHotkey, 2),
+        );
+        let admitted = reduce(
+            &mut state,
+            CoordinatorEvent::PrepareFinished {
+                effect_id,
+                run_id: run.run_id,
+                outcome: PrepareOutcome::Succeeded { generation: 1 },
+            },
+        );
+        assert!(admitted.contains(&CoordinatorEffect::SealStartingCapture { run_id: run.run_id }));
+        assert!(admitted
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::StartRecording { .. })));
+        assert!(!admitted
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::CancelStart { .. })));
+        assert_eq!(state.projection().status, ProjectionStatus::Processing);
+    }
+
+    #[test]
+    fn hard_cancelled_admission_is_discarded_before_queued_start() {
+        for reason in [StopReason::SystemSleep, StopReason::RuntimeFailure] {
+            let mut state = CoordinatorState::default();
+            let prepare = reduce(
+                &mut state,
+                intent(IntentKind::Start, IntentSource::CarbonHotkey, 1),
+            );
+            let (effect_id, run) = prepare
+                .iter()
+                .find_map(|effect| match effect {
+                    CoordinatorEffect::PrepareCapture { effect_id, run } => {
+                        Some((*effect_id, *run))
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            reduce(&mut state, CoordinatorEvent::ForceOff(reason));
+            reduce(
+                &mut state,
+                intent(IntentKind::Start, IntentSource::CarbonHotkey, 2),
+            );
+            let admitted = reduce(
+                &mut state,
+                CoordinatorEvent::PrepareFinished {
+                    effect_id,
+                    run_id: run.run_id,
+                    outcome: PrepareOutcome::Succeeded { generation: 1 },
+                },
+            );
+            let (stop_id, stopped_run) = find_stop(&admitted);
+            assert_eq!(stopped_run, run.run_id);
+            assert!(matches!(
+                state.capture,
+                CaptureState::Stopping {
+                    finalize_after: false,
+                    ..
+                }
+            ));
+            assert!(!admitted.iter().any(|effect| matches!(
+                effect,
+                CoordinatorEffect::StartRecording { .. }
+                    | CoordinatorEffect::SealStartingCapture { .. }
+            )));
+            let released = reduce(
+                &mut state,
+                CoordinatorEvent::CaptureStopped {
+                    effect_id: stop_id,
+                    run_id: run.run_id,
+                    outcome: CaptureStopOutcome::Inactive,
+                },
+            );
+            assert!(released.iter().any(|effect| matches!(effect,
+                CoordinatorEffect::PrepareCapture { run: next, .. } if next.run_id != run.run_id)));
+            assert!(state.hard_cancelled_prepare.is_none());
+            assert!(state.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn new_start_cannot_reopen_an_already_sealed_cold_start() {
+        let mut state = CoordinatorState::default();
+        let prepare = reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::CarbonHotkey, 1),
+        );
+        let (effect_id, run) = finish_prepare_and_find_start(&mut state, &prepare);
+        reduce(
+            &mut state,
+            intent(IntentKind::Stop, IntentSource::CarbonHotkey, 2),
+        );
+        reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::CarbonHotkey, 3),
+        );
+        let completed = complete_start(&mut state, effect_id, run.run_id);
+        assert_eq!(find_stop(&completed).1, run.run_id);
+        assert!(state.desired_recording.is_on());
+        assert!(matches!(state.capture, CaptureState::Stopping { .. }));
+    }
+
+    #[test]
+    fn force_off_while_starting_still_cancels_provider_admission() {
+        for reason in [
+            StopReason::RuntimeFailure,
+            StopReason::SystemSleep,
+            StopReason::Shutdown,
+        ] {
+            let mut state = CoordinatorState::default();
+            let start_effects = reduce(
+                &mut state,
+                intent(IntentKind::Start, IntentSource::CarbonHotkey, 1),
+            );
+            let (start_id, run) = finish_prepare_and_find_start(&mut state, &start_effects);
+
+            let effects = reduce(&mut state, CoordinatorEvent::ForceOff(reason));
+            assert!(effects.iter().any(|effect| matches!(
+                effect,
+                CoordinatorEffect::CancelStart { effect_id, run_id }
+                    if *effect_id == start_id && *run_id == run.run_id
+            )));
+        }
+    }
+
+    #[test]
+    fn ordinary_stop_then_force_off_revokes_pending_attach() {
+        for reason in [
+            StopReason::SystemSleep,
+            StopReason::Shutdown,
+            StopReason::RuntimeFailure,
+        ] {
+            let mut state = CoordinatorState::default();
+            let prepare = reduce(
+                &mut state,
+                intent(IntentKind::Start, IntentSource::CarbonHotkey, 1),
+            );
+            let (effect_id, run) = finish_prepare_and_find_start(&mut state, &prepare);
+            reduce(
+                &mut state,
+                intent(IntentKind::Stop, IntentSource::CarbonHotkey, 2),
+            );
+            let effects = reduce(&mut state, CoordinatorEvent::ForceOff(reason));
+            assert!(effects.contains(&CoordinatorEffect::CancelStart {
+                effect_id,
+                run_id: run.run_id
+            }));
+            assert!(!effects
+                .iter()
+                .any(|effect| matches!(effect, CoordinatorEffect::SealStartingCapture { .. })));
+        }
     }
 
     #[test]
@@ -4223,7 +4503,8 @@ mod tests {
                 observed_effects.extend(effects.iter().copied().filter(|effect| {
                     !matches!(
                         effect,
-                        CoordinatorEffect::ReleaseTranscriptBarrier { .. }
+                        CoordinatorEffect::SealStartingCapture { .. }
+                            | CoordinatorEffect::ReleaseTranscriptBarrier { .. }
                             | CoordinatorEffect::EmitProjection(_)
                             | CoordinatorEffect::ShutdownReady
                     )
@@ -4313,7 +4594,8 @@ mod tests {
                     outcome: PrepareOutcome::Cancelled,
                 }
             }
-            CoordinatorEffect::ReleaseTranscriptBarrier { .. }
+            CoordinatorEffect::SealStartingCapture { .. }
+            | CoordinatorEffect::ReleaseTranscriptBarrier { .. }
             | CoordinatorEffect::EmitProjection(_)
             | CoordinatorEffect::ShutdownReady => {
                 unreachable!("non-completing effects are not retained")
