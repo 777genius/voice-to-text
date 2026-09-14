@@ -1295,6 +1295,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     if (pendingStopFinalization?.sessionId === payload.session_id) clearHotkeyStopFinalizeTimer();
     ledger.lastDeliverySeq = payload.delivery_seq;
     ledger.stableSnapshot = appendTranscriptText(ledger.stableSnapshot, payload.text);
+    ledger.interimSnapshot = '';
     deliveryRevision.value++;
     if (sessionId.value === payload.session_id && !awaitingSessionStart.value) {
       finalText.value = ledger.stableSnapshot;
@@ -1311,9 +1312,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   function captureLegacyTranscript(payloadSessionId: number): void {
     const ledger = captureAutoPasteLedger(payloadSessionId);
-    if (ledger.negotiated || ledger.terminal) return;
-    ledger.stableSnapshot = appendTranscriptText(finalText.value, accumulatedText.value);
-    ledger.interimSnapshot = partialText.value;
+    if (ledger.terminal || sessionId.value !== payloadSessionId) return;
+    if (!ledger.negotiated) {
+      ledger.stableSnapshot = appendTranscriptText(finalText.value, accumulatedText.value);
+    }
+    // Empty speech-final events clear the UI partial before terminal arrives.
+    // Retain negotiated recovery data until a stable delivery or terminal owns it.
+    if (!ledger.negotiated || partialText.value.trim()) {
+      ledger.interimSnapshot = partialText.value;
+    }
   }
 
   function acceptRunTerminal(payload: TranscriptionTerminalPayload): Promise<boolean> {
@@ -1332,9 +1339,22 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     // Legacy segment-finals arrive as partial events, so the Rust final-only
     // snapshot can omit stable prefixes already accumulated in this run's ledger.
     const stableSnapshot = ledger.stableSnapshot || payload.stable_snapshot;
+    const report = payload.report;
+    const canRecoverInterim = ledger.negotiated && !payload.stable_snapshot.trim() &&
+      !ledger.stableSnapshot.trim() && !report?.provider?.stable_snapshot?.trim() &&
+      !!ledger.interimSnapshot.trim() && payload.error === null && payload.delivery_complete === true &&
+      !report?.error && !report?.shared_failure && !report?.provider?.error &&
+      (!report?.audio?.reason || report.audio.reason === 'drained') &&
+      (!report?.provider?.reason || ['drained', 'no_audio'].includes(report.provider.reason));
     const terminalSnapshot = ledger.negotiated
-      ? payload.stable_snapshot
+      ? (canRecoverInterim ? ledger.interimSnapshot : payload.stable_snapshot)
       : appendTranscriptText(stableSnapshot, ledger.interimSnapshot);
+    if (canRecoverInterim) {
+      clientLog('transcription_terminal_interim_fallback', {
+        sessionId: payload.session_id,
+        textLength: terminalSnapshot.length,
+      }, 'warn');
+    }
     ledger.stableSnapshot = terminalSnapshot;
     deliveryRevision.value++;
     ledger.interimSnapshot = '';
@@ -1347,8 +1367,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       animatedAccumulatedText.value = '';
       clearTranscriptionAnimationTimers();
     }
-    // Completion quality never upgrades an interim. Even incomplete outcomes own
-    // an immutable stable snapshot, copied/pasted through A's existing ledger.
+    // Only a successful empty negotiated terminal may recover its interim.
+    // All terminal delivery still passes through the existing immutable ledger.
     const acknowledgeTerminal = ledger.continuation !== false || payload.continuation_delivery === true;
     return terminalSnapshot.trim() || acknowledgeTerminal
       ? enqueueTextDelivery('run_terminal', terminalSnapshot, ledger, ledger.autoCopy, ledger.autoPaste, null,
@@ -2024,7 +2044,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             console.log('📋 Successfully added utterance to finalText');
 
             captureLegacyTranscript(event.payload.session_id);
-            if (autoPasteEnabled.value && currentUtteranceText.trim()) {
+            const ledger = captureAutoPasteLedger(event.payload.session_id);
+            // Unsequenced finals cannot authorize negotiated stable delivery, but
+            // their text remains recoverable at a successful empty terminal.
+            if (ledger.negotiated && event.payload.text.trim()) {
+              ledger.interimSnapshot = currentUtteranceText;
+            }
+            if (!ledger.negotiated && autoPasteEnabled.value && currentUtteranceText.trim()) {
               await autoPasteCurrentText(
                 'speech_final',
                 undefined,

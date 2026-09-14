@@ -634,6 +634,130 @@ describe('transcription connect-retry reliability', () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it.each([false, true])('recovers successful empty negotiated terminal once (refused=%s)', async (refused) => {
+    appConfigMock.autoCopyToClipboard = true;
+    appConfigMock.autoPasteText = true;
+    invokeMock.mockResolvedValue(undefined);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({ payload: { session_id: 1, status: 'Recording' } });
+    for (const text of ['old draft', 'latest draft']) {
+      await handlers.get('transcription:partial')({ payload: {
+        session_id: 1, text, completion_v1: true, continuation_delivery: refused,
+        is_segment_final: false, timestamp: 0, timing_known: false,
+      } });
+    }
+    const terminal = { session_id: 1, continuation_delivery: false, stable_snapshot: '',
+      delivery_complete: true, report: null, error: null };
+    handlers.get('transcription:terminal')({ payload: terminal });
+    handlers.get('transcription:terminal')({ payload: terminal });
+    await handlers.get('transcription:final')({ payload: {
+      session_id: 1, text: 'late final', delivery_seq: 1, timestamp: 1,
+    } });
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(store.finalText).toBe('latest draft');
+    const effects = invokeMock.mock.calls.filter(([cmd]) =>
+      ['auto_paste_text', 'copy_to_clipboard_native', 'auto_paste_continuation_text', 'copy_continuation_text'].includes(cmd));
+    expect(effects.map(([, args]) => args.text)).toEqual(refused ? [] : ['latest draft', 'latest draft']);
+    expect(invokeMock.mock.calls.filter(([cmd, args]) => cmd === 'log_client_event' &&
+      args.event === 'transcription_terminal_interim_fallback').map(([, args]) => args.data))
+      .toEqual([{ sessionId: 1, textLength: 12 }]);
+    store.cleanup();
+  });
+
+  it.each(['', 'corrected final'])('recovers negotiated text after unsequenced speech-final %j without early paste', async (final) => {
+    appConfigMock.autoPasteText = true;
+    invokeMock.mockResolvedValue(undefined);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({ payload: { session_id: 1, status: 'Recording' } });
+    for (const text of ['old draft', 'latest draft']) {
+      await handlers.get('transcription:partial')({ payload: {
+        session_id: 1, text, completion_v1: true, continuation_delivery: false,
+        is_segment_final: false, timestamp: 0,
+      } });
+    }
+    await handlers.get('transcription:final')({ payload: { session_id: 1, text: final, timestamp: 1 } });
+    expect(store.partialText).toBe('');
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text')).toHaveLength(0);
+    handlers.get('transcription:terminal')({ payload: {
+      session_id: 1, continuation_delivery: false, stable_snapshot: '', delivery_complete: true,
+      report: null, error: null,
+    } });
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(store.finalText).toBe(final || 'latest draft');
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text').map(([, args]) => args.text))
+      .toEqual([final || 'latest draft']);
+    store.cleanup();
+  });
+
+  it('keeps negotiated interim snapshots isolated across sessions', async () => {
+    appConfigMock.autoCopyToClipboard = true;
+    invokeMock.mockResolvedValue(undefined);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    for (const session_id of [1, 2]) {
+      await handlers.get('recording:status')({ payload: { session_id, status: 'Recording' } });
+      await handlers.get('transcription:partial')({ payload: {
+        session_id, text: `draft ${session_id}`, completion_v1: true, is_segment_final: false,
+      } });
+    }
+    handlers.get('transcription:terminal')({ payload: {
+      session_id: 1, continuation_delivery: false, stable_snapshot: '', delivery_complete: true,
+      report: null, error: null,
+    } });
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(store.partialText).toBe('draft 2');
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'copy_to_clipboard_native').map(([, args]) => args.text))
+      .toEqual(['draft 1']);
+    store.cleanup();
+  });
+
+  it.each([
+    { error: 'failed' },
+    { delivery_complete: false },
+    { report: { error: 'failed' } },
+    { report: { shared_failure: true } },
+    { report: { provider: { error: 'failed' } } },
+    ...['deadline', 'cancelled', 'processor_error'].map(reason => ({ report: { audio: { reason } } })),
+    ...['deadline', 'cancelled', 'provider_error'].map(reason => ({ report: { provider: { reason } } })),
+  ])('does not recover negotiated interim for adverse terminal %j', async (outcome) => {
+    appConfigMock.autoPasteText = true;
+    invokeMock.mockResolvedValue(undefined);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({ payload: { session_id: 1, status: 'Recording' } });
+    await handlers.get('transcription:partial')({ payload: {
+      session_id: 1, text: 'draft', completion_v1: true, is_segment_final: false,
+    } });
+    handlers.get('transcription:terminal')({ payload: {
+      session_id: 1, continuation_delivery: false, stable_snapshot: '', delivery_complete: true,
+      report: null, error: null, ...outcome,
+    } });
+    await flushMicrotasks();
+    expect(store.finalText).toBe('');
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text')).toHaveLength(0);
+    store.cleanup();
+  });
+
+  it.each(['stable', ''])('never appends negotiated interim when stable was received (terminal=%s)', async (snapshot) => {
+    appConfigMock.autoPasteText = true;
+    invokeMock.mockResolvedValue(undefined);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({ payload: { session_id: 1, status: 'Recording' } });
+    await handlers.get('transcription:final')({ payload: {
+      session_id: 1, text: 'stable', delivery_seq: 1, continuation_delivery: false,
+    } });
+    await handlers.get('transcription:partial')({ payload: {
+      session_id: 1, text: 'stable overlapping draft', completion_v1: true, is_segment_final: false,
+    } });
+    handlers.get('transcription:terminal')({ payload: {
+      session_id: 1, continuation_delivery: false, stable_snapshot: snapshot, delivery_complete: true,
+      report: null, error: null,
+    } });
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(store.finalText).toBe(snapshot);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text').map(([, args]) => args.text))
+      .toEqual(['stable']);
+    store.cleanup();
+  });
+
   it('preserves the legacy segment-final prefix when terminal contains only the speech-final suffix', async () => {
     appConfigMock.autoCopyToClipboard = true;
     appConfigMock.autoPasteText = true;
