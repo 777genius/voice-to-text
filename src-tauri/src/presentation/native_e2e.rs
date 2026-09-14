@@ -1939,9 +1939,15 @@ pub fn setup(app: &AppHandle) -> Result<(), String> {
         state.set_authenticated(true).await;
         // Native fixture bootstrap bypasses production config loading. E54 B
         // explicitly restores the same isolated disk config before ready.
-        if event_case("E54") && std::env::var("VOICETEXT_NATIVE_RESTART_PHASE").ok().as_deref() == Some("B") {
+        if event_case("E54")
+            && std::env::var("VOICETEXT_NATIVE_RESTART_PHASE")
+                .ok()
+                .as_deref()
+                == Some("B")
+        {
             let restored = crate::infrastructure::config_store::ConfigStore::load_config()
-                .await.map_err(|e| e.to_string())?;
+                .await
+                .map_err(|e| e.to_string())?;
             state.config.write().await.stt = restored;
         }
         // Mirror live initial configuration while retaining the TEST refusing factory.
@@ -3612,17 +3618,34 @@ pub async fn native_e2e_progress(
     state: State<'_, AppState>,
     report: Value,
 ) -> Result<(), String> {
-    if event_case("E54") && std::env::var("VOICETEXT_NATIVE_RESTART_PHASE").ok().as_deref() == Some("A") {
-        crate::infrastructure::config_store::ConfigStore::save_config(&state.config.read().await.stt)
-            .await.map_err(|e| e.to_string())?;
+    if event_case("E54")
+        && std::env::var("VOICETEXT_NATIVE_RESTART_PHASE")
+            .ok()
+            .as_deref()
+            == Some("A")
+    {
+        crate::infrastructure::config_store::ConfigStore::save_config(
+            &state.config.read().await.stt,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
     }
     let native_state = native_e2e_state(app, state, None).await?;
     if event_case("E54") && report["mode"] == "restart-crash" {
         use std::io::Write;
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
-            .open(RESULT_PATH.get().ok_or("unvalidated restart fixture")?).map_err(|e| e.to_string())?;
-        file.write_all(&serde_json::to_vec(&json!({"marker": MARKER, "report": report, "state": native_state}))
-            .map_err(|e| e.to_string())?).and_then(|_| file.sync_all()).map_err(|e| e.to_string())?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(RESULT_PATH.get().ok_or("unvalidated restart fixture")?)
+            .map_err(|e| e.to_string())?;
+        file.write_all(
+            &serde_json::to_vec(
+                &json!({"marker": MARKER, "report": report, "state": native_state}),
+            )
+            .map_err(|e| e.to_string())?,
+        )
+        .and_then(|_| file.sync_all())
+        .map_err(|e| e.to_string())?;
         return Ok(());
     }
     write_native_progress(report, native_state)
