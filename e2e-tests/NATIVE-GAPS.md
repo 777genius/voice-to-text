@@ -26,7 +26,7 @@ RUSTC=/root/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc python3
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s src-tauri/tests/native_ax_stall_support -p test_supervisor.py
 ```
 
-Results: 9 Rust source/unit tests, 4 store-routing scenarios and 10 existing
+Results: 8 Rust source/unit tests, 4 store-routing scenarios and 10 existing
 supervisor tests passed. Direct installed rustfmt and `git diff --check` passed.
 PATH rustup cannot initialize its read-only home; no installation was attempted.
 The source runner extracts unchanged function bodies, substitutes declared
