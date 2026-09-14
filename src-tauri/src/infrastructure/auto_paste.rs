@@ -3703,6 +3703,13 @@ pub(crate) mod synthetic_readiness {
         }
     }
     pub fn reset_attempt(d: &mut Value, attempt: usize, start: f64) {
+        if attempt == 1 {
+            d["operations"] = json!([]);
+            d["bindOperations"] = json!([]);
+            d["firstFatal"] = Value::Null;
+            d["evidenceOverflow"] = json!(false);
+            d["readSequence"] = json!(0);
+        }
         d["attempt"] = json!(attempt);
         d["stage"] = json!("target");
         d["phase"] = json!("bind");
@@ -3733,6 +3740,23 @@ pub(crate) mod synthetic_readiness {
             assert_eq!(history["target"]["pid"], 42);
             assert_eq!(history["foreground"]["pid"], 42);
         }
+    }
+
+    #[test]
+    fn first_attempt_starts_a_fresh_reader_diagnostic_session() {
+        let mut d = json!({
+            "operations": [{"old": true}],
+            "bindOperations": [{"old": true}],
+            "firstFatal": {"old": true},
+            "evidenceOverflow": true,
+            "readSequence": 9,
+        });
+        reset_attempt(&mut d, 1, 25.0);
+        assert_eq!(d["operations"], json!([]));
+        assert_eq!(d["bindOperations"], json!([]));
+        assert!(d["firstFatal"].is_null());
+        assert_eq!(d["evidenceOverflow"], false);
+        assert_eq!(d["readSequence"], 0);
     }
     // A missing process lookup may be corroborated once by fresh foreground state.
     // A present but wrong bundle is positive mismatch evidence and cannot fall back.

@@ -210,6 +210,11 @@ impl SttConfig {
         self.model = Some(model.into());
         self
     }
+
+    #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+    pub fn qualify_continuation_target_for_native_e2e(&mut self) {
+        self.continuation_target_eligible = true;
+    }
 }
 
 /// Last saved recording window position in physical screen coordinates.

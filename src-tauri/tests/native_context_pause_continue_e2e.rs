@@ -216,6 +216,27 @@ fn range(target: &AutoPasteTarget, path: &Path, location: isize, length: isize) 
     }
     Ok(())
 }
+
+#[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+fn bind_synthetic_reader(
+    path: &Path,
+) -> Result<app_lib::infrastructure::auto_paste::SyntheticTextEditReader> {
+    use app_lib::infrastructure::auto_paste::SyntheticTextEditReader;
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut owner = None;
+    let reader = SyntheticTextEditReader::bind(path, &mut owner, 1, cancel, deadline)?;
+    SyntheticTextEditReader::finish_arming();
+    Ok(reader)
+}
+
+#[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+fn read_synthetic_reader(
+    reader: &app_lib::infrastructure::auto_paste::SyntheticTextEditReader,
+) -> Result<Option<String>> {
+    reader.read(None, Instant::now() + Duration::from_millis(200))
+}
 // All representations stay in process memory; no text conversion of representation data.
 // Bounds are deliberately practical, not a general pasteboard archival format.
 type Image = Vec<Vec<(String, Vec<u8>)>>;
@@ -542,9 +563,12 @@ fn run_native_matrix(composed: bool) -> Result<()> {
                 .open(&path)?;
             created.push(path.clone());
             let target = focus(&root, &path)?;
-            let reader = SyntheticTextEditReader::bind(&path)?;
+            let reader = bind_synthetic_reader(&path)?;
             let start = SyntheticTextEditReader::clock_ms();
-            ensure!(reader.read()?.is_empty(), "reader initial empty");
+            ensure!(
+                read_synthetic_reader(&reader)?.as_deref() == Some(""),
+                "reader initial empty"
+            );
             writeln!(
                 evidence.file,
                 "{}",
@@ -565,14 +589,14 @@ fn run_native_matrix(composed: bool) -> Result<()> {
             let deadline = Instant::now() + Duration::from_secs(2);
             loop {
                 let start = SyntheticTextEditReader::clock_ms();
-                let text = reader.read()?;
+                let text = read_synthetic_reader(&reader)?;
                 writeln!(
                     evidence.file,
                     "{}",
                     json!({"stage":"reader-synthetic-applescript","readStartMs":start,
                     "readEndMs":SyntheticTextEditReader::clock_ms(),"text":text})
                 )?;
-                if text == expected {
+                if text.as_deref() == Some(expected) {
                     break;
                 }
                 ensure!(
@@ -591,7 +615,10 @@ fn run_native_matrix(composed: bool) -> Result<()> {
                 ),
             )?;
             ensure!(
-                reader.read().unwrap_err().to_string().contains("overflow"),
+                read_synthetic_reader(&reader)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("overflow"),
                 "reader must reject full AX UTF16 overflow"
             );
             writeln!(
@@ -605,7 +632,7 @@ fn run_native_matrix(composed: bool) -> Result<()> {
             );
             ensure!(
                 reader
-                    .read()
+                    .read(None, Instant::now() + Duration::from_millis(200))
                     .unwrap_err()
                     .to_string()
                     .contains("owned editor/window changed"),
@@ -673,7 +700,7 @@ fn run_native_matrix(composed: bool) -> Result<()> {
                     let mut expected = before.clone();
                     if index == 0 {
                         #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
-                        let os_reader = app_lib::infrastructure::auto_paste::SyntheticTextEditReader::bind(&paths[0])?;
+                        let os_reader = bind_synthetic_reader(&paths[0])?;
                         for (seq, text, rev) in [(1, "😀e\u{301}", 1), (1, "😀e\u{301}", 1), (2, "𐐀!", 2)]
                         {
                             editor(&target, &paths[0])?;
@@ -702,10 +729,13 @@ fn run_native_matrix(composed: bool) -> Result<()> {
                             #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
                             {
                                 let start = app_lib::infrastructure::auto_paste::SyntheticTextEditReader::clock_ms();
-                                let text = os_reader.read()?;
+                                let text = read_synthetic_reader(&os_reader)?;
                                 writeln!(evidence.file, "{}", json!({"stage":"reader-guarded","readStartMs":start,
                                     "readEndMs":app_lib::infrastructure::auto_paste::SyntheticTextEditReader::clock_ms(),"text":text}))?;
-                                ensure!(text == expected, "retained OS reader after guarded own paste/dedup");
+                                ensure!(
+                                    text.as_deref() == Some(expected.as_str()),
+                                    "retained OS reader after guarded own paste/dedup"
+                                );
                             }
                             let validation = bounded(manager.validate(run)).await?;
                             evidence.event(
@@ -842,7 +872,7 @@ fn run_native_matrix(composed: bool) -> Result<()> {
         if writeln!(
             evidence.file,
             "{}",
-            json!({"case":case,"pass":pass,"error":result.err().map(|e|e.to_string()),"release_error":released.err().map(|e|e.to_string()),"clipboard_cleanup_error":restored.err().map(|e|e.to_string())})
+            json!({"case":case,"pass":pass,"error":result.err().map(|e|format!("{e:#}")),"release_error":released.err().map(|e|e.to_string()),"clipboard_cleanup_error":restored.err().map(|e|e.to_string())})
         ).and_then(|_| evidence.file.flush()).is_err() {
             failed = true;
             reporting_failed = true;
@@ -1240,6 +1270,10 @@ async fn composition(
         let target = focus(&root, &paths[0])?;
         range(&target, &paths[0], 5, 0)?;
         ensure!(bounded(manager.capture(run, Some(target.clone()), true)).await? == V::Valid { revision: 0 }, "A capture");
+        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+        config.qualify_continuation_target_for_native_e2e();
+        #[cfg(not(all(debug_assertions, feature = "native-window-e2e")))]
+        bail!("service composition requires a debug native-window-e2e build");
         service.update_config(config.clone()).await?;
         let policy = AppConfig::default();
         service.register_continuation_policy(run, &policy).await;
@@ -1374,10 +1408,16 @@ async fn composition(
             Err(anyhow::anyhow!("peer shutdown timeout"))
         }
     };
-    // Prioritize teardown failure over scenario failure; neither can pass.
+    // Prioritize teardown failure. Preserve both scenario and peer failures so
+    // a rejected synthetic protocol handshake is not hidden by a later timeout.
     // Caller releases both native registrations after case runtime shutdown.
     teardown?;
-    result?;
-    peer_result?;
-    Ok(())
+    match (result, peer_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(scenario), Ok(())) => Err(scenario),
+        (Ok(()), Err(peer)) => Err(peer),
+        (Err(scenario), Err(peer)) => {
+            Err(scenario.context(format!("local peer also failed: {peer:#}")))
+        }
+    }
 }
