@@ -39,6 +39,10 @@ const MACOS_LEFT_COMMAND_KEY_CODE: u16 = 55;
 #[cfg(target_os = "macos")]
 const MACOS_PASTE_KEY_EVENT_DELAY_MS: u64 = 20;
 #[cfg(target_os = "macos")]
+const MACOS_SYSTEM_EVENTS_ACTIVATION_TIMEOUT_MS: u64 = 500;
+#[cfg(target_os = "macos")]
+const MACOS_SYSTEM_EVENTS_ACTIVATION_POLL_MS: u64 = 10;
+#[cfg(target_os = "macos")]
 const MAC_CG_SESSION_EVENT_TAP: u32 = 1;
 #[cfg(target_os = "macos")]
 const MAC_CG_EVENT_FLAG_MASK_COMMAND: u64 = 0x0010_0000;
@@ -292,6 +296,95 @@ fn running_app_pid(app: cocoa::base::id) -> i32 {
     unsafe { msg_send![app, processIdentifier] }
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn macos_system_events_activation_script() -> &'static str {
+    r#"on run argv
+  set expectedPid to (item 1 of argv) as integer
+  set expectedBundleId to item 2 of argv
+  tell application "System Events"
+    set matchingProcesses to every application process whose unix id is expectedPid
+    if (count of matchingProcesses) is not 1 then error "Target process is unavailable"
+    set targetProcess to item 1 of matchingProcesses
+    set actualBundleId to bundle identifier of targetProcess
+    if actualBundleId is not expectedBundleId then error "Target bundle ID changed"
+    set frontmost of targetProcess to true
+    return actualBundleId
+  end tell
+end run"#
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn validate_system_events_activation_output(target: &AutoPasteTarget, stdout: &[u8]) -> Result<()> {
+    let activated_bundle_id = String::from_utf8_lossy(stdout).trim().to_string();
+    if activated_bundle_id != target.bundle_id {
+        anyhow::bail!(
+            "System Events activated unexpected bundle: expected={}, actual={}, pid={}",
+            target.bundle_id,
+            activated_bundle_id,
+            target.pid
+        );
+    }
+
+    Ok(())
+}
+
+/// Requests foreground activation through Accessibility after AppKit refuses it.
+/// The script validates both PID and bundle ID before changing focus, so a reused
+/// PID cannot redirect paste to another application.
+#[cfg(target_os = "macos")]
+fn activate_running_app_via_system_events(target: &AutoPasteTarget) -> Result<()> {
+    let mut child = std::process::Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(macos_system_events_activation_script())
+        .arg("--")
+        .arg(target.pid.to_string())
+        .arg(&target.bundle_id)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("Failed to start System Events activation fallback")?;
+
+    let deadline = std::time::Instant::now()
+        + Duration::from_millis(MACOS_SYSTEM_EVENTS_ACTIVATION_TIMEOUT_MS);
+    loop {
+        if child
+            .try_wait()
+            .context("Failed to poll System Events activation fallback")?
+            .is_some()
+        {
+            break;
+        }
+
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!(
+                "System Events activation fallback timed out after {}ms",
+                MACOS_SYSTEM_EVENTS_ACTIVATION_TIMEOUT_MS
+            );
+        }
+
+        thread::sleep(Duration::from_millis(
+            MACOS_SYSTEM_EVENTS_ACTIVATION_POLL_MS,
+        ));
+    }
+
+    let output = child
+        .wait_with_output()
+        .context("Failed to collect System Events activation fallback output")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!(
+            "System Events activation fallback failed with status {}: {}",
+            output.status,
+            stderr
+        );
+    }
+
+    validate_system_events_activation_output(target, &output.stdout)
+}
+
 /// Получает bundle ID активного приложения (для macOS)
 /// Возвращает bundle ID текущего активного приложения или None если не удалось получить
 #[cfg(target_os = "macos")]
@@ -425,11 +518,17 @@ pub fn activate_running_app_by_target(target: &AutoPasteTarget) -> Result<()> {
         ];
 
         if !activated {
-            anyhow::bail!(
-                "macOS refused to activate auto-paste target: bundle_id={}, pid={}",
+            log::warn!(
+                "AppKit refused auto-paste target activation; trying exact-target System Events fallback: bundle_id={}, pid={}",
                 target.bundle_id,
                 target.pid
             );
+            activate_running_app_via_system_events(target).with_context(|| {
+                format!(
+                    "macOS refused to activate auto-paste target: bundle_id={}, pid={}",
+                    target.bundle_id, target.pid
+                )
+            })?;
         }
     }
 
@@ -1813,7 +1912,8 @@ pub fn paste_text(text: &str) -> Result<()> {
 mod tests {
     use super::{
         focused_element_likely_accepts_text, normalize_auto_paste_target, paste_text_hybrid_with,
-        should_use_clipboard_backend, target_matches_bundle_and_pid, AutoPasteMethod,
+        should_use_clipboard_backend, target_matches_bundle_and_pid,
+        validate_system_events_activation_output, AutoPasteMethod, AutoPasteTarget,
         ClipboardAccess, DelayProvider, TextInjector, AUTO_PASTE_CLIPBOARD_THRESHOLD_CHARS,
         VOICETEXT_BUNDLE_ID, VOICETEXT_DEV_BUNDLE_ID, VOICETEXT_PROD_BUNDLE_ID,
     };
@@ -1831,6 +1931,20 @@ mod tests {
     use std::time::Duration;
     #[cfg(target_os = "macos")]
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn system_events_activation_requires_exact_bundle_result() {
+        let target = AutoPasteTarget {
+            bundle_id: "com.brave.Browser".to_string(),
+            pid: 4242,
+        };
+
+        assert!(validate_system_events_activation_output(&target, b"com.brave.Browser\n").is_ok());
+
+        let error = validate_system_events_activation_output(&target, b"com.example.ReusedPid\n")
+            .expect_err("a reused PID must not be accepted");
+        assert!(error.to_string().contains("unexpected bundle"));
+    }
 
     #[derive(Default)]
     struct FakeClipboard {
