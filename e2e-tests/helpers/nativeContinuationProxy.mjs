@@ -16,8 +16,10 @@ export async function startConfigDelayProxy(upstreamUrl, delayMs, record) {
   await new Promise((resolve, reject) => { server.once('listening', resolve); server.once('error', reject); });
   const sockets = new Set();
   const timers = new Set();
+  let nextConnectionId = 0;
   server.on('connection', (client, request) => {
-    record('fault_proxy_connected');
+    const connectionId = ++nextConnectionId;
+    record('fault_proxy_connected', { connectionId });
     const upstream = new WebSocket(url, { headers: { Authorization: request.headers.authorization ?? '' }, maxPayload: 960_000, perMessageDeflate: false, handshakeTimeout: 15000 });
     sockets.add(client); sockets.add(upstream);
     const queue = []; let bytes = 0; let open = false; let released = false; let configSeen = false;
@@ -58,6 +60,7 @@ export async function startConfigDelayProxy(upstreamUrl, delayMs, record) {
         releaseTimer = setTimeout(() => { timers.delete(releaseTimer); released = true; flush(); }, delayMs);
         timers.add(releaseTimer);
       }
+      if (binary) record('client_binary', { connectionId, bytes: data.length });
       bytes += data.length;
       if (bytes > 960_000 || queue.length >= 2048 || upstream.bufferedAmount > 960_000) { record('fault_proxy_overflow', { bytes }); stop(); return; }
       queue.push({ data, binary, config }); flush();
@@ -69,7 +72,7 @@ export async function startConfigDelayProxy(upstreamUrl, delayMs, record) {
         clearTimeout(deadline); timers.delete(deadline); clearTimeout(releaseTimer); timers.delete(releaseTimer);
         queue.length = 0; bytes = 0;
         const peer = socket === upstream ? client : upstream;
-        record('fault_proxy_close', { direction: socket === upstream ? 'upstream' : 'client', code, reasonBytes: reason.length });
+        record('fault_proxy_close', { connectionId, direction: socket === upstream ? 'upstream' : 'client', code, reasonBytes: reason.length });
         // Relay the actual close handshake; terminate would manufacture code 1006.
         if (peer.readyState === WebSocket.OPEN) {
           if (code === 1005) peer.close(); // Empty Close: never send reserved 1005 on the wire.

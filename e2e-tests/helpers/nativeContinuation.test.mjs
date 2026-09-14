@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { approvedFixtures, validatePcm, readApprovedFixtures, liveTrials, validateHarnessConfig, exactInsertionEvidence } from './nativeContinuation.mjs';
+import { approvedFixtures, maxProxyEvidenceEvents, validatePcm, readApprovedFixtures, liveTrials, validateHarnessConfig, exactInsertionEvidence } from './nativeContinuation.mjs';
 import { parseArguments, sanitizedEnvironment, validateResult } from '../run-native-window-e2e.mjs';
 test('qualification requires explicit opt in and inherits no feature flags', () => {
   assert.deepEqual(parseArguments(['--continuation-fake']), { continuationFake: true });
@@ -12,6 +12,8 @@ test('fixed live budget includes all trials and full long clock', async () => {
   assert.equal(liveTrials.filter(x => x.id.startsWith('warm-continue')).length, 3);
   assert.equal(new Set(liveTrials.map(x => x.id)).size, 12);
   assert.equal(approvedFixtures['long-auto-commit.pcm'][0] / 32, 49268);
+  const longestTwoEpisodeBytes = approvedFixtures['long-auto-commit.pcm'][0] + approvedFixtures['episode-b.pcm'][0];
+  assert.ok(Math.ceil(longestTwoEpisodeBytes / 640) + 128 < maxProxyEvidenceEvents);
   const rows = await readApprovedFixtures(new URL('../../../qualification-fixtures', import.meta.url).pathname);
   assert.equal(rows.length, 5);
   for (const row of rows) assert.equal(validatePcm(row.name, row.pcm).sourceFrames * 2, row.bytes);
@@ -185,6 +187,39 @@ test('normal Stop closure must precede explicit live-process collector boundary,
   assert.throws(() => verifyQualificationConnections(trial, [open, boundary, close]));
   assert.throws(() => verifyQualificationConnections(trial, [open, close]));
   assert.throws(() => verifyQualificationConnections(trial, [open, close, { ...boundary, nativeProcessAlive: false }]));
+});
+
+test('live route verifier rejects A-only false positives and distinguishes sealed cancellation', async () => {
+  const { verifyQualificationRoute } = await import('./nativeContinuation.mjs');
+  const connected = { event: 'fault_proxy_connected', connectionId: 1 };
+  const audio = (bytes = 640) => ({ event: 'client_binary', connectionId: 1, bytes });
+  const pause = { event: 'backend_control', type: 'pause_accepted', decision: 'accepted' };
+  const continued = { event: 'backend_control', type: 'continue_result', decision: 'accepted', eligible_now: true };
+  const restore = { event: 'backend_control', type: 'pause_restore_result', decision: 'accepted' };
+  const continuedTrial = liveTrials.find(t => t.id === 'warm-continue-1');
+  const cancelledTrial = liveTrials.find(t => t.id === 'short-tail');
+  verifyQualificationRoute(continuedTrial, [connected, audio(), pause, continued, audio()]);
+  verifyQualificationRoute(continuedTrial, [connected, audio(9600), pause, continued, audio(9600)]);
+  for (const bytes of [1, 9601, 9602]) {
+    assert.throws(() => verifyQualificationRoute(continuedTrial, [connected, audio(bytes), pause, continued, audio()]), /Invalid client audio/);
+  }
+  assert.throws(() => verifyQualificationRoute(continuedTrial, [connected, audio(), pause, continued]), /requires a B write/);
+  assert.throws(() => verifyQualificationRoute(continuedTrial, [connected, audio(), pause, audio(), continued, audio()]), /preceded Continue/);
+  assert.throws(() => verifyQualificationRoute(continuedTrial, [connected, audio(), pause, continued, restore, audio()]), /no Restore/);
+  verifyQualificationRoute(cancelledTrial, [connected, audio(), pause, continued, restore]);
+  assert.throws(() => verifyQualificationRoute(cancelledTrial, [connected, audio(), pause, audio(), continued, restore]), /preceded Continue/);
+  assert.throws(() => verifyQualificationRoute(cancelledTrial, [connected, audio(), pause, continued, audio(), restore]), /without a B write/);
+  assert.throws(() => verifyQualificationRoute(cancelledTrial, [connected, audio(), continued, restore]), /ordered Pause\/Continue/);
+});
+
+test('cold route verifier requires client audio on both connection owners', async () => {
+  const { verifyQualificationRoute } = await import('./nativeContinuation.mjs');
+  const trial = liveTrials.find(t => t.id === 'cold-4000');
+  const connected = connectionId => ({ event: 'fault_proxy_connected', connectionId });
+  const audio = connectionId => ({ event: 'client_binary', connectionId, bytes: 640 });
+  verifyQualificationRoute(trial, [connected(1), audio(1), connected(2), audio(2)]);
+  assert.throws(() => verifyQualificationRoute(trial, [connected(1), audio(1), connected(2)]), /has no client audio/);
+  assert.throws(() => verifyQualificationRoute(trial, [connected(1), audio(2), connected(2), audio(2)]), /has no client audio/);
 });
 
 // Execute the actual TypeScript orchestration against an ordered IPC evidence tape.

@@ -9,6 +9,7 @@ export const approvedFixtures = Object.freeze({
   'stop-inside-word.pcm': [35200, '72603893abf7efe13a68100201b9d6c25a8e2d6002f635c41f0fd67dea30cf82'],
   'old-commit-new-tail.pcm': [214156, 'a2d00cd1f10fac3f19f5dd566779b869cb12f7325965ea3b8b76e1f16e1c2933'],
 });
+export const maxProxyEvidenceEvents = 4096;
 export function validatePcm(name, bytes) {
   const pin = Object.hasOwn(approvedFixtures, name) && approvedFixtures[name];
   if (!pin || bytes.length !== pin[0] || createHash('sha256').update(bytes).digest('hex') !== pin[1]) {
@@ -35,12 +36,12 @@ export async function readApprovedFixtures(directory) {
 }
 // Fixed paid budget: each entry is run at most once, failure evidence is retained.
 export const liveTrials = Object.freeze([
-  ...[1, 2, 3].map(attempt => ({ id: `warm-baseline-${attempt}`, continuation: false, configDelayMs: 0, episodes: ['episode-a.pcm', 'episode-b.pcm'] })),
-  ...[1, 2, 3].map(attempt => ({ id: `warm-continue-${attempt}`, continuation: true, configDelayMs: 0, episodes: ['episode-a.pcm', 'episode-b.pcm'] })),
-  ...[0, 4000, 8000].map(configDelayMs => ({ id: `cold-${configDelayMs}`, continuation: false, configDelayMs, episodes: ['long-auto-commit.pcm', 'episode-b.pcm'] })),
-  { id: 'long', continuation: true, configDelayMs: 0, episodes: ['episode-a.pcm', 'long-auto-commit.pcm'] },
-  { id: 'short-tail', continuation: true, configDelayMs: 0, episodes: ['episode-a.pcm', 'stop-inside-word.pcm'] },
-  { id: 'old-tail', continuation: true, configDelayMs: 0, episodes: ['old-commit-new-tail.pcm', 'episode-b.pcm'] },
+  ...[1, 2, 3].map(attempt => ({ id: `warm-baseline-${attempt}`, continuation: false, configDelayMs: 0, route: 'baseline', episodes: ['episode-a.pcm', 'episode-b.pcm'] })),
+  ...[1, 2, 3].map(attempt => ({ id: `warm-continue-${attempt}`, continuation: true, configDelayMs: 0, route: 'continued-audio', episodes: ['episode-a.pcm', 'episode-b.pcm'] })),
+  ...[0, 4000, 8000].map(configDelayMs => ({ id: `cold-${configDelayMs}`, continuation: false, configDelayMs, route: 'cold-two-runs', episodes: ['long-auto-commit.pcm', 'episode-b.pcm'] })),
+  { id: 'long', continuation: true, configDelayMs: 0, route: 'continued-audio', episodes: ['episode-a.pcm', 'long-auto-commit.pcm'] },
+  { id: 'short-tail', continuation: true, configDelayMs: 0, route: 'cancel-unsent', episodes: ['episode-a.pcm', 'stop-inside-word.pcm'] },
+  { id: 'old-tail', continuation: true, configDelayMs: 0, route: 'continued-audio', episodes: ['old-commit-new-tail.pcm', 'episode-b.pcm'] },
 ]);
 export function validateHarnessConfig(config) {
   if (config?.schema !== 'p4-test-backend-v1' || config.testOnly !== true ||
@@ -101,6 +102,43 @@ export function verifyQualificationConnections(trial, events) {
     requiredMaxActiveUpstream: 1, normalStopConnectionReleaseVerified: true,
     preTeardownBoundary: events.find(event => event.event === 'qualification_pre_teardown'),
     providerHandshakeVerification: 'pending-parent-logs' };
+}
+
+export function verifyQualificationRoute(trial, events) {
+  const expected = qualificationExpectations(trial);
+  const connections = events.filter(event => event.event === 'fault_proxy_connected');
+  const binary = events.filter(event => event.event === 'client_binary');
+  if (binary.some(event => !Number.isSafeInteger(event.connectionId) || event.connectionId <= 0 ||
+      !Number.isSafeInteger(event.bytes) || event.bytes <= 0 || event.bytes > 9_600 || event.bytes % 2 !== 0)) {
+    throw new Error('Invalid client audio frame evidence');
+  }
+  const connectionIds = new Set(connections.map(event => event.connectionId));
+  if (connectionIds.size !== expected.backendConnections || connections.some(event =>
+      !Number.isSafeInteger(event.connectionId) || event.connectionId <= 0) ||
+      binary.some(event => !connectionIds.has(event.connectionId))) {
+    throw new Error('Audio evidence does not belong to the expected connections');
+  }
+  for (const connectionId of connectionIds) {
+    if (!binary.some(event => event.connectionId === connectionId)) throw new Error('Expected connection has no client audio');
+  }
+  if (!trial.continuation) return { clientAudioFrames: binary.length, clientAudioConnections: connectionIds.size, routeVerified: trial.route };
+
+  const pause = events.findIndex(event => event.event === 'backend_control' && event.type === 'pause_accepted' && event.decision === 'accepted');
+  const continued = events.findIndex(event => event.event === 'backend_control' && event.type === 'continue_result' &&
+    event.decision === 'accepted' && event.eligible_now === true);
+  if (pause < 0 || continued <= pause) throw new Error('Continue route lacks ordered Pause/Continue acceptance');
+  const preContinueAudio = events.slice(pause + 1, continued).filter(event => event.event === 'client_binary');
+  if (preContinueAudio.length !== 0) throw new Error('Client audio preceded Continue acceptance');
+  const postContinueAudio = events.slice(continued + 1).filter(event => event.event === 'client_binary');
+  const restores = events.slice(continued + 1).filter(event => event.event === 'backend_control' &&
+    event.type === 'pause_restore_result' && event.decision === 'accepted');
+  if (trial.route === 'cancel-unsent') {
+    if (restores.length !== 1 || postContinueAudio.length !== 0) throw new Error('Cancelled unsent route must Restore without a B write');
+  } else if (trial.route === 'continued-audio') {
+    if (restores.length !== 0 || postContinueAudio.length === 0) throw new Error('Continued route requires a B write after acceptance and no Restore');
+  } else throw new Error('Unknown continuation route contract');
+  return { clientAudioFrames: binary.length, clientAudioConnections: connectionIds.size,
+    postContinueAudioFrames: postContinueAudio.length, routeVerified: trial.route };
 }
 
 export function verifyQualificationTerminals(trial, episodes, terminals) {

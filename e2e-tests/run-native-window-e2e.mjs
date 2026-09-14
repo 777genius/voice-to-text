@@ -1,6 +1,6 @@
 import { closeOwnedDocument, ownedDocumentMatches } from './helpers/nativeOwnedDocument.mjs';
 import { isDeepStrictEqual, promisify } from 'node:util';
-import { verifyQualificationTerminals, verifyQualificationSources, verifyQualificationConnections, liveTrials, readApprovedFixtures, validateHarnessConfig, exactInsertionEvidence } from './helpers/nativeContinuation.mjs';
+import { verifyQualificationTerminals, verifyQualificationSources, verifyQualificationConnections, verifyQualificationRoute, maxProxyEvidenceEvents, liveTrials, readApprovedFixtures, validateHarnessConfig, exactInsertionEvidence } from './helpers/nativeContinuation.mjs';
 import { createWriteStream } from 'node:fs';
 import { spawn, execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -899,8 +899,10 @@ export async function main(args = process.argv.slice(2)) {
   const proxyStarted = performance.now();
   const { startConfigDelayProxy } = trial ? await import('./helpers/nativeContinuationProxy.mjs') : {};
   const proxy = trial ? await startConfigDelayProxy(provenance.endpoint, trial.configDelayMs, (event, details) => {
-    if (proxyEvents.length < 1024) proxyEvents.push({ event, ...details, atMs: performance.now() - proxyStarted });
-    else if (proxyEvents.length === 1024) proxyEvents.push({ event: 'fault_proxy_evidence_overflow' });
+    // The longest approved source is 49.3 s. At the native 30 ms audio cadence it
+    // produces fewer than 1,650 binary events, leaving bounded room for controls.
+    if (proxyEvents.length < maxProxyEvidenceEvents) proxyEvents.push({ event, ...details, atMs: performance.now() - proxyStarted });
+    else if (proxyEvents.length === maxProxyEvidenceEvents) proxyEvents.push({ event: 'fault_proxy_evidence_overflow' });
   }) : null;
   if (proxy) env.VOICETEXT_QUALIFICATION_ENDPOINT = proxy.url;
   const collectBeforeTeardown = trial ? createQualificationCollector(trial, proxyEvents,
@@ -952,6 +954,7 @@ export async function main(args = process.argv.slice(2)) {
       verification.readback = { clock: 'runner-performance-now', startMs: readbackStartMs, endMs: performance.now() - proxyStarted };
       Object.assign(verification, exactInsertionEvidence(report.expectedInsertion, stdout.replace(/\n$/, ''), report.targetDocument));
       Object.assign(verification, verifyQualificationConnections(trial, proxyEvents));
+      Object.assign(verification, verifyQualificationRoute(trial, proxyEvents));
       verifyQualificationSources(trial, report.final?.fixture);
       verifyQualificationTerminals(trial, report.episodes, report.terminals);
       const accepted = proxyEvents.filter(e => e.event === 'backend_control' && e.type === 'continue_result' && e.decision === 'accepted' && e.eligible_now === true);
