@@ -535,10 +535,10 @@ mod synthetic_readback {
         json!({"originBoundsMs":[lower,upper],"deadlineBoundsMs":[lower+2000.0,upper+2000.0],
             "conservativeOriginDeadlineMs":[lower,lower+2000.0]})
     }
-    fn read_loop(
+    fn read_loop<T>(
         signal: &AtomicBool,
-        mut read: impl FnMut() -> Result<String, String>,
-        mut publish: impl FnMut(Result<String, String>, f64, f64) -> Result<(), String>,
+        mut read: impl FnMut() -> Result<Option<T>, String>,
+        mut publish: impl FnMut(Result<T, String>, f64, f64) -> Result<(), String>,
     ) -> Result<(), String> {
         let began = std::time::Instant::now();
         loop {
@@ -546,8 +546,18 @@ mod synthetic_readback {
             let stopping_before_read = signal.load(Ordering::SeqCst);
             let result = read();
             let end = observation::now_ms();
-            publish(result, start, end)?;
-            if stopping_before_read {
+            let published = match result {
+                Ok(Some(value)) => {
+                    publish(Ok(value), start, end)?;
+                    true
+                }
+                Ok(None) => false,
+                Err(error) => {
+                    publish(Err(error), start, end)?;
+                    true
+                }
+            };
+            if stopping_before_read && published {
                 return Ok(());
             }
             if began.elapsed() >= Duration::from_secs(180) {
@@ -720,14 +730,25 @@ mod synthetic_readback {
                         if arming { policy::admit(std::time::Instant::now(), deadline,
                             signal.load(Ordering::SeqCst) || !data().lock().unwrap()["error"].is_null(), 250)?; }
                         read_deadline.set(std::time::Instant::now() + Duration::from_millis(200));
-                        reader.read(arming.then_some(deadline), read_deadline.get()).map_err(|e| e.to_string())
+                        reader
+                            .read(arming.then_some(deadline), read_deadline.get())
+                            .map_err(|e| e.to_string())
                     },
                     |read, start, end| {
                         {
                             let mut d = data().lock().unwrap();
                             d["lastReadInterval"] = json!([start, end]);
                         }
-                        let text = captured_read(read, capture_diagnostics)?;
+                        let text = match read {
+                            Ok(text) => {
+                                capture_diagnostics(None);
+                                text
+                            }
+                            Err(error) => {
+                                capture_diagnostics(Some(&error));
+                                return Err(error);
+                            }
+                        };
                         if initial {
                             let mut candidate = data().lock().unwrap().clone();
                             publish_read_result(&mut candidate, Ok(text), read_deadline.get(), std::time::Instant::now,
@@ -1050,7 +1071,7 @@ mod synthetic_readback {
                     &AtomicBool::new(false),
                     || {
                         calls += 1;
-                        Err(reason.into())
+                        Err::<Option<()>, String>(reason.into())
                     },
                     |read, _, _| read.map(|_| ()),
                 );
@@ -1332,7 +1353,7 @@ mod synthetic_readback {
                             entered_tx.send(()).unwrap();
                             release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
                         }
-                        Ok(captured)
+                        Ok(Some(captured))
                     },
                     |read, start, end| {
                         samples.push((read?, start, end));
@@ -1351,6 +1372,26 @@ mod synthetic_readback {
             assert_eq!(samples[0].0, "");
             assert_eq!(samples[1].0, "changed after stop");
             assert!(samples[1].1 >= samples[0].2, "reads must not overlap");
+        }
+        #[test]
+        fn stop_during_skipped_sample_waits_for_a_fresh_terminal_read() {
+            let signal = AtomicBool::new(true);
+            let mut reads = 0;
+            let mut samples = Vec::new();
+            read_loop(
+                &signal,
+                || {
+                    reads += 1;
+                    Ok((reads > 1).then(|| "fresh terminal sample".to_string()))
+                },
+                |read, _, _| {
+                    samples.push(read?);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(reads, 2);
+            assert_eq!(samples, ["fresh terminal sample"]);
         }
         #[test]
         fn unchanged_runs_preserve_absence_and_gap_and_overflow() {
@@ -3575,21 +3616,40 @@ pub async fn native_e2e_prepare_live_target() -> Result<String, String> {
         use std::io::Write;
         use std::os::unix::fs::MetadataExt;
         let metadata = file.metadata().map_err(|e| e.to_string())?;
+        let directory_metadata = std::fs::metadata(directory).map_err(|e| e.to_string())?;
         let mut journal = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(directory.join("owned-document.json"))
             .map_err(|e| e.to_string())?;
         journal.write_all(&serde_json::to_vec(&json!({"marker":MARKER,"path":target,
-            "appPid":std::process::id(),"device":metadata.dev().to_string(),"inode":metadata.ino().to_string()}))
+            "appPid":std::process::id(),"device":metadata.dev().to_string(),"inode":metadata.ino().to_string(),
+            "directoryDevice":directory_metadata.dev().to_string(),"directoryInode":directory_metadata.ino().to_string(),
+            "directoryMode":directory_metadata.mode(),"directoryUid":directory_metadata.uid()}))
             .map_err(|e| e.to_string())?).and_then(|_| journal.sync_all()).map_err(|e| e.to_string())?;
     }
     drop(file);
-    let quoted = serde_json::to_string(target.to_str().ok_or("invalid document path")?)
-        .map_err(|e| e.to_string())?;
+    let target_path = target.to_str().ok_or("invalid document path")?;
+    let quoted = serde_json::to_string(target_path).map_err(|e| e.to_string())?;
+    let visible_path = target_path
+        .strip_prefix("/private/var/")
+        .map(|suffix| format!("/var/{suffix}"))
+        .or_else(|| {
+            target_path
+                .strip_prefix("/private/tmp/")
+                .map(|suffix| format!("/tmp/{suffix}"))
+        });
+    let identity_guard = if let Some(visible_path) = visible_path {
+        let visible = serde_json::to_string(&visible_path).map_err(|e| e.to_string())?;
+        format!("set actualPath to (path of d) as text\nif actualPath is not {quoted} and actualPath is not {visible} then error \"TEST document path mismatch\"")
+    } else {
+        format!(
+            "if ((path of d) as text) is not {quoted} then error \"TEST document path mismatch\""
+        )
+    };
     // These markers contain no document data. Their receipt brackets completion;
     // it is not a timestamp inside TextEdit or evidence of AX causality.
-    let script = format!("tell application \"TextEdit\"\nset d to open POSIX file {quoted}\nif (path of d) is not {quoted} then error \"TEST document path mismatch\"\nlog \"TEST-owned-open-complete\"\nactivate\nlog \"TEST-owned-activate-complete\"\nreturn name of d\nend tell");
+    let script = format!("tell application \"TextEdit\"\nset d to open POSIX file {quoted}\n{identity_guard}\nlog \"TEST-owned-open-complete\"\nactivate\nlog \"TEST-owned-activate-complete\"\nreturn name of d\nend tell");
     let script_start = observation::now_ms();
     let mut child = tokio::process::Command::new("/usr/bin/osascript")
         .arg("-e")

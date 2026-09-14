@@ -1,4 +1,4 @@
-import { closeOwnedDocument } from './helpers/nativeOwnedDocument.mjs';
+import { closeOwnedDocument, ownedDocumentMatches } from './helpers/nativeOwnedDocument.mjs';
 import { isDeepStrictEqual, promisify } from 'node:util';
 import { verifyQualificationTerminals, verifyQualificationSources, verifyQualificationConnections, liveTrials, readApprovedFixtures, validateHarnessConfig, exactInsertionEvidence } from './helpers/nativeContinuation.mjs';
 import { createWriteStream } from 'node:fs';
@@ -125,7 +125,18 @@ export async function runOwned(command, args, options, timeoutMs, logPath, progr
   const child = spawn(command, args, { ...options, ...(terminationPath ? { detached: true } : {}), stdio: ['ignore', 'pipe', 'pipe'] });
   const kill = signal => {
     try { if (terminationPath && child.pid) process.kill(-child.pid, signal); else child.kill(signal); }
-    catch (error) { if (error.code !== 'ESRCH') throw error; }
+    catch (error) {
+      if (error.code === 'ESRCH') return;
+      // A macOS process group can become unsignalable while its owned leader is
+      // still our direct child. Retire that leader and let the later group probe
+      // keep groupGone=false unless disappearance is independently observed.
+      if (error.code === 'EPERM' && terminationPath && child.pid) {
+        try { child.kill(signal); }
+        catch (childError) { if (childError.code !== 'ESRCH') throw childError; }
+        return;
+      }
+      throw error;
+    }
   };
   let tearingDown = false, terminationRequested = false, force;
   const requestTermination = () => {
@@ -207,7 +218,11 @@ export async function runOwned(command, args, options, timeoutMs, logPath, progr
       const deadline = performance.now() + 500;
       do {
         try { process.kill(-child.pid, 0); }
-        catch (error) { if (error.code === 'ESRCH') { groupGone = true; break; } throw error; }
+        catch (error) {
+          if (error.code === 'ESRCH') { groupGone = true; break; }
+          if (error.code === 'EPERM') break;
+          throw error;
+        }
         await new Promise(resolve => setTimeout(resolve, 10));
       } while (performance.now() < deadline);
       await writeFile(terminationPath, JSON.stringify({ pid: child.pid,
@@ -931,7 +946,7 @@ export async function main(args = process.argv.slice(2)) {
       const report = envelope.report;
       if (envelope.marker !== marker || envelope.passed !== true || report?.passed !== true || report.errors?.length || report.trial?.id !== trial.id) throw new Error('Native live qualification failed');
       const target = path.join(directory, 'p4-textedit-a.txt');
-      const script = `tell application "TextEdit"\nset matches to every document whose path is ${JSON.stringify(target)}\nif (count matches) is not 1 then error "TEST document identity missing or ambiguous"\nreturn text of item 1 of matches\nend tell`;
+      const script = `tell application "TextEdit"\nset matches to ${ownedDocumentMatches(target)}\nif (count matches) is not 1 then error "TEST document identity missing or ambiguous"\nreturn text of item 1 of matches\nend tell`;
       const readbackStartMs = performance.now() - proxyStarted;
       const { stdout } = await promisify(execFile)('/usr/bin/osascript', ['-e', script], { timeout: 5000, maxBuffer: 1024 * 1024 });
       verification.readback = { clock: 'runner-performance-now', startMs: readbackStartMs, endMs: performance.now() - proxyStarted };
@@ -956,7 +971,7 @@ export async function main(args = process.argv.slice(2)) {
         const report = envelope.report;
         const target = path.join(directory, 'p4-textedit-a.txt');
         if (report.mode !== 'live-elevenlabs' || report.targetDocument !== path.basename(target)) throw new Error('Legacy live TEST document identity mismatch');
-        const script = `tell application "TextEdit"\nset matches to every document whose path is ${JSON.stringify(target)}\nif (count matches) is not 1 then error "TEST document identity missing or ambiguous"\nreturn text of item 1 of matches\nend tell`;
+        const script = `tell application "TextEdit"\nset matches to ${ownedDocumentMatches(target)}\nif (count matches) is not 1 then error "TEST document identity missing or ambiguous"\nreturn text of item 1 of matches\nend tell`;
         const { stdout } = await promisify(execFile)('/usr/bin/osascript', ['-e', script], { timeout: 5000, maxBuffer: 1024 * 1024 });
         Object.assign(verification, exactInsertionEvidence(report.finalText, stdout.replace(/\n$/, ''), report.targetDocument));
         verification.passed = true;

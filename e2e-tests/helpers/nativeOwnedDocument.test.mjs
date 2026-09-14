@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readFile, lstat, rm, symlink, realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { closeOwnedDocument, ownedClosureScript } from './nativeOwnedDocument.mjs';
+import { closeOwnedDocument, ownedClosureScript, ownedDocumentMatches, textEditPathAliases } from './nativeOwnedDocument.mjs';
 
 for (const scenario of ['success', 'absent', 'no-owner', 'bad-owner', 'changed-inode', 'symlink', 'missing-termination', 'alive', 'different-pid', 'script-error', 'unverified']) {
   test(`owned closure ${scenario}: exact identity and termination required; independent evidence`, async () => {
@@ -15,7 +15,9 @@ for (const scenario of ['success', 'absent', 'no-owner', 'bad-owner', 'changed-i
       await writeFile(unrelated, 'USER DATA UNTOUCHED');
       await writeFile(target, 'owned final insertion');
       const info = await lstat(target, { bigint: true });
-      const owner = { marker: 'VOICETEXT_NATIVE_WINDOW_E2E_V1', path: target, appPid: 123, device: String(info.dev), inode: String(info.ino) };
+      const directoryInfo = await lstat(dir, { bigint: true });
+      const owner = { marker: 'VOICETEXT_NATIVE_WINDOW_E2E_V1', path: target, appPid: 123, device: String(info.dev), inode: String(info.ino),
+        directoryDevice: String(directoryInfo.dev), directoryInode: String(directoryInfo.ino), directoryMode: Number(directoryInfo.mode), directoryUid: Number(directoryInfo.uid) };
       if (scenario === 'bad-owner') owner.path = unrelated;
       if (scenario === 'changed-inode') owner.inode = '0';
       if (scenario === 'symlink') { await rm(target); await symlink(unrelated, target); }
@@ -31,12 +33,12 @@ for (const scenario of ['success', 'absent', 'no-owner', 'bad-owner', 'changed-i
         if (scenario === 'script-error') throw Error('TextEdit denied close');
         return { stdout: scenario === 'unverified' ? 'still-open' : 'absent\n' };
       };
-      const success = ['success', 'absent', 'no-owner'].includes(scenario);
+      const success = ['success', 'absent', 'no-owner', 'changed-inode'].includes(scenario);
       if (success) assert.equal((await closeOwnedDocument(dir, execute)).passed, true);
       else await assert.rejects(closeOwnedDocument(dir, execute));
       const evidence = JSON.parse(await readFile(path.join(dir, 'owned-document-cleanup.json'), 'utf8'));
       assert.equal(evidence.passed, success);
-      assert.equal(evidence.attempted, ['success', 'absent', 'script-error', 'unverified'].includes(scenario));
+       assert.equal(evidence.attempted, ['success', 'absent', 'changed-inode', 'script-error', 'unverified'].includes(scenario));
       assert.equal(calls, Number(evidence.attempted));
       assert.equal(await readFile(unrelated, 'utf8'), 'USER DATA UNTOUCHED');
       assert.ok(evidence.endMs >= evidence.startMs);
@@ -48,8 +50,20 @@ test('closure script never reads text, quits TextEdit, uses front document, or r
   const script = ownedClosureScript('/tmp/TEST path/p4-textedit-a.txt');
   assert.match(script, /every document whose path is/);
   assert.match(script, /close item 1 of matches saving no/);
-  assert.match(script, /is not 0 then error/);
+  assert.match(script, /repeat 20 times/);
+  assert.match(script, /set matches to missing value/);
+  assert.match(script, /count remainingMatches\) is 0 then return "absent"/);
   assert.doesNotMatch(script, /\b(?:clipboard|quit|front document|text of|name of)\b/);
+});
+test('TextEdit identity accepts only the canonical TEST path and its macOS private alias', () => {
+  assert.deepEqual(textEditPathAliases('/private/var/TEST/p4-textedit-a.txt'), [
+    '/private/var/TEST/p4-textedit-a.txt', '/var/TEST/p4-textedit-a.txt',
+  ]);
+  assert.deepEqual(textEditPathAliases('/Users/test/p4-textedit-a.txt'), ['/Users/test/p4-textedit-a.txt']);
+  const matches = ownedDocumentMatches('/private/var/TEST/p4-textedit-a.txt');
+  assert.match(matches, /whose path is "\/private\/var\/TEST\/p4-textedit-a\.txt"/);
+  assert.match(matches, /whose path is "\/var\/TEST\/p4-textedit-a\.txt"/);
+  assert.doesNotMatch(matches, /front document|text of|name of/);
 });
 
 // Execute the real parent main with only its OS/provider boundaries replaced.
@@ -81,6 +95,7 @@ for (const mode of ['diagnostic', 'live']) for (const failure of ['none', 'setup
       promisify: fn => fn, execFile: async () => { calls.push('readback'); return { stdout: 'synthetic\n' }; },
       exactInsertionEvidence: () => { if (failure === 'verification') throw Error('primary verification'); return {}; },
       verifyQualificationConnections: () => ({}), verifyQualificationSources: () => {}, verifyQualificationTerminals: () => {},
+      ownedDocumentMatches,
       closeOwnedDocument: async () => { calls.push('close'); if (failure.includes('cleanup')) throw Error('cleanup failure'); },
       marker: 'test-marker', console: { log() {} },
     };
@@ -103,14 +118,24 @@ for (const mode of ['diagnostic', 'live']) for (const failure of ['none', 'setup
 
 const { EventEmitter } = await import('node:events');
 const runOwnedBody = runner.slice(runner.indexOf('export async function runOwned('), runner.indexOf('\nexport async function snapshotDigest')).replace('export ', '');
-for (const outcome of ['success', 'failed-exit', 'timeout', 'spawn-error', 'group-retained', 'evidence-write-failure']) {
+for (const outcome of ['success', 'failed-exit', 'timeout', 'spawn-error', 'group-retained', 'group-eperm', 'evidence-write-failure']) {
   test(`process owner ${outcome}: termination evidence comes from exit and group disappearance`, async () => {
     const child = Object.assign(new EventEmitter(), { pid: 123, exitCode: null, signalCode: null,
-      stdout: new EventEmitter(), stderr: new EventEmitter() });
+      stdout: new EventEmitter(), stderr: new EventEmitter(), kill: signal => {
+        signals.push(`child:${signal}`);
+        if (child.exitCode === null && child.signalCode === null) {
+          child.signalCode = signal;
+          queueMicrotask(() => child.emit('exit', null, signal));
+        }
+      } });
     const output = Object.assign(new EventEmitter(), { write() {}, end: callback => callback() });
     const signals = [], writes = [];
     const parent = Object.assign(new EventEmitter(), { stdout: { write() {} }, kill: (pid, signal) => {
       assert.equal(pid, -123);
+      if (outcome === 'group-eperm') {
+        signals.push(signal);
+        throw Object.assign(Error('denied'), { code: 'EPERM' });
+      }
       if (signal === 0) {
         if (outcome === 'group-retained') return;
         throw Object.assign(Error('gone'), { code: 'ESRCH' });
@@ -138,7 +163,7 @@ for (const outcome of ['success', 'failed-exit', 'timeout', 'spawn-error', 'grou
     const run = new Function('createWriteStream', 'spawn', 'process', 'path', 'writeFile', 'performance', `${runOwnedBody}; return runOwned;`)
       (() => output, spawn, parent, path, writeFile, performance);
     const promise = run('/TEST/app', [], {}, 5, '/TEST/log', undefined, undefined, '/TEST/termination');
-    if (['success', 'group-retained'].includes(outcome)) await promise;
+    if (['success', 'group-retained', 'group-eperm'].includes(outcome)) await promise;
     else await assert.rejects(promise, error => {
       if (outcome === 'evidence-write-failure') {
         assert.match(error.cause.message, /app failed/);
@@ -150,7 +175,7 @@ for (const outcome of ['success', 'failed-exit', 'timeout', 'spawn-error', 'grou
     if (outcome === 'spawn-error') assert.equal(writes.length, 0);
     else {
       assert.equal(writes[0].exited, true);
-      assert.equal(writes[0].groupGone, outcome !== 'group-retained');
+      assert.equal(writes[0].groupGone, !['group-retained', 'group-eperm'].includes(outcome));
       assert.equal(writes[0].pid, 123);
       assert.ok(signals.includes('SIGKILL'));
     }
@@ -216,6 +241,7 @@ for (const outcome of ['success', 'mismatch', 'read-failure', 'mismatch-cleanup'
       },
       validateReusableBuild: async () => {}, validateCachedBinary: async () => '/TEST/binary', randomUUID: () => 'fixed',
       runOwned: async () => calls.push('terminated'), validateResult: () => calls.push('validated'),
+      ownedDocumentMatches,
       promisify: fn => fn, execFile: async (command, args, options) => {
         calls.push('readback');
         assert.equal(command, '/usr/bin/osascript');

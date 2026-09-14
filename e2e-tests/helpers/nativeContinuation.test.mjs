@@ -352,7 +352,7 @@ test('bounded fixture hooks dispatch real captured events and lifecycle helpers;
   const hotkey = native.slice(native.indexOf('pub async fn native_e2e_hotkey'), native.indexOf('fn dispatch_hotkey'));
   assert.match(hotkey, /!event_case\("E41"\)/);
   assert.match(hotkey, /current_capture_stop\(IntentSource::Vad\)/);
-  assert.match(hotkey, /RecordingIntent::stop\(IntentSource::HoldHotkey, Some\(gesture\)\)/);
+  assert.match(hotkey, /RecordingIntent::stop\(\s*IntentSource::HoldHotkey,\s*Some\(gesture\),?\s*\)/);
   assert.match(hotkey, /dispatch_recording_coordinator_event\(app, event\)/);
   assert.doesNotMatch(hotkey, /reduce\(|reduce_at\(/);
   assert.match(hotkey, /force_off_recording_for_system_sleep\(app\)/);
@@ -430,6 +430,8 @@ function afterWriteEnvelope(selected) {
   const a = { nativeClockMs: 0, logicalProviderRunId: 9, captureEpisode: { runId: 1, generation: 1 }, preparedCaptureTokenCount: 0,
     coordinatorTrace: [], fixture: { providerMarkers: [marker(1, 2)] } };
   const b = { nativeClockMs: 0, logicalProviderRunId: 9, captureEpisode: { runId: 2, generation: 2 }, preparedCaptureTokenCount: 0,
+    visible: true, windowEpoch: 2, coordinatorShownEpoch: 2,
+    coordinatorCapture: { recording: true, runId: 2 },
     coordinatorTrace: [{ sequence: 3, phase: 'IntentApplied', source: 'Some(HoldHotkey)', gesture: 2, desiredAfter: 'On' }],
     fixture: { captureStarts: 2, captureStops: 1, activeCaptures: 1, activeProviders: 1,
       maxActiveCaptures: 1, maxActiveProviders: 1, providerStarts: 1, providerResumes: 0,

@@ -3624,29 +3624,66 @@ pub(crate) mod synthetic_readiness {
     }
     impl std::error::Error for OperationError {}
     impl OperationError {
-        // This result is rejected and dropped, never used as an acquired element.
-        pub fn rejected_late_initial_focus(&self) -> bool {
-            self.initial_focus
-                && self.bind
-                && self.sequence == 0
-                && self.op == "AXFocusedUIElement"
-                && self.called
-                && self.code == Some(0)
+        fn rejected_late_success(&self) -> bool {
+            self.called
+                && matches!(self.code, None | Some(0))
                 && self.expired
                 && !self.null
                 && !self.wrong_type
                 && self.outcome == "local-deadline"
         }
-        pub fn retryable(&self) -> bool {
-            self.initial_focus
-                && self.bind
-                && self.sequence == 0
-                && self.op == "AXFocusedUIElement"
-                && self.called
-                && self.code == Some(-25204)
-                && self.outcome == "native-error"
-                && !self.expired
+        fn rejected_late_focus(&self) -> bool {
+            self.op == "AXFocusedUIElement" && self.code == Some(0) && self.rejected_late_success()
+        }
+        fn expired_before_call(&self) -> bool {
+            !self.called
+                && self.code.is_none()
+                && self.expired
+                && !self.null
                 && !self.wrong_type
+                && self.outcome == "local-deadline"
+        }
+        fn transient_process_lookup(&self) -> bool {
+            self.op == "NSRunningApplicationBundleIdentifier"
+                && self.called
+                && self.code.is_none()
+                && self.null
+                && !self.wrong_type
+                && self.outcome == "success-null"
+        }
+        // This result is rejected and dropped, never used as an acquired element.
+        pub fn rejected_late_initial_focus(&self) -> bool {
+            self.rejected_late_focus() && self.initial_focus && self.bind && self.sequence == 0
+        }
+        pub fn retryable(&self) -> bool {
+            self.transient_process_lookup()
+                || (self.initial_focus
+                    && self.bind
+                    && self.sequence == 0
+                    && self.op == "AXFocusedUIElement"
+                    && self.called
+                    && self.code == Some(-25204)
+                    && self.outcome == "native-error"
+                    && self.null
+                    && !self.wrong_type)
+        }
+        pub fn retryable_sample(&self) -> bool {
+            self.transient_process_lookup()
+                || (self.rejected_late_success() && !self.bind && self.sequence > 0)
+                || (self.expired_before_call() && !self.bind && self.sequence > 0)
+                || (!self.initial_focus
+                    && !self.bind
+                    && self.sequence > 0
+                    && matches!(
+                        self.op,
+                        "AXFocusedUIElement" | "AXWindow" | "AXDocument" | "AXValue"
+                    )
+                    && self.called
+                    && self.code == Some(-25204)
+                    && self.outcome == "native-error"
+                    && self.null
+                    && !self.expired
+                    && !self.wrong_type)
         }
     }
     pub fn admit(
@@ -3761,6 +3798,7 @@ pub(crate) mod synthetic_readiness {
     }
     // The worker and scripted tests execute this same serial controller. Evidence
     // is separate from rolling AX diagnostics, so enrichment cannot replace it.
+    const BIND_ATTEMPT_LIMIT: usize = 8;
     pub fn bind<T>(
         deadline: Instant,
         now: impl Fn() -> Instant,
@@ -3776,10 +3814,10 @@ pub(crate) mod synthetic_readiness {
             "firstNonTransient":null,"terminalCause":null,"stopReason":null,"recoveredDuringBind":false,
             "deadlineFromWorkerMs":ms(deadline)});
         let result = (|| {
-            for number in 1..=4 {
+            for number in 1..=BIND_ATTEMPT_LIMIT {
                 admit(now(), deadline, stopped(), 450).map_err(stop)?;
                 let rows = evidence["attempts"].as_array_mut().unwrap();
-                if rows.len() >= 4 {
+                if rows.len() >= BIND_ATTEMPT_LIMIT {
                     return Err(stop("evidence-overflow"));
                 }
                 rows.push(json!({"attempt":number,"status":"pending","startMs":ms(now())}));
@@ -3823,8 +3861,7 @@ pub(crate) mod synthetic_readiness {
                 }
                 publish(evidence.clone()); // Returned errors survive cancellation/overrun.
                 admit(now(), deadline, stopped(), 0).map_err(stop)?;
-                if now().duration_since(start) >= Duration::from_millis(200) && !late_initial_focus
-                {
+                if now().duration_since(start) >= Duration::from_millis(200) && !transient {
                     return Err(stop("bind-deadline"));
                 }
                 match result {
@@ -3838,7 +3875,7 @@ pub(crate) mod synthetic_readiness {
                     Err(error) if !transient => return Err(error),
                     Err(_) => {}
                 }
-                if number == 4 {
+                if number == BIND_ATTEMPT_LIMIT {
                     return Err(stop("attempt-limit"));
                 }
                 admit(now(), deadline, stopped(), 500).map_err(stop)?;
@@ -3868,6 +3905,46 @@ pub(crate) mod synthetic_readiness {
         publish(evidence);
         result
     }
+    // A transient AX server refusal invalidates the whole sample. Retry the full
+    // identity/value/identity transaction without rebinding or publishing text.
+    pub fn sample<T>(
+        deadline: Instant,
+        now: impl Fn() -> Instant,
+        consecutive_skips: &std::cell::Cell<u8>,
+        mut wait: impl FnMut(Duration),
+        mut attempt: impl FnMut() -> anyhow::Result<T>,
+    ) -> anyhow::Result<Option<T>> {
+        for number in 1..=3 {
+            admit(now(), deadline, false, 0).map_err(stop)?;
+            match attempt() {
+                Ok(value) => {
+                    consecutive_skips.set(0);
+                    return Ok(Some(value));
+                }
+                Err(error) => {
+                    let typed = error.downcast_ref::<OperationError>();
+                    let retryable = typed.is_some_and(OperationError::retryable_sample);
+                    if !retryable {
+                        return Err(error);
+                    }
+                    let rejected_late_success = typed.is_some_and(|error| {
+                        error.rejected_late_success() || error.expired_before_call()
+                    });
+                    if number == 3 || (rejected_late_success && now() >= deadline) {
+                        let skips = consecutive_skips.get().saturating_add(1);
+                        if skips > 2 {
+                            return Err(error);
+                        }
+                        consecutive_skips.set(skips);
+                        return Ok(None);
+                    }
+                }
+            }
+            admit(now(), deadline, false, 5).map_err(stop)?;
+            wait(Duration::from_millis(5));
+        }
+        unreachable!()
+    }
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -3881,7 +3958,7 @@ pub(crate) mod synthetic_readiness {
                 called: true,
                 code: Some(-25204),
                 expired: false,
-                null: false,
+                null: true,
                 wrong_type: false,
                 outcome: "native-error",
                 evidence: json!({"code":-25204,"readSequence":sequence}),
@@ -3927,7 +4004,7 @@ pub(crate) mod synthetic_readiness {
         }
         #[test]
         fn recovery_and_exhaustion_keep_history_without_fatal_state() {
-            for failures in 0..=4 {
+            for failures in 0..=BIND_ATTEMPT_LIMIT {
                 let mut script: Vec<_> = (0..failures)
                     .map(|i| {
                         let mut e = transient(0);
@@ -3935,14 +4012,17 @@ pub(crate) mod synthetic_readiness {
                         Err(e.into())
                     })
                     .collect();
-                if failures < 4 {
+                if failures < BIND_ATTEMPT_LIMIT {
                     script.push(Ok(()));
                 }
                 let (ok, attempts, waits, d) = run(script, 2000, 0, 0, None);
-                assert_eq!(ok, failures < 4);
-                assert_eq!(attempts, (failures + 1).min(4));
-                assert_eq!(waits, failures.min(3) * 10);
-                assert_eq!(d["recoveredDuringBind"], failures > 0 && failures < 4);
+                assert_eq!(ok, failures < BIND_ATTEMPT_LIMIT);
+                assert_eq!(attempts, (failures + 1).min(BIND_ATTEMPT_LIMIT));
+                assert_eq!(waits, failures.min(BIND_ATTEMPT_LIMIT - 1) * 10);
+                assert_eq!(
+                    d["recoveredDuringBind"],
+                    failures > 0 && failures < BIND_ATTEMPT_LIMIT
+                );
                 assert!(d["firstNonTransient"].is_null());
                 assert!(d.get("firstFatal").is_none());
                 assert!(d.get("valid").is_none());
@@ -3951,7 +4031,7 @@ pub(crate) mod synthetic_readiness {
                     assert_eq!(d["firstTransient"]["attempt"], 1);
                     assert_eq!(d["lastTransient"]["attempt"], failures);
                 }
-                if failures == 4 {
+                if failures == BIND_ATTEMPT_LIMIT {
                     assert_eq!(d["stopReason"], "attempt-limit");
                     assert_eq!(d["terminalCause"]["code"], -25204);
                 }
@@ -3959,6 +4039,9 @@ pub(crate) mod synthetic_readiness {
         }
         #[test]
         fn only_current_typed_initial_acquisition_can_retry() {
+            let mut expired_transient = transient(0);
+            expired_transient.expired = true;
+            assert!(expired_transient.retryable());
             let mut errors = Vec::new();
             for category in 0..10 {
                 let mut e = transient(0);
@@ -3970,7 +4053,7 @@ pub(crate) mod synthetic_readiness {
                     4 => e.called = false,
                     5 => e.code = Some(0),
                     6 => e.code = Some(-25205),
-                    7 => e.expired = true,
+                    7 => e.null = false,
                     8 => e.wrong_type = true,
                     _ => e.outcome = "local-deadline",
                 }
@@ -3989,6 +4072,249 @@ pub(crate) mod synthetic_readiness {
                 assert_eq!(d["firstTransient"]["code"], -25204);
                 assert!(!d.to_string().contains("TEXT_SENTINEL"));
             }
+        }
+        #[test]
+        fn ongoing_sample_retries_only_transient_attribute_refusal() {
+            let origin = Instant::now();
+            let elapsed = Cell::new(0u64);
+            let calls = Cell::new(0usize);
+            let skips = Cell::new(0u8);
+            let result = sample(
+                origin + Duration::from_millis(200),
+                || origin + Duration::from_millis(elapsed.get()),
+                &skips,
+                |duration| elapsed.set(elapsed.get() + duration.as_millis() as u64),
+                || {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == 1 {
+                        let mut error = transient(7);
+                        error.initial_focus = false;
+                        error.bind = false;
+                        Err(error.into())
+                    } else {
+                        Ok("fresh")
+                    }
+                },
+            );
+            assert_eq!(result.unwrap(), Some("fresh"));
+            assert_eq!(calls.get(), 2);
+
+            for mutate in 0..8 {
+                let calls = Cell::new(0usize);
+                let mut error = transient(7);
+                error.initial_focus = false;
+                error.bind = false;
+                match mutate {
+                    0 => error.initial_focus = true,
+                    1 => error.bind = true,
+                    2 => error.sequence = 0,
+                    3 => error.op = "AXRole",
+                    4 => error.called = false,
+                    5 => error.code = Some(-25205),
+                    6 => error.expired = true,
+                    _ => error.wrong_type = true,
+                }
+                let result = sample(
+                    origin + Duration::from_millis(200),
+                    || origin,
+                    &skips,
+                    |_| panic!("non-transient error must not wait"),
+                    || {
+                        calls.set(calls.get() + 1);
+                        Err::<(), _>(error.clone().into())
+                    },
+                );
+                assert!(result.is_err());
+                assert_eq!(calls.get(), 1);
+            }
+            for op in ["AXFocusedUIElement", "AXWindow", "AXDocument", "AXValue"] {
+                let mut error = transient(7);
+                error.initial_focus = false;
+                error.bind = false;
+                error.op = op;
+                assert!(error.retryable_sample(), "{op}");
+            }
+        }
+        #[test]
+        fn late_successful_focus_is_discarded_as_a_bounded_sample_skip() {
+            let origin = Instant::now();
+            let elapsed = Cell::new(0u64);
+            let skips = Cell::new(0u8);
+            let calls = Cell::new(0usize);
+            for expected in 1..=2 {
+                let result = sample(
+                    origin + Duration::from_millis(200),
+                    || origin + Duration::from_millis(elapsed.get()),
+                    &skips,
+                    |_| panic!("expired late success must not wait"),
+                    || {
+                        calls.set(calls.get() + 1);
+                        elapsed.set(250);
+                        let mut error = late_focus();
+                        error.initial_focus = false;
+                        error.bind = false;
+                        error.sequence = expected;
+                        Err::<(), _>(error.into())
+                    },
+                );
+                assert_eq!(result.unwrap(), None);
+                assert_eq!(skips.get(), expected as u8);
+                elapsed.set(0);
+            }
+            let result = sample(
+                origin + Duration::from_millis(200),
+                || origin + Duration::from_millis(elapsed.get()),
+                &skips,
+                |_| panic!("expired late success must not wait"),
+                || {
+                    elapsed.set(250);
+                    let mut error = late_focus();
+                    error.initial_focus = false;
+                    error.bind = false;
+                    error.sequence = 3;
+                    Err::<(), _>(error.into())
+                },
+            );
+            assert!(result
+                .unwrap_err()
+                .downcast_ref::<OperationError>()
+                .is_some());
+            assert_eq!(calls.get(), 2);
+        }
+        #[test]
+        fn process_identity_lookup_nil_is_the_only_retryable_lookup_outcome() {
+            let mut lookup = transient(7);
+            lookup.initial_focus = false;
+            lookup.bind = false;
+            lookup.op = "NSRunningApplicationBundleIdentifier";
+            lookup.code = None;
+            lookup.null = true;
+            lookup.outcome = "success-null";
+            assert!(lookup.retryable());
+            assert!(lookup.retryable_sample());
+            for mutate in 0..5 {
+                let mut error = lookup.clone();
+                match mutate {
+                    0 => error.op = "AXValue",
+                    1 => error.called = false,
+                    2 => error.code = Some(-25204),
+                    3 => error.null = false,
+                    _ => error.outcome = "native-error",
+                }
+                assert!(!error.retryable());
+                assert!(!error.retryable_sample());
+            }
+        }
+        #[test]
+        fn late_successful_process_lookup_discards_the_whole_sample() {
+            let origin = Instant::now();
+            let elapsed = Cell::new(0u64);
+            let skips = Cell::new(0u8);
+            let result = sample(
+                origin + Duration::from_millis(200),
+                || origin + Duration::from_millis(elapsed.get()),
+                &skips,
+                |_| panic!("expired late process lookup must not wait"),
+                || {
+                    elapsed.set(250);
+                    let mut error = late_focus();
+                    error.initial_focus = false;
+                    error.bind = false;
+                    error.sequence = 7;
+                    error.op = "NSRunningApplicationBundleIdentifier";
+                    error.code = None;
+                    Err::<(), _>(error.into())
+                },
+            );
+            assert_eq!(result.unwrap(), None);
+            assert_eq!(skips.get(), 1);
+        }
+        #[test]
+        fn scheduler_overrun_before_native_call_discards_the_whole_sample() {
+            let origin = Instant::now();
+            let elapsed = Cell::new(0u64);
+            let skips = Cell::new(0u8);
+            let result = sample(
+                origin + Duration::from_millis(200),
+                || origin + Duration::from_millis(elapsed.get()),
+                &skips,
+                |_| panic!("expired sample must not wait"),
+                || {
+                    elapsed.set(250);
+                    let mut error = late_focus();
+                    error.initial_focus = false;
+                    error.bind = false;
+                    error.sequence = 8;
+                    error.op = "AXUIElementGetPid";
+                    error.called = false;
+                    error.code = None;
+                    Err::<(), _>(error.into())
+                },
+            );
+            assert_eq!(result.unwrap(), None);
+            assert_eq!(skips.get(), 1);
+        }
+        #[test]
+        fn ongoing_sample_keeps_one_deadline_and_stops_after_three_attempts() {
+            let origin = Instant::now();
+            let elapsed = Cell::new(0u64);
+            let calls = Cell::new(0usize);
+            let skips = Cell::new(0u8);
+            for expected in 1..=2 {
+                let result = sample(
+                    origin + Duration::from_millis(200),
+                    || origin + Duration::from_millis(elapsed.get()),
+                    &skips,
+                    |duration| elapsed.set(elapsed.get() + duration.as_millis() as u64),
+                    || {
+                        calls.set(calls.get() + 1);
+                        let mut error = transient(9);
+                        error.initial_focus = false;
+                        error.bind = false;
+                        Err::<(), _>(error.into())
+                    },
+                );
+                assert_eq!(result.unwrap(), None);
+                assert_eq!(skips.get(), expected);
+            }
+            let result = sample(
+                origin + Duration::from_millis(200),
+                || origin + Duration::from_millis(elapsed.get()),
+                &skips,
+                |duration| elapsed.set(elapsed.get() + duration.as_millis() as u64),
+                || {
+                    calls.set(calls.get() + 1);
+                    let mut error = transient(9);
+                    error.initial_focus = false;
+                    error.bind = false;
+                    Err::<(), _>(error.into())
+                },
+            );
+            assert!(result
+                .unwrap_err()
+                .downcast_ref::<OperationError>()
+                .is_some());
+            assert_eq!(calls.get(), 9);
+            assert_eq!(elapsed.get(), 30);
+
+            elapsed.set(196);
+            calls.set(0);
+            skips.set(0);
+            let result = sample(
+                origin + Duration::from_millis(200),
+                || origin + Duration::from_millis(elapsed.get()),
+                &skips,
+                |_| panic!("insufficient reserve must not wait"),
+                || {
+                    calls.set(calls.get() + 1);
+                    let mut error = transient(10);
+                    error.initial_focus = false;
+                    error.bind = false;
+                    Err::<(), _>(error.into())
+                },
+            );
+            assert_eq!(result.unwrap_err().to_string(), "insufficient-reserve");
+            assert_eq!(calls.get(), 1);
         }
         #[test]
         fn missing_bundle_fallback_is_fresh_once_and_does_not_hide_mismatch() {
@@ -4114,6 +4440,7 @@ pub(crate) mod synthetic_readiness {
             let mut error = transient(0);
             error.code = Some(0);
             error.expired = true;
+            error.null = false;
             error.outcome = "local-deadline";
             error.evidence = json!({"code":0,"outcome":"local-deadline"});
             error
@@ -4189,14 +4516,16 @@ pub(crate) mod synthetic_readiness {
                 assert_eq!(evidence["lastTransient"]["code"], 0);
             }
             let (ok, count, _, evidence) = run(
-                (0..4).map(|_| Err(late_focus().into())).collect(),
+                (0..BIND_ATTEMPT_LIMIT)
+                    .map(|_| Err(late_focus().into()))
+                    .collect(),
                 2000,
-                200,
+                0,
                 0,
                 None,
             );
             assert!(!ok);
-            assert_eq!(count, 4);
+            assert_eq!(count, BIND_ATTEMPT_LIMIT);
             assert_eq!(evidence["stopReason"], "attempt-limit");
             let (ok, count, _, evidence) = run(
                 vec![Err(transient(0).into()), Err(late_focus().into()), Ok(())],
@@ -5020,6 +5349,7 @@ mod continuation_native {
         element: Owned,
         window: Owned,
         path: String,
+        consecutive_transient_samples: std::cell::Cell<u8>,
     }
     #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
     impl SyntheticTextEditReader {
@@ -5356,6 +5686,7 @@ mod continuation_native {
                     .to_str()
                     .ok_or_else(|| anyhow::anyhow!("owned path UTF8"))?
                     .into(),
+                consecutive_transient_samples: std::cell::Cell::new(0),
             };
             reader.identity(deadline)?;
             // Acquisition/identity work may span a foreground change. Observe again
@@ -5377,51 +5708,25 @@ mod continuation_native {
         fn identity(&self, deadline: std::time::Instant) -> Result<()> {
             Self::operation("identity-entry", deadline, || (None, false, false, ()))?;
             // Query this PID, never rebind to whatever app/editor is currently focused.
-            let bundle = unsafe {
-                let pool = CocoaOwned(msg_send![class!(NSAutoreleasePool), new]);
-                let app: cocoa::base::id = msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier:self.target.pid];
-                let bundle = if app == cocoa::base::nil {
-                    None
-                } else {
-                    running_app_bundle_id(app)
-                };
-                drop(pool);
-                bundle
-            };
-            super::synthetic_readiness::validate_process_identity(
-                bundle.as_deref(),
-                self.target.pid,
-                &self.target.bundle_id,
+            let bundle = Self::operation(
+                "NSRunningApplicationBundleIdentifier",
                 deadline,
-                std::time::Instant::now,
-                || {
-                    READER_CANCEL.with(|s| {
-                        s.borrow()
-                            .as_ref()
-                            .is_some_and(|s| s.load(std::sync::atomic::Ordering::SeqCst))
-                    })
-                },
-                |deadline| {
-                    Self::operation("identity-missing-bundle-foreground", deadline, || {
-                        (
-                            None,
-                            false,
-                            false,
-                            frontmost_identity_for_validation()
-                                .map(|target| (target.pid, target.bundle_id)),
-                        )
-                    })
-                },
-                |missing, attempted, result| {
-                    READER_DIAGNOSTICS.with(|d| {
-                    let mut d = d.borrow_mut();
-                    let fact = serde_json::json!({"lookupMissing":missing,"fallbackAttempted":attempted,
-                        "result":result,"readSequence":d["readSequence"],"atMs":Self::clock_ms()});
-                    d["processIdentityLookup"] = fact.clone();
-                    if missing { d["lastProcessIdentityFallback"] = fact; }
-                })
+                || unsafe {
+                    let pool = CocoaOwned(msg_send![class!(NSAutoreleasePool), new]);
+                    let app: cocoa::base::id = msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier:self.target.pid];
+                    let bundle = if app == cocoa::base::nil {
+                        None
+                    } else {
+                        running_app_bundle_id(app)
+                    };
+                    drop(pool);
+                    (None, bundle.is_none(), false, bundle)
                 },
             )?;
+            anyhow::ensure!(
+                bundle.as_deref() == Some(self.target.bundle_id.as_str()),
+                "owned PID/bundle changed"
+            );
             anyhow::ensure!(
                 Self::checked_pid(self.element.0, deadline)? == Some(self.target.pid)
                     && Self::checked_pid(self.window.0, deadline)? == Some(self.target.pid),
@@ -5459,7 +5764,7 @@ mod continuation_native {
             &self,
             arm_deadline: Option<std::time::Instant>,
             deadline: std::time::Instant,
-        ) -> Result<String> {
+        ) -> Result<Option<String>> {
             let entry = std::time::Instant::now();
             if let Some(deadline) = arm_deadline {
                 super::synthetic_readiness::admit(entry, deadline, false, 250)
@@ -5469,13 +5774,21 @@ mod continuation_native {
                 let mut d = d.borrow_mut();
                 d["readSequence"] = serde_json::json!(d["readSequence"].as_u64().unwrap_or(0) + 1);
             });
-            Self::phase("pre-value");
-            self.identity(deadline)?;
-            Self::phase("value");
-            let value = Self::string(Self::attr(&self.element, "AXValue", deadline)?)?;
-            Self::phase("post-value");
-            self.identity(deadline)?;
-            Ok(value)
+            super::synthetic_readiness::sample(
+                deadline,
+                std::time::Instant::now,
+                &self.consecutive_transient_samples,
+                std::thread::sleep,
+                || {
+                    Self::phase("pre-value");
+                    self.identity(deadline)?;
+                    Self::phase("value");
+                    let value = Self::string(Self::attr(&self.element, "AXValue", deadline)?)?;
+                    Self::phase("post-value");
+                    self.identity(deadline)?;
+                    Ok(value)
+                },
+            )
         }
     }
     #[cfg(all(test, debug_assertions, feature = "native-window-e2e"))]
