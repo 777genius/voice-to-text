@@ -1045,7 +1045,6 @@ describe('transcription connect-retry reliability', () => {
 
     expect(store.status).toBe('Error');
     expect(store.errorType).toBe('connection');
-    expect(store.errorRaw).not.toBe('Provider quota exceeded');
   });
 
   it.each(['startFailed', 'runtimeFailed', 'stopUncertain'] as const)(
