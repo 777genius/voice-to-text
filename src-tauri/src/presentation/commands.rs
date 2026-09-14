@@ -12025,12 +12025,9 @@ mod deferred_recording_cancellation_tests {
             RecordingIntent::stop(IntentSource::Frontend, None)
         };
         let competing = adapter.submit(CoordinatorEvent::Intent(event));
-        assert_eq!(
-            competing
-                .iter()
-                .any(|e| matches!(e, CoordinatorEffect::CancelStart { .. })),
-            toggle
-        );
+        assert!(!competing
+            .iter()
+            .any(|e| matches!(e, CoordinatorEffect::CancelStart { .. })));
         let seal = competing
             .iter()
             .find_map(|e| match e {
@@ -12039,7 +12036,7 @@ mod deferred_recording_cancellation_tests {
                     cancel,
                     ..
                 }) => {
-                    assert_eq!(*cancel, toggle);
+                    assert!(!*cancel, "admitted capture must retain delivery");
                     Some(*effect_id)
                 }
                 _ => None,
@@ -12063,15 +12060,10 @@ mod deferred_recording_cancellation_tests {
             }
         }));
         assert_eq!(
-            controls,
-            usize::from(!toggle),
-            "Continue control admitted after completed Toggle cancellation"
+            controls, 1,
+            "ordinary stop must admit retained Continue once"
         );
-        assert_eq!(
-            first_audio,
-            usize::from(!toggle),
-            "first audio admitted after completed Toggle cancellation"
-        );
+        assert_eq!(first_audio, 1, "admitted audio must survive ordinary stop");
         assert!(Arc::ptr_eq(&original, &token));
         adapter
             .cancellations
@@ -12087,58 +12079,55 @@ mod deferred_recording_cancellation_tests {
                 outcome,
             },
         ));
-        if toggle {
-            assert_eq!(outcome, ContinueAttachOutcome::Cancelled);
-            adapter.capture_active = false;
-            prepared_tokens.remove(&b.run_id.get());
-            adapter.submit(CoordinatorEvent::Continuation(
-                ContinuationEvent::PendingCaptureStopped {
-                    effect_id: seal,
-                    run_id: b.run_id,
-                    generation,
-                    outcome: CaptureStopOutcome::Inactive,
-                },
-            ));
-            let terminal = adapter.submit(CoordinatorEvent::Continuation(
-                ContinuationEvent::TerminalObserved {
-                    logical_run_id: a.run_id,
-                    connection_generation: 7,
-                },
-            ));
-            for effect in terminal {
-                if let CoordinatorEffect::FinalizeRecording {
-                    effect_id, run_id, ..
-                } = effect
-                {
-                    adapter.submit(CoordinatorEvent::FinalizeFinished {
-                        effect_id,
-                        run_id,
-                        outcome: FinalizeOutcome::Committed,
-                    });
-                }
+        assert_eq!(
+            outcome,
+            ContinueAttachOutcome::Attached {
+                context_revision: 1
             }
-            assert!(prepared_tokens.is_empty());
-            adapter.assert_drained();
-            let duplicate = adapter.submit(CoordinatorEvent::Continuation(
-                ContinuationEvent::ContinueFinished {
-                    effect_id,
-                    key,
-                    run_id: b.run_id,
-                    generation,
-                    outcome: ContinueAttachOutcome::Attached {
-                        context_revision: 2,
-                    },
+        );
+        assert!(
+            !token.load(Ordering::Acquire),
+            "ordinary stop must preserve seal/drain admission"
+        );
+        assert!(
+            adapter.capture_active,
+            "held Seal still owns physical release"
+        );
+        assert_eq!(prepared_tokens.get(&b.run_id.get()), Some(&generation));
+        adapter.capture_active = false;
+        prepared_tokens.remove(&b.run_id.get());
+        let released = adapter.submit(CoordinatorEvent::Continuation(
+            ContinuationEvent::PendingCaptureStopped {
+                effect_id: seal,
+                run_id: b.run_id,
+                generation,
+                outcome: CaptureStopOutcome::Inactive,
+            },
+        ));
+        assert!(released.iter().any(|e| matches!(e,
+            CoordinatorEffect::Continuation(ContinuationEffect::Pause { key, .. })
+                if key.logical_run_id == a.run_id)));
+        assert!(prepared_tokens.is_empty());
+        let duplicate = adapter.submit(CoordinatorEvent::Continuation(
+            ContinuationEvent::ContinueFinished {
+                effect_id,
+                key,
+                run_id: b.run_id,
+                generation,
+                outcome: ContinueAttachOutcome::Attached {
+                    context_revision: 2,
                 },
-            ));
-            assert!(duplicate.is_empty(), "retired Continue must not replay");
-        } else {
-            assert!(
-                !token.load(Ordering::Acquire),
-                "Stop must preserve seal/drain admission"
-            );
-            assert!(adapter.cancellations.lock().unwrap().is_empty());
-            assert_eq!(adapter.coordinator.lock().unwrap().validate(), Ok(()));
-        }
+            },
+        ));
+        assert!(duplicate.is_empty(), "completed Continue must not replay");
+        assert!(adapter.cancellations.lock().unwrap().is_empty());
+        let state = adapter.coordinator.lock().unwrap();
+        assert_eq!(state.capture, CaptureState::Idle);
+        assert!(
+            state.processing_jobs.contains_key(&a.run_id),
+            "logical delivery must survive capture release"
+        );
+        assert_eq!(state.validate(), Ok(()));
     }
 
     #[test]
