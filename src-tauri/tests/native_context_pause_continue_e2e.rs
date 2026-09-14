@@ -533,6 +533,16 @@ fn run_native_matrix(composed: bool) -> Result<()> {
         "clipboard-restore-race",
         #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
         "post-paste-readback-unavailable",
+        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+        "e57-post-paste-readback-mismatch",
+        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+        "e35-unsupported-field",
+        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+        "e35-revoked-trust",
+        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+        "e35-secure-field",
+        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+        "e35-expired-budget",
     ];
     let composition_names = [
         "e23_actual_target_change_cold_b_rejects_late_a",
@@ -665,7 +675,7 @@ fn run_native_matrix(composed: bool) -> Result<()> {
         let run = NEXT_NATIVE_RUN.fetch_add(2, std::sync::atomic::Ordering::SeqCst);
         // Sequential process-wide IDs: composition also owns run + 1.
         // A composition owns its Tokio runtime, including unretained async tasks.
-        let case_runtime = if composed {
+        let case_runtime = if composed || index >= 9 {
             Some(
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -691,6 +701,13 @@ fn run_native_matrix(composed: bool) -> Result<()> {
                         "{}",
                         json!({"case":case,"run":run,"target_pid":target.pid,"bundle_id":target.bundle_id})
                     )?;
+                    #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+                    if index >= 9 {
+                        use app_lib::infrastructure::continuation_context::native_e2e::CaptureFault;
+                        let fault = [CaptureFault::Unsupported, CaptureFault::Revoked,
+                            CaptureFault::Secure, CaptureFault::Timeout][index - 9];
+                        return capture_refusal(run, target, fault, &manager, clip).await;
+                    }
                     let before = read(&root, &paths[0])?;
                     let other = read(&root, &paths[1])?;
                     range(&target, &paths[0], before.encode_utf16().count() as isize, 0)?;
@@ -833,10 +850,10 @@ fn run_native_matrix(composed: bool) -> Result<()> {
                         }
                         #[cfg(not(all(debug_assertions, feature = "native-window-e2e")))]
                         unreachable!("native E37 case is feature-gated");
-                    } else if index == 7 {
+                    } else if index == 7 || index == 8 {
                         #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
                         {
-                            use app_lib::infrastructure::continuation_context::native_e2e::arm_post_paste_readback_unavailable;
+                            use app_lib::infrastructure::continuation_context::native_e2e::{arm_post_paste_readback_unavailable, arm_post_paste_readback_mismatch};
 
                             editor(&target, &paths[0])?;
                             let known = " E38_KNOWN";
@@ -856,8 +873,12 @@ fn run_native_matrix(composed: bool) -> Result<()> {
                             expected.push_str(known);
                             evidence.text(case, &paths[0], &expected)?;
 
-                            let uncertain = " E38_UNKNOWN";
-                            let fault = arm_post_paste_readback_unavailable(run, 2)?;
+                            let uncertain = if index == 8 { " E57_e\u{301}" } else { " E38_UNKNOWN" };
+                            let fault = if index == 8 {
+                                arm_post_paste_readback_mismatch(run, 2)?
+                            } else {
+                                arm_post_paste_readback_unavailable(run, 2)?
+                            };
                             clip.check()?;
                             let uncertain_before = clip.revision;
                             clip.uncertain = true;
@@ -1053,7 +1074,7 @@ fn run_native_matrix(composed: bool) -> Result<()> {
         };
         let released = released.and(released_b);
         let restored = clipboard.as_mut().map(Clipboard::restore).transpose();
-        if result.is_err() || released.is_err() || restored.is_err() {
+        if (composed || index < 9) && (result.is_err() || released.is_err() || restored.is_err()) {
             for path in &created {
                 let captured = (|| -> Result<()> {
                     let text = read(&root, path)?;
@@ -1626,4 +1647,108 @@ async fn composition(
             Err(scenario.context(format!("local peer also failed: {peer:#}")))
         }
     }
+}
+
+// E35 fault/service composition. No text readback or framework error payloads.
+// Real native capture branches receive one fault; no TCC settings are changed.
+#[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+async fn capture_refusal(
+    run: u64,
+    target: AutoPasteTarget,
+    fault_kind: app_lib::infrastructure::continuation_context::native_e2e::CaptureFault,
+    manager: &ContinuationContextManager,
+    clip: &mut Clipboard,
+) -> Result<()> {
+    use app_lib::infrastructure::continuation_context::native_e2e::{
+        arm_capture_fault, delivery_observations,
+    };
+    struct NoProvider(Arc<std::sync::atomic::AtomicUsize>);
+    impl SttProviderFactory for NoProvider {
+        fn create(&self, _: &SttConfig) -> SttResult<Box<dyn SttProvider>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(app_lib::domain::SttError::Processing(
+                "forbidden provider".into(),
+            ))
+        }
+    }
+    let providers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let source: Source = Arc::new(Mutex::new(None));
+    let service = TranscriptionService::new(
+        Box::new(DrivenCapture {
+            config: AudioConfig::default(),
+            source: source.clone(),
+        }),
+        Arc::new(NoProvider(providers.clone())),
+    );
+    let config = SttConfig::new(SttProviderType::Backend);
+    let token = service
+        .prepare_recording_capture(
+            run,
+            config,
+            Arc::new(|_, _| {}),
+            Arc::new(|_, _| {}),
+            Arc::new(|_| {}),
+        )
+        .await?;
+    let result = std::panic::AssertUnwindSafe(async {
+        // Enter the actual prepared-service callback before and after refusal.
+        // This is readiness evidence; stopped-AX fixture supplies overlap timing.
+        inject(&source, 0)?;
+        let fault = arm_capture_fault(target.clone(), fault_kind)?;
+        let started = Instant::now();
+        ensure!(
+            bounded(manager.capture(run, Some(target), true)).await? == V::Unavailable,
+            "capture must fail closed"
+        );
+        ensure!(
+            started.elapsed() < Duration::from_millis(500),
+            "capture refusal exceeded fixture bound"
+        );
+        ensure!(fault.was_consumed(), "target-scoped fault not consumed");
+        ensure!(
+            service.retains_prepared_capture(token).await,
+            "native refusal consumed prepared capture"
+        );
+        let callback_start = Instant::now();
+        inject(&source, 0)?;
+        ensure!(
+            callback_start.elapsed() < Duration::from_millis(100),
+            "prepared callback blocked"
+        );
+        let count = clip.count();
+        ensure!(
+            bounded(manager.validate(run)).await? == V::Unavailable,
+            "failed capture revived"
+        );
+        ensure!(
+            bounded(manager.guarded_paste(run, 1, "OWNED_SENTINEL".into())).await?
+                == P::Unavailable,
+            "failed capture allowed insertion"
+        );
+        let (records, overflow) = delivery_observations(run);
+        ensure!(
+            !overflow && records.len() == 1 && !records[0].insertion_started,
+            "failed capture entered insertion boundary"
+        );
+        ensure!(clip.count() == count, "failed capture touched clipboard");
+        ensure!(
+            providers.load(Ordering::SeqCst) == 0,
+            "provider was constructed"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .catch_unwind()
+    .await
+    .unwrap_or_else(|_| Err(anyhow::anyhow!("capture refusal panic")));
+    // Cleanup precedes propagation; outer case runtime is then shut down.
+    let cleanup = bounded(service.cancel_prepared_capture(token)).await;
+    service
+        .cleanup_runtime_failure("owned capture refusal cleanup")
+        .await;
+    cleanup??;
+    ensure!(
+        source.lock().unwrap().is_none(),
+        "synthetic capture remained active"
+    );
+    result
 }

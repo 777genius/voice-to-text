@@ -6022,7 +6022,18 @@ mod continuation_native {
             }
             let _budget =
                 crate::infrastructure::continuation_context::NativeEligibilityBudget::start();
-            if !check_accessibility_permission() || !frontmost_app_matches_target(&target) {
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            use crate::infrastructure::continuation_context::native_e2e::{self, CaptureFault};
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            let fault = native_e2e::take_capture_fault(&target);
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            if fault == Some(CaptureFault::Timeout) {
+                native_e2e::expire_capture_budget();
+            }
+            let trusted = check_accessibility_permission();
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            let trusted = trusted && fault != Some(CaptureFault::Revoked);
+            if !trusted || !frontmost_app_matches_target(&target) {
                 anyhow::bail!("target unavailable before focus transfer");
             }
             let app = unsafe { AXUIElementCreateApplication(target.pid) };
@@ -6041,12 +6052,23 @@ mod continuation_native {
                     return None;
                 }
                 let subrole = bounded_string_attribute(&element, "AXSubrole")?;
-                if subrole.as_ref().is_some_and(|value| {
+                let secure = subrole.as_ref().is_some_and(|value| {
                     "AXSecureTextField".encode_utf16().eq(value.iter().copied())
-                }) || !element.bounded()
-                    || ax_attribute_settable(element.0 as MacAXUIElementRef, "AXSelectedTextRange")
-                        != Some(true)
-                {
+                });
+                #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+                let secure = secure || fault == Some(CaptureFault::Secure);
+                if secure || !element.bounded() {
+                    return None;
+                }
+                let settable =
+                    ax_attribute_settable(element.0 as MacAXUIElementRef, "AXSelectedTextRange");
+                #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+                let settable = if fault == Some(CaptureFault::Unsupported) {
+                    Some(false)
+                } else {
+                    settable
+                };
+                if settable != Some(true) {
                     return None;
                 }
                 let window = element.attribute("AXWindow")?;
@@ -6192,6 +6214,9 @@ mod continuation_native {
                         )? == expected.anchor,
                 )
             })() == Some(true);
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            let confirmed = confirmed
+                && !crate::infrastructure::continuation_context::native_e2e::take_post_paste_readback_mismatch();
             if !confirmed {
                 return GuardedPasteOutcome::Uncertain;
             }

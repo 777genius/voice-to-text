@@ -376,11 +376,77 @@ pub mod native_e2e {
         BARRIER.get_or_init(Default::default)
     }
 
+    /// Fault inputs only; no AX content, callbacks or provider handles are stored.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum CaptureFault {
+        Unsupported,
+        Revoked,
+        Secure,
+        Timeout,
+    }
+    struct ArmedCaptureFault {
+        token: u64,
+        target: super::AutoPasteTarget,
+        fault: CaptureFault,
+        consumed: Arc<AtomicBool>,
+    }
+    fn capture_fault() -> &'static Mutex<Option<ArmedCaptureFault>> {
+        static FAULT: OnceLock<Mutex<Option<ArmedCaptureFault>>> = OnceLock::new();
+        FAULT.get_or_init(Default::default)
+    }
+    pub struct CaptureFaultHandle {
+        token: u64,
+        consumed: Arc<AtomicBool>,
+    }
+    pub fn arm_capture_fault(
+        target: super::AutoPasteTarget,
+        fault: CaptureFault,
+    ) -> anyhow::Result<CaptureFaultHandle> {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let token = NEXT.fetch_add(1, Ordering::SeqCst);
+        let consumed = Arc::new(AtomicBool::new(false));
+        let mut slot = capture_fault().lock().unwrap_or_else(|e| e.into_inner());
+        anyhow::ensure!(slot.is_none(), "capture fault already armed");
+        *slot = Some(ArmedCaptureFault {
+            token,
+            target,
+            fault,
+            consumed: consumed.clone(),
+        });
+        Ok(CaptureFaultHandle { token, consumed })
+    }
+    impl CaptureFaultHandle {
+        pub fn was_consumed(&self) -> bool {
+            self.consumed.load(Ordering::SeqCst)
+        }
+    }
+    impl Drop for CaptureFaultHandle {
+        fn drop(&mut self) {
+            let mut slot = capture_fault().lock().unwrap_or_else(|e| e.into_inner());
+            if slot.as_ref().is_some_and(|armed| armed.token == self.token) {
+                slot.take();
+            }
+        }
+    }
+    pub(crate) fn take_capture_fault(target: &super::AutoPasteTarget) -> Option<CaptureFault> {
+        let mut slot = capture_fault().lock().unwrap_or_else(|e| e.into_inner());
+        if !slot.as_ref().is_some_and(|armed| &armed.target == target) {
+            return None;
+        }
+        let armed = slot.take().expect("matched capture fault");
+        armed.consumed.store(true, Ordering::SeqCst);
+        Some(armed.fault)
+    }
+    pub(crate) fn expire_capture_budget() {
+        super::NATIVE_DEADLINE.with(|deadline| deadline.set(Some(std::time::Instant::now())));
+    }
+
     struct ArmedReadbackFault {
         token: u64,
         run_id: u64,
         delivery_seq: u64,
         consumed: Arc<AtomicBool>,
+        mismatch: bool,
     }
 
     fn readback_fault() -> &'static Mutex<Option<ArmedReadbackFault>> {
@@ -423,6 +489,23 @@ pub mod native_e2e {
         run_id: u64,
         delivery_seq: u64,
     ) -> anyhow::Result<PostPasteReadbackFault> {
+        arm_readback_fault(run_id, delivery_seq, false)
+    }
+
+    /// Simulates contradictory readback after real key posting and AX reads.
+    /// This is fault evidence, not proof that an editor normalized the text.
+    pub fn arm_post_paste_readback_mismatch(
+        run_id: u64,
+        delivery_seq: u64,
+    ) -> anyhow::Result<PostPasteReadbackFault> {
+        arm_readback_fault(run_id, delivery_seq, true)
+    }
+
+    fn arm_readback_fault(
+        run_id: u64,
+        delivery_seq: u64,
+        mismatch: bool,
+    ) -> anyhow::Result<PostPasteReadbackFault> {
         static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
         let token = NEXT_TOKEN.fetch_add(1, Ordering::SeqCst);
         let consumed = Arc::new(AtomicBool::new(false));
@@ -433,6 +516,7 @@ pub mod native_e2e {
             run_id,
             delivery_seq,
             consumed: consumed.clone(),
+            mismatch,
         });
         Ok(PostPasteReadbackFault { token, consumed })
     }
@@ -453,6 +537,14 @@ pub mod native_e2e {
     }
 
     pub fn take_post_paste_readback_unavailable() -> bool {
+        take_readback_fault(false)
+    }
+
+    pub fn take_post_paste_readback_mismatch() -> bool {
+        take_readback_fault(true)
+    }
+
+    fn take_readback_fault(mismatch: bool) -> bool {
         let identity = super::EXECUTION.with(|cell| {
             let execution = cell.borrow();
             execution
@@ -464,10 +556,11 @@ pub mod native_e2e {
             return false;
         };
         let mut slot = readback_fault().lock().unwrap_or_else(|e| e.into_inner());
-        if !slot
-            .as_ref()
-            .is_some_and(|armed| armed.run_id == run_id && armed.delivery_seq == delivery_seq)
-        {
+        if !slot.as_ref().is_some_and(|armed| {
+            armed.run_id == run_id
+                && armed.delivery_seq == delivery_seq
+                && armed.mismatch == mismatch
+        }) {
             return false;
         }
         let armed = slot.take().expect("matching readback fault");
