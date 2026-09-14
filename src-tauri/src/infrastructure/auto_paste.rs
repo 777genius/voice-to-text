@@ -6171,6 +6171,10 @@ mod continuation_native {
                 return GuardedPasteOutcome::Uncertain;
             }
             thread::sleep(Duration::from_millis(250));
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            if crate::infrastructure::continuation_context::native_e2e::take_post_paste_readback_unavailable() {
+                return GuardedPasteOutcome::Uncertain;
+            }
             let Some(expected) = self.expected.after_insertion(text) else {
                 return GuardedPasteOutcome::Uncertain;
             };

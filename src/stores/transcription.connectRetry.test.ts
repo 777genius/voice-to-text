@@ -302,6 +302,61 @@ describe('transcription connect-retry reliability', () => {
     store.cleanup();
   });
 
+  it('retains only the unconfirmed suffix after a confirmed prefix and uncertain native insert', async () => {
+    appConfigMock.autoCopyToClipboard = true;
+    appConfigMock.autoPasteText = true;
+    const uncertain = deferred<any>();
+    let pasteAttempt = 0;
+    invokeMock.mockImplementation((command: string) => {
+      if (command !== 'auto_paste_continuation_text') return Promise.resolve(true);
+      pasteAttempt++;
+      return pasteAttempt === 1
+        ? Promise.resolve({ status: 'confirmed', revision: 1 })
+        : uncertain.promise;
+    });
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({ payload: { session_id: 1, status: 'Recording' } });
+    handlers.get('recording:intent-projection')({ payload: {
+      intentRevision: 1, runId: 1, logicalRunId: 1, captureEpisodeId: 1,
+      continuationPhase: 'active', desiredOn: true, pendingStart: false,
+      status: 'Recording', processingJobs: 0, shutdownRequested: false,
+    } });
+    const stable = (seq: number, text: string) => handlers.get('transcription:final')({ payload: {
+      session_id: 1, delivery_seq: seq, text, timestamp: 0, start: 0,
+      duration: 0, timing_known: false,
+    } });
+
+    await stable(1, 'known');
+    await flushMicrotasks();
+    const tail = stable(2, 'unknown tail');
+    handlers.get('transcription:terminal')({ payload: {
+      session_id: 1, stable_snapshot: 'known unknown tail',
+      delivery_complete: true, report: null, error: null,
+    } });
+    uncertain.resolve({ status: 'uncertain' });
+    await tail;
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_continuation_text')).toEqual([
+      ['auto_paste_continuation_text', { text: 'known', sessionId: 1, deliverySeq: 1 }],
+      ['auto_paste_continuation_text', { text: ' unknown tail', sessionId: 1, deliverySeq: 2 }],
+    ]);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'finish_continuation_delivery')).toEqual([
+      ['finish_continuation_delivery', { sessionId: 1, deliverySeq: 2 }],
+    ]);
+    expect(store.finalText).toBe('known unknown tail');
+    expect(store.deliveryRecovery).toEqual([{
+      sessionId: 1,
+      transcript: 'known unknown tail',
+      unconfirmedText: 'unknown tail',
+    }]);
+    expect(invokeMock.mock.calls.filter(([cmd]) =>
+      cmd === 'auto_paste_text' || cmd === 'copy_to_clipboard_native')).toHaveLength(0);
+    await store.copyRecoveryText(store.deliveryRecovery[0].unconfirmedText);
+    expect(invokeMock).toHaveBeenCalledWith('copy_to_clipboard_native', { text: 'unknown tail' });
+    store.cleanup();
+  });
+
   it('preserves native Toggle versus explicit Stop for a pending continuation', async () => {
     invokeMock.mockResolvedValue('Recording stop requested');
     const { handlers, store } = await initializeStoreWithHandlers();

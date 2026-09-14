@@ -99,6 +99,14 @@ pub(crate) mod observation {
     pub fn snapshot() -> Trace {
         trace().lock().unwrap().clone()
     }
+    pub(super) fn identity(index: usize) -> Option<(u64, u64)> {
+        trace()
+            .lock()
+            .unwrap()
+            .records
+            .get(index)
+            .map(|record| (record.logical_run_id, record.delivery_seq))
+    }
     impl Trace {
         fn push(&mut self, record: Record) -> Option<usize> {
             if self.records.len() == LIMIT {
@@ -351,7 +359,8 @@ pub enum GuardedPasteOutcome {
 /// it never replaces validation, clipboard operations, or the paste effect.
 #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
 pub mod native_e2e {
-    use std::sync::{mpsc, Mutex, OnceLock};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{mpsc, Arc, Mutex, OnceLock};
     use std::time::Duration;
 
     const RENDEZVOUS_TIMEOUT: Duration = Duration::from_secs(2);
@@ -367,6 +376,105 @@ pub mod native_e2e {
         BARRIER.get_or_init(Default::default)
     }
 
+    struct ArmedReadbackFault {
+        token: u64,
+        run_id: u64,
+        delivery_seq: u64,
+        consumed: Arc<AtomicBool>,
+    }
+
+    fn readback_fault() -> &'static Mutex<Option<ArmedReadbackFault>> {
+        static FAULT: OnceLock<Mutex<Option<ArmedReadbackFault>>> = OnceLock::new();
+        FAULT.get_or_init(Default::default)
+    }
+
+    pub struct PostPasteReadbackFault {
+        token: u64,
+        consumed: Arc<AtomicBool>,
+    }
+
+    #[derive(Debug)]
+    pub struct DeliveryObservation {
+        pub delivery_seq: u64,
+        pub insertion_started: bool,
+        pub insertion_finished: bool,
+        pub insertion_confirmed: bool,
+        pub result: Option<super::GuardedPasteOutcome>,
+    }
+
+    pub fn delivery_observations(run_id: u64) -> (Vec<DeliveryObservation>, bool) {
+        let trace = super::observation::snapshot();
+        let records = trace
+            .records
+            .into_iter()
+            .filter(|record| record.logical_run_id == run_id)
+            .map(|record| DeliveryObservation {
+                delivery_seq: record.delivery_seq,
+                insertion_started: record.insertion_start_ms.is_some(),
+                insertion_finished: record.insertion_end_ms.is_some(),
+                insertion_confirmed: record.insertion_confirmed,
+                result: record.result,
+            })
+            .collect();
+        (records, trace.overflow)
+    }
+
+    pub fn arm_post_paste_readback_unavailable(
+        run_id: u64,
+        delivery_seq: u64,
+    ) -> anyhow::Result<PostPasteReadbackFault> {
+        static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
+        let token = NEXT_TOKEN.fetch_add(1, Ordering::SeqCst);
+        let consumed = Arc::new(AtomicBool::new(false));
+        let mut slot = readback_fault().lock().unwrap_or_else(|e| e.into_inner());
+        anyhow::ensure!(slot.is_none(), "post-paste readback fault already armed");
+        *slot = Some(ArmedReadbackFault {
+            token,
+            run_id,
+            delivery_seq,
+            consumed: consumed.clone(),
+        });
+        Ok(PostPasteReadbackFault { token, consumed })
+    }
+
+    impl PostPasteReadbackFault {
+        pub fn was_consumed(&self) -> bool {
+            self.consumed.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for PostPasteReadbackFault {
+        fn drop(&mut self) {
+            let mut slot = readback_fault().lock().unwrap_or_else(|e| e.into_inner());
+            if slot.as_ref().is_some_and(|armed| armed.token == self.token) {
+                slot.take();
+            }
+        }
+    }
+
+    pub fn take_post_paste_readback_unavailable() -> bool {
+        let identity = super::EXECUTION.with(|cell| {
+            let execution = cell.borrow();
+            execution
+                .as_ref()
+                .and_then(|execution| execution.trace)
+                .and_then(super::observation::identity)
+        });
+        let Some((run_id, delivery_seq)) = identity else {
+            return false;
+        };
+        let mut slot = readback_fault().lock().unwrap_or_else(|e| e.into_inner());
+        if !slot
+            .as_ref()
+            .is_some_and(|armed| armed.run_id == run_id && armed.delivery_seq == delivery_seq)
+        {
+            return false;
+        }
+        let armed = slot.take().expect("matching readback fault");
+        armed.consumed.store(true, Ordering::SeqCst);
+        true
+    }
+
     pub struct ClipboardRestoreBarrier {
         token: u64,
         reached: mpsc::Receiver<()>,
@@ -374,8 +482,8 @@ pub mod native_e2e {
     }
 
     pub fn arm_clipboard_restore_barrier() -> anyhow::Result<ClipboardRestoreBarrier> {
-        static NEXT_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let token = NEXT_TOKEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
+        let token = NEXT_TOKEN.fetch_add(1, Ordering::SeqCst);
         let (reached_tx, reached_rx) = mpsc::sync_channel(0);
         let (resume_tx, resume_rx) = mpsc::sync_channel(0);
         let mut slot = barrier().lock().unwrap_or_else(|e| e.into_inner());

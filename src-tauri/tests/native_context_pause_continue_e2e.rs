@@ -531,6 +531,8 @@ fn run_native_matrix(composed: bool) -> Result<()> {
         "clipboard-refusal",
         #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
         "clipboard-restore-race",
+        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+        "post-paste-readback-unavailable",
     ];
     let composition_names = [
         "e23_actual_target_change_cold_b_rejects_late_a",
@@ -831,6 +833,124 @@ fn run_native_matrix(composed: bool) -> Result<()> {
                         }
                         #[cfg(not(all(debug_assertions, feature = "native-window-e2e")))]
                         unreachable!("native E37 case is feature-gated");
+                    } else if index == 7 {
+                        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+                        {
+                            use app_lib::infrastructure::continuation_context::native_e2e::arm_post_paste_readback_unavailable;
+
+                            editor(&target, &paths[0])?;
+                            let known = " E38_KNOWN";
+                            clip.check()?;
+                            let known_before = clip.revision;
+                            clip.uncertain = true;
+                            let known_outcome = bounded(
+                                manager.guarded_paste(run, 1, known.into()),
+                            )
+                            .await?;
+                            clip.refused(known_before, &known_outcome);
+                            ensure!(
+                                matches!(known_outcome, P::Confirmed { revision: 1 }),
+                                "known prefix was not confirmed: {known_outcome:?}"
+                            );
+                            clip.confirmed(known_before, false, &marker)?;
+                            expected.push_str(known);
+                            evidence.text(case, &paths[0], &expected)?;
+
+                            let uncertain = " E38_UNKNOWN";
+                            let fault = arm_post_paste_readback_unavailable(run, 2)?;
+                            clip.check()?;
+                            let uncertain_before = clip.revision;
+                            clip.uncertain = true;
+                            let uncertain_outcome = bounded(
+                                manager.guarded_paste(run, 2, uncertain.into()),
+                            )
+                            .await?;
+                            ensure!(
+                                fault.was_consumed(),
+                                "run/sequence-scoped post-paste fault was not consumed"
+                            );
+                            ensure!(
+                                matches!(uncertain_outcome, P::Uncertain),
+                                "post-paste readback fault was not uncertain: {uncertain_outcome:?}"
+                            );
+                            let uncertain_revision = uncertain_before
+                                .checked_add(1)
+                                .context("clipboard revision overflow")?;
+                            let uncertain_image = vec![vec![(
+                                "public.utf8-plain-text".into(),
+                                uncertain.as_bytes().to_vec(),
+                            )]];
+                            ensure!(
+                                clip.count() == uncertain_revision
+                                    && clip.image()? == uncertain_image,
+                                "uncertain insertion did not retain its exact publication receipt"
+                            );
+                            // Adopt only the exact fixture-owned publication so teardown can
+                            // restore the original clipboard without treating text equality as
+                            // proof of ownership.
+                            clip.revision = uncertain_revision;
+                            clip.uncertain = false;
+                            expected.push_str(uncertain);
+                            evidence.text(case, &paths[0], &expected)?;
+                            evidence.text(case, &paths[1], &other)?;
+
+                            let before_refusals = clip.count();
+                            for (seq, text, stage) in [
+                                (2, uncertain, "duplicate-uncertain-refused"),
+                                (3, " MUST_NOT_INSERT", "later-delivery-refused"),
+                            ] {
+                                let outcome = bounded(
+                                    manager.guarded_paste(run, seq, text.into()),
+                                )
+                                .await?;
+                                evidence.event(
+                                    case,
+                                    stage,
+                                    format!("{outcome:?}"),
+                                    "Unavailable".into(),
+                                )?;
+                                ensure!(
+                                    matches!(outcome, P::Unavailable),
+                                    "uncertain run accepted another delivery: {outcome:?}"
+                                );
+                            }
+                            ensure!(
+                                clip.count() == before_refusals
+                                    && clip.image()? == uncertain_image,
+                                "refused delivery touched uncertain clipboard publication"
+                            );
+                            let (observations, overflow) =
+                                app_lib::infrastructure::continuation_context::native_e2e::delivery_observations(run);
+                            ensure!(!overflow, "native insertion observation overflow");
+                            let attempted: Vec<_> = observations
+                                .iter()
+                                .filter(|record| record.insertion_started)
+                                .collect();
+                            ensure!(
+                                attempted.len() == 2
+                                    && attempted[0].delivery_seq == 1
+                                    && attempted[0].insertion_finished
+                                    && attempted[0].insertion_confirmed
+                                    && matches!(attempted[0].result, Some(P::Confirmed { revision: 1 }))
+                                    && attempted[1].delivery_seq == 2
+                                    && attempted[1].insertion_finished
+                                    && !attempted[1].insertion_confirmed
+                                    && matches!(attempted[1].result, Some(P::Uncertain)),
+                                "native insertion trace did not contain one confirmed and one uncertain effect: {observations:?}"
+                            );
+                            ensure!(
+                                observations.len() == 4
+                                    && observations[2..].iter().all(|record| {
+                                        !record.insertion_started
+                                            && matches!(record.result, Some(P::Unavailable))
+                                    }),
+                                "retired run attempted another native effect: {observations:?}"
+                            );
+                            evidence.text(case, &paths[0], &expected)?;
+                            evidence.text(case, &paths[1], &other)?;
+                        }
+                        #[cfg(not(all(debug_assertions, feature = "native-window-e2e")))]
+                        unreachable!("native E38 case is feature-gated");
                     } else {
                         match index {
                             1 | 5 => {
