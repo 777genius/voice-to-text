@@ -719,6 +719,39 @@ describe('transcription connect-retry reliability', () => {
     store.cleanup();
   });
 
+  it('recovers negotiated interim after an empty sequenced stable and successful terminal', async () => {
+    appConfigMock.autoCopyToClipboard = true;
+    appConfigMock.autoPasteText = true;
+    invokeMock.mockResolvedValue(undefined);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({ payload: { session_id: 1, status: 'Recording' } });
+    await handlers.get('transcription:partial')({ payload: {
+      session_id: 1, text: 'recognized draft', completion_v1: true,
+      continuation_delivery: false, is_segment_final: false, timestamp: 0,
+    } });
+    await handlers.get('transcription:final')({ payload: {
+      session_id: 1, text: '', delivery_seq: 1, continuation_delivery: false,
+    } });
+
+    expect(store.partialText).toBe('recognized draft');
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'auto_paste_text')).toBe(false);
+
+    const terminal = {
+      session_id: 1, continuation_delivery: false, stable_snapshot: '',
+      delivery_complete: true, report: null, error: null,
+    };
+    handlers.get('transcription:terminal')({ payload: terminal });
+    handlers.get('transcription:terminal')({ payload: terminal });
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+
+    expect(store.finalText).toBe('recognized draft');
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text').map(([, args]) => args.text))
+      .toEqual(['recognized draft']);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'copy_to_clipboard_native').map(([, args]) => args.text))
+      .toEqual(['recognized draft']);
+    store.cleanup();
+  });
+
   it.each(['', 'corrected final'])('recovers negotiated text after unsequenced speech-final %j without early paste', async (final) => {
     appConfigMock.autoPasteText = true;
     invokeMock.mockResolvedValue(undefined);

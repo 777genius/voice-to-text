@@ -1297,6 +1297,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     ledger.negotiated = true;
     if (pendingStopFinalization?.sessionId === payload.session_id) clearHotkeyStopFinalizeTimer();
     ledger.lastDeliverySeq = payload.delivery_seq;
+    // An empty ordered stable is still a valid sequence fence, but it confirms
+    // no text. Keep the latest interim recoverable until the terminal outcome
+    // proves whether that draft can be delivered safely.
+    if (!payload.text.trim()) {
+      deliveryRevision.value++;
+      return Promise.resolve(true);
+    }
     ledger.stableSnapshot = appendTranscriptText(ledger.stableSnapshot, payload.text);
     ledger.interimSnapshot = '';
     deliveryRevision.value++;
