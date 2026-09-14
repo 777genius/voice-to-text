@@ -470,6 +470,21 @@ mod tests {
     }
 
     #[test]
+    fn continuation_target_eligibility_never_survives_persisted_config() {
+        let mut runtime = SttConfig::default();
+        runtime.continuation_target_eligible = true;
+
+        let mut persisted = serde_json::to_value(&runtime).unwrap();
+        assert!(persisted.get("continuation_target_eligible").is_none());
+
+        // A stale or manually edited settings file cannot resurrect a live
+        // continuation target after an application restart.
+        persisted["continuation_target_eligible"] = serde_json::Value::Bool(true);
+        let restored: SttConfig = serde_json::from_value(persisted).unwrap();
+        assert!(!restored.continuation_target_eligible);
+    }
+
+    #[test]
     fn test_stt_config_new() {
         let config = SttConfig::new(SttProviderType::AssemblyAI);
         assert_eq!(config.provider, SttProviderType::AssemblyAI);
