@@ -529,6 +529,8 @@ fn run_native_matrix(composed: bool) -> Result<()> {
         "selection",
         "local-edit",
         "clipboard-refusal",
+        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+        "clipboard-restore-race",
     ];
     let composition_names = [
         "e23_actual_target_change_cold_b_rejects_late_a",
@@ -745,6 +747,90 @@ fn run_native_matrix(composed: bool) -> Result<()> {
                                 format!("{:?}", V::Valid { revision: rev }),
                             )?;
                         }
+                    } else if index == 6 {
+                        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+                        {
+                        use app_lib::infrastructure::continuation_context::native_e2e::arm_clipboard_restore_barrier;
+
+                        editor(&target, &paths[0])?;
+                        let text = " E37_INSERT";
+                        let user_copy = format!("{marker}-USER_DURING_RESTORE");
+                        let barrier = arm_clipboard_restore_barrier()?;
+                        clip.check()?;
+                        clip.uncertain = true;
+                        let paste = manager.guarded_paste(run, 1, text.into());
+                        let external_write = async {
+                            let deadline = Instant::now() + Duration::from_secs(2);
+                            loop {
+                                if barrier.try_reached()? {
+                                    break;
+                                }
+                                ensure!(
+                                    Instant::now() < deadline,
+                                    "clipboard restore barrier was not reached"
+                                );
+                                tokio::time::sleep(Duration::from_millis(5)).await;
+                            }
+                            // A separately owned writer snapshots the current
+                            // production publication, then replaces it. It must
+                            // not inherit this fixture's deliberately uncertain
+                            // ownership or restore the displaced publication.
+                            let mut writer = Clipboard::snapshot()?;
+                            writer.write(&user_copy)?;
+                            let user_revision = writer.count();
+                            let user_image = writer.image()?;
+                            writer.dirty = false;
+                            barrier.resume()?;
+                            Ok::<_, anyhow::Error>((user_revision, user_image))
+                        };
+                        let (outcome, external) = tokio::join!(bounded(paste), external_write);
+                        let outcome = outcome?;
+                        let (user_revision, user_image) = external?;
+                        evidence.event(
+                            case,
+                            "paste-confirmed-before-restore-race",
+                            format!("{outcome:?}"),
+                            format!("{:?}", P::Confirmed { revision: 1 }),
+                        )?;
+                        ensure!(
+                            clip.count() == user_revision && clip.image()? == user_image,
+                            "production restore overwrote concurrent user clipboard"
+                        );
+                        ensure!(
+                            user_image
+                                == vec![vec![(
+                                    "public.utf8-plain-text".into(),
+                                    user_copy.as_bytes().to_vec()
+                                )]],
+                            "concurrent user clipboard bytes changed"
+                        );
+                        clip.revision = user_revision;
+                        clip.uncertain = false;
+                        expected.push_str(text);
+                        evidence.text(case, &paths[0], &expected)?;
+
+                        let duplicate_count = clip.count();
+                        let duplicate =
+                            bounded(manager.guarded_paste(run, 1, text.into())).await?;
+                        evidence.event(
+                            case,
+                            "duplicate-does-not-retry",
+                            format!("{duplicate:?}"),
+                            format!("{:?}", P::Confirmed { revision: 1 }),
+                        )?;
+                        ensure!(
+                            clip.count() == duplicate_count && clip.image()? == user_image,
+                            "duplicate delivery touched concurrent user clipboard"
+                        );
+                        evidence.event(
+                            case,
+                            "advanced-baseline",
+                            format!("{:?}", bounded(manager.validate(run)).await?),
+                            format!("{:?}", V::Valid { revision: 1 }),
+                        )?;
+                        }
+                        #[cfg(not(all(debug_assertions, feature = "native-window-e2e")))]
+                        unreachable!("native E37 case is feature-gated");
                     } else {
                         match index {
                             1 | 5 => {

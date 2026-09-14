@@ -346,6 +346,93 @@ pub enum GuardedPasteOutcome {
     },
 }
 
+/// TEST-only timing control for a real NSPasteboard ownership race. The hook
+/// pauses after the native insertion outcome is known and before restoration;
+/// it never replaces validation, clipboard operations, or the paste effect.
+#[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+pub mod native_e2e {
+    use std::sync::{mpsc, Mutex, OnceLock};
+    use std::time::Duration;
+
+    const RENDEZVOUS_TIMEOUT: Duration = Duration::from_secs(2);
+
+    struct ArmedBarrier {
+        token: u64,
+        reached: mpsc::SyncSender<()>,
+        resume: mpsc::Receiver<()>,
+    }
+
+    fn barrier() -> &'static Mutex<Option<ArmedBarrier>> {
+        static BARRIER: OnceLock<Mutex<Option<ArmedBarrier>>> = OnceLock::new();
+        BARRIER.get_or_init(Default::default)
+    }
+
+    pub struct ClipboardRestoreBarrier {
+        token: u64,
+        reached: mpsc::Receiver<()>,
+        resume: Option<mpsc::SyncSender<()>>,
+    }
+
+    pub fn arm_clipboard_restore_barrier() -> anyhow::Result<ClipboardRestoreBarrier> {
+        static NEXT_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let token = NEXT_TOKEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (reached_tx, reached_rx) = mpsc::sync_channel(0);
+        let (resume_tx, resume_rx) = mpsc::sync_channel(0);
+        let mut slot = barrier().lock().unwrap_or_else(|e| e.into_inner());
+        anyhow::ensure!(slot.is_none(), "clipboard restore barrier already armed");
+        *slot = Some(ArmedBarrier {
+            token,
+            reached: reached_tx,
+            resume: resume_rx,
+        });
+        Ok(ClipboardRestoreBarrier {
+            token,
+            reached: reached_rx,
+            resume: Some(resume_tx),
+        })
+    }
+
+    impl ClipboardRestoreBarrier {
+        pub fn try_reached(&self) -> anyhow::Result<bool> {
+            match self.reached.try_recv() {
+                Ok(()) => Ok(true),
+                Err(mpsc::TryRecvError::Empty) => Ok(false),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    anyhow::bail!("clipboard restore barrier disconnected")
+                }
+            }
+        }
+
+        pub fn resume(mut self) -> anyhow::Result<()> {
+            let sender = self
+                .resume
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("clipboard restore barrier already resumed"))?;
+            sender
+                .send(())
+                .map_err(|_| anyhow::anyhow!("clipboard restore barrier receiver closed"))
+        }
+    }
+
+    impl Drop for ClipboardRestoreBarrier {
+        fn drop(&mut self) {
+            self.resume.take();
+            let mut slot = barrier().lock().unwrap_or_else(|e| e.into_inner());
+            if slot.as_ref().is_some_and(|armed| armed.token == self.token) {
+                slot.take();
+            }
+        }
+    }
+
+    pub(super) fn before_clipboard_restore() -> bool {
+        let armed = barrier().lock().unwrap_or_else(|e| e.into_inner()).take();
+        let Some(armed) = armed else {
+            return true;
+        };
+        armed.reached.send(()).is_ok() && armed.resume.recv_timeout(RENDEZVOUS_TIMEOUT).is_ok()
+    }
+}
+
 /// Validation may inspect the retained editor while our own mini-window is
 /// frontmost. Another process with the same bundle ID is not our window.
 pub(crate) fn permits_frontmost_validation(
@@ -470,6 +557,12 @@ pub(crate) fn clipboard_delivery<C: TextClipboard>(
         GuardedPasteOutcome::ContextMismatch | GuardedPasteOutcome::Unavailable
     ) || (restore_confirmed
         && matches!(outcome, GuardedPasteOutcome::Confirmed { .. }));
+    #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+    if restore && !native_e2e::before_clipboard_restore() {
+        return GuardedPasteOutcome::RestorationFailed {
+            insertion_confirmed: matches!(outcome, GuardedPasteOutcome::Confirmed { .. }),
+        };
+    }
     if restore && clipboard.revision() == Some(publication) && begin_effect() {
         if clipboard.restore(&previous, publication).is_none() {
             return GuardedPasteOutcome::RestorationFailed {
