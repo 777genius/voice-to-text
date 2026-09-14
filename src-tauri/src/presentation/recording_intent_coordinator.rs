@@ -1683,7 +1683,10 @@ fn apply_intent(state: &mut CoordinatorState, intent: RecordingIntent, phase: &m
 fn force_off(state: &mut CoordinatorState, reason: StopReason) {
     if matches!(
         reason,
-        StopReason::RuntimeFailure | StopReason::SystemSleep | StopReason::Shutdown
+        StopReason::RuntimeFailure
+            | StopReason::SystemSleep
+            | StopReason::Shutdown
+            | StopReason::PermissionRevoked
     ) {
         if let CaptureState::Preparing { effect_id, .. } = state.capture {
             // The disposition belongs to this admission, not the latest intent.
@@ -1695,7 +1698,10 @@ fn force_off(state: &mut CoordinatorState, reason: StopReason) {
     // still be able to revoke that same in-flight provider admission.
     if !matches!(
         state.desired_stop_reason,
-        StopReason::RuntimeFailure | StopReason::SystemSleep | StopReason::Shutdown
+        StopReason::RuntimeFailure
+            | StopReason::SystemSleep
+            | StopReason::Shutdown
+            | StopReason::PermissionRevoked
     ) {
         if let CaptureState::Starting {
             cancel_requested, ..
@@ -1867,6 +1873,19 @@ fn apply_prepare_finished(
     match outcome {
         PrepareOutcome::Succeeded { generation } => {
             state.capture_identity = Some((run_id, generation));
+            // Success proves capture admission even if cancellation raced Prepare.
+            // Ordinary stop must preserve admitted audio; hard teardown still wins.
+            if hard_cancel_reason.is_none() {
+                if let Some(pending) = state
+                    .pending_episode
+                    .as_mut()
+                    .filter(|p| p.run_id == run_id)
+                {
+                    if pending.disposition == PendingDisposition::Cancel {
+                        pending.disposition = PendingDisposition::Seal;
+                    }
+                }
+            }
             let stopped_after_admission = matches!(
                 state.capture,
                 CaptureState::Preparing {
@@ -1875,7 +1894,10 @@ fn apply_prepare_finished(
                 }
             ) && !matches!(
                 state.desired_stop_reason,
-                StopReason::RuntimeFailure | StopReason::SystemSleep | StopReason::Shutdown
+                StopReason::RuntimeFailure
+                    | StopReason::SystemSleep
+                    | StopReason::Shutdown
+                    | StopReason::PermissionRevoked
             ) && state.continuation.is_none()
                 && state.processing_jobs.is_empty();
             if let Some(reason) = hard_cancel_reason {
@@ -2532,7 +2554,7 @@ fn reconcile_capture(state: &mut CoordinatorState, effects: &mut Vec<Coordinator
                 effect_id,
                 cancel_requested: false,
             };
-            if state.continuation.is_some() {
+            if state.continuation.is_some() || !state.processing_jobs.is_empty() {
                 state.pending_episode = Some(PendingEpisode::new(run.run_id));
             }
             register_effect(state, effect_id, PendingEffect::Prepare { run });
@@ -2585,7 +2607,10 @@ fn reconcile_capture(state: &mut CoordinatorState, effects: &mut Vec<Coordinator
             if run.policy.capture_mode != CaptureMode::Dictation
                 || matches!(
                     state.desired_stop_reason,
-                    StopReason::RuntimeFailure | StopReason::SystemSleep | StopReason::Shutdown
+                    StopReason::RuntimeFailure
+                        | StopReason::SystemSleep
+                        | StopReason::Shutdown
+                        | StopReason::PermissionRevoked
                 )
             {
                 effects.push(CoordinatorEffect::CancelStart {
@@ -3275,7 +3300,11 @@ mod tests {
 
     #[test]
     fn hard_cancelled_admission_is_discarded_before_queued_start() {
-        for reason in [StopReason::SystemSleep, StopReason::RuntimeFailure] {
+        for reason in [
+            StopReason::SystemSleep,
+            StopReason::RuntimeFailure,
+            StopReason::PermissionRevoked,
+        ] {
             let mut state = CoordinatorState::default();
             let prepare = reduce(
                 &mut state,

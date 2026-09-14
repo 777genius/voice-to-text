@@ -279,11 +279,12 @@ pub(super) fn note_continuation_stop(state: &mut CoordinatorState, toggle: bool)
         // Repeated Stop is idempotent. Once cancelled, a late Stop cannot resurrect B.
         if pending.disposition == PendingDisposition::Live {
             pending.stopped_at_ns = Some(state.last_monotonic_ns);
-            pending.disposition = if toggle {
-                PendingDisposition::Cancel
-            } else {
-                PendingDisposition::Seal
-            };
+            pending.disposition =
+                if toggle && matches!(state.capture, CaptureState::Preparing { .. }) {
+                    PendingDisposition::Cancel
+                } else {
+                    PendingDisposition::Seal
+                };
         }
     } else if let Some(route) = &mut state.continuation {
         if route.phase == LogicalPhase::Active && route.stopped_at_ns.is_none() {
@@ -688,6 +689,13 @@ pub(super) fn reconcile_continuation_capture(
         state.pending_episode = None;
         return false;
     }
+    // Before admission a toggle may cancel Prepare. Its token-fenced outcome
+    // decides whether capture was admitted; success must instead seal and drain.
+    if matches!(state.capture, CaptureState::Preparing { .. })
+        && pending.disposition == PendingDisposition::Cancel
+    {
+        return false;
+    }
     // Continue owns its cancellation independently of the physical microphone.
     // Seal/retry may have replaced Starting while that control still awaits admission.
     if pending.disposition == PendingDisposition::Cancel && !pending.cancel_signalled {
@@ -943,13 +951,8 @@ mod tests {
                     let (prepare, b) = start(&mut state);
                     let effects = prepared(&mut state, prepare, b, 22);
                     let (attach, key, _, generation) = continue_effect(&effects);
-                    let effects = reduce(
-                        &mut state,
-                        CoordinatorEvent::Intent(RecordingIntent::toggle(
-                            IntentSource::Frontend,
-                            GestureId::new(900),
-                        )),
-                    );
+                    let effects =
+                        reduce(&mut state, CoordinatorEvent::ForceOff(StopReason::Shutdown));
                     let seal = effects
                         .iter()
                         .find_map(|e| match e {
@@ -1068,12 +1071,12 @@ mod tests {
             let (prepare, b) = start(&mut state);
             prepared(&mut state, prepare, b, 22);
             assert!(matches!(state.capture, CaptureState::Buffering { .. }));
-            let intent = if cancel {
-                RecordingIntent::toggle(IntentSource::Frontend, GestureId::new(901))
+            let stop = if cancel {
+                CoordinatorEvent::ForceOff(StopReason::Shutdown)
             } else {
-                RecordingIntent::stop(IntentSource::Frontend, None)
+                CoordinatorEvent::Intent(RecordingIntent::stop(IntentSource::Frontend, None))
             };
-            let effects = reduce(&mut state, CoordinatorEvent::Intent(intent));
+            let effects = reduce(&mut state, stop);
             let seal = effects
                 .iter()
                 .find_map(|e| match e {
@@ -1852,13 +1855,7 @@ mod tests {
         let (prepare, b) = start(&mut state);
         assert!(state.register_native_candidate(b.run_id));
         prepared(&mut state, prepare, b, 22);
-        reduce(
-            &mut state,
-            CoordinatorEvent::Intent(RecordingIntent::toggle(
-                IntentSource::Frontend,
-                GestureId::new(1),
-            )),
-        );
+        reduce(&mut state, CoordinatorEvent::ForceOff(StopReason::Shutdown));
         assert_eq!(
             state.retire_native_candidates(|id| id == a.run_id),
             vec![b.run_id]
@@ -2219,19 +2216,232 @@ mod tests {
         assert!(!state.desired_recording.is_on());
     }
     #[test]
-    fn pending_toggle_cancels_only_unsent_episode_and_fences_late_completion() {
+    fn admitted_pending_toggle_seals_once_for_continue_and_cold_buffer() {
+        for cold in [false, true] {
+            let (mut state, a) = active();
+            pause(&mut state, a, 1);
+            if cold {
+                state.continuation = None;
+            }
+            let (prepare, b) = start(&mut state);
+            prepared(&mut state, prepare, b, 22);
+            let effects = reduce(
+                &mut state,
+                CoordinatorEvent::Intent(RecordingIntent::toggle(
+                    IntentSource::Frontend,
+                    GestureId::new(100),
+                )),
+            );
+            let seal = effects
+                .iter()
+                .find_map(|effect| match effect {
+                    CoordinatorEffect::Continuation(ContinuationEffect::SealPending {
+                        effect_id,
+                        run_id,
+                        generation: 22,
+                        cancel: false,
+                    }) if *run_id == b.run_id => Some(*effect_id),
+                    _ => None,
+                })
+                .expect("admitted audio must be sealed");
+            assert!(!effects.iter().any(|e| matches!(
+                e,
+                CoordinatorEffect::CancelStart { .. } | CoordinatorEffect::StopRecording { .. }
+            )));
+            let repeated = reduce(
+                &mut state,
+                CoordinatorEvent::Intent(RecordingIntent::stop(IntentSource::HoldHotkey, None)),
+            );
+            assert!(!repeated.iter().any(|e| matches!(
+                e,
+                CoordinatorEffect::Continuation(ContinuationEffect::SealPending { .. })
+                    | CoordinatorEffect::CancelStart { .. }
+            )));
+            event(
+                &mut state,
+                ContinuationEvent::PendingCaptureStopped {
+                    effect_id: seal,
+                    run_id: b.run_id,
+                    generation: 23,
+                    outcome: CaptureStopOutcome::Inactive,
+                },
+            );
+            assert_eq!(state.pending_episode.unwrap().seal_effect, Some(seal));
+            event(
+                &mut state,
+                ContinuationEvent::PendingCaptureStopped {
+                    effect_id: seal,
+                    run_id: b.run_id,
+                    generation: 22,
+                    outcome: CaptureStopOutcome::Inactive,
+                },
+            );
+            assert!(state.pending_episode.unwrap().sealed);
+            assert_eq!(
+                state.pending_episode.unwrap().disposition,
+                PendingDisposition::Seal
+            );
+            if cold {
+                let mut finalization = Vec::new();
+                begin_terminal_finalize(&mut state, a.run_id, 1, &mut finalization);
+                let finalizer = finalization
+                    .iter()
+                    .find_map(|e| match e {
+                        CoordinatorEffect::FinalizeRecording { effect_id, .. } => Some(*effect_id),
+                        _ => None,
+                    })
+                    .unwrap();
+                let effects = reduce(
+                    &mut state,
+                    CoordinatorEvent::FinalizeFinished {
+                        effect_id: finalizer,
+                        run_id: a.run_id,
+                        outcome: FinalizeOutcome::Committed,
+                    },
+                );
+                let starts: Vec<_> = effects
+                    .iter()
+                    .filter_map(|e| match e {
+                        CoordinatorEffect::StartRecording { effect_id, run } if *run == b => {
+                            Some(*effect_id)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(starts.len(), 1);
+                let effects = reduce(
+                    &mut state,
+                    CoordinatorEvent::StartFinished {
+                        effect_id: starts[0],
+                        run_id: b.run_id,
+                        outcome: StartOutcome::Succeeded,
+                    },
+                );
+                assert!(effects.iter().any(|e| matches!(e,
+                    CoordinatorEffect::StopRecording { run_id, .. } if *run_id == b.run_id)));
+                assert!(matches!(
+                    state.capture,
+                    CaptureState::Stopping {
+                        finalize_after: true,
+                        ..
+                    }
+                ));
+            }
+            assert!(state.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn permission_revocation_discards_pending_admission_in_both_stop_orders() {
+        for ordinary_first in [false, true] {
+            let (mut state, a) = active();
+            pause(&mut state, a, 1);
+            let (prepare, b) = start(&mut state);
+            if ordinary_first {
+                reduce(
+                    &mut state,
+                    CoordinatorEvent::Intent(RecordingIntent::toggle(
+                        IntentSource::Frontend,
+                        GestureId::new(102),
+                    )),
+                );
+            }
+            reduce(
+                &mut state,
+                CoordinatorEvent::ForceOff(StopReason::PermissionRevoked),
+            );
+            if !ordinary_first {
+                reduce(
+                    &mut state,
+                    CoordinatorEvent::Intent(RecordingIntent::stop(IntentSource::HoldHotkey, None)),
+                );
+            }
+            let effects = prepared(&mut state, prepare, b, 22);
+            assert!(!effects.iter().any(|e| matches!(
+                e,
+                CoordinatorEffect::Continuation(ContinuationEffect::SealPending {
+                    cancel: false,
+                    ..
+                }) | CoordinatorEffect::StartRecording { .. }
+            )));
+            let stop = effects
+                .iter()
+                .find_map(|e| match e {
+                    CoordinatorEffect::StopRecording {
+                        effect_id, run_id, ..
+                    } if *run_id == b.run_id => Some(*effect_id),
+                    _ => None,
+                })
+                .expect("revoked admitted capture must be discarded");
+            assert!(matches!(
+                state.capture,
+                CaptureState::Stopping {
+                    finalize_after: false,
+                    ..
+                }
+            ));
+            reduce(
+                &mut state,
+                CoordinatorEvent::CaptureStopped {
+                    effect_id: stop,
+                    run_id: b.run_id,
+                    outcome: CaptureStopOutcome::Inactive,
+                },
+            );
+            assert_eq!(state.capture, CaptureState::Idle);
+            assert!(state.pending_episode.is_none());
+            assert!(state.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn pending_prepare_cancel_outcome_decides_admission() {
+        for admitted in [false, true] {
+            let (mut state, a) = active();
+            pause(&mut state, a, 1);
+            let (prepare, b) = start(&mut state);
+            let effects = reduce(
+                &mut state,
+                CoordinatorEvent::Intent(RecordingIntent::toggle(
+                    IntentSource::Frontend,
+                    GestureId::new(101),
+                )),
+            );
+            assert!(effects.iter().any(|e| matches!(e,
+                CoordinatorEffect::CancelPrepare { effect_id, run_id }
+                    if *effect_id == prepare && *run_id == b.run_id)));
+            let effects = reduce(
+                &mut state,
+                CoordinatorEvent::PrepareFinished {
+                    effect_id: prepare,
+                    run_id: b.run_id,
+                    outcome: if admitted {
+                        PrepareOutcome::Succeeded { generation: 22 }
+                    } else {
+                        PrepareOutcome::Cancelled
+                    },
+                },
+            );
+            if admitted {
+                assert!(effects.iter().any(|e| matches!(e,
+                    CoordinatorEffect::Continuation(ContinuationEffect::SealPending {
+                        run_id, generation: 22, cancel: false, .. }) if *run_id == b.run_id)));
+            } else {
+                assert_eq!(state.capture, CaptureState::Idle);
+                assert!(state.pending_episode.is_none());
+            }
+            assert!(state.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn hard_force_off_cancels_unsent_episode_and_fences_late_completion() {
         let (mut state, a) = active();
         pause(&mut state, a, 1);
         let (prepare, b) = start(&mut state);
         let effects = prepared(&mut state, prepare, b, 22);
         let (effect_id, key, _, generation) = continue_effect(&effects);
-        let effects = reduce(
-            &mut state,
-            CoordinatorEvent::Intent(RecordingIntent::toggle(
-                IntentSource::Frontend,
-                GestureId::new(1),
-            )),
-        );
+        let effects = reduce(&mut state, CoordinatorEvent::ForceOff(StopReason::Shutdown));
         assert!(effects.iter().any(
             |e| matches!(e,CoordinatorEffect::CancelStart{effect_id:owner,..} if *owner==effect_id)
         ));
