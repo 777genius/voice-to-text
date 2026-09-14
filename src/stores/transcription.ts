@@ -130,6 +130,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const errorType = ref<TranscriptionErrorPayload['error_type'] | null>(null);
   const errorRaw = ref<string | null>(null);
   const errorDetails = ref<TranscriptionErrorPayload['error_details'] | null>(null);
+  let terminalRecordingErrorSessionId: number | null = null;
   const isDeviceNotFoundError = ref(false);
   const lastFinalizedSegmentKey = ref<string>(''); // последний finalized range (для дедупликации)
   const lastSpeechFinalRangeKey = ref<string>(''); // последний speech_final range (для дедупликации)
@@ -230,6 +231,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     errorType.value = null;
     errorRaw.value = null;
     errorDetails.value = null;
+    terminalRecordingErrorSessionId = null;
     isDeviceNotFoundError.value = false;
   }
 
@@ -617,6 +619,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   }
 
   function setTerminalRecordingErrorStatus(payloadSessionId: number, reason: string): void {
+    terminalRecordingErrorSessionId = payloadSessionId;
     status.value = RecordingStatus.Error;
     markRecordingSessionClosed(payloadSessionId, reason);
     awaitingSessionStart.value = false;
@@ -2155,12 +2158,20 @@ export const useTranscriptionStore = defineStore('transcription', () => {
                 : event.payload.fault === 'finalizeFailed'
                   ? i18n.global.t('errors.transcriptFinalizeFailed')
                   : i18n.global.t('errors.processing');
-              setRecordingError(
-                event.payload.fault === 'stopUncertain' ? null : 'processing',
-                message,
-                null,
-                message,
-              );
+              const preservesRunError =
+                event.payload.fault === 'runtimeFailed' &&
+                faultOwnerRunId !== null &&
+                terminalRecordingErrorSessionId === faultOwnerRunId &&
+                errorType.value !== null &&
+                errorType.value !== 'processing';
+              if (!preservesRunError) {
+                setRecordingError(
+                  event.payload.fault === 'stopUncertain' ? null : 'processing',
+                  message,
+                  null,
+                  message,
+                );
+              }
               return;
             }
 
@@ -2464,7 +2475,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         generation,
         EVENT_TRANSCRIPTION_ERROR,
         async (event) => {
-          if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:error')) {
+          const isTerminalRunError =
+            status.value === RecordingStatus.Error &&
+            sessionId.value === null &&
+            (terminalRecordingErrorSessionId !== null
+              ? terminalRecordingErrorSessionId === event.payload.session_id
+              : recordingIntentFault.value === 'runtimeFailed' &&
+                recordingIntentFaultRunId.value === event.payload.session_id);
+          if (!isTerminalRunError &&
+              !ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:error')) {
             return;
           }
           const errorSessionId = event.payload.session_id;

@@ -919,6 +919,135 @@ describe('transcription connect-retry reliability', () => {
     expect(store.sessionId).toBeNull();
   });
 
+  it.each(['error-first', 'projection-first', 'connection-quota-projection'] as const)(
+    'keeps the provider quota error when runtimeFailed arrives %s',
+    async (order) => {
+      invokeMock.mockResolvedValue(null);
+      const { handlers, store } = await initializeStoreWithHandlers();
+      const providerError = () => handlers.get('transcription:error')({
+        payload: {
+          session_id: 501,
+          error: 'Provider quota exceeded',
+          error_type: 'provider_quota_exceeded',
+          error_details: {
+            category: 'provider_quota_exceeded',
+            serverCode: 'PROVIDER_QUOTA_EXCEEDED',
+          },
+        },
+      });
+      const connectionError = () => handlers.get('transcription:error')({
+        payload: {
+          session_id: 501,
+          error: 'Failed to send audio after provider close',
+          error_type: 'connection',
+          error_details: { category: 'connection' },
+        },
+      });
+      const runtimeFailure = () => handlers.get('recording:intent-projection')({
+        payload: {
+          runId: 501,
+          faultRunId: 501,
+          intentRevision: 1,
+          status: 'Processing',
+          desiredOn: false,
+          pendingStart: false,
+          processingJobs: 0,
+          shutdownRequested: false,
+          fault: 'runtimeFailed',
+        },
+      });
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 501, status: 'Recording', stopped_via_hotkey: false },
+      });
+      if (order === 'error-first') {
+        await providerError();
+        await runtimeFailure();
+      } else if (order === 'projection-first') {
+        await runtimeFailure();
+        await providerError();
+      } else {
+        await connectionError();
+        await providerError();
+        await runtimeFailure();
+      }
+
+      expect(store.status).toBe('Error');
+      expect(store.sessionId).toBeNull();
+      expect(store.errorType).toBe('provider_quota_exceeded');
+      expect(store.error).toBeTruthy();
+    },
+  );
+
+  it('does not carry a previous run provider error into a failed new run', async () => {
+    invokeMock.mockResolvedValue(null);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({
+      payload: { session_id: 511, status: 'Recording', stopped_via_hotkey: false },
+    });
+    await handlers.get('transcription:error')({
+      payload: {
+        session_id: 511,
+        error: 'Provider quota exceeded',
+        error_type: 'provider_quota_exceeded',
+        error_details: { category: 'provider_quota_exceeded' },
+      },
+    });
+    await handlers.get('recording:intent-projection')({
+      payload: {
+        runId: 511,
+        faultRunId: 511,
+        intentRevision: 1,
+        status: 'Processing',
+        desiredOn: false,
+        pendingStart: false,
+        processingJobs: 0,
+        shutdownRequested: false,
+        fault: 'runtimeFailed',
+      },
+    });
+
+    store.prepareForRustHotkeyStart(false);
+    await handlers.get('recording:status')({
+      payload: { session_id: 512, status: 'Recording', stopped_via_hotkey: false },
+    });
+    await handlers.get('transcription:error')({
+      payload: {
+        session_id: 512,
+        error: 'New run connection failure',
+        error_type: 'connection',
+        error_details: { category: 'connection' },
+      },
+    });
+    await handlers.get('transcription:error')({
+      payload: {
+        session_id: 511,
+        error: 'Late provider quota error from the previous run',
+        error_type: 'provider_quota_exceeded',
+        error_details: { category: 'provider_quota_exceeded' },
+      },
+    });
+    expect(store.status).toBe('Error');
+    expect(store.errorType).toBe('connection');
+    await handlers.get('recording:intent-projection')({
+      payload: {
+        runId: 512,
+        faultRunId: 512,
+        intentRevision: 2,
+        status: 'Processing',
+        desiredOn: false,
+        pendingStart: false,
+        processingJobs: 0,
+        shutdownRequested: false,
+        fault: 'runtimeFailed',
+      },
+    });
+
+    expect(store.status).toBe('Error');
+    expect(store.errorType).toBe('connection');
+    expect(store.errorRaw).not.toBe('Provider quota exceeded');
+  });
+
   it.each(['startFailed', 'runtimeFailed', 'stopUncertain'] as const)(
     'preserves the old transcript tail when pending successor reports %s',
     async (fault) => {
