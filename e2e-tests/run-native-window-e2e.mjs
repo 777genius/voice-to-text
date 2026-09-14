@@ -1,3 +1,4 @@
+import { runRestartCrash } from './helpers/nativeRestartCrash.mjs';
 import { closeOwnedDocument, ownedDocumentMatches } from './helpers/nativeOwnedDocument.mjs';
 import { isDeepStrictEqual, promisify } from 'node:util';
 import { verifyQualificationTerminals, verifyQualificationSources, verifyQualificationConnections, verifyQualificationRoute, maxProxyEvidenceEvents, liveTrials, readApprovedFixtures, validateHarnessConfig, exactInsertionEvidence } from './helpers/nativeContinuation.mjs';
@@ -36,7 +37,7 @@ export function parseArguments(args) {
     return { ...parseArguments(args.slice(2)), reuseBuild: args[1] };
   }
   if (args.length === 3 && args[0] === '--qualification-live' && path.isAbsolute(args[1]) && liveTrials.some(t => t.id === args[2])) return { harnessConfig: args[1], trialId: args[2] };
-  if (args.length === 2 && args[0] === '--continuation-case' && ['after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle', 'seal-stop', 'seal-hold', 'seal-close', 'cancel', 'stale-epoch', 'terminal-before-write', 'E04', 'E41', 'E42'].includes(args[1])) return { continuationFake: true, continuationCase: args[1] };
+  if (args.length === 2 && args[0] === '--continuation-case' && ['after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle', 'seal-stop', 'seal-hold', 'seal-close', 'cancel', 'stale-epoch', 'terminal-before-write', 'E04', 'E41', 'E42', 'E54'].includes(args[1])) return { continuationFake: true, continuationCase: args[1] };
   if (args.length === 1 && args[0] === '--continuation-fake') return { continuationFake: true };
   if (args.length === 1 && args[0] === '--terminal-cleanup') return { terminalCleanup: true };
   if (args.length === 2 && args[0] === '--live-elevenlabs' && path.isAbsolute(args[1])) {
@@ -120,7 +121,8 @@ export function createQualificationCollector(trial, proxyEvents, readEnvelope, n
   };
 }
 
-export async function runOwned(command, args, options, timeoutMs, logPath, progressPath, collectBeforeTeardown, terminationPath) {
+export async function runOwned(command, args, options, timeoutMs, logPath, progressPath, collectBeforeTeardown, terminationPath, crashAfterCheckpoint = false) {
+  if (crashAfterCheckpoint && (!terminationPath || !collectBeforeTeardown)) throw new Error('Crash requires owned group and checkpoint collector');
   const output = createWriteStream(logPath, { flags: 'wx' });
   const child = spawn(command, args, { ...options, ...(terminationPath ? { detached: true } : {}), stdio: ['ignore', 'pipe', 'pipe'] });
   const kill = signal => {
@@ -142,7 +144,7 @@ export async function runOwned(command, args, options, timeoutMs, logPath, progr
   const requestTermination = () => {
     if (tearingDown || terminationRequested) return;
     terminationRequested = true;
-    kill('SIGTERM');
+    kill(crashAfterCheckpoint && collected && !collectionError ? 'SIGKILL' : 'SIGTERM');
     force = setTimeout(() => { if (!tearingDown) kill('SIGKILL'); }, 5000);
   };
   const interrupted = signal => {
@@ -162,7 +164,7 @@ export async function runOwned(command, args, options, timeoutMs, logPath, progr
     if (tearingDown || terminationRequested || collecting || collected || collectionError) return;
     collecting = true;
     try {
-      if (child.exitCode === null && child.signalCode === null && await collectBeforeTeardown(() => child.exitCode === null && child.signalCode === null)) {
+      if (child.exitCode === null && child.signalCode === null && await collectBeforeTeardown(() => child.exitCode === null && child.signalCode === null, child.pid)) {
         if (tearingDown || terminationRequested) return;
         if (child.exitCode !== null || child.signalCode !== null) throw new Error('Native exited during pre-teardown collection');
         collected = true;
@@ -226,6 +228,7 @@ export async function runOwned(command, args, options, timeoutMs, logPath, progr
         await new Promise(resolve => setTimeout(resolve, 10));
       } while (performance.now() < deadline);
       await writeFile(terminationPath, JSON.stringify({ pid: child.pid,
+        signal: child.signalCode, checkpointCollected: collected, failure: primaryFailure ? String(primaryFailure) : null,
         exited: child.exitCode !== null || child.signalCode !== null, groupGone }), { flag: 'wx' });
     }
     } catch (error) {
@@ -894,6 +897,11 @@ export async function main(args = process.argv.slice(2)) {
   }
   await validateReusableBuild(directory, source);
   const binary = await validateCachedBinary(directory);
+  if (options.continuationCase === 'E54') {
+    await runRestartCrash(binary, directory, env, runOwned);
+    completionMessage = `[native-e2e] E54 restart/crash verified ${directory}`;
+    return;
+  }
   let runtimeFailure;
   const proxyEvents = [];
   const proxyStarted = performance.now();

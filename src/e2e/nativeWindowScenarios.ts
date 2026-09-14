@@ -91,6 +91,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
   if ((await state()).readerPreparation) { await runNativeReaderPreparation(); return; }
   if ((await state()).qualificationTrial) { await runNativeContinuationLive(pinia); return; }
   const continuationCase = (await state()).continuationCase;
+  if (continuationCase === 'E54') { await runRestartCrashScenario(pinia); return; }
   if (continuationCase) { await runNativeContinuationCase(pinia, continuationCase); return; }
   if ((await state()).continuationMode) { await runNativeContinuationScenarios(pinia); return; }
   if ((await state()).liveMode) { await runLiveNativeScenario(pinia); return; }
@@ -1033,4 +1034,44 @@ async function runNativeTerminalScenario(pinia: Pinia) {
   finally { unlisten(); }
   report.elapsedMs = Date.now() - started;
   await invoke('native_e2e_finish', { report });
+}
+
+/** E54 deliberately never calls finish: parent owns crash/termination. */
+async function runRestartCrashScenario(pinia: Pinia): Promise<void> {
+  const report = { mode: 'restart-crash', passed: false, errors: [] as string[], ui: {} };
+  const unlisten = await listen('transcription:error', event => report.errors.push(JSON.stringify(event.payload)));
+  try {
+    const store = useTranscriptionStore(pinia);
+    await store.initialize();
+    report.ui = { error: store.error };
+    check(store.error === null, `E54 store initialization failed: ${store.error}`);
+    const config = useAppConfigStore(pinia);
+    const configSynced = await config.startSync();
+    check(configSynced === true, 'E54 config synchronization failed');
+    let reconciledStatus: string | null = null;
+    const initial = await invoke<NativeState & { restartPhase: string }>('native_e2e_state');
+    if (initial.restartPhase === 'A') {
+      await invoke('update_app_config', { holdToRecord: false, showMiniRecordingWindow: true,
+        hideRecordingWindowOnHotkey: true, autoCopyToClipboard: false, autoPasteText: false, playCompletionSound: false });
+      await config.refresh();
+      await invoke('native_e2e_configure', { config: { audioDelayMs: 0, stopDelayMs: 0, keepAlive: false, controlDelayMs: 0 } });
+      await hotkey('press'); await hotkey('release');
+      await until(state, s => s.fixture.providerAudioChunks > 0, 'E54 A never wrote fake audio');
+      await delay(120);
+      await hotkey('press'); await hotkey('release');
+      await until(() => invoke<NativeState & { pausedContinuation: unknown }>('native_e2e_state'),
+        s => s.pausedContinuation !== null && s.fixture.activeCaptures === 0 && s.fixture.activeProviders === 1,
+        'E54 A never reached genuine paused context');
+    } else {
+      check(initial.restartPhase === 'B', 'Invalid restart phase');
+      reconciledStatus = await store.reconcileBackendStatus('native_e54_restart');
+      check(reconciledStatus === 'Idle', 'E54 backend status reconciliation failed');
+    }
+    report.ui = { error: store.error, configSynced, reconciledStatus, status: store.status, desiredOn: store.recordingDesiredOn,
+      pendingStart: store.recordingStartPending, canRequestContinuation: store.canRequestContinuation };
+    check(store.error === null, `E54 store error before checkpoint: ${store.error}`);
+    report.passed = report.errors.length === 0;
+  } catch (error) { report.errors.push(String(error)); }
+  await invoke('native_e2e_progress', { report });
+  unlisten();
 }
