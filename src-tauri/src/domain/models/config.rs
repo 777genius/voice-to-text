@@ -105,8 +105,11 @@ impl FromStr for BackendStreamingProvider {
 }
 
 /// Configuration for STT provider
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SttConfig {
+    /// Native target qualification frozen before provider capability selection.
+    #[serde(skip)]
+    pub(crate) continuation_target_eligible: bool,
     /// Provider type
     pub provider: SttProviderType,
 
@@ -171,6 +174,7 @@ fn default_keep_alive_ttl_secs() -> u64 {
 impl Default for SttConfig {
     fn default() -> Self {
         Self {
+            continuation_target_eligible: false,
             provider: SttProviderType::default(),
             language: "ru".to_string(),
             auto_detect_language: false,
@@ -205,6 +209,11 @@ impl SttConfig {
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
         self
+    }
+
+    #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+    pub fn qualify_continuation_target_for_native_e2e(&mut self) {
+        self.continuation_target_eligible = true;
     }
 }
 
@@ -458,6 +467,21 @@ mod tests {
             Some("Kubernetes, VoicetextAI")
         );
         assert!(value.get("deepgram_keyterms").is_none());
+    }
+
+    #[test]
+    fn continuation_target_eligibility_never_survives_persisted_config() {
+        let mut runtime = SttConfig::default();
+        runtime.continuation_target_eligible = true;
+
+        let mut persisted = serde_json::to_value(&runtime).unwrap();
+        assert!(persisted.get("continuation_target_eligible").is_none());
+
+        // A stale or manually edited settings file cannot resurrect a live
+        // continuation target after an application restart.
+        persisted["continuation_target_eligible"] = serde_json::Value::Bool(true);
+        let restored: SttConfig = serde_json::from_value(persisted).unwrap();
+        assert!(!restored.continuation_target_eligible);
     }
 
     #[test]

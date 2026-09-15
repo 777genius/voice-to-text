@@ -69,8 +69,10 @@ const SUPPORT_ISSUES_URL = 'https://github.com/777genius/voice-to-text/issues';
 
 const recordingHotkey = computed(() => formatHotkeyForDisplay(appConfigStore.recordingHotkey));
 
-const hasMiniError = computed(() => Boolean(store.error || store.hasError));
-const showMiniActions = computed(() => isMiniActionsVisible.value || hasMiniError.value);
+const hasMiniError = computed(() =>
+  Boolean(store.error || store.hasError || store.incomingTranslationError)
+);
+const showMiniActions = computed(() => isMiniActionsVisible.value || hasMiniError.value || store.deliveryRecovery.length > 0);
 const hasMiniTranslationText = computed(() =>
   store.activeRecordingMode === 'live_translation' && store.translationText.trim().length > 0
 );
@@ -89,6 +91,46 @@ const showDuplexHeadsetWarning = computed(() =>
 const hasMiniIncomingTranslation = computed(() =>
   hasVisibleIncomingTranslation.value
 );
+const hasMiniReadyCapture = computed(() =>
+  !hasMiniError.value && (
+    store.isCaptureReady ||
+    (store.activeRecordingMode === 'live_translation' && store.isRecording) ||
+    (!store.hasCaptureReadinessProtocol && store.isRecording) ||
+    store.incomingTranslationStatus === 'Recording'
+  )
+);
+const hasMiniStartingCapture = computed(() =>
+  !hasMiniReadyCapture.value && (
+    store.recordingDesiredOn ||
+    store.isConnecting ||
+    store.isStarting ||
+    store.isRecording ||
+    store.incomingTranslationStatus === 'Starting'
+  )
+);
+const hasMiniProcessingCapture = computed(() =>
+  !hasMiniReadyCapture.value && (
+    store.isProcessing || store.incomingTranslationStatus === 'Processing'
+  )
+);
+const miniCaptureStatusText = computed(() => {
+  if (hasMiniError.value) {
+    return store.incomingTranslationError || store.errorSummary || t('main.errorGeneric');
+  }
+  if (hasMiniReadyCapture.value) {
+    if (!store.isCaptureReady) return t('main.listening');
+    if (store.captureReadiness?.reason === 'finalizing-previous') {
+      return `${t('main.listening')} ${t('main.processing')}`;
+    }
+    if (store.captureReadiness?.reason === 'connecting-provider') {
+      return `${t('main.listening')} ${t('main.connecting')}`;
+    }
+    return t('main.listening');
+  }
+  if (hasMiniProcessingCapture.value) return t('main.processing');
+  if (hasMiniStartingCapture.value) return t('main.starting');
+  return '';
+});
 const hasMiniRecognizedText = computed(() =>
   store.hasVisibleTranscriptionText || hasMiniTranslationText.value || hasMiniIncomingTranslationText.value
 );
@@ -98,6 +140,7 @@ const shouldShowMiniHotkeyPrompt = computed(() =>
   !hasMiniIncomingTranslation.value &&
   !store.error &&
   !store.hasError &&
+  !store.deliveryRecovery.length &&
   recordingHotkey.value.length > 0
 );
 
@@ -116,9 +159,9 @@ function normalizeMiniTranscriptText(...parts: string[]): string {
     .trim();
 }
 
-const miniDisplayText = computed(() => {
+const miniCurrentDisplayText = computed(() => {
   if (hasMiniError.value) {
-    return store.errorSummary;
+    return store.incomingTranslationError || store.errorSummary;
   }
 
   const latestRecognized = normalizeMiniTranscriptText(
@@ -132,11 +175,31 @@ const miniDisplayText = computed(() => {
   if (latestRecognized) return latestRecognized;
   if (store.incomingTranslationText.trim()) return store.incomingTranslationText.trim();
   if (store.isIncomingTranslationActive) return t('main.incomingTranslationEmpty');
+  if (store.isCaptureReady) return t('main.listening');
   if (store.isConnecting) return t('main.connecting');
-  if (store.isStarting || store.isRecording) return t('main.listening');
-  if (store.isProcessing) return store.displayText;
+  if (store.isRecording && !store.hasCaptureReadinessProtocol) return t('main.listening');
+  if (store.isStarting || store.isRecording) return t('main.starting');
+  if (store.isProcessing) return store.displayText || t('main.processing');
   return '';
 });
+
+// A pending successor can fault while sessionId still owns the older transcript tail.
+// Session status retains the display owner after terminal cleanup clears sessionId.
+// Old recovery stays in the actions, but cannot take a newer run's surface.
+const showMiniRecoveryWarning = computed(() => {
+  if (!store.deliveryRecovery.length) return false;
+  const displayRunId = (store.recordingDesiredOn ? store.recordingIntentRunId : null)
+    ?? (hasMiniError.value ? store.recordingIntentFaultRunId : null)
+    ?? store.sessionId ?? store.lastAcceptedRecordingStatus?.session_id;
+  const newerDisplayOwnsSurface = miniCurrentDisplayText.value && displayRunId != null
+    && store.deliveryRecovery.every(
+      recovery => recovery.sessionId != null && recovery.sessionId < displayRunId,
+    );
+  return !newerDisplayOwnsSurface;
+});
+const miniDisplayText = computed(() => showMiniRecoveryWarning.value
+  ? 'Automatic insertion stopped. Check the target before pasting unconfirmed text.'
+  : miniCurrentDisplayText.value);
 
 const miniTranscriptionTextRef = ref<HTMLElement | null>(null);
 const isMiniTextOverflowing = ref(false);
@@ -159,7 +222,7 @@ function alignMiniTextToEnd() {
     const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
 
     isMiniTextOverflowing.value = shouldShowText && maxScroll > 1;
-    el.scrollLeft = shouldShowText && !hasMiniError.value ? maxScroll : 0;
+    el.scrollLeft = shouldShowText && !hasMiniError.value && !showMiniRecoveryWarning.value ? maxScroll : 0;
   });
 }
 
@@ -297,6 +360,7 @@ let cancelledStartEpoch = -1;
 let pendingRustStart: { epoch: number; revision: number } | null = null;
 const pendingStartValidations = new Set<{ epoch: number }>();
 const hasPendingCurrentStart = () =>
+  store.isCaptureReady ||
   (store.recordingDesiredOn && store.recordingStartPending) ||
   [...pendingStartValidations].some(({ epoch }) => epoch === currentWindowEpoch);
 
@@ -335,6 +399,27 @@ function cancelPendingHideRecordingWindow() {
   }
   pendingAutoHideSessionId = null;
   isMiniClosing.value = false;
+}
+
+function revealMiniForNewerNativeShow(payload: RecordingWindowLifecyclePayload | undefined) {
+  const epoch = payload?.windowEpoch;
+  if (
+    !useMiniLayout.value ||
+    isComponentUnmounted ||
+    typeof epoch !== 'number' ||
+    !Number.isSafeInteger(epoch) ||
+    epoch < 0 ||
+    (currentWindowEpoch !== null && epoch < currentWindowEpoch) ||
+    (closingWindowEpoch !== null && epoch <= closingWindowEpoch)
+  ) return;
+
+  // Native show has already committed before this event is emitted. Make its
+  // contents visible before IPC validation, which may be delayed while a
+  // previously hidden WebView resumes. A newer native hide is still fenced by
+  // closeRevision below.
+  resetMiniActionState();
+  cancelPendingHideRecordingWindow();
+  clearMiniOpeningAnimation();
 }
 
 function clearHotkeyDebounceTimeout() {
@@ -496,8 +581,24 @@ async function playMiniOpenAnimation() {
   });
 }
 
-function scheduleHideRecordingWindow(reason: string, sessionId: number | null = null) {
+async function scheduleHideRecordingWindow(reason: string, sessionId: number | null = null) {
   if (hasPendingCurrentStart()) return;
+  const requestedGeneration = hideGeneration;
+  let windowEpoch = currentWindowEpoch;
+  if (sessionId !== null) {
+    try {
+      windowEpoch = await invoke<number | null>('get_recording_window_epoch_for_session', {
+        sessionId,
+      });
+    } catch {
+      return;
+    }
+  }
+  // A newer show/start can revoke this close while the lease IPC is pending,
+  // even before that event's own native epoch query has completed.
+  if (requestedGeneration !== hideGeneration ||
+      windowEpoch === null || windowEpoch !== currentWindowEpoch || hasPendingCurrentStart() ||
+      isComponentUnmounted) return;
   if (hasVisibleIncomingTranslation.value) {
     if (pendingAutoHideSessionId === sessionId) {
       pendingAutoHideSessionId = null;
@@ -513,7 +614,6 @@ function scheduleHideRecordingWindow(reason: string, sessionId: number | null = 
   const generation = ++hideGeneration;
   closeRevision += 1;
   closingWindowEpoch = currentWindowEpoch;
-  const windowEpoch = currentWindowEpoch;
   const isCurrentHide = () => generation === hideGeneration && !isComponentUnmounted;
 
   const delay = useMiniLayout.value ? MINI_CLOSE_ANIMATION_MS : 50;
@@ -534,7 +634,6 @@ function scheduleHideRecordingWindow(reason: string, sessionId: number | null = 
     }
 
     try {
-      if (windowEpoch === null) return;
       const hidden = await invoke<boolean>('hide_recording_window_if_current', { windowEpoch });
       if (!hidden || !isCurrentHide()) return;
       if (sessionId !== null) {
@@ -709,6 +808,7 @@ onMounted(async () => {
   // Важно: не очищаем посреди активной записи — иначе можно потерять текст если пользователь скрыл и снова показал окно.
   unlistenWindowShown = await registerRecordingListener<RecordingWindowLifecyclePayload>(EVENT_RECORDING_WINDOW_SHOWN, async (event) => {
     const closeAtRequest = closeRevision;
+    revealMiniForNewerNativeShow(event.payload);
     if (!await acceptWindowEvent(event.payload)) return;
     if (closeAtRequest !== closeRevision && (closingWindowEpoch === null || closingWindowEpoch >= event.payload.windowEpoch)) return;
     resetMiniActionState();
@@ -784,17 +884,17 @@ watch(() => store.lastAcceptedRecordingStatus, (payload) => {
     if (appConfigStore.showMiniRecordingWindow &&
         pendingAutoHideSessionId !== payloadSessionId &&
         completedAutoHideSessionId !== payloadSessionId) {
-      scheduleHideRecordingWindow('mini window recording finalizing', payloadSessionId);
+      void scheduleHideRecordingWindow('mini window recording finalizing', payloadSessionId);
     }
     return;
   }
   if (appConfigStore.playCompletionSound) playDoneSound();
   if (appConfigStore.showMiniRecordingWindow) {
     if (completedAutoHideSessionId !== payloadSessionId) {
-      scheduleHideRecordingWindow('mini window recording stopped', payloadSessionId);
+      void scheduleHideRecordingWindow('mini window recording stopped', payloadSessionId);
     }
   } else if (payload.stopped_via_hotkey) {
-    scheduleHideRecordingWindow('stopped via hotkey', payloadSessionId);
+    void scheduleHideRecordingWindow('stopped via hotkey', payloadSessionId);
   }
 }, { flush: 'sync' });
 
@@ -804,6 +904,7 @@ watch([
   () => store.sessionId,
   () => store.recordingDesiredOn,
   () => store.recordingStartPending,
+  () => store.isCaptureReady,
   hasVisibleIncomingTranslation,
 ], () => {
   if (store.isStarting || store.isRecording || store.hasError || hasVisibleIncomingTranslation.value || hasPendingCurrentStart()) {
@@ -860,7 +961,7 @@ const handleToggle = async () => {
 
 // Обёртка для клика — запускает glow pulse эффект и переключает запись
 const onRecordClick = (e: MouseEvent) => {
-  glowColor.value = store.isRecording ? 'red' : 'blue';
+  glowColor.value = (store.isRecording || store.recordingDesiredOn) ? 'red' : 'blue';
   const btn = e.currentTarget as HTMLElement;
   btn.addEventListener('animationend', () => { glowColor.value = null; }, { once: true });
   handleToggle();
@@ -1042,7 +1143,7 @@ const minimizeWindow = async (event?: Event) => {
         <AudioVisualizer
           variant="mini"
           class="mini-audio-visualizer"
-          :active="store.isStarting || store.isRecording"
+          :active="hasMiniReadyCapture"
         />
         <div
           class="mini-popover-content"
@@ -1051,10 +1152,13 @@ const minimizeWindow = async (event?: Event) => {
         >
           <span
             class="mini-status-dot"
+            role="status"
+            :aria-label="miniCaptureStatusText"
+            :title="miniCaptureStatusText"
             :class="{
-              recording: store.isStarting || store.isRecording || store.incomingTranslationStatus === 'Recording',
-              starting: store.isConnecting || store.incomingTranslationStatus === 'Starting',
-              processing: store.isProcessing || store.incomingTranslationStatus === 'Processing',
+              recording: hasMiniReadyCapture,
+              starting: hasMiniStartingCapture,
+              processing: hasMiniProcessingCapture,
               error: store.hasError || Boolean(store.error) || Boolean(store.incomingTranslationError),
             }"
           ></span>
@@ -1064,9 +1168,9 @@ const minimizeWindow = async (event?: Event) => {
             class="mini-transcription-text"
             :class="{
               recording: hasMiniRecognizedText,
-              placeholder: !hasMiniRecognizedText && !hasMiniError,
+              placeholder: !hasMiniRecognizedText && !hasMiniError && !showMiniRecoveryWarning,
               prompt: shouldShowMiniHotkeyPrompt,
-              error: store.hasError || Boolean(store.error),
+              error: store.hasError || Boolean(store.error) || showMiniRecoveryWarning,
               overflowing: isMiniTextOverflowing,
             }"
             :title="miniDisplayText || miniHotkeyPrompt"
@@ -1077,6 +1181,17 @@ const minimizeWindow = async (event?: Event) => {
           </div>
 
           <div class="mini-actions no-drag">
+            <template v-if="store.deliveryRecovery.length">
+              <button
+                v-for="recovery in store.deliveryRecovery"
+                :key="recovery.sessionId ?? 0"
+                class="mini-icon-button"
+                data-testid="mini-copy-recovery"
+                title="Copy unconfirmed text"
+                aria-label="Copy unconfirmed text"
+                @click="store.copyRecoveryText(recovery.unconfirmedText)"
+              ><span class="mdi mdi-content-copy"></span></button>
+            </template>
             <template v-if="hasMiniError">
               <button
                 v-if="store.canReconnect"
@@ -1113,7 +1228,7 @@ const minimizeWindow = async (event?: Event) => {
                 <span class="mdi mdi-key-outline"></span>
               </button>
             </template>
-            <template v-else>
+            <template v-else-if="!store.deliveryRecovery.length">
               <UpdateIndicator compact @click="openUpdateDialog" />
               <button
                 v-if="authStore.isAuthenticated"
@@ -1211,6 +1326,13 @@ const minimizeWindow = async (event?: Event) => {
         >
           {{ store.displayText }}
         </p>
+
+        <div v-for="recovery in store.deliveryRecovery" :key="recovery.sessionId ?? 0" class="error-container" role="status">
+          <p>Automatic insertion stopped. Check the target before pasting unconfirmed text.</p>
+          <pre class="no-drag" style="white-space: pre-wrap; user-select: text">{{ recovery.unconfirmedText }}</pre>
+          <button class="error-action-button no-drag" @click="store.copyRecoveryText(recovery.unconfirmedText)">Copy unconfirmed text</button>
+          <button class="error-action-button no-drag" @click="store.copyRecoveryText(recovery.transcript)">Copy full transcript</button>
+        </div>
 
         <div v-if="store.error || store.hasError" class="error-container">
           <div class="error-row">
@@ -1340,19 +1462,19 @@ const minimizeWindow = async (event?: Event) => {
       <!-- Controls -->
       <div class="controls">
         <button
-          v-ripple="{ class: store.isRecording ? 'text-red' : 'text-blue' }"
+          v-ripple="{ class: (store.isRecording || store.recordingDesiredOn) ? 'text-red' : 'text-blue' }"
           class="record-button no-drag"
           :class="{
-            recording: store.isRecording,
-            starting: store.isStarting,
-            processing: store.isProcessing,
+            recording: store.isRecording || store.recordingDesiredOn,
+            starting: store.isStarting && !store.recordingDesiredOn,
+            processing: store.isProcessing && !store.recordingDesiredOn,
             'glow-blue': glowColor === 'blue',
             'glow-red': glowColor === 'red',
           }"
-          :disabled="!isRecordingUiReady || store.isProcessing || store.isStarting"
+          :disabled="!isRecordingUiReady || ((store.isProcessing || store.isStarting) && !store.recordingDesiredOn && !store.canRequestContinuation)"
           @click="onRecordClick"
         >
-          <span v-if="store.isRecording" class="mdi mdi-stop"></span>
+          <span v-if="store.isRecording || store.recordingDesiredOn" class="mdi mdi-stop"></span>
           <span v-else-if="store.isProcessing" class="mdi mdi-cached record-icon-spin"></span>
           <span v-else class="mdi mdi-microphone"></span>
         </button>

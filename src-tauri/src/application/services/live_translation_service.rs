@@ -10,6 +10,7 @@
 //! - нет VAD (translation идёт сплошным потоком, включая тишину).
 
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex as StdMutex;
 use std::sync::{Arc, Weak};
 
@@ -78,6 +79,8 @@ pub struct LiveTranslationCallbacks {
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum LiveTranslationError {
+    #[error("translation startup cancelled")]
+    Cancelled,
     #[error("configuration: {0}")]
     Configuration(String),
     #[error("authentication: {0}")]
@@ -96,6 +99,7 @@ impl LiveTranslationError {
     /// Канонический строковый ID для UI (тот же что в TranslationErrorPayload.error_type).
     pub fn error_type(&self) -> &'static str {
         match self {
+            Self::Cancelled => "cancelled",
             Self::Configuration(_) => "configuration",
             Self::Authentication(_) => "authentication",
             Self::RateLimited(_) => "rate_limited",
@@ -234,7 +238,23 @@ impl LiveTranslationService {
         config: LiveTranslationConfig,
         callbacks: LiveTranslationCallbacks,
     ) -> Result<(), LiveTranslationError> {
+        self.start_translation_cancellable(config, callbacks, None)
+            .await
+    }
+
+    /// Cancellation fences admission of the next resource; already-owned startup
+    /// resources settle and close before Cancelled is returned.
+    pub async fn start_translation_cancellable(
+        &self,
+        config: LiveTranslationConfig,
+        callbacks: LiveTranslationCallbacks,
+        cancelled: Option<&AtomicBool>,
+    ) -> Result<(), LiveTranslationError> {
+        let is_cancelled = || cancelled.is_some_and(|token| token.load(Ordering::Acquire));
         let _lifecycle_guard = self.lifecycle.lock().await;
+        if is_cancelled() {
+            return Err(LiveTranslationError::Cancelled);
+        }
         let stale_session = if *self.status.read().await == RecordingStatus::Error {
             self.inner.lock().await.take()
         } else {
@@ -251,7 +271,13 @@ impl LiveTranslationService {
             ));
         }
 
+        if is_cancelled() {
+            return Err(LiveTranslationError::Cancelled);
+        }
         *self.status.write().await = RecordingStatus::Starting;
+        if is_cancelled() {
+            return self.cancelled_startup().await;
+        }
         call_live_callback("Starting status", || {
             (callbacks.on_status)(RecordingStatus::Starting)
         });
@@ -267,6 +293,9 @@ impl LiveTranslationService {
         }
         let target_language = normalize_live_translation_target_language(&config.target_language);
 
+        if is_cancelled() {
+            return self.cancelled_startup().await;
+        }
         // 2. Output device - fail cheap, before OpenAI session creation.
         let output_concrete = match self.audio_factory.create_translation_output() {
             Ok(output) => output,
@@ -276,13 +305,23 @@ impl LiveTranslationService {
                 return Err(err);
             }
         };
-        let output_concrete = match open_startup_output(
+        if is_cancelled() {
+            close_startup_output(output_concrete).await;
+            return self.cancelled_startup().await;
+        }
+        let output_result = open_startup_output(
             output_concrete,
             TranslationAudioOutputConfig::openai_translation(),
             self.startup_policy.device_start_timeout,
         )
-        .await
-        {
+        .await;
+        if is_cancelled() {
+            if let Ok(output) = output_result {
+                close_startup_output(output).await;
+            }
+            return self.cancelled_startup().await;
+        }
+        let output_concrete = match output_result {
             Ok(output) => output,
             Err(StartupOutputError::Operation(error)) => {
                 let error = LiveTranslationError::Configuration(error.to_string());
@@ -302,6 +341,10 @@ impl LiveTranslationService {
                 return Err(LiveTranslationError::Processing(message));
             }
         };
+        if is_cancelled() {
+            close_startup_output(output_concrete).await;
+            return self.cancelled_startup().await;
+        }
         // 3. Mic preflight. Do this before paid OpenAI session creation.
         if let Err(e) = self.audio_factory.microphone_preflight() {
             close_startup_output(output_concrete).await;
@@ -310,6 +353,10 @@ impl LiveTranslationService {
             return Err(err);
         }
 
+        if is_cancelled() {
+            close_startup_output(output_concrete).await;
+            return self.cancelled_startup().await;
+        }
         let capture_result = self.audio_factory.create_microphone_capture(
             config.microphone_device.clone(),
             AudioCaptureTarget::outgoing_translation(),
@@ -323,7 +370,12 @@ impl LiveTranslationService {
                 return Err(err);
             }
         };
-        let capture = match initialize_startup_capture(
+        if is_cancelled() {
+            close_startup_capture(capture).await;
+            close_startup_output(output_concrete).await;
+            return self.cancelled_startup().await;
+        }
+        let capture_result = initialize_startup_capture(
             capture,
             AudioConfig {
                 sample_rate: AudioCaptureTarget::outgoing_translation().sample_rate,
@@ -332,8 +384,15 @@ impl LiveTranslationService {
             },
             self.startup_policy.device_start_timeout,
         )
-        .await
-        {
+        .await;
+        if is_cancelled() {
+            if let Ok(capture) = capture_result {
+                close_startup_capture(capture).await;
+            }
+            close_startup_output(output_concrete).await;
+            return self.cancelled_startup().await;
+        }
+        let capture = match capture_result {
             Ok(capture) => capture,
             Err(StartupCaptureError::Operation(error)) => {
                 close_startup_output(output_concrete).await;
@@ -357,6 +416,11 @@ impl LiveTranslationService {
             }
         };
 
+        if is_cancelled() {
+            close_startup_capture(capture).await;
+            close_startup_output(output_concrete).await;
+            return self.cancelled_startup().await;
+        }
         // 4. OpenAI client connect
         let mut client = self.client_factory.create();
         let translation_config = RealtimeTranslationConfig::new(
@@ -364,11 +428,23 @@ impl LiveTranslationService {
             target_language.clone(),
             RealtimeInputNoiseReduction::NearField,
         );
+        if is_cancelled() {
+            abort_startup_translation(client.as_mut()).await;
+            close_startup_capture(capture).await;
+            close_startup_output(output_concrete).await;
+            return self.cancelled_startup().await;
+        }
         let client_connect = tokio::time::timeout(
             self.startup_policy.network_connect_timeout,
             client.connect(translation_config),
         )
         .await;
+        if is_cancelled() {
+            abort_startup_translation(client.as_mut()).await;
+            close_startup_capture(capture).await;
+            close_startup_output(output_concrete).await;
+            return self.cancelled_startup().await;
+        }
         let openai_rx = match client_connect {
             Ok(Ok(rx)) => rx,
             Ok(Err(error)) => {
@@ -419,7 +495,7 @@ impl LiveTranslationService {
             microphone_sensitivity_gain(config.microphone_sensitivity),
         )
         .with_capture_start_timeout(self.startup_policy.device_start_timeout);
-        let (session, mut runtime_stop_rx) = match RealtimeInterpretationSession::start(
+        let session_result = RealtimeInterpretationSession::start(
             core_config,
             RealtimeInterpretationPorts {
                 capture,
@@ -429,8 +505,16 @@ impl LiveTranslationService {
             },
             core_callbacks,
         )
-        .await
-        {
+        .await;
+        if is_cancelled() {
+            if let Ok((session, _)) = session_result {
+                session
+                    .shutdown(RealtimeInterpretationShutdown::Abort)
+                    .await;
+            }
+            return self.cancelled_startup().await;
+        }
+        let (session, mut runtime_stop_rx) = match session_result {
             Ok(runtime) => runtime,
             Err(error) => {
                 let error = match error {
@@ -446,6 +530,12 @@ impl LiveTranslationService {
             }
         };
 
+        if is_cancelled() {
+            session
+                .shutdown(RealtimeInterpretationShutdown::Abort)
+                .await;
+            return self.cancelled_startup().await;
+        }
         if !session.try_publish_startup() {
             let stop = runtime_stop_rx
                 .recv()
@@ -458,7 +548,16 @@ impl LiveTranslationService {
             return Err(map_live_runtime_stop(stop));
         }
 
-        *self.inner.lock().await = Some(session);
+        let mut inner = self.inner.lock().await;
+        if is_cancelled() {
+            drop(inner);
+            session
+                .shutdown(RealtimeInterpretationShutdown::Abort)
+                .await;
+            return self.cancelled_startup().await;
+        }
+        *inner = Some(session);
+        drop(inner);
         spawn_live_runtime_cleanup_monitor(
             Arc::downgrade(&self.inner),
             Arc::downgrade(&self.lifecycle),
@@ -484,6 +583,13 @@ impl LiveTranslationService {
             ));
         }
         Ok(())
+    }
+
+    // Called only while the startup lifecycle guard is held and all acquired
+    // resources have been released. Cancellation is not a provider/UI failure.
+    async fn cancelled_startup(&self) -> Result<(), LiveTranslationError> {
+        *self.status.write().await = RecordingStatus::Idle;
+        Err(LiveTranslationError::Cancelled)
     }
 
     /// Graceful stop:
@@ -719,6 +825,7 @@ mod tests {
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum TestFactoryMode {
+        Ready,
         OutputCreateFails,
         MicPreflightFails,
         MicInitializeFails,
@@ -731,6 +838,14 @@ mod tests {
         output_opened: AtomicBool,
         output_closed: AtomicBool,
         block_output_open: AtomicBool,
+        output_release: StdMutex<Option<Arc<tokio::sync::Notify>>>,
+        initialize_release: StdMutex<Option<Arc<tokio::sync::Notify>>>,
+        start_release: StdMutex<Option<Arc<tokio::sync::Notify>>>,
+        fail_output: AtomicBool,
+        fail_capture_start: AtomicBool,
+        capture_start_calls: AtomicUsize,
+        capture_stop_calls: AtomicUsize,
+        capture_dropped: AtomicBool,
         mic_preflight_calls: AtomicUsize,
         mic_create_calls: AtomicUsize,
         mic_initialize_calls: AtomicUsize,
@@ -748,6 +863,15 @@ mod tests {
             _config: TranslationAudioOutputConfig,
         ) -> crate::domain::TranslationAudioOutputResult<()> {
             self.state.output_opened.store(true, Ordering::SeqCst);
+            let release = self.state.output_release.lock().unwrap().clone();
+            if let Some(release) = release {
+                release.notified().await;
+            }
+            if self.state.fail_output.load(Ordering::SeqCst) {
+                return Err(crate::domain::TranslationAudioOutputError::Configuration(
+                    "simulated output open failure".into(),
+                ));
+            }
             if self.state.block_output_open.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(80));
             }
@@ -795,6 +919,12 @@ mod tests {
         fail_initialize: bool,
     }
 
+    impl Drop for TestAudioCapture {
+        fn drop(&mut self) {
+            self.state.capture_dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
     #[async_trait::async_trait]
     impl AudioCapture for TestAudioCapture {
         async fn initialize(
@@ -804,6 +934,10 @@ mod tests {
             self.state
                 .mic_initialize_calls
                 .fetch_add(1, Ordering::SeqCst);
+            let release = self.state.initialize_release.lock().unwrap().clone();
+            if let Some(release) = release {
+                release.notified().await;
+            }
             if self.state.block_mic_initialize.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(80));
             }
@@ -820,10 +954,23 @@ mod tests {
             &mut self,
             _on_chunk: AudioChunkCallback,
         ) -> crate::domain::AudioResult<()> {
+            self.state
+                .capture_start_calls
+                .fetch_add(1, Ordering::SeqCst);
+            let release = self.state.start_release.lock().unwrap().clone();
+            if let Some(release) = release {
+                release.notified().await;
+            }
+            if self.state.fail_capture_start.load(Ordering::SeqCst) {
+                return Err(crate::domain::AudioError::Configuration(
+                    "simulated capture start failure".into(),
+                ));
+            }
             Ok(())
         }
 
         async fn stop_capture(&mut self) -> crate::domain::AudioResult<()> {
+            self.state.capture_stop_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -1216,6 +1363,7 @@ mod tests {
         runtime_event_after_first_append: StdMutex<Option<RealtimeTranslationEvent>>,
         close_events_on_connect: AtomicBool,
         block_connect: AtomicBool,
+        connect_release: StdMutex<Option<Arc<tokio::sync::Notify>>>,
     }
 
     struct SyntheticRealtimeClientFactory {
@@ -1243,6 +1391,10 @@ mod tests {
             self.state.connect_calls.fetch_add(1, Ordering::SeqCst);
             *self.state.target_language.lock().unwrap() = Some(config.target_language);
             *self.state.input_noise_reduction.lock().unwrap() = Some(config.input_noise_reduction);
+            let release = self.state.connect_release.lock().unwrap().clone();
+            if let Some(release) = release {
+                release.notified().await;
+            }
             if self.state.block_connect.load(Ordering::SeqCst) {
                 return std::future::pending().await;
             }
@@ -1819,6 +1971,202 @@ mod tests {
         assert_eq!(svc.get_status().await, RecordingStatus::Idle);
         assert_eq!(realtime_state.connect_calls.load(Ordering::SeqCst), 2);
         assert!(realtime_state.append_calls.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[tokio::test]
+    async fn cancelled_translation_waits_admit_no_later_resources_and_release_owned_setup() {
+        for stage in ["lifecycle", "output", "network"] {
+            let audio = Arc::new(TestFactoryState::default());
+            let network = Arc::new(SyntheticRealtimeState::default());
+            let gate = Arc::new(tokio::sync::Notify::new());
+            if stage == "output" {
+                *audio.output_release.lock().unwrap() = Some(gate.clone());
+            }
+            if stage == "network" {
+                *network.connect_release.lock().unwrap() = Some(gate.clone());
+            }
+            let svc = LiveTranslationService::new_with_factories(
+                Arc::new(TestPlatformAudioFactory {
+                    mode: TestFactoryMode::Ready,
+                    state: audio.clone(),
+                }),
+                Arc::new(SyntheticRealtimeClientFactory {
+                    state: network.clone(),
+                }),
+            );
+            let held = if stage == "lifecycle" {
+                Some(svc.lifecycle.lock().await)
+            } else {
+                None
+            };
+            let cancelled = AtomicBool::new(false);
+            let start = svc.start_translation_cancellable(
+                valid_config(1901),
+                test_callbacks(),
+                Some(&cancelled),
+            );
+            tokio::pin!(start);
+            assert!(futures_util::poll!(start.as_mut()).is_pending());
+            if stage != "lifecycle" {
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    loop {
+                        let entered = if stage == "output" { audio.output_opened.load(Ordering::SeqCst) }
+                            else { network.connect_calls.load(Ordering::SeqCst) == 1 };
+                        if entered { break; }
+                        tokio::select! {
+                            result = start.as_mut() => panic!("startup settled before barrier: {result:?}"),
+                            _ = tokio::task::yield_now() => {}
+                        }
+                    }
+                }).await.expect("actual service reached the owned barrier");
+            }
+            cancelled.store(true, Ordering::Release);
+            drop(held);
+            gate.notify_one();
+            let result = tokio::time::timeout(Duration::from_secs(2), start)
+                .await
+                .unwrap();
+            assert!(
+                matches!(result, Err(LiveTranslationError::Cancelled)),
+                "{stage}: {result:?}"
+            );
+            assert_eq!(
+                audio.capture_start_calls.load(Ordering::SeqCst),
+                0,
+                "{stage}"
+            );
+            assert_eq!(network.append_calls.load(Ordering::SeqCst), 0, "{stage}");
+            assert!(svc.active_session_id().await.is_none());
+            assert_eq!(svc.get_status().await, RecordingStatus::Idle);
+            if stage == "lifecycle" {
+                assert_eq!(audio.output_create_calls.load(Ordering::SeqCst), 0);
+            } else {
+                assert!(audio.output_closed.load(Ordering::SeqCst));
+            }
+            if stage != "network" {
+                assert_eq!(audio.mic_create_calls.load(Ordering::SeqCst), 0);
+                assert_eq!(network.connect_calls.load(Ordering::SeqCst), 0);
+            } else {
+                assert_eq!(audio.capture_stop_calls.load(Ordering::SeqCst), 1);
+                assert_eq!(network.abort_calls.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_translation_failure_and_timeout_settlements_release_setup_without_error() {
+        for stage in ["output", "initialize", "capture_start"] {
+            for timeout in [false, true] {
+                let audio = Arc::new(TestFactoryState::default());
+                let network = Arc::new(SyntheticRealtimeState::default());
+                let gate = Arc::new(tokio::sync::Notify::new());
+                let mode = match stage {
+                    "output" => {
+                        *audio.output_release.lock().unwrap() = Some(gate.clone());
+                        audio.fail_output.store(true, Ordering::SeqCst);
+                        TestFactoryMode::Ready
+                    }
+                    "initialize" => {
+                        *audio.initialize_release.lock().unwrap() = Some(gate.clone());
+                        TestFactoryMode::MicInitializeFails
+                    }
+                    _ => {
+                        *audio.start_release.lock().unwrap() = Some(gate.clone());
+                        audio.fail_capture_start.store(true, Ordering::SeqCst);
+                        TestFactoryMode::Ready
+                    }
+                };
+                let mut svc = LiveTranslationService::new_with_factories(
+                    Arc::new(TestPlatformAudioFactory {
+                        mode,
+                        state: audio.clone(),
+                    }),
+                    Arc::new(SyntheticRealtimeClientFactory {
+                        state: network.clone(),
+                    }),
+                );
+                svc.startup_policy.device_start_timeout = Duration::from_millis(200);
+                let errors = Arc::new(AtomicUsize::new(0));
+                let statuses = Arc::new(StdMutex::new(Vec::new()));
+                let mut callbacks = test_callbacks();
+                let observed_errors = errors.clone();
+                callbacks.on_error = Arc::new(move |_| {
+                    observed_errors.fetch_add(1, Ordering::SeqCst);
+                });
+                let observed_statuses = statuses.clone();
+                callbacks.on_status = Arc::new(move |status| {
+                    observed_statuses.lock().unwrap().push(status);
+                });
+                let cancelled = AtomicBool::new(false);
+                let start = svc.start_translation_cancellable(
+                    valid_config(1902),
+                    callbacks,
+                    Some(&cancelled),
+                );
+                tokio::pin!(start);
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        let entered = match stage {
+                            "output" => audio.output_opened.load(Ordering::SeqCst),
+                            "initialize" => audio.mic_initialize_calls.load(Ordering::SeqCst) == 1,
+                            _ => audio.capture_start_calls.load(Ordering::SeqCst) == 1,
+                        };
+                        if entered { break; }
+                        tokio::select! {
+                            result = start.as_mut() => panic!("{stage}: settled before barrier: {result:?}"),
+                            _ = tokio::task::yield_now() => {}
+                        }
+                    }
+                }).await.expect("startup entered actual resource operation");
+                cancelled.store(true, Ordering::Release);
+                if !timeout {
+                    gate.notify_one();
+                }
+                let result = tokio::time::timeout(Duration::from_secs(8), start.as_mut()).await;
+                gate.notify_one();
+                let result = result.expect("bounded startup settlement");
+                // Timeout helpers own late cleanup. Release the operation only after
+                // its timeout result has reached the service, then observe disposal.
+                if timeout {
+                    gate.notify_one();
+                }
+                assert!(
+                    matches!(result, Err(LiveTranslationError::Cancelled)),
+                    "{stage}/{timeout}: {result:?}"
+                );
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while !audio.output_closed.load(Ordering::SeqCst)
+                        || (stage != "output" && !audio.capture_dropped.load(Ordering::SeqCst))
+                    {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("all owned audio resources released");
+                assert_eq!(svc.get_status().await, RecordingStatus::Idle);
+                assert!(svc.active_session_id().await.is_none());
+                assert_eq!(errors.load(Ordering::SeqCst), 0);
+                assert_eq!(*statuses.lock().unwrap(), vec![RecordingStatus::Starting]);
+                assert_eq!(network.append_calls.load(Ordering::SeqCst), 0);
+                assert_eq!(
+                    network.connect_calls.load(Ordering::SeqCst),
+                    usize::from(stage == "capture_start")
+                );
+                assert_eq!(
+                    network.abort_calls.load(Ordering::SeqCst),
+                    usize::from(stage == "capture_start")
+                );
+                if stage == "capture_start" {
+                    assert_eq!(audio.capture_stop_calls.load(Ordering::SeqCst), 1);
+                }
+                if stage == "output" {
+                    assert_eq!(audio.mic_create_calls.load(Ordering::SeqCst), 0);
+                }
+                if stage != "capture_start" {
+                    assert_eq!(audio.capture_start_calls.load(Ordering::SeqCst), 0);
+                }
+            }
+        }
     }
 
     #[tokio::test]

@@ -3,6 +3,7 @@ pub mod auth_store;
 pub mod auto_paste; // Автоматическая вставка текста
 pub mod clipboard; // Кроссплатформенная работа с clipboard
 pub mod config_store;
+pub mod continuation_context;
 pub mod embedded_keys {
     include!(concat!(env!("OUT_DIR"), "/embedded_keys.rs"));
 }

@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
-import { isolatedTauriConfig, parseArguments, sanitizedEnvironment, validateArtifactDirectory, validateCachedBinary, validateResult } from '../run-native-window-e2e.mjs';
+import { snapshotDigest, isolatedTauriConfig, parseArguments, sanitizedEnvironment, validateArtifactDirectory, validateCachedBinary, validateResult } from '../run-native-window-e2e.mjs';
 
 const marker = 'VOICETEXT_NATIVE_WINDOW_E2E_V1';
 
@@ -88,9 +88,15 @@ test('cached executable requires feature marker and matching checksum; no proces
     const bytes = `${marker}\0${identifier}\0`;
     await writeFile(binary, bytes);
     const sha256 = createHash('sha256').update(bytes).digest('hex');
-    const manifest = { marker, binary: 'native-window-e2e', sha256, identifier, sourceSha256: 'a'.repeat(64) };
+    const snapshot = path.join(directory, 'frontend');
+    await mkdir(snapshot);
+    await writeFile(path.join(snapshot, 'source.rs'), 'fixture source');
+    const manifest = { marker, binary: 'native-window-e2e', sha256, identifier, sourceSha256: await snapshotDigest(snapshot) };
     await writeFile(path.join(directory, 'native-build.json'), JSON.stringify(manifest));
     assert.equal(await validateCachedBinary(directory), binary);
+    await writeFile(path.join(snapshot, 'source.rs'), 'changed source');
+    await assert.rejects(validateCachedBinary(directory), /source snapshot hash/);
+    await writeFile(path.join(snapshot, 'source.rs'), 'fixture source');
     await writeFile(path.join(directory, 'native-build.json'), JSON.stringify({ ...manifest, identifier: 'com.voicetotext.app.native-e2e.OtherBuild' }));
     await assert.rejects(validateCachedBinary(directory), /identity mismatch/);
     await writeFile(path.join(directory, 'native-build.json'), JSON.stringify(manifest));
@@ -123,4 +129,34 @@ test('isolated bootstrap preserves updater requirements without real endpoints/p
   assert.equal(isolated.identifier, 'com.voicetotext.app.native-e2e.Contract123');
   assert.throws(() => isolatedTauriConfig({ ...original, plugins: {} }), /public key/);
   assert.throws(() => isolatedTauriConfig(original, '../unsafe'), /suffix/);
+});
+
+
+test('live canary remains explicit and never claims external paste verification', () => {
+  assert.deepEqual(parseArguments(['--live-elevenlabs', '/tmp/synthetic.pcm']), { liveFixturePath: '/tmp/synthetic.pcm' });
+  assert.throws(() => parseArguments(['--live-elevenlabs', 'relative.pcm']), /Usage/);
+  const valid = { marker, passed: true, fixture: {captureStarts: 1, captureStops: 1, activeCaptures: 0},
+    report: {mode: 'live-elevenlabs', passed: true, pcmBytes: 788288, targetDocument: 'Untitled test',
+      finalText: 'synthetic transcript', actualPasteVerified: false} };
+  assert.equal(validateResult(valid), valid.report);
+  for (const modify of [r => {r.report.actualPasteVerified = true;}, r => {r.report.pcmBytes = 100;},
+    r => {r.fixture.activeCaptures = 1;}, r => {r.report.targetDocument = '';}]) {
+    const invalid = structuredClone(valid); modify(invalid);
+    assert.throws(() => validateResult(invalid), /external verification/);
+  }
+});
+
+
+test('terminal-only evidence cannot bypass any native cleanup phase', () => {
+  assert.deepEqual(parseArguments(['--terminal-cleanup']), {terminalCleanup: true});
+  const report = { mode: 'terminal-cleanup', passed: true, sleepReleased: true, wakeDidNotRestart: true,
+    explicitRestart: true, holdSleepReleased: true, retiredHoldReleaseIgnored: true, holdRestartReleased: true, deviceErrorObserved: true, deviceReleased: true };
+  const fixture = {captureStarts: 5, captureStops: 5, activeCaptures: 0, activeProviders: 0};
+  const envelope = {marker, passed: true, report, fixture};
+  assert.equal(validateResult(envelope), report);
+  for (const key of ['sleepReleased', 'wakeDidNotRestart', 'explicitRestart', 'holdSleepReleased', 'retiredHoldReleaseIgnored', 'holdRestartReleased', 'deviceErrorObserved', 'deviceReleased']) {
+    assert.throws(() => validateResult({...envelope, report: {...report, [key]: false}}));
+  }
+  assert.throws(() => validateResult({...envelope, fixture: {...fixture, activeCaptures: 1}}));
+  assert.throws(() => validateResult({...envelope, fixture: {...fixture, captureStops: 2}}));
 });

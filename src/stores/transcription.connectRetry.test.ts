@@ -163,6 +163,742 @@ describe('transcription connect-retry reliability', () => {
     apiClientMock.get.mockResolvedValue({ licenses: [] });
   });
 
+  it.each(['confirmed', 'false', 'ipc_error'])('serializes terminal paste, gate, copy and %s acknowledgement without replay', async (ackOutcome) => {
+    appConfigMock.autoPasteText = true;
+    appConfigMock.autoCopyToClipboard = true;
+    const paste = deferred<any>();
+    const copy = deferred<any>();
+    const ack = deferred<boolean>();
+    invokeMock.mockImplementation((cmd: string, args: any) => {
+      if (cmd === 'auto_paste_continuation_text') return paste.promise;
+      if (cmd === 'copy_continuation_text') return args.text ? copy.promise : Promise.resolve({status: 'confirmed', revision: 1});
+      if (cmd === 'finish_continuation_delivery') return ack.promise;
+      return Promise.resolve();
+    });
+    const {handlers, store} = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({payload: {session_id: 1, status: 'Recording'}});
+    handlers.get('recording:intent-projection')({payload: {intentRevision: 1, runId: 1, logicalRunId: 1, continuationPhase: 'active', desiredOn: true, pendingStart: false, status: 'Recording'}});
+    const stable = handlers.get('transcription:final')({payload: {session_id: 1, delivery_seq: 1, text: 'stable', timestamp: 0, start: 0, duration: 0}});
+    await flushMicrotasks();
+    const terminal = {session_id: 1, stable_snapshot: 'stable', delivery_complete: true, report: null, error: null};
+    handlers.get('transcription:terminal')({payload: terminal});
+    handlers.get('transcription:terminal')({payload: terminal});
+    const effects = () => invokeMock.mock.calls.filter(([cmd]) => ['auto_paste_continuation_text', 'copy_continuation_text', 'finish_continuation_delivery', 'auto_paste_text', 'copy_to_clipboard_native'].includes(cmd));
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(effects().map(([cmd]) => cmd)).toEqual(['auto_paste_continuation_text']);
+    paste.resolve({status: 'confirmed', revision: 1});
+    await stable;
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(effects()).toEqual([
+      ['auto_paste_continuation_text', {sessionId: 1, deliverySeq: 1, text: 'stable'}],
+      ['copy_continuation_text', {sessionId: 1, deliverySeq: 2, text: ''}],
+      ['copy_continuation_text', {sessionId: 1, deliverySeq: 3, text: 'stable'}],
+    ]);
+    copy.resolve({status: 'confirmed', revision: 1});
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(effects()[effects().length - 1]).toEqual(['finish_continuation_delivery', {sessionId: 1, deliverySeq: 3}]);
+    // B's delivery must wait for A's acknowledgement result, too.
+    await handlers.get('recording:status')({payload: {session_id: 2, status: 'Recording'}});
+    const next = handlers.get('transcription:final')({payload: {session_id: 2, delivery_seq: 1, text: 'next', timestamp: 0, start: 0, duration: 0}});
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(effects()).toHaveLength(4);
+    if (ackOutcome === 'ipc_error') ack.reject(new Error('lost acknowledgement'));
+    else ack.resolve(ackOutcome === 'confirmed');
+    await next;
+    handlers.get('transcription:terminal')({payload: terminal});
+    await handlers.get('transcription:final')({payload: {session_id: 1, delivery_seq: 2, text: 'late', timestamp: 0, start: 0, duration: 0}});
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(effects()).toHaveLength(5);
+    expect(effects()[effects().length - 1]).toEqual(['auto_paste_text', {sessionId: 2, text: 'next'}]);
+    expect(store.deliveryRecovery.filter(item => item.sessionId === 1)).toEqual([]);
+    expect(store.finalText).toBe('next');
+    store.cleanup();
+  });
+
+  it.each([false, true])('acknowledges empty terminal behind pending work (prior paste=%s)', async (priorPaste) => {
+    appConfigMock.autoPasteText = true;
+    appConfigMock.autoCopyToClipboard = true;
+    const paste = deferred<any>();
+    invokeMock.mockImplementation((cmd: string) => cmd === 'auto_paste_continuation_text' ? paste.promise : Promise.resolve(true));
+    const {handlers, store} = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({payload: {session_id: 1, status: 'Recording'}});
+    handlers.get('recording:intent-projection')({payload: {intentRevision: 1, runId: 1, logicalRunId: 1, continuationPhase: 'active', desiredOn: true, pendingStart: false, status: 'Recording'}});
+    if (priorPaste) handlers.get('transcription:final')({payload: {session_id: 1, delivery_seq: 1, text: 'earlier', timestamp: 0, start: 0, duration: 0}});
+    await flushMicrotasks();
+    const terminal = {session_id: 1, continuation_delivery: false, stable_snapshot: '', delivery_complete: true, report: null, error: null};
+    handlers.get('transcription:terminal')({payload: terminal});
+    handlers.get('transcription:terminal')({payload: terminal});
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    if (priorPaste) expect(invokeMock).not.toHaveBeenCalledWith('finish_continuation_delivery', expect.anything());
+    paste.resolve({status: 'confirmed', revision: 1});
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'finish_continuation_delivery')).toEqual([
+      ['finish_continuation_delivery', {sessionId: 1, deliverySeq: priorPaste ? 1 : 0}],
+    ]);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'copy_continuation_text' || cmd === 'copy_to_clipboard_native')).toEqual([]);
+    expect(store.finalText).toBe('');
+    store.cleanup();
+  });
+
+  it('acknowledges a nonempty no-op terminal with sequence zero and preserves text', async () => {
+    invokeMock.mockResolvedValue(false);
+    const {handlers, store} = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({payload: {session_id: 1, status: 'Recording'}});
+    handlers.get('recording:intent-projection')({payload: {intentRevision: 1, runId: 1, logicalRunId: 1, continuationPhase: 'active', desiredOn: true, pendingStart: false, status: 'Recording'}});
+    const terminal = {session_id: 1, stable_snapshot: 'retained', delivery_complete: true, report: null, error: null};
+    handlers.get('transcription:terminal')({payload: terminal});
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    handlers.get('transcription:terminal')({payload: terminal});
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'finish_continuation_delivery')).toEqual([
+      ['finish_continuation_delivery', {sessionId: 1, deliverySeq: 0}],
+    ]);
+    expect(invokeMock.mock.calls.filter(([cmd]) => ['copy_continuation_text', 'auto_paste_continuation_text', 'copy_to_clipboard_native', 'auto_paste_text'].includes(cmd))).toEqual([]);
+    expect(store.finalText).toBe('retained');
+    store.cleanup();
+  });
+
+  it.each([null, 'deepgram'])('does not acknowledge legacy/DG terminal (%s)', async (provider) => {
+    const {handlers, store} = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({payload: {session_id: 1, status: 'Recording'}});
+    handlers.get('transcription:terminal')({payload: {session_id: 1, continuation_delivery: false, stable_snapshot: 'text', delivery_complete: true, report: provider ? {provider} : null, error: null}});
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'finish_continuation_delivery')).toEqual([]);
+    store.cleanup();
+  });
+
+  it.each(['context_mismatch', 'unavailable', 'uncertain', 'ipc_error'])('continuation %s suppresses already queued paste and terminal copy', async (outcome) => {
+    appConfigMock.autoCopyToClipboard = true;
+    appConfigMock.autoPasteText = true;
+    const pending = deferred<any>();
+    invokeMock.mockImplementation((command: string) => command === 'auto_paste_continuation_text' ? pending.promise : Promise.resolve());
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({ payload: { session_id: 1, status: 'Recording' } });
+    handlers.get('recording:intent-projection')({ payload: {
+      intentRevision: 1, runId: 1, logicalRunId: 1, captureEpisodeId: 1,
+      continuationPhase: 'active', desiredOn: true, pendingStart: false, status: 'Recording', processingJobs: 0, shutdownRequested: false,
+    } });
+    const stable = (seq: number, text: string) => handlers.get('transcription:final')({ payload: {
+      session_id: 1, delivery_seq: seq, text, timestamp: 0, start: 0, duration: 0, timing_known: false,
+    } });
+    const a = stable(1, 'first');
+    await flushMicrotasks();
+    const b = stable(2, 'tail');
+    handlers.get('transcription:terminal')({ payload: { session_id: 1, stable_snapshot: 'first tail', delivery_complete: true, report: null, error: null } });
+    if (outcome === 'ipc_error') pending.reject(new Error('lost reply'));
+    else pending.resolve({ status: outcome });
+    await Promise.all([a, b]);
+    await flushMicrotasks();
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'finish_continuation_delivery')).toEqual([
+      ['finish_continuation_delivery', {sessionId: 1, deliverySeq: 1}],
+    ]);
+    expect(store.finalText).toBe('first tail');
+    expect(store.deliveryRecovery).toEqual([{sessionId: 1, transcript: 'first tail', unconfirmedText: 'first tail'}]);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_continuation_text')).toHaveLength(1);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text' || cmd === 'copy_to_clipboard_native')).toHaveLength(0);
+    await store.copyRecoveryText(store.deliveryRecovery[0].unconfirmedText);
+    expect(invokeMock).toHaveBeenCalledWith('copy_to_clipboard_native', {text: 'first tail'});
+    store.cleanup();
+  });
+
+  it('retains only the unconfirmed suffix after a confirmed prefix and uncertain native insert', async () => {
+    appConfigMock.autoCopyToClipboard = true;
+    appConfigMock.autoPasteText = true;
+    const uncertain = deferred<any>();
+    let pasteAttempt = 0;
+    invokeMock.mockImplementation((command: string) => {
+      if (command !== 'auto_paste_continuation_text') return Promise.resolve(true);
+      pasteAttempt++;
+      return pasteAttempt === 1
+        ? Promise.resolve({ status: 'confirmed', revision: 1 })
+        : uncertain.promise;
+    });
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({ payload: { session_id: 1, status: 'Recording' } });
+    handlers.get('recording:intent-projection')({ payload: {
+      intentRevision: 1, runId: 1, logicalRunId: 1, captureEpisodeId: 1,
+      continuationPhase: 'active', desiredOn: true, pendingStart: false,
+      status: 'Recording', processingJobs: 0, shutdownRequested: false,
+    } });
+    const stable = (seq: number, text: string) => handlers.get('transcription:final')({ payload: {
+      session_id: 1, delivery_seq: seq, text, timestamp: 0, start: 0,
+      duration: 0, timing_known: false,
+    } });
+
+    await stable(1, 'known');
+    await flushMicrotasks();
+    const tail = stable(2, 'unknown tail');
+    handlers.get('transcription:terminal')({ payload: {
+      session_id: 1, stable_snapshot: 'known unknown tail',
+      delivery_complete: true, report: null, error: null,
+    } });
+    uncertain.resolve({ status: 'uncertain' });
+    await tail;
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_continuation_text')).toEqual([
+      ['auto_paste_continuation_text', { text: 'known', sessionId: 1, deliverySeq: 1 }],
+      ['auto_paste_continuation_text', { text: ' unknown tail', sessionId: 1, deliverySeq: 2 }],
+    ]);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'finish_continuation_delivery')).toEqual([
+      ['finish_continuation_delivery', { sessionId: 1, deliverySeq: 2 }],
+    ]);
+    expect(store.finalText).toBe('known unknown tail');
+    expect(store.deliveryRecovery).toEqual([{
+      sessionId: 1,
+      transcript: 'known unknown tail',
+      unconfirmedText: 'unknown tail',
+    }]);
+    expect(invokeMock.mock.calls.filter(([cmd]) =>
+      cmd === 'auto_paste_text' || cmd === 'copy_to_clipboard_native')).toHaveLength(0);
+    await store.copyRecoveryText(store.deliveryRecovery[0].unconfirmedText);
+    expect(invokeMock).toHaveBeenCalledWith('copy_to_clipboard_native', { text: 'unknown tail' });
+    store.cleanup();
+  });
+
+  it('preserves native Toggle versus explicit Stop for a pending continuation', async () => {
+    invokeMock.mockResolvedValue('Recording stop requested');
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({payload: {session_id: 1, status: 'Recording'}});
+    handlers.get('recording:intent-projection')({payload: {
+      intentRevision: 1, runId: 2, logicalRunId: 1, captureEpisodeId: 2,
+      continuationPhase: 'continue_pending', desiredOn: true, pendingStart: true, status: 'Processing',
+    }});
+    await store.toggleRecording();
+    await store.toggleRecording();
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'toggle_recording_with_window')).toHaveLength(2);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'start_recording' || cmd === 'stop_recording')).toHaveLength(0);
+    await store.stopRecording('manual');
+    expect(invokeMock).toHaveBeenCalledWith('stop_recording', {expectedSessionId: 2});
+    handlers.get('recording:intent-projection')({payload: {intentRevision: 2, runId: 2, logicalRunId: 1, continuationPhase: 'paused_reclaimable', desiredOn: false, pendingStart: false, status: 'Processing'}});
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'finish_continuation_delivery')).toEqual([]);
+    store.cleanup();
+  });
+
+  it('does not retry an unknown native continuation toggle', async () => {
+    invokeMock.mockImplementation((cmd: string) => cmd === 'toggle_recording_with_window'
+      ? Promise.reject(new Error('toggle reply lost')) : Promise.resolve());
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({payload: {session_id: 1, status: 'Recording'}});
+    handlers.get('recording:intent-projection')({payload: {intentRevision: 1, runId: 1, logicalRunId: 1, continuationPhase: 'paused_reclaimable', desiredOn: false, pendingStart: false, status: 'Processing'}});
+    await store.toggleRecording();
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'toggle_recording_with_window')).toHaveLength(1);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'start_recording')).toHaveLength(0);
+    expect(store.error).toContain('toggle reply lost');
+    store.cleanup();
+  });
+
+  it.each([true, false])('native-only terminal refusal suppresses clipboard with autoPaste=%s', async (autoPaste) => {
+    appConfigMock.autoPasteText = autoPaste;
+    appConfigMock.autoCopyToClipboard = true;
+    let refused = false;
+    invokeMock.mockImplementation((cmd: string) => Promise.resolve(
+      cmd === 'auto_paste_continuation_text' ? {status: 'confirmed', revision: 1} :
+      cmd === 'copy_continuation_text' ? {status: refused ? 'context_mismatch' : 'confirmed', revision: 1} : undefined));
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({payload: {session_id: 1, status: 'Recording'}});
+    handlers.get('recording:intent-projection')({payload: {intentRevision: 1, runId: 1, logicalRunId: 1, continuationPhase: 'active', desiredOn: true, pendingStart: false, status: 'Recording'}});
+    await handlers.get('transcription:final')({payload: {session_id: 1, delivery_seq: 1, text: 'stable', timestamp: 0, start: 0, duration: 0}});
+    // Continue validation has independently invalidated native state; no failed paste event.
+    refused = true;
+    const terminal = {session_id: 1, stable_snapshot: 'stable', delivery_complete: true, report: null, error: null};
+    handlers.get('transcription:terminal')({payload: terminal});
+    handlers.get('transcription:terminal')({payload: terminal});
+    for (let turn = 0; turn < 10; turn++) await flushMicrotasks();
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'copy_continuation_text')).toEqual([
+      ['copy_continuation_text', {sessionId: 1, deliverySeq: autoPaste ? 2 : 1, text: autoPaste ? '' : 'stable'}],
+    ]);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'copy_to_clipboard_native')).toHaveLength(0);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'finish_continuation_delivery')).toEqual([
+      ['finish_continuation_delivery', {sessionId: 1, deliverySeq: autoPaste ? 2 : 1}],
+    ]);
+    expect(store.finalText).toBe('stable');
+    expect(store.deliveryRecovery).toHaveLength(1);
+    store.cleanup();
+  });
+
+  it('without auto-paste, continuation keeps one terminal copy and never invokes native paste', async () => {
+    appConfigMock.autoPasteText = false;
+    appConfigMock.autoCopyToClipboard = true;
+    invokeMock.mockImplementation((cmd: string) => Promise.resolve(cmd === 'copy_continuation_text' ? {status: 'confirmed', revision: 0} : undefined));
+    const { handlers, store } = await initializeStoreWithHandlers();
+    const status = (value: string) => handlers.get('recording:status')({payload: {session_id: 1, status: value}});
+    await status('Recording');
+    handlers.get('recording:intent-projection')({payload: {intentRevision: 1, runId: 1, logicalRunId: 1, continuationPhase: 'active', desiredOn: true, pendingStart: false, status: 'Recording'}});
+    const stable = (delivery_seq: number, text: string) => handlers.get('transcription:final')({payload: {session_id: 1, delivery_seq, text, timestamp: 0, start: 0, duration: 0}});
+    await stable(1, 'first');
+    await status('Idle');
+    await status('Recording');
+    await stable(2, 'second');
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'copy_to_clipboard_native')).toHaveLength(0);
+    const terminal = {session_id: 1, stable_snapshot: 'first second', delivery_complete: true, report: null, error: null};
+    handlers.get('transcription:terminal')({payload: terminal});
+    handlers.get('transcription:terminal')({payload: terminal});
+    for (let turn = 0; turn < 10; turn++) await flushMicrotasks();
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'copy_continuation_text')).toEqual([
+      ['copy_continuation_text', {text: 'first second', sessionId: 1, deliverySeq: 1}],
+    ]);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_continuation_text' || cmd === 'auto_paste_text')).toHaveLength(0);
+    store.cleanup();
+  });
+
+  it.each([true, false])('routes the first stable delivery before projection using explicit continuation mode %s', async (continuation) => {
+    appConfigMock.autoPasteText = true;
+    invokeMock.mockImplementation((cmd: string) => Promise.resolve(cmd === 'auto_paste_continuation_text' ? {status: 'confirmed', revision: 1} : undefined));
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({payload: {session_id: 1, status: 'Recording'}});
+    await handlers.get('transcription:final')({payload: {
+      session_id: 1, delivery_seq: 1, text: 'first', timestamp: 0, start: 0, duration: 0,
+      completion_v1: true, continuation_delivery: continuation,
+    }});
+    const calls = invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_continuation_text' || cmd === 'auto_paste_text');
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toBe(continuation ? 'auto_paste_continuation_text' : 'auto_paste_text');
+    if (continuation) {
+      handlers.get('recording:intent-projection')({payload: {intentRevision: 1, runId: 1, logicalRunId: 1, continuationPhase: 'active', desiredOn: true, pendingStart: false, status: 'Recording'}});
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text')).toHaveLength(0);
+    }
+    store.cleanup();
+  });
+
+  it.each([true, false, null, undefined])('recovers terminal-first text with mode %s before effects', async (mode) => {
+    appConfigMock.autoPasteText = true;
+    appConfigMock.autoCopyToClipboard = true;
+    invokeMock.mockImplementation((cmd: string) => Promise.resolve(
+      cmd === 'auto_paste_continuation_text' || cmd === 'copy_continuation_text'
+        ? {status: 'confirmed', revision: 1} : true));
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({payload: {session_id: 1, status: 'Recording'}});
+    const terminal = {session_id: 1, continuation_delivery: mode, stable_snapshot: 'recovered',
+      report: {run_id: 1, provider: {stable_snapshot: 'recovered'}}, delivery_complete: false, error: 'deadline'};
+    handlers.get('transcription:terminal')({payload: terminal});
+    handlers.get('transcription:terminal')({payload: {...terminal, continuation_delivery: !mode}});
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(store.finalText).toBe('recovered');
+    const commands = invokeMock.mock.calls.map(([cmd]) => cmd);
+    expect(commands.filter(cmd => cmd === 'auto_paste_continuation_text')).toHaveLength(mode === true ? 1 : 0);
+    expect(commands.filter(cmd => cmd === 'copy_continuation_text')).toHaveLength(mode === true ? 1 : 0);
+    expect(commands.filter(cmd => cmd === 'auto_paste_text')).toHaveLength(mode === false ? 1 : 0);
+    expect(commands.filter(cmd => cmd === 'copy_to_clipboard_native')).toHaveLength(mode === false ? 1 : 0);
+    expect(commands.filter(cmd => cmd === 'finish_continuation_delivery')).toHaveLength(mode === false ? 0 : 1);
+    store.cleanup();
+  });
+
+  it('rejects mismatched terminal reports and keeps old-run mode out of the active ledger', async () => {
+    appConfigMock.autoPasteText = true;
+    invokeMock.mockImplementation((cmd: string) => Promise.resolve(
+      cmd === 'auto_paste_continuation_text' ? {status: 'context_mismatch'} : true));
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({payload: {session_id: 1, status: 'Recording'}});
+    await handlers.get('recording:status')({payload: {session_id: 2, status: 'Recording'}});
+    const terminal = {session_id: 2, continuation_delivery: true, stable_snapshot: 'wrong',
+      report: {run_id: 1}, delivery_complete: true, error: null};
+    handlers.get('transcription:terminal')({payload: terminal});
+    handlers.get('transcription:terminal')({payload: {...terminal, session_id: 99, report: null}});
+    handlers.get('transcription:terminal')({payload: {...terminal, session_id: 1, stable_snapshot: 'old'}});
+    handlers.get('transcription:terminal')({payload: {...terminal, continuation_delivery: false,
+      stable_snapshot: 'active', report: {run_id: 2}}});
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(store.finalText).toBe('active');
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text').map(([, args]) => args))
+      .toEqual([{text: 'active', sessionId: 2}]);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_continuation_text').map(([, args]) => args.sessionId))
+      .toEqual([1]);
+    store.cleanup();
+  });
+
+  it('refuses conflicting terminal mode without downgrading an established continuation run', async () => {
+    appConfigMock.autoCopyToClipboard = true;
+    appConfigMock.autoPasteText = true;
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({payload: {session_id: 1, status: 'Recording'}});
+    await handlers.get('transcription:partial')({payload: {session_id: 1, text: '',
+      completion_v1: true, continuation_delivery: true, is_segment_final: false}});
+    handlers.get('transcription:terminal')({payload: {session_id: 1, continuation_delivery: false,
+      stable_snapshot: 'recover manually', report: null, error: null, delivery_complete: true}});
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(store.finalText).toBe('recover manually');
+    expect(invokeMock.mock.calls.filter(([cmd]) => ['auto_paste_text', 'copy_to_clipboard_native',
+      'auto_paste_continuation_text', 'copy_continuation_text'].includes(cmd))).toHaveLength(0);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'finish_continuation_delivery')).toHaveLength(1);
+    store.cleanup();
+  });
+
+  it('retains negotiated logical text across a new capture episode and confirms deltas once', async () => {
+    appConfigMock.autoPasteText = true;
+    appConfigMock.autoCopyToClipboard = true;
+    let revision = 0;
+    invokeMock.mockImplementation((cmd: string) => Promise.resolve(cmd === 'auto_paste_continuation_text' ? {status: 'confirmed', revision: ++revision} : cmd === 'copy_continuation_text' ? {status: 'confirmed', revision} : undefined));
+    const { handlers, store } = await initializeStoreWithHandlers();
+    const status = (value: string) => handlers.get('recording:status')({payload: {session_id: 1, status: value}});
+    await status('Recording');
+    handlers.get('recording:intent-projection')({payload: {intentRevision: 1, runId: 1, logicalRunId: 1, continuationPhase: 'active', desiredOn: true, pendingStart: false, status: 'Recording'}});
+    const stable = (seq: number, text: string) => handlers.get('transcription:final')({payload: {session_id: 1, delivery_seq: seq, text, timestamp: 0, start: 0, duration: 0}});
+    await stable(1, 'hello');
+    await status('Idle');
+    store.prepareForRustHotkeyStart();
+    handlers.get('recording:intent-projection')({payload: {intentRevision: 2, runId: 2, captureEpisodeId: 2, logicalRunId: 1, continuationPhase: 'active_awaiting_audio', desiredOn: true, pendingStart: false, status: 'Recording'}});
+    await status('Recording');
+    expect(store.finalText).toBe('hello');
+    await stable(2, 'world');
+    await stable(2, 'world');
+    expect(store.finalText).toBe('hello world');
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'copy_to_clipboard_native')).toHaveLength(0);
+    const terminal = {session_id: 1, stable_snapshot: 'hello world', delivery_complete: true, report: null, error: null};
+    handlers.get('transcription:terminal')({payload: terminal});
+    handlers.get('transcription:terminal')({payload: terminal});
+    // Terminal handler schedules delivery without awaiting its queue.
+    for (let turn = 0; turn < 10; turn++) await flushMicrotasks();
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'copy_continuation_text')).toEqual([
+      ['copy_continuation_text', {text: '', sessionId: 1, deliverySeq: 3}],
+      ['copy_continuation_text', {text: 'hello world', sessionId: 1, deliverySeq: 4}],
+    ]);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_continuation_text').map(([, args]) => args)).toEqual([
+      {text: 'hello', sessionId: 1, deliverySeq: 1}, {text: ' world', sessionId: 1, deliverySeq: 2},
+    ]);
+    store.cleanup();
+  });
+
+  it('keeps late negotiated A on guarded IPC while a cold B owns the visible transcript', async () => {
+    appConfigMock.autoPasteText = true;
+    let revision = 0;
+    invokeMock.mockImplementation((cmd: string) => Promise.resolve(cmd === 'auto_paste_continuation_text' ? {status: 'confirmed', revision: ++revision} : undefined));
+    const { handlers, store } = await initializeStoreWithHandlers();
+    const status = (session_id: number) => handlers.get('recording:status')({payload: {session_id, status: 'Recording'}});
+    const stable = (session_id: number, delivery_seq: number, text: string) => handlers.get('transcription:final')({payload: {session_id, delivery_seq, text, timestamp: 0, start: 0, duration: 0}});
+    await status(1);
+    handlers.get('recording:intent-projection')({payload: {intentRevision: 1, runId: 1, logicalRunId: 1, continuationPhase: 'active', desiredOn: true, pendingStart: false, status: 'Recording'}});
+    await stable(1, 1, 'A');
+    handlers.get('recording:intent-projection')({payload: {intentRevision: 2, runId: 2, logicalRunId: null, continuationPhase: null, desiredOn: true, pendingStart: false, status: 'Recording'}});
+    await status(2);
+    await stable(2, 1, 'B');
+    await stable(1, 2, 'late');
+    expect(store.finalText).toBe('B');
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_continuation_text').map(([,args]) => args)).toEqual([
+      {text: 'A', sessionId: 1, deliverySeq: 1}, {text: ' late', sessionId: 1, deliverySeq: 2},
+    ]);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text').map(([,args]) => args)).toEqual([{text: 'B', sessionId: 2}]);
+    store.cleanup();
+  });
+
+  it('delivers immutable terminal A after B starts, preserving A queue and target', async () => {
+    appConfigMock.autoCopyToClipboard = true;
+    appConfigMock.autoPasteText = true;
+    const firstPaste = deferred<void>();
+    invokeMock.mockImplementation((command: string, args: any) => {
+      if (command === 'auto_paste_text' && args.text === 'yes') return firstPaste.promise;
+      return Promise.resolve();
+    });
+    const { handlers, store } = await initializeStoreWithHandlers();
+    const status = (id: number) => handlers.get('recording:status')({ payload: { session_id: id, status: 'Recording' } });
+    const stable = (id: number, seq: number, text: string) => handlers.get('transcription:final')({ payload: {
+      session_id: id, delivery_seq: seq, timing_known: false, text, timestamp: 0, start: 0, duration: 0,
+    } });
+    await status(1);
+    const inFlight = stable(1, 1, 'yes');
+    await flushMicrotasks();
+    await status(2);
+    const tail = stable(1, 2, 'yes');
+    const terminal = { session_id: 1, continuation_delivery: false, stable_snapshot: 'yes yes', delivery_complete: true, report: null, error: null };
+    handlers.get('transcription:terminal')({ payload: terminal });
+    terminal.stable_snapshot = 'mutated';
+    handlers.get('transcription:terminal')({ payload: { ...terminal, stable_snapshot: 'duplicate' } });
+    const next = stable(2, 1, 'B');
+    firstPaste.resolve();
+    await Promise.all([inFlight, tail, next]);
+    await stable(1, 3, 'late');
+    expect(store.finalText).toBe('B');
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text').map(([, args]) => args)).toEqual([
+      { text: 'yes', sessionId: 1 }, { text: ' yes', sessionId: 1 }, { text: 'B', sessionId: 2 },
+    ]);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'copy_to_clipboard_native').map(([, args]) => args.text)).toEqual(['yes yes']);
+    store.cleanup();
+  });
+
+  it('queues 50 received stable deliveries promptly when the paste queue is free', async () => {
+    appConfigMock.autoPasteText = true;
+    const elapsed: number[] = [];
+    let receivedAt = 0;
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'auto_paste_text') elapsed.push(performance.now() - receivedAt);
+      return Promise.resolve();
+    });
+    const {handlers, store} = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({payload: {session_id: 1, status: 'Recording'}});
+    for (let seq = 1; seq <= 50; seq++) {
+      receivedAt = performance.now();
+      await handlers.get('transcription:final')({payload: {
+        session_id: 1, delivery_seq: seq, text: `token${seq}`, timing_known: false,
+        timestamp: 0, start: 0, duration: 0,
+      }});
+    }
+    expect(elapsed).toHaveLength(50);
+    const sorted = [...elapsed].sort((a, b) => a - b);
+    expect(sorted[47]).toBeLessThanOrEqual(100);
+    consoleSpies[1].mockRestore();
+    console.info('STABLE_ENQUEUE_EVIDENCE', JSON.stringify({
+      scope: 'real store handler to mocked native invoke, free queue, Vitest; upper bound on enqueue, not OS paste latency',
+      samples_ms: elapsed, p95_ms: sorted[47], max_ms: sorted[49],
+    }));
+    store.cleanup();
+  });
+
+  it('deduplicates stable by run and sequence while preserving repeated unknown-range text', async () => {
+    appConfigMock.autoPasteText = true;
+    invokeMock.mockResolvedValue(undefined);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({ payload: { session_id: 1, status: 'Recording' } });
+    const payload = { session_id: 1, text: 'again', timestamp: 0, start: 0, duration: 0, timing_known: false, is_segment_final: true, delivery_seq: 1 };
+    await handlers.get('transcription:partial')({ payload });
+    await handlers.get('transcription:final')({ payload });
+    await handlers.get('transcription:partial')({ payload: { ...payload, delivery_seq: 2 } });
+    await handlers.get('transcription:partial')({ payload });
+    expect(store.finalText).toBe('again again');
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text').map(([, args]) => args.text)).toEqual(['again', ' again']);
+    store.cleanup();
+  });
+
+  it('terminal incomplete outcome copies only stable text and never promotes negotiated interim', async () => {
+    vi.useFakeTimers();
+    try {
+      appConfigMock.autoCopyToClipboard = true;
+      appConfigMock.autoPasteText = true;
+      invokeMock.mockResolvedValue(undefined);
+      const { handlers, store } = await initializeStoreWithHandlers();
+      await handlers.get('recording:status')({ payload: { session_id: 1, status: 'Recording' } });
+      await handlers.get('transcription:partial')({ payload: {
+        session_id: 1, text: 'unconfirmed draft', timestamp: 0, start: 0, duration: 0,
+        completion_v1: true, timing_known: false, is_segment_final: false,
+      } });
+      await handlers.get('recording:status')({ payload: { session_id: 1, status: 'Idle' } });
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'auto_paste_text')).toBe(false);
+      handlers.get('transcription:terminal')({ payload: {
+        session_id: 1, continuation_delivery: false, stable_snapshot: 'confirmed', delivery_complete: false,
+        report: { provider: { tail_evidence: 'unconfirmed' } }, error: 'deadline',
+      } });
+      await vi.advanceTimersByTimeAsync(0);
+      await handlers.get('transcription:partial')({ payload: { session_id: 1, text: 'late draft', is_segment_final: false } });
+      expect(store.finalText).toBe('confirmed');
+      expect(store.partialText).toBe('');
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text').map(([, args]) => args.text)).toEqual(['confirmed']);
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'copy_to_clipboard_native').map(([, args]) => args.text)).toEqual(['confirmed']);
+      store.cleanup();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each([false, true])('recovers successful empty negotiated terminal once (refused=%s)', async (refused) => {
+    appConfigMock.autoCopyToClipboard = true;
+    appConfigMock.autoPasteText = true;
+    invokeMock.mockResolvedValue(undefined);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({ payload: { session_id: 1, status: 'Recording' } });
+    for (const text of ['old draft', 'latest draft']) {
+      await handlers.get('transcription:partial')({ payload: {
+        session_id: 1, text, completion_v1: true, continuation_delivery: refused,
+        is_segment_final: false, timestamp: 0, timing_known: false,
+      } });
+    }
+    const terminal = { session_id: 1, continuation_delivery: false, stable_snapshot: '',
+      delivery_complete: true, report: null, error: null };
+    handlers.get('transcription:terminal')({ payload: terminal });
+    handlers.get('transcription:terminal')({ payload: terminal });
+    await handlers.get('transcription:final')({ payload: {
+      session_id: 1, text: 'late final', delivery_seq: 1, timestamp: 1,
+    } });
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(store.finalText).toBe('latest draft');
+    const effects = invokeMock.mock.calls.filter(([cmd]) =>
+      ['auto_paste_text', 'copy_to_clipboard_native', 'auto_paste_continuation_text', 'copy_continuation_text'].includes(cmd));
+    expect(effects.map(([, args]) => args.text)).toEqual(refused ? [] : ['latest draft', 'latest draft']);
+    expect(invokeMock.mock.calls.filter(([cmd, args]) => cmd === 'log_client_event' &&
+      args.event === 'transcription_terminal_interim_fallback').map(([, args]) => args.data))
+      .toEqual([{ sessionId: 1, textLength: 12 }]);
+    store.cleanup();
+  });
+
+  it('recovers negotiated interim after an empty sequenced stable and successful terminal', async () => {
+    appConfigMock.autoCopyToClipboard = true;
+    appConfigMock.autoPasteText = true;
+    invokeMock.mockResolvedValue(undefined);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({ payload: { session_id: 1, status: 'Recording' } });
+    await handlers.get('transcription:partial')({ payload: {
+      session_id: 1, text: 'recognized draft', completion_v1: true,
+      continuation_delivery: false, is_segment_final: false, timestamp: 0,
+    } });
+    await handlers.get('transcription:final')({ payload: {
+      session_id: 1, text: '', delivery_seq: 1, continuation_delivery: false,
+    } });
+
+    expect(store.partialText).toBe('recognized draft');
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'auto_paste_text')).toBe(false);
+
+    const terminal = {
+      session_id: 1, continuation_delivery: false, stable_snapshot: '',
+      delivery_complete: true, report: null, error: null,
+    };
+    handlers.get('transcription:terminal')({ payload: terminal });
+    handlers.get('transcription:terminal')({ payload: terminal });
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+
+    expect(store.finalText).toBe('recognized draft');
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text').map(([, args]) => args.text))
+      .toEqual(['recognized draft']);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'copy_to_clipboard_native').map(([, args]) => args.text))
+      .toEqual(['recognized draft']);
+    store.cleanup();
+  });
+
+  it.each(['', 'corrected final'])('recovers negotiated text after unsequenced speech-final %j without early paste', async (final) => {
+    appConfigMock.autoPasteText = true;
+    invokeMock.mockResolvedValue(undefined);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({ payload: { session_id: 1, status: 'Recording' } });
+    for (const text of ['old draft', 'latest draft']) {
+      await handlers.get('transcription:partial')({ payload: {
+        session_id: 1, text, completion_v1: true, continuation_delivery: false,
+        is_segment_final: false, timestamp: 0,
+      } });
+    }
+    await handlers.get('transcription:final')({ payload: { session_id: 1, text: final, timestamp: 1 } });
+    expect(store.partialText).toBe('');
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text')).toHaveLength(0);
+    handlers.get('transcription:terminal')({ payload: {
+      session_id: 1, continuation_delivery: false, stable_snapshot: '', delivery_complete: true,
+      report: null, error: null,
+    } });
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(store.finalText).toBe(final || 'latest draft');
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text').map(([, args]) => args.text))
+      .toEqual([final || 'latest draft']);
+    store.cleanup();
+  });
+
+  it('keeps negotiated interim snapshots isolated across sessions', async () => {
+    appConfigMock.autoCopyToClipboard = true;
+    invokeMock.mockResolvedValue(undefined);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    for (const session_id of [1, 2]) {
+      await handlers.get('recording:status')({ payload: { session_id, status: 'Recording' } });
+      await handlers.get('transcription:partial')({ payload: {
+        session_id, text: `draft ${session_id}`, completion_v1: true, is_segment_final: false,
+      } });
+    }
+    handlers.get('transcription:terminal')({ payload: {
+      session_id: 1, continuation_delivery: false, stable_snapshot: '', delivery_complete: true,
+      report: null, error: null,
+    } });
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(store.partialText).toBe('draft 2');
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'copy_to_clipboard_native').map(([, args]) => args.text))
+      .toEqual(['draft 1']);
+    store.cleanup();
+  });
+
+  it.each([
+    { error: 'failed' },
+    { delivery_complete: false },
+    { report: { error: 'failed' } },
+    { report: { shared_failure: true } },
+    { report: { provider: { error: 'failed' } } },
+    ...['deadline', 'cancelled', 'processor_error'].map(reason => ({ report: { audio: { reason } } })),
+    ...['deadline', 'cancelled', 'provider_error'].map(reason => ({ report: { provider: { reason } } })),
+  ])('does not recover negotiated interim for adverse terminal %j', async (outcome) => {
+    appConfigMock.autoPasteText = true;
+    invokeMock.mockResolvedValue(undefined);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({ payload: { session_id: 1, status: 'Recording' } });
+    await handlers.get('transcription:partial')({ payload: {
+      session_id: 1, text: 'draft', completion_v1: true, is_segment_final: false,
+    } });
+    handlers.get('transcription:terminal')({ payload: {
+      session_id: 1, continuation_delivery: false, stable_snapshot: '', delivery_complete: true,
+      report: null, error: null, ...outcome,
+    } });
+    await flushMicrotasks();
+    expect(store.finalText).toBe('');
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text')).toHaveLength(0);
+    store.cleanup();
+  });
+
+  it.each(['stable', ''])('never appends negotiated interim when stable was received (terminal=%s)', async (snapshot) => {
+    appConfigMock.autoPasteText = true;
+    invokeMock.mockResolvedValue(undefined);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({ payload: { session_id: 1, status: 'Recording' } });
+    await handlers.get('transcription:final')({ payload: {
+      session_id: 1, text: 'stable', delivery_seq: 1, continuation_delivery: false,
+    } });
+    await handlers.get('transcription:partial')({ payload: {
+      session_id: 1, text: 'stable overlapping draft', completion_v1: true, is_segment_final: false,
+    } });
+    handlers.get('transcription:terminal')({ payload: {
+      session_id: 1, continuation_delivery: false, stable_snapshot: snapshot, delivery_complete: true,
+      report: null, error: null,
+    } });
+    for (let i = 0; i < 10; i++) await flushMicrotasks();
+    expect(store.finalText).toBe(snapshot);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text').map(([, args]) => args.text))
+      .toEqual(['stable']);
+    store.cleanup();
+  });
+
+  it('preserves the legacy segment-final prefix when terminal contains only the speech-final suffix', async () => {
+    appConfigMock.autoCopyToClipboard = true;
+    appConfigMock.autoPasteText = true;
+    invokeMock.mockResolvedValue(undefined);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({ payload: { session_id: 1, status: 'Recording' } });
+    await handlers.get('transcription:partial')({ payload: {
+      session_id: 1, text: 'one', timestamp: 0, start: 0, duration: 1, is_segment_final: true,
+    } });
+    await handlers.get('transcription:final')({ payload: {
+      session_id: 1, text: 'two', timestamp: 1, start: 1, duration: 1,
+    } });
+    expect(store.finalText).toBe('one two');
+    handlers.get('transcription:terminal')({ payload: {
+      session_id: 1, continuation_delivery: false, stable_snapshot: 'two', delivery_complete: true, report: null, error: null,
+    } });
+    await flushMicrotasks();
+    expect(store.finalText).toBe('one two');
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'copy_to_clipboard_native').map(([, args]) => args.text)).toEqual(['one two']);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text').map(([, args]) => args)).toEqual([
+      { text: 'one', sessionId: 1 }, { text: ' two', sessionId: 1 },
+    ]);
+    store.cleanup();
+  });
+
+  it('preserves legacy DG stable segment and interim stop fallback across terminal and B start', async () => {
+    appConfigMock.autoCopyToClipboard = true;
+    appConfigMock.autoPasteText = true;
+    invokeMock.mockResolvedValue(undefined);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({ payload: { session_id: 1, status: 'Recording' } });
+    await handlers.get('transcription:partial')({ payload: {
+      session_id: 1, text: 'stable', timestamp: 0, start: 0, duration: 1, is_segment_final: true,
+    } });
+    await handlers.get('transcription:partial')({ payload: {
+      session_id: 1, text: 'legacy tail', timestamp: 0, start: 1, duration: 1, is_segment_final: false, timing_known: false,
+    } });
+    await handlers.get('recording:status')({ payload: { session_id: 2, status: 'Recording' } });
+    handlers.get('transcription:terminal')({ payload: {
+      session_id: 1, continuation_delivery: false, stable_snapshot: '', delivery_complete: true, report: null, error: null,
+    } });
+    // A queued B stable delta acts as the existing ordered delivery barrier.
+    await handlers.get('transcription:final')({ payload: {
+      session_id: 2, text: 'B', timestamp: 0, delivery_seq: 1, timing_known: false,
+    } });
+    expect(store.finalText).toBe('B');
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'copy_to_clipboard_native').map(([, args]) => args.text)).toEqual(['stable legacy tail']);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text').map(([, args]) => args)).toEqual([
+      { text: 'stable', sessionId: 1 }, { text: ' legacy tail', sessionId: 1 }, { text: 'B', sessionId: 2 },
+    ]);
+    store.cleanup();
+  });
+
   it('reconciles a corrected suffix without blanking its stable animated prefix', () => {
     expect(
       reconcilePartialAnimation('The quick brown fax', 'The quick brown fox')
@@ -227,6 +963,8 @@ describe('transcription connect-retry reliability', () => {
   });
 
   it.each([
+    ['startFailed', 'terminal start'],
+    ['runtimeFailed', 'terminal runtime'],
     ['stopUncertain', 'terminal mic-safety'],
     ['finalizeFailed', 'terminal finalize'],
   ] as const)('закрывает активную сессию при %s fault (%s)', async (fault, _label) => {
@@ -247,7 +985,7 @@ describe('transcription connect-retry reliability', () => {
     await handlers.get('recording:intent-projection')({
       payload: {
         runId: 91,
-        intentRevision: undefined,
+        intentRevision: 1,
         status: 'Error',
         desiredOn: false,
         pendingStart: false,
@@ -267,6 +1005,716 @@ describe('transcription connect-retry reliability', () => {
     });
     expect(store.status).toBe('Error');
     expect(store.sessionId).toBeNull();
+  });
+
+  it.each(['error-first', 'projection-first', 'connection-quota-projection'] as const)(
+    'keeps the provider quota error when runtimeFailed arrives %s',
+    async (order) => {
+      invokeMock.mockResolvedValue(null);
+      const { handlers, store } = await initializeStoreWithHandlers();
+      const providerError = () => handlers.get('transcription:error')({
+        payload: {
+          session_id: 501,
+          error: 'Provider quota exceeded',
+          error_type: 'provider_quota_exceeded',
+          error_details: {
+            category: 'provider_quota_exceeded',
+            serverCode: 'PROVIDER_QUOTA_EXCEEDED',
+          },
+        },
+      });
+      const connectionError = () => handlers.get('transcription:error')({
+        payload: {
+          session_id: 501,
+          error: 'Failed to send audio after provider close',
+          error_type: 'connection',
+          error_details: { category: 'connection' },
+        },
+      });
+      const runtimeFailure = () => handlers.get('recording:intent-projection')({
+        payload: {
+          runId: 501,
+          faultRunId: 501,
+          intentRevision: 1,
+          status: 'Processing',
+          desiredOn: false,
+          pendingStart: false,
+          processingJobs: 0,
+          shutdownRequested: false,
+          fault: 'runtimeFailed',
+        },
+      });
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 501, status: 'Recording', stopped_via_hotkey: false },
+      });
+      if (order === 'error-first') {
+        await providerError();
+        await runtimeFailure();
+      } else if (order === 'projection-first') {
+        await runtimeFailure();
+        await providerError();
+      } else {
+        await connectionError();
+        await providerError();
+        await runtimeFailure();
+      }
+
+      expect(store.status).toBe('Error');
+      expect(store.sessionId).toBeNull();
+      expect(store.errorType).toBe('provider_quota_exceeded');
+      expect(store.error).toBeTruthy();
+    },
+  );
+
+  it('does not carry a previous run provider error into a failed new run', async () => {
+    invokeMock.mockResolvedValue(null);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({
+      payload: { session_id: 511, status: 'Recording', stopped_via_hotkey: false },
+    });
+    await handlers.get('transcription:error')({
+      payload: {
+        session_id: 511,
+        error: 'Provider quota exceeded',
+        error_type: 'provider_quota_exceeded',
+        error_details: { category: 'provider_quota_exceeded' },
+      },
+    });
+    await handlers.get('recording:intent-projection')({
+      payload: {
+        runId: 511,
+        faultRunId: 511,
+        intentRevision: 1,
+        status: 'Processing',
+        desiredOn: false,
+        pendingStart: false,
+        processingJobs: 0,
+        shutdownRequested: false,
+        fault: 'runtimeFailed',
+      },
+    });
+
+    store.prepareForRustHotkeyStart(false);
+    await handlers.get('recording:status')({
+      payload: { session_id: 512, status: 'Recording', stopped_via_hotkey: false },
+    });
+    await handlers.get('transcription:error')({
+      payload: {
+        session_id: 512,
+        error: 'New run connection failure',
+        error_type: 'connection',
+        error_details: { category: 'connection' },
+      },
+    });
+    await handlers.get('transcription:error')({
+      payload: {
+        session_id: 511,
+        error: 'Late provider quota error from the previous run',
+        error_type: 'provider_quota_exceeded',
+        error_details: { category: 'provider_quota_exceeded' },
+      },
+    });
+    expect(store.status).toBe('Error');
+    expect(store.errorType).toBe('connection');
+    await handlers.get('recording:intent-projection')({
+      payload: {
+        runId: 512,
+        faultRunId: 512,
+        intentRevision: 2,
+        status: 'Processing',
+        desiredOn: false,
+        pendingStart: false,
+        processingJobs: 0,
+        shutdownRequested: false,
+        fault: 'runtimeFailed',
+      },
+    });
+
+    expect(store.status).toBe('Error');
+    expect(store.errorType).toBe('connection');
+  });
+
+  it.each(['startFailed', 'runtimeFailed', 'stopUncertain'] as const)(
+    'preserves the old transcript tail when pending successor reports %s',
+    async (fault) => {
+      invokeMock.mockResolvedValue(null);
+      const { handlers, store } = await initializeStoreWithHandlers();
+      await handlers.get('recording:status')({
+        payload: { session_id: 1, status: 'Recording', stopped_via_hotkey: false },
+      });
+      await handlers.get('recording:status')({
+        payload: { session_id: 1, status: 'Processing', stopped_via_hotkey: true },
+      });
+
+      await handlers.get('recording:intent-projection')({
+        payload: {
+          runId: null,
+          faultRunId: 2,
+          intentRevision: 2,
+          status: 'Error',
+          desiredOn: false,
+          pendingStart: false,
+          processingJobs: 1,
+          shutdownRequested: false,
+          fault,
+        },
+      });
+      expect(store.status).toBe('Error');
+      expect(store.sessionId).toBe(1);
+      expect(store.error).toBeTruthy();
+
+      await handlers.get('recording:status')({
+        payload: { session_id: 2, status: 'Error', stopped_via_hotkey: false },
+      });
+      expect(store.sessionId).toBe(1);
+
+      await handlers.get('transcription:final')({
+        payload: {
+          session_id: 1,
+          text: 'old run final tail',
+          timestamp: 1,
+          start: 0,
+          duration: 1,
+        },
+      });
+      expect(store.finalText).toContain('old run final tail');
+
+      await handlers.get('recording:intent-projection')({
+        payload: {
+          runId: 2,
+          intentRevision: 2,
+          status: 'Processing',
+          desiredOn: false,
+          pendingStart: false,
+          processingJobs: 1,
+          shutdownRequested: false,
+        },
+      });
+      await handlers.get('recording:status')({
+        payload: { session_id: 1, status: 'Idle', stopped_via_hotkey: true },
+      });
+      expect(store.status).toBe('Error');
+      expect(store.sessionId).toBe(1);
+      expect(store.error).toBeTruthy();
+    },
+  );
+
+  it('requires actual typed capture readiness, independently from offered capability and event generation', async () => {
+    invokeMock.mockResolvedValue(null);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    handlers.get('recording:intent-projection')({payload: {intentRevision: 1, runId: 2, logicalRunId: 1, continuationPhase: 'continue_pending', desiredOn: true, pendingStart: true, status: 'Processing'}});
+    const readiness = {revision: 1, runId: 2, logicalRunId: 1, captureEpisodeId: 2, captureGeneration: 8, state: 'buffering', reason: 'connecting-provider', generation: 1, captureReady: false, transportReady: false, offeredContinuation: true};
+    handlers.get('recording:capture-readiness')({payload: readiness});
+    expect(store.isCaptureReady).toBe(false);
+    handlers.get('recording:capture-readiness')({payload: {...readiness, generation: 2, captureReady: 'true'}});
+    expect(store.isCaptureReady).toBe(false);
+    expect(store.captureReadiness?.generation).toBe(1);
+    handlers.get('recording:capture-readiness')({payload: {...readiness, generation: 3, captureReady: true}});
+    expect(store.isCaptureReady).toBe(true);
+    expect(store.captureRunId).toBe(2);
+    expect(store.captureGeneration).toBe(8);
+    expect(store.captureReadiness?.transportReady).toBe(false);
+    store.cleanup();
+  });
+
+  it('fences capture readiness by intent revision independently from transcript session', async () => {
+    invokeMock.mockResolvedValue(null);
+    const { handlers, store } = await initializeStoreWithHandlers();
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 90, status: 'Recording', stopped_via_hotkey: false },
+    });
+    await handlers.get('recording:capture-readiness')({
+      payload: {
+        revision: 8,
+        runId: 101,
+        state: 'buffering',
+        reason: 'finalizing-previous',
+        generation: 1,
+      },
+    });
+    expect(store.isCaptureReady).toBe(false);
+
+    await handlers.get('recording:intent-projection')({
+      payload: {
+        runId: 90,
+        intentRevision: 8,
+        status: 'Processing',
+        desiredOn: true,
+        pendingStart: true,
+        processingJobs: 1,
+        shutdownRequested: false,
+      },
+    });
+    await handlers.get('recording:status')({
+      payload: { session_id: 90, status: 'Processing', stopped_via_hotkey: true },
+    });
+
+    expect(store.sessionId).toBe(90);
+    expect(store.captureRunId).toBe(101);
+    expect(store.captureReadiness?.reason).toBe('finalizing-previous');
+    expect(store.isCaptureReady).toBe(true);
+
+    await handlers.get('recording:capture-readiness')({
+      payload: {
+        revision: 7,
+        runId: 89,
+        state: 'unavailable',
+        reason: 'error',
+        generation: 2,
+      },
+    });
+    await handlers.get('recording:intent-projection')({
+      payload: {
+        runId: null,
+        intentRevision: 7,
+        status: 'Idle',
+        desiredOn: false,
+        pendingStart: false,
+        processingJobs: 0,
+        shutdownRequested: false,
+      },
+    });
+
+    expect(store.recordingIntentRevision).toBe(8);
+    expect(store.isCaptureReady).toBe(true);
+  });
+
+  it('cannot resurrect a cancelled capture with delayed readiness', async () => {
+    invokeMock.mockResolvedValue(null);
+    const { handlers, store } = await initializeStoreWithHandlers();
+
+    await handlers.get('recording:intent-projection')({
+      payload: {
+        runId: 120,
+        intentRevision: 20,
+        status: 'Starting',
+        desiredOn: true,
+        pendingStart: true,
+        processingJobs: 0,
+        shutdownRequested: false,
+      },
+    });
+    await handlers.get('recording:capture-readiness')({
+      payload: {
+        revision: 20,
+        runId: 121,
+        state: 'buffering',
+        reason: 'connecting-provider',
+        generation: 5,
+      },
+    });
+    expect(store.isCaptureReady).toBe(true);
+
+    await handlers.get('recording:intent-projection')({
+      payload: {
+        runId: null,
+        intentRevision: 21,
+        status: 'Idle',
+        desiredOn: false,
+        pendingStart: false,
+        processingJobs: 0,
+        shutdownRequested: false,
+      },
+    });
+    expect(store.captureReadiness).toBeNull();
+    expect(store.isCaptureReady).toBe(false);
+
+    await handlers.get('recording:capture-readiness')({
+      payload: {
+        revision: 20,
+        runId: 121,
+        state: 'streaming',
+        reason: 'recording',
+        generation: 6,
+      },
+    });
+    expect(store.captureReadiness).toBeNull();
+    expect(store.isCaptureReady).toBe(false);
+  });
+
+  it('hydrates missed intent state from the authoritative readiness getter', async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'get_recording_capture_readiness') {
+        return {
+          revision: 30,
+          runId: 131,
+          state: 'buffering',
+          reason: 'connecting-provider',
+          generation: 10,
+        };
+      }
+      return null;
+    });
+
+    const { store } = await initializeStoreWithHandlers();
+    await flushMicrotasks();
+
+    expect(store.recordingDesiredOn).toBe(true);
+    expect(store.recordingIntentRevision).toBe(30);
+    expect(store.captureRunId).toBe(131);
+    expect(store.isCaptureReady).toBe(true);
+  });
+
+  it('hydrates from an equal-generation getter after the event wins the race', async () => {
+    const getter = deferred<any>();
+    const snapshot = {
+      revision: 31,
+      runId: 132,
+      state: 'buffering',
+      reason: 'connecting-provider',
+      generation: 11,
+    };
+    invokeMock.mockImplementation((command: string) =>
+      command === 'get_recording_capture_readiness' ? getter.promise : Promise.resolve(null)
+    );
+    const { handlers, store } = await initializeStoreWithHandlers();
+
+    await handlers.get('recording:capture-readiness')({ payload: snapshot });
+    expect(store.isCaptureReady).toBe(false);
+    getter.resolve(snapshot);
+    await flushMicrotasks();
+
+    expect(store.recordingIntentRevision).toBe(31);
+    expect(store.captureRunId).toBe(132);
+    expect(store.isCaptureReady).toBe(true);
+  });
+
+  it('does not erase a known Off revision with an idle null-revision snapshot', async () => {
+    let readinessSnapshot: any = null;
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'get_recording_status') return 'Idle';
+      if (command === 'get_recording_capture_readiness') return readinessSnapshot;
+      return null;
+    });
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:intent-projection')({
+      payload: {
+        runId: null,
+        intentRevision: 21,
+        status: 'Idle',
+        desiredOn: false,
+        pendingStart: false,
+        processingJobs: 0,
+        shutdownRequested: false,
+      },
+    });
+    readinessSnapshot = {
+      revision: null,
+      runId: null,
+      state: 'unavailable',
+      reason: 'idle',
+      generation: 12,
+    };
+    await store.reconcileBackendStatus('idle_snapshot');
+    expect(store.recordingIntentRevision).toBe(21);
+
+    await handlers.get('recording:intent-projection')({
+      payload: {
+        runId: 20,
+        intentRevision: 20,
+        status: 'Starting',
+        desiredOn: true,
+        pendingStart: true,
+        processingJobs: 0,
+        shutdownRequested: false,
+      },
+    });
+    await handlers.get('recording:capture-readiness')({
+      payload: {
+        revision: 20,
+        runId: 20,
+        state: 'streaming',
+        reason: 'recording',
+        generation: 13,
+      },
+    });
+    expect(store.recordingDesiredOn).toBe(false);
+    expect(store.recordingIntentRevision).toBe(21);
+    expect(store.isCaptureReady).toBe(false);
+  });
+
+  it('does not apply an older Starting snapshot after Recording arrives during readiness refresh', async () => {
+    invokeMock.mockResolvedValue(null);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    const readiness = deferred<any>();
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'get_recording_status') return Promise.resolve('Starting');
+      if (command === 'get_recording_capture_readiness') return readiness.promise;
+      return Promise.resolve(null);
+    });
+
+    const reconcile = store.reconcileBackendStatus('window_shown');
+    await flushMicrotasks();
+    await handlers.get('recording:status')({
+      payload: { session_id: 4, status: 'Recording', stopped_via_hotkey: true },
+    });
+    readiness.resolve(null);
+
+    expect(await reconcile).toBeNull();
+    expect(store.status).toBe('Recording');
+    expect(store.sessionId).toBe(4);
+    expect(store.lastAcceptedRecordingStatus).toEqual({
+      session_id: 4,
+      status: 'Recording',
+      stopped_via_hotkey: true,
+    });
+  });
+
+  it('applies authoritative Idle after readiness clears a provisional start', async () => {
+    invokeMock.mockResolvedValue(null);
+    const { store } = await initializeStoreWithHandlers();
+    store.prepareForRustHotkeyStart(false);
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'get_recording_status') return 'Idle';
+      if (command === 'get_recording_capture_readiness') {
+        return {
+          revision: null,
+          runId: null,
+          state: 'unavailable',
+          reason: 'idle',
+          generation: 1,
+        };
+      }
+      return null;
+    });
+
+    expect(await store.reconcileBackendStatus('window_shown')).toBe('Idle');
+    expect(store.status).toBe('Idle');
+    expect(store.recordingDesiredOn).toBe(false);
+    expect(store.isCaptureReady).toBe(false);
+  });
+
+  it('settles a no-session provisional start when readiness turns Off during reconciliation', async () => {
+    invokeMock.mockResolvedValue(null);
+    const { store } = await initializeStoreWithHandlers();
+    store.prepareForRustHotkeyStart(false);
+    const readiness = deferred<any>();
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'get_recording_status') return Promise.resolve('Starting');
+      if (command === 'get_recording_capture_readiness') return readiness.promise;
+      return Promise.resolve(null);
+    });
+
+    const reconcile = store.reconcileBackendStatus('window_shown');
+    await flushMicrotasks();
+    readiness.resolve({
+      revision: 9,
+      runId: null,
+      state: 'unavailable',
+      reason: 'cancelled',
+      generation: 9,
+    });
+
+    expect(await reconcile).toBe('Idle');
+    expect(store.status).toBe('Idle');
+    expect(store.sessionId).toBeNull();
+    expect(store.recordingDesiredOn).toBe(false);
+  });
+
+  it('does not close an old transcript session when readiness turns Off during reconciliation', async () => {
+    invokeMock.mockResolvedValue(null);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({
+      payload: { session_id: 170, status: 'Recording', stopped_via_hotkey: false },
+    });
+    await handlers.get('recording:status')({
+      payload: { session_id: 170, status: 'Processing', stopped_via_hotkey: true },
+    });
+    const readiness = deferred<any>();
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'get_recording_status') return Promise.resolve('Recording');
+      if (command === 'get_recording_capture_readiness') return readiness.promise;
+      return Promise.resolve(null);
+    });
+
+    const reconcile = store.reconcileBackendStatus('window_shown');
+    await flushMicrotasks();
+    readiness.resolve({
+      revision: 10,
+      runId: null,
+      state: 'unavailable',
+      reason: 'idle',
+      generation: 10,
+    });
+
+    expect(await reconcile).toBeNull();
+    expect(store.status).toBe('Processing');
+    expect(store.sessionId).toBe(170);
+    await handlers.get('transcription:final')({
+      payload: {
+        session_id: 170,
+        text: 'preserved old tail',
+        timestamp: 1,
+        start: 0,
+        duration: 1,
+      },
+    });
+    expect(store.finalText).toContain('preserved old tail');
+  });
+
+  it('does not let a stale revision poison readiness generation fencing', async () => {
+    invokeMock.mockResolvedValue(null);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:intent-projection')({
+      payload: {
+        runId: 140,
+        intentRevision: 40,
+        status: 'Starting',
+        desiredOn: true,
+        pendingStart: true,
+        processingJobs: 0,
+        shutdownRequested: false,
+      },
+    });
+    await handlers.get('recording:capture-readiness')({
+      payload: {
+        revision: 39,
+        runId: 139,
+        state: 'unavailable',
+        reason: 'error',
+        generation: 11,
+      },
+    });
+    await handlers.get('recording:capture-readiness')({
+      payload: {
+        revision: 40,
+        runId: 141,
+        state: 'buffering',
+        reason: 'recording',
+        generation: 10,
+      },
+    });
+
+    expect(store.captureRunId).toBe(141);
+    expect(store.isCaptureReady).toBe(true);
+  });
+
+  it('targets pending capture run on stop while preserving old transcript ownership', async () => {
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === 'stop_recording') {
+        expect(args).toEqual({ expectedSessionId: 151 });
+        return 'Recording stop requested';
+      }
+      return null;
+    });
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({
+      payload: { session_id: 150, status: 'Recording', stopped_via_hotkey: false },
+    });
+    await handlers.get('recording:intent-projection')({
+      payload: {
+        runId: 150,
+        intentRevision: 50,
+        status: 'Processing',
+        desiredOn: true,
+        pendingStart: true,
+        processingJobs: 1,
+        shutdownRequested: false,
+      },
+    });
+    await handlers.get('recording:capture-readiness')({
+      payload: {
+        revision: 50,
+        runId: 151,
+        state: 'buffering',
+        reason: 'finalizing-previous',
+        generation: 1,
+      },
+    });
+
+    await store.stopRecording('cancel_pending_capture');
+
+    expect(store.sessionId).toBe(150);
+    expect(store.status).toBe('Processing');
+  });
+
+  it('settles a cancelled provisional native session without waiting for an Idle status', async () => {
+    invokeMock.mockResolvedValue(null);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:capture-readiness')({ payload: {
+      revision: 64, runId: 32, state: 'unavailable', reason: 'starting-capture', generation: 1,
+    } });
+    await handlers.get('recording:intent-projection')({ payload: {
+      runId: 32, intentRevision: 64, status: 'Starting', desiredOn: true,
+      pendingStart: true, processingJobs: 0, shutdownRequested: false,
+    } });
+    await handlers.get('recording:status')({
+      payload: { session_id: 32, status: 'Starting', stopped_via_hotkey: true },
+    });
+    expect(store.status).toBe('Starting');
+    expect(store.sessionId).toBe(32);
+
+    await handlers.get('recording:capture-readiness')({ payload: {
+      revision: 65, runId: 32, state: 'unavailable', reason: 'cancelled', generation: 2,
+    } });
+    await handlers.get('recording:intent-projection')({ payload: {
+      runId: 32, intentRevision: 65, status: 'Starting', desiredOn: false,
+      pendingStart: false, processingJobs: 0, shutdownRequested: false,
+    } });
+
+    expect(store.status).toBe('Idle');
+    expect(store.sessionId).toBeNull();
+    await handlers.get('recording:status')({
+      payload: { session_id: 32, status: 'Starting', stopped_via_hotkey: true },
+    });
+    expect(store.status).toBe('Idle');
+    expect(store.sessionId).toBeNull();
+  });
+
+  it('preserves a real recording tail when UI missed Recording before its Off projection', async () => {
+    invokeMock.mockResolvedValue(null);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:intent-projection')({ payload: {
+      runId: 33, intentRevision: 66, status: 'Starting', desiredOn: true,
+      pendingStart: false, processingJobs: 0, shutdownRequested: false,
+    } });
+    await handlers.get('recording:status')({
+      payload: { session_id: 33, status: 'Starting', stopped_via_hotkey: true },
+    });
+    expect(store.status).toBe('Starting');
+
+    await handlers.get('recording:intent-projection')({ payload: {
+      runId: 33, intentRevision: 67, status: 'Processing', desiredOn: false,
+      pendingStart: false, processingJobs: 1, shutdownRequested: false,
+    } });
+    expect(store.sessionId).toBe(33);
+
+    await handlers.get('transcription:final')({ payload: {
+      session_id: 33, text: 'recording tail after delayed status', timestamp: 1, start: 0, duration: 1,
+    } });
+    expect(store.finalText).toContain('recording tail after delayed status');
+  });
+
+  it('keeps the previous transcript session open until its final tail arrives', async () => {
+    invokeMock.mockResolvedValue(null);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({
+      payload: { session_id: 160, status: 'Recording', stopped_via_hotkey: false },
+    });
+    await handlers.get('recording:status')({
+      payload: { session_id: 160, status: 'Processing', stopped_via_hotkey: true },
+    });
+
+    store.prepareForRustHotkeyStart(false);
+    expect(store.sessionId).toBe(160);
+
+    await handlers.get('transcription:final')({
+      payload: {
+        session_id: 160,
+        text: 'previous transcript tail',
+        timestamp: 1,
+        start: 0,
+        duration: 1,
+      },
+    });
+    expect(store.finalText).toContain('previous transcript tail');
+
+    await handlers.get('recording:status')({
+      payload: { session_id: 161, status: 'Starting', stopped_via_hotkey: false },
+    });
+    expect(store.sessionId).toBe(161);
   });
 
   afterEach(() => {
@@ -397,7 +1845,7 @@ describe('transcription connect-retry reliability', () => {
     expect(store.errorType).toBe('authentication');
   });
 
-  it('не показывает "Подключение..." для ожидаемого warm-start после hotkey', () => {
+  it('не считает warm-start доказательством готовности capture', () => {
     const store = useTranscriptionStore();
     store.finalText = 'старый текст';
     store.accumulatedText = 'старый хвост';
@@ -406,9 +1854,10 @@ describe('transcription connect-retry reliability', () => {
 
     store.prepareForRustHotkeyStart(true);
 
-    expect(store.status).toBe('Recording');
-    expect(store.isRecording).toBe(true);
-    expect(store.isStarting).toBe(false);
+    expect(store.status).toBe('Starting');
+    expect(store.isRecording).toBe(false);
+    expect(store.isStarting).toBe(true);
+    expect(store.isCaptureReady).toBe(false);
     expect(store.isConnecting).toBe(false);
     expect(store.sessionId).toBeNull();
     expect(store.hasVisibleTranscriptionText).toBe(false);
@@ -4014,6 +5463,127 @@ describe('transcription connect-retry reliability', () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it('keeps a UI retry alive across the failed-intent cleanup projection', async () => {
+    vi.useFakeTimers();
+    try {
+      invokeMock.mockResolvedValue(null);
+      const { handlers, store } = await initializeStoreWithHandlers();
+      let starts = 0;
+      invokeMock.mockImplementation(async (cmd) => {
+        if (cmd !== 'start_recording') return null;
+        starts++;
+        if (starts === 2) {
+          await handlers.get('recording:intent-projection')({ payload: {
+            runId: 2, intentRevision: 2, status: 'Starting', desiredOn: true,
+            pendingStart: false, processingJobs: 0, shutdownRequested: false,
+          } });
+          await handlers.get('recording:status')({
+            payload: { session_id: 2, status: 'Starting', stopped_via_hotkey: false },
+          });
+          await handlers.get('recording:status')({
+            payload: { session_id: 2, status: 'Recording', stopped_via_hotkey: false },
+          });
+        }
+        return 'Recording start requested';
+      });
+
+      const start = store.startRecording();
+      await flushMicrotasks();
+      await handlers.get('recording:intent-projection')({ payload: {
+        runId: 1, intentRevision: 1, status: 'Starting', desiredOn: true,
+        pendingStart: false, processingJobs: 0, shutdownRequested: false,
+      } });
+      await handlers.get('recording:status')({
+        payload: { session_id: 1, status: 'Starting', stopped_via_hotkey: false },
+      });
+      await handlers.get('recording:intent-projection')({ payload: {
+        runId: null, faultRunId: 1, intentRevision: 1, status: 'Error', desiredOn: false,
+        pendingStart: false, processingJobs: 0, shutdownRequested: false, fault: 'startFailed',
+      } });
+      expect(store.isConnecting).toBe(true);
+      expect(store.error).toBeNull();
+      await handlers.get('recording:status')({
+        payload: { session_id: 1, status: 'Error', stopped_via_hotkey: false },
+      });
+      expect(store.status).toBe('Starting');
+      await handlers.get('transcription:error')({ payload: {
+        session_id: 1, error: 'Connection error: network unavailable', error_type: 'connection',
+      } });
+      await handlers.get('recording:intent-projection')({ payload: {
+        runId: null, intentRevision: 1, status: 'Idle', desiredOn: false,
+        pendingStart: false, processingJobs: 0, shutdownRequested: false,
+      } });
+      invokeMock.mockImplementation(async (cmd) => {
+        if (cmd === 'get_recording_status') return 'Starting';
+        if (cmd === 'get_recording_capture_readiness') return {
+          revision: 1, runId: null, state: 'unavailable', reason: 'idle', generation: 1,
+        };
+        if (cmd !== 'start_recording') return null;
+        starts++;
+        if (starts === 2) {
+          await handlers.get('recording:intent-projection')({ payload: {
+            runId: 2, intentRevision: 2, status: 'Starting', desiredOn: true,
+            pendingStart: false, processingJobs: 0, shutdownRequested: false,
+          } });
+          await handlers.get('recording:status')({
+            payload: { session_id: 2, status: 'Starting', stopped_via_hotkey: false },
+          });
+          await handlers.get('recording:status')({
+            payload: { session_id: 2, status: 'Recording', stopped_via_hotkey: false },
+          });
+        }
+        return 'Recording start requested';
+      });
+      await store.reconcileBackendStatus('failed_start_cleanup');
+
+      expect(store.isConnecting).toBe(true);
+      expect(store.status).toBe('Starting');
+      expect(starts).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await start;
+      expect(starts).toBe(2);
+      expect(store.status).toBe('Recording');
+      expect(store.sessionId).toBe(2);
+      expect(store.isConnecting).toBe(false);
+      store.cleanup();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('cancels a UI retry when a newer native Off supersedes failed-intent cleanup', async () => {
+    vi.useFakeTimers();
+    try {
+      invokeMock.mockResolvedValue(null);
+      const { handlers, store } = await initializeStoreWithHandlers();
+      invokeMock.mockImplementation((cmd) =>
+        cmd === 'start_recording' ? Promise.resolve('Recording start requested') : Promise.resolve(null)
+      );
+      const start = store.startRecording();
+      await flushMicrotasks();
+      await handlers.get('recording:status')({
+        payload: { session_id: 1, status: 'Starting', stopped_via_hotkey: false },
+      });
+      await handlers.get('transcription:error')({ payload: {
+        session_id: 1, error: 'Connection error: network unavailable', error_type: 'connection',
+      } });
+      await handlers.get('recording:intent-projection')({ payload: {
+        runId: null, faultRunId: 1, intentRevision: 1, status: 'Error', desiredOn: false,
+        pendingStart: false, processingJobs: 0, shutdownRequested: false, fault: 'startFailed',
+      } });
+      await handlers.get('recording:intent-projection')({ payload: {
+        runId: null, intentRevision: 2, status: 'Idle', desiredOn: false,
+        pendingStart: false, processingJobs: 0, shutdownRequested: false,
+      } });
+
+      await vi.advanceTimersByTimeAsync(40_000);
+      await start;
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'start_recording')).toHaveLength(1);
+      expect(store.isConnecting).toBe(false);
+      expect(store.status).toBe('Idle');
+      store.cleanup();
+    } finally { vi.useRealTimers(); }
+  });
+
   it.each([0, 402])('handles failed-start cleanup with native active owner %s', async (replacementOwner) => {
     vi.useFakeTimers();
     try {
@@ -4108,7 +5678,7 @@ describe('transcription connect-retry reliability', () => {
     const store = useTranscriptionStore();
     store.prepareForRustHotkeyStart(true);
     await store.reconcileBackendStatus('window_shown');
-    expect(store.status).toBe('Recording');
+    expect(store.status).toBe('Starting');
     expect(store.sessionId).toBeNull();
   });
 

@@ -190,14 +190,23 @@ pub fn run() {
             #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
             presentation::native_e2e::native_e2e_configure,
             #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            presentation::native_e2e::native_e2e_close_recording,
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
             presentation::native_e2e::native_e2e_finish,
             #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            presentation::native_e2e::native_e2e_terminal_handoff,
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
             presentation::native_e2e::native_e2e_progress,
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            presentation::native_e2e::native_e2e_delay,
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            presentation::native_e2e::native_e2e_prepare_live_target,
             #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
             presentation::native_e2e::native_e2e_idle_then_press,
             commands::start_recording,
             commands::stop_recording,
             commands::get_recording_status,
+            commands::get_recording_capture_readiness,
             commands::start_incoming_translation,
             commands::stop_incoming_translation,
             commands::toggle_incoming_translation,
@@ -239,10 +248,14 @@ pub fn run() {
             commands::check_accessibility_permission,
             commands::request_accessibility_permission,
             commands::auto_paste_text,
+            commands::auto_paste_continuation_text,
+            commands::copy_continuation_text,
+            commands::finish_continuation_delivery,
             commands::copy_to_clipboard_native,
             commands::show_auth_window,
             commands::show_recording_window,
             commands::get_recording_window_epoch,
+            commands::get_recording_window_epoch_for_session,
             commands::hide_recording_window_if_current,
             commands::show_settings_window,
             commands::show_profile_window,
@@ -382,6 +395,7 @@ pub fn run() {
                         tauri::WindowEvent::CloseRequested { api, .. } => {
                             // Отменяем закрытие
                             api.prevent_close();
+                            commands::stop_recording_on_native_close(window_clone.app_handle());
                             // Скрываем окно
                             let _ = commands::hide_recording_webview(&window_clone);
                             log::debug!("Window hidden instead of closed (app still running in tray)");

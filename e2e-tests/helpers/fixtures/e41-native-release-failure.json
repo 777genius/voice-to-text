@@ -1,0 +1,4981 @@
+{
+  "fixture": {
+    "activeCaptures": 0,
+    "activeProviders": 0,
+    "audioChunks": 23,
+    "autoPasteTargetCaptures": 0,
+    "autoPastes": 0,
+    "captureEvents": [
+      {
+        "atMs": 561.176416,
+        "generation": 1,
+        "kind": "capture-start"
+      },
+      {
+        "atMs": 563.346,
+        "generation": 1,
+        "kind": "first-pcm"
+      },
+      {
+        "atMs": 649.645666,
+        "generation": 1,
+        "kind": "capture-off"
+      },
+      {
+        "atMs": 649.8011660000001,
+        "generation": 1,
+        "kind": "capture-joined"
+      },
+      {
+        "atMs": 905.5243750000001,
+        "generation": 2,
+        "kind": "capture-start"
+      },
+      {
+        "atMs": 910.473916,
+        "generation": 2,
+        "kind": "first-pcm"
+      },
+      {
+        "atMs": 1286.286791,
+        "generation": 2,
+        "kind": "capture-off"
+      },
+      {
+        "atMs": 1286.301916,
+        "generation": 2,
+        "kind": "capture-joined"
+      }
+    ],
+    "captureMarkers": [
+      {
+        "captureGeneration": 1,
+        "count": 4,
+        "firstSequence": 1,
+        "lastSequence": 4
+      },
+      {
+        "captureGeneration": 2,
+        "count": 19,
+        "firstSequence": 1,
+        "lastSequence": 19
+      }
+    ],
+    "captureRunAssociations": [
+      {
+        "captureFenceGeneration": 1,
+        "captureGeneration": 1,
+        "captureRunId": 1
+      },
+      {
+        "captureFenceGeneration": 3,
+        "captureGeneration": 2,
+        "captureRunId": 2
+      }
+    ],
+    "captureStartLatenciesMs": [
+      1,
+      1
+    ],
+    "captureStarts": 2,
+    "captureStops": 2,
+    "controlResults": [
+      {
+        "cumulativeBytes": 2560,
+        "delivered": true,
+        "logicalRunId": 1,
+        "operation": "pause",
+        "result": {
+          "current_phase": "paused_reclaimable",
+          "decision": "accepted",
+          "eligible_now": true,
+          "pause_epoch": 1,
+          "provider_session_id": "p4-1",
+          "reason": null,
+          "request_id": "p4-1-1"
+        }
+      },
+      {
+        "cumulativeBytes": 2560,
+        "delivered": true,
+        "logicalRunId": 1,
+        "operation": "continue",
+        "result": {
+          "current_phase": "active_awaiting_audio",
+          "decision": "accepted",
+          "eligible_now": true,
+          "pause_epoch": 1,
+          "provider_session_id": "p4-1",
+          "reason": null,
+          "request_id": "p4-1-2"
+        }
+      },
+      {
+        "cumulativeBytes": 14720,
+        "delivered": true,
+        "logicalRunId": 1,
+        "operation": "pause",
+        "result": {
+          "current_phase": "paused_reclaimable",
+          "decision": "accepted",
+          "eligible_now": true,
+          "pause_epoch": 2,
+          "provider_session_id": "p4-1",
+          "reason": null,
+          "request_id": "p4-1-3"
+        }
+      }
+    ],
+    "finals": 0,
+    "firstBWrites": [
+      {
+        "captureGeneration": 2,
+        "cumulativeBytes": 3200,
+        "logicalRunId": 1,
+        "pauseEpoch": 1
+      }
+    ],
+    "firstPcmLatenciesMs": [
+      {
+        "captureGeneration": 1,
+        "configuredDelayMs": 0,
+        "elapsedMs": 3
+      },
+      {
+        "captureGeneration": 2,
+        "configuredDelayMs": 0,
+        "elapsedMs": 6
+      }
+    ],
+    "intentObservations": [
+      {
+        "atMs": 560.059125,
+        "pressed": true
+      },
+      {
+        "atMs": 620.823833,
+        "pressed": false
+      },
+      {
+        "atMs": 903.915416,
+        "pressed": true
+      },
+      {
+        "atMs": 1281.880458,
+        "pressed": false
+      }
+    ],
+    "lastPastedSessionId": null,
+    "lastPastedText": null,
+    "lastTranscript": "Native fixture session 1",
+    "livePcmBytes": 0,
+    "markerViolations": [],
+    "maxActiveCaptures": 1,
+    "maxActiveProviders": 1,
+    "observationOverflow": false,
+    "providerAudioChunks": 23,
+    "providerFailures": 0,
+    "providerMarkers": [
+      {
+        "captureFenceGeneration": 1,
+        "captureGeneration": 1,
+        "captureRunId": 1,
+        "count": 4,
+        "firstSequence": 1,
+        "lastSequence": 4,
+        "providerSessionId": 1
+      },
+      {
+        "captureFenceGeneration": 3,
+        "captureGeneration": 2,
+        "captureRunId": 2,
+        "count": 19,
+        "firstSequence": 1,
+        "lastSequence": 19,
+        "providerSessionId": 1
+      }
+    ],
+    "providerPcmBytes": 14720,
+    "providerResumes": 0,
+    "providerStarts": 1,
+    "providerStops": 1,
+    "sourceEpisodes": []
+  },
+  "marker": "VOICETEXT_NATIVE_WINDOW_E2E_V1",
+  "nativeClock": "native-process-monotonic",
+  "nativeClockMs": 1323.047875,
+  "nativeInsertionTrace": {
+    "legacyAttempts": [],
+    "overflow": false,
+    "records": []
+  },
+  "nativeReadback": {
+    "armed": false,
+    "clock": "native-process-monotonic-observation",
+    "error": null,
+    "maxSamplingGapMs": 0,
+    "records": [],
+    "samplingGapDefinition": "current read end minus previous read start; conservative sample spacing",
+    "stopped": false,
+    "valid": false
+  },
+  "observationValid": true,
+  "ownedPath": "/Volumes/Transcend/.voicetext-native-temp-01a072cb/voicetext-native-e2e-0a32Uu/p4-textedit-a.txt",
+  "passed": false,
+  "preTeardown": {
+    "cleanupDeferredToRunner": false,
+    "clock": "native-process-monotonic",
+    "nativeClockMs": 1307.1825000000001,
+    "normalStopReleased": false,
+    "transport": null
+  },
+  "qualificationPassed": false,
+  "readerPreparation": false,
+  "readerWorkerJoined": false,
+  "report": {
+    "case": "E41",
+    "checkpoints": [
+      {
+        "label": "A recording",
+        "state": {
+          "captureEpisode": {
+            "generation": 1,
+            "runId": 1
+          },
+          "completedReport": null,
+          "continuationCase": "E41",
+          "continuationMode": true,
+          "coordinatorTrace": [
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "PolicyUpdated",
+              "reason": "None",
+              "runId": null,
+              "sequence": 1,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "PolicyUpdated",
+              "reason": "None",
+              "runId": null,
+              "sequence": 2,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 3,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": 1,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 4,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Idle",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 5,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 5,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 5,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 6,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 6,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 7,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 8,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 9,
+              "source": "None"
+            }
+          ],
+          "fixture": {
+            "activeCaptures": 1,
+            "activeProviders": 1,
+            "audioChunks": 3,
+            "autoPasteTargetCaptures": 0,
+            "autoPastes": 0,
+            "captureEvents": [
+              {
+                "atMs": 561.176416,
+                "generation": 1,
+                "kind": "capture-start"
+              },
+              {
+                "atMs": 563.346,
+                "generation": 1,
+                "kind": "first-pcm"
+              }
+            ],
+            "captureMarkers": [
+              {
+                "captureGeneration": 1,
+                "count": 3,
+                "firstSequence": 1,
+                "lastSequence": 3
+              }
+            ],
+            "captureRunAssociations": [
+              {
+                "captureFenceGeneration": 1,
+                "captureGeneration": 1,
+                "captureRunId": 1
+              }
+            ],
+            "captureStartLatenciesMs": [
+              1
+            ],
+            "captureStarts": 1,
+            "captureStops": 0,
+            "controlResults": [],
+            "finals": 0,
+            "firstBWrites": [],
+            "firstPcmLatenciesMs": [
+              {
+                "captureGeneration": 1,
+                "configuredDelayMs": 0,
+                "elapsedMs": 3
+              }
+            ],
+            "intentObservations": [
+              {
+                "atMs": 560.059125,
+                "pressed": true
+              }
+            ],
+            "lastPastedSessionId": null,
+            "lastPastedText": null,
+            "lastTranscript": "Native fixture session 1",
+            "livePcmBytes": 0,
+            "markerViolations": [],
+            "maxActiveCaptures": 1,
+            "maxActiveProviders": 1,
+            "observationOverflow": false,
+            "providerAudioChunks": 3,
+            "providerFailures": 0,
+            "providerMarkers": [
+              {
+                "captureFenceGeneration": 1,
+                "captureGeneration": 1,
+                "captureRunId": 1,
+                "count": 3,
+                "firstSequence": 1,
+                "lastSequence": 3,
+                "providerSessionId": 1
+              }
+            ],
+            "providerPcmBytes": 1920,
+            "providerResumes": 0,
+            "providerStarts": 1,
+            "providerStops": 0,
+            "sourceEpisodes": []
+          },
+          "historyEntryCount": 0,
+          "liveMode": false,
+          "logicalProviderRunId": 1,
+          "marker": "VOICETEXT_NATIVE_WINDOW_E2E_V1",
+          "nativeClockMs": 608.36875,
+          "nativeInsertionTrace": {
+            "legacyAttempts": [],
+            "overflow": false,
+            "records": []
+          },
+          "nativeReadback": {
+            "armed": false,
+            "clock": "native-process-monotonic-observation",
+            "error": null,
+            "maxSamplingGapMs": 0,
+            "records": [],
+            "samplingGapDefinition": "current read end minus previous read start; conservative sample spacing",
+            "stopped": false,
+            "valid": false
+          },
+          "pausedContinuation": null,
+          "position": {
+            "x": 2096,
+            "y": 1540
+          },
+          "preparedCaptureTokenCount": 0,
+          "readerPreparation": false,
+          "ready": true,
+          "sessionId": 1,
+          "status": "Recording",
+          "terminalMode": false,
+          "visible": true,
+          "windowEpoch": 3,
+          "windowNumber": 117167
+        }
+      },
+      {
+        "label": "A off",
+        "state": {
+          "captureEpisode": {
+            "generation": 1,
+            "runId": 1
+          },
+          "completedReport": null,
+          "continuationCase": "E41",
+          "continuationMode": true,
+          "coordinatorTrace": [
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "PolicyUpdated",
+              "reason": "None",
+              "runId": null,
+              "sequence": 1,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "PolicyUpdated",
+              "reason": "None",
+              "runId": null,
+              "sequence": 2,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 3,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": 1,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 4,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Idle",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 5,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 5,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 5,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 6,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 6,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 7,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 8,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 9,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 10,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 11,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Recording",
+              "desiredAfter": "Off",
+              "gesture": 1,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 12,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "CaptureStopEnqueued",
+              "reason": "Some(HoldReleased)",
+              "runId": 1,
+              "sequence": 12,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "Some(Hotkey)",
+              "runId": null,
+              "sequence": 12,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 13,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "CaptureStopped",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 14,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 14,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 15,
+              "source": "None"
+            }
+          ],
+          "fixture": {
+            "activeCaptures": 0,
+            "activeProviders": 1,
+            "audioChunks": 4,
+            "autoPasteTargetCaptures": 0,
+            "autoPastes": 0,
+            "captureEvents": [
+              {
+                "atMs": 561.176416,
+                "generation": 1,
+                "kind": "capture-start"
+              },
+              {
+                "atMs": 563.346,
+                "generation": 1,
+                "kind": "first-pcm"
+              },
+              {
+                "atMs": 649.645666,
+                "generation": 1,
+                "kind": "capture-off"
+              },
+              {
+                "atMs": 649.8011660000001,
+                "generation": 1,
+                "kind": "capture-joined"
+              }
+            ],
+            "captureMarkers": [
+              {
+                "captureGeneration": 1,
+                "count": 4,
+                "firstSequence": 1,
+                "lastSequence": 4
+              }
+            ],
+            "captureRunAssociations": [
+              {
+                "captureFenceGeneration": 1,
+                "captureGeneration": 1,
+                "captureRunId": 1
+              }
+            ],
+            "captureStartLatenciesMs": [
+              1
+            ],
+            "captureStarts": 1,
+            "captureStops": 1,
+            "controlResults": [
+              {
+                "cumulativeBytes": 2560,
+                "delivered": true,
+                "logicalRunId": 1,
+                "operation": "pause",
+                "result": {
+                  "current_phase": "paused_reclaimable",
+                  "decision": "accepted",
+                  "eligible_now": true,
+                  "pause_epoch": 1,
+                  "provider_session_id": "p4-1",
+                  "reason": null,
+                  "request_id": "p4-1-1"
+                }
+              }
+            ],
+            "finals": 0,
+            "firstBWrites": [],
+            "firstPcmLatenciesMs": [
+              {
+                "captureGeneration": 1,
+                "configuredDelayMs": 0,
+                "elapsedMs": 3
+              }
+            ],
+            "intentObservations": [
+              {
+                "atMs": 560.059125,
+                "pressed": true
+              },
+              {
+                "atMs": 620.823833,
+                "pressed": false
+              }
+            ],
+            "lastPastedSessionId": null,
+            "lastPastedText": null,
+            "lastTranscript": "Native fixture session 1",
+            "livePcmBytes": 0,
+            "markerViolations": [],
+            "maxActiveCaptures": 1,
+            "maxActiveProviders": 1,
+            "observationOverflow": false,
+            "providerAudioChunks": 4,
+            "providerFailures": 0,
+            "providerMarkers": [
+              {
+                "captureFenceGeneration": 1,
+                "captureGeneration": 1,
+                "captureRunId": 1,
+                "count": 4,
+                "firstSequence": 1,
+                "lastSequence": 4,
+                "providerSessionId": 1
+              }
+            ],
+            "providerPcmBytes": 2560,
+            "providerResumes": 0,
+            "providerStarts": 1,
+            "providerStops": 0,
+            "sourceEpisodes": []
+          },
+          "historyEntryCount": 0,
+          "liveMode": false,
+          "logicalProviderRunId": 1,
+          "marker": "VOICETEXT_NATIVE_WINDOW_E2E_V1",
+          "nativeClockMs": 697.177,
+          "nativeInsertionTrace": {
+            "legacyAttempts": [],
+            "overflow": false,
+            "records": []
+          },
+          "nativeReadback": {
+            "armed": false,
+            "clock": "native-process-monotonic-observation",
+            "error": null,
+            "maxSamplingGapMs": 0,
+            "records": [],
+            "samplingGapDefinition": "current read end minus previous read start; conservative sample spacing",
+            "stopped": false,
+            "valid": false
+          },
+          "pausedContinuation": {
+            "connectionGeneration": 1,
+            "logicalRunId": 1,
+            "pauseEpoch": 1,
+            "providerSessionId": "p4-1"
+          },
+          "position": {
+            "x": 2096,
+            "y": 1540
+          },
+          "preparedCaptureTokenCount": 0,
+          "readerPreparation": false,
+          "ready": true,
+          "sessionId": 1,
+          "status": "Processing",
+          "terminalMode": false,
+          "visible": false,
+          "windowEpoch": 4,
+          "windowNumber": 117167
+        }
+      },
+      {
+        "label": "B recording",
+        "state": {
+          "captureEpisode": {
+            "generation": 3,
+            "runId": 2
+          },
+          "completedReport": null,
+          "continuationCase": "E41",
+          "continuationMode": true,
+          "coordinatorTrace": [
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "PolicyUpdated",
+              "reason": "None",
+              "runId": null,
+              "sequence": 1,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "PolicyUpdated",
+              "reason": "None",
+              "runId": null,
+              "sequence": 2,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 3,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": 1,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 4,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Idle",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 5,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 5,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 5,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 6,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 6,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 7,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 8,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 9,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 10,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 11,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Recording",
+              "desiredAfter": "Off",
+              "gesture": 1,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 12,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "CaptureStopEnqueued",
+              "reason": "Some(HoldReleased)",
+              "runId": 1,
+              "sequence": 12,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "Some(Hotkey)",
+              "runId": null,
+              "sequence": 12,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 13,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "CaptureStopped",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 14,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 14,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 15,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 16,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": 2,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 17,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Idle",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": 2,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 18,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 18,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 18,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 19,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 19,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 20,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 21,
+              "source": "None"
+            }
+          ],
+          "fixture": {
+            "activeCaptures": 1,
+            "activeProviders": 1,
+            "audioChunks": 5,
+            "autoPasteTargetCaptures": 0,
+            "autoPastes": 0,
+            "captureEvents": [
+              {
+                "atMs": 561.176416,
+                "generation": 1,
+                "kind": "capture-start"
+              },
+              {
+                "atMs": 563.346,
+                "generation": 1,
+                "kind": "first-pcm"
+              },
+              {
+                "atMs": 649.645666,
+                "generation": 1,
+                "kind": "capture-off"
+              },
+              {
+                "atMs": 649.8011660000001,
+                "generation": 1,
+                "kind": "capture-joined"
+              },
+              {
+                "atMs": 905.524375,
+                "generation": 2,
+                "kind": "capture-start"
+              },
+              {
+                "atMs": 910.473916,
+                "generation": 2,
+                "kind": "first-pcm"
+              }
+            ],
+            "captureMarkers": [
+              {
+                "captureGeneration": 1,
+                "count": 4,
+                "firstSequence": 1,
+                "lastSequence": 4
+              },
+              {
+                "captureGeneration": 2,
+                "count": 1,
+                "firstSequence": 1,
+                "lastSequence": 1
+              }
+            ],
+            "captureRunAssociations": [
+              {
+                "captureFenceGeneration": 1,
+                "captureGeneration": 1,
+                "captureRunId": 1
+              },
+              {
+                "captureFenceGeneration": 3,
+                "captureGeneration": 2,
+                "captureRunId": 2
+              }
+            ],
+            "captureStartLatenciesMs": [
+              1,
+              1
+            ],
+            "captureStarts": 2,
+            "captureStops": 1,
+            "controlResults": [
+              {
+                "cumulativeBytes": 2560,
+                "delivered": true,
+                "logicalRunId": 1,
+                "operation": "pause",
+                "result": {
+                  "current_phase": "paused_reclaimable",
+                  "decision": "accepted",
+                  "eligible_now": true,
+                  "pause_epoch": 1,
+                  "provider_session_id": "p4-1",
+                  "reason": null,
+                  "request_id": "p4-1-1"
+                }
+              },
+              {
+                "cumulativeBytes": 2560,
+                "delivered": true,
+                "logicalRunId": 1,
+                "operation": "continue",
+                "result": {
+                  "current_phase": "active_awaiting_audio",
+                  "decision": "accepted",
+                  "eligible_now": true,
+                  "pause_epoch": 1,
+                  "provider_session_id": "p4-1",
+                  "reason": null,
+                  "request_id": "p4-1-2"
+                }
+              }
+            ],
+            "finals": 0,
+            "firstBWrites": [
+              {
+                "captureGeneration": 2,
+                "cumulativeBytes": 3200,
+                "logicalRunId": 1,
+                "pauseEpoch": 1
+              }
+            ],
+            "firstPcmLatenciesMs": [
+              {
+                "captureGeneration": 1,
+                "configuredDelayMs": 0,
+                "elapsedMs": 3
+              },
+              {
+                "captureGeneration": 2,
+                "configuredDelayMs": 0,
+                "elapsedMs": 6
+              }
+            ],
+            "intentObservations": [
+              {
+                "atMs": 560.059125,
+                "pressed": true
+              },
+              {
+                "atMs": 620.823833,
+                "pressed": false
+              },
+              {
+                "atMs": 903.915416,
+                "pressed": true
+              }
+            ],
+            "lastPastedSessionId": null,
+            "lastPastedText": null,
+            "lastTranscript": "Native fixture session 1",
+            "livePcmBytes": 0,
+            "markerViolations": [],
+            "maxActiveCaptures": 1,
+            "maxActiveProviders": 1,
+            "observationOverflow": false,
+            "providerAudioChunks": 5,
+            "providerFailures": 0,
+            "providerMarkers": [
+              {
+                "captureFenceGeneration": 1,
+                "captureGeneration": 1,
+                "captureRunId": 1,
+                "count": 4,
+                "firstSequence": 1,
+                "lastSequence": 4,
+                "providerSessionId": 1
+              },
+              {
+                "captureFenceGeneration": 3,
+                "captureGeneration": 2,
+                "captureRunId": 2,
+                "count": 1,
+                "firstSequence": 1,
+                "lastSequence": 1,
+                "providerSessionId": 1
+              }
+            ],
+            "providerPcmBytes": 3200,
+            "providerResumes": 0,
+            "providerStarts": 1,
+            "providerStops": 0,
+            "sourceEpisodes": []
+          },
+          "historyEntryCount": 0,
+          "liveMode": false,
+          "logicalProviderRunId": 1,
+          "marker": "VOICETEXT_NATIVE_WINDOW_E2E_V1",
+          "nativeClockMs": 928.079583,
+          "nativeInsertionTrace": {
+            "legacyAttempts": [],
+            "overflow": false,
+            "records": []
+          },
+          "nativeReadback": {
+            "armed": false,
+            "clock": "native-process-monotonic-observation",
+            "error": null,
+            "maxSamplingGapMs": 0,
+            "records": [],
+            "samplingGapDefinition": "current read end minus previous read start; conservative sample spacing",
+            "stopped": false,
+            "valid": false
+          },
+          "pausedContinuation": null,
+          "position": {
+            "x": 2096,
+            "y": 1540
+          },
+          "preparedCaptureTokenCount": 0,
+          "readerPreparation": false,
+          "ready": true,
+          "sessionId": 1,
+          "status": "Recording",
+          "terminalMode": false,
+          "visible": true,
+          "windowEpoch": 5,
+          "windowNumber": 117167
+        }
+      },
+      {
+        "label": "before stale-key-release",
+        "state": {
+          "captureEpisode": {
+            "generation": 3,
+            "runId": 2
+          },
+          "completedReport": null,
+          "continuationCase": "E41",
+          "continuationMode": true,
+          "coordinatorTrace": [
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "PolicyUpdated",
+              "reason": "None",
+              "runId": null,
+              "sequence": 1,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "PolicyUpdated",
+              "reason": "None",
+              "runId": null,
+              "sequence": 2,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 3,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": 1,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 4,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Idle",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 5,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 5,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 5,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 6,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 6,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 7,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 8,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 9,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 10,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 11,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Recording",
+              "desiredAfter": "Off",
+              "gesture": 1,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 12,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "CaptureStopEnqueued",
+              "reason": "Some(HoldReleased)",
+              "runId": 1,
+              "sequence": 12,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "Some(Hotkey)",
+              "runId": null,
+              "sequence": 12,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 13,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "CaptureStopped",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 14,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 14,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 15,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 16,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": 2,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 17,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Idle",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": 2,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 18,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 18,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 18,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 19,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 19,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 20,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 21,
+              "source": "None"
+            }
+          ],
+          "fixture": {
+            "activeCaptures": 1,
+            "activeProviders": 1,
+            "audioChunks": 6,
+            "autoPasteTargetCaptures": 0,
+            "autoPastes": 0,
+            "captureEvents": [
+              {
+                "atMs": 561.176416,
+                "generation": 1,
+                "kind": "capture-start"
+              },
+              {
+                "atMs": 563.346,
+                "generation": 1,
+                "kind": "first-pcm"
+              },
+              {
+                "atMs": 649.645666,
+                "generation": 1,
+                "kind": "capture-off"
+              },
+              {
+                "atMs": 649.8011660000001,
+                "generation": 1,
+                "kind": "capture-joined"
+              },
+              {
+                "atMs": 905.524375,
+                "generation": 2,
+                "kind": "capture-start"
+              },
+              {
+                "atMs": 910.473916,
+                "generation": 2,
+                "kind": "first-pcm"
+              }
+            ],
+            "captureMarkers": [
+              {
+                "captureGeneration": 1,
+                "count": 4,
+                "firstSequence": 1,
+                "lastSequence": 4
+              },
+              {
+                "captureGeneration": 2,
+                "count": 2,
+                "firstSequence": 1,
+                "lastSequence": 2
+              }
+            ],
+            "captureRunAssociations": [
+              {
+                "captureFenceGeneration": 1,
+                "captureGeneration": 1,
+                "captureRunId": 1
+              },
+              {
+                "captureFenceGeneration": 3,
+                "captureGeneration": 2,
+                "captureRunId": 2
+              }
+            ],
+            "captureStartLatenciesMs": [
+              1,
+              1
+            ],
+            "captureStarts": 2,
+            "captureStops": 1,
+            "controlResults": [
+              {
+                "cumulativeBytes": 2560,
+                "delivered": true,
+                "logicalRunId": 1,
+                "operation": "pause",
+                "result": {
+                  "current_phase": "paused_reclaimable",
+                  "decision": "accepted",
+                  "eligible_now": true,
+                  "pause_epoch": 1,
+                  "provider_session_id": "p4-1",
+                  "reason": null,
+                  "request_id": "p4-1-1"
+                }
+              },
+              {
+                "cumulativeBytes": 2560,
+                "delivered": true,
+                "logicalRunId": 1,
+                "operation": "continue",
+                "result": {
+                  "current_phase": "active_awaiting_audio",
+                  "decision": "accepted",
+                  "eligible_now": true,
+                  "pause_epoch": 1,
+                  "provider_session_id": "p4-1",
+                  "reason": null,
+                  "request_id": "p4-1-2"
+                }
+              }
+            ],
+            "finals": 0,
+            "firstBWrites": [
+              {
+                "captureGeneration": 2,
+                "cumulativeBytes": 3200,
+                "logicalRunId": 1,
+                "pauseEpoch": 1
+              }
+            ],
+            "firstPcmLatenciesMs": [
+              {
+                "captureGeneration": 1,
+                "configuredDelayMs": 0,
+                "elapsedMs": 3
+              },
+              {
+                "captureGeneration": 2,
+                "configuredDelayMs": 0,
+                "elapsedMs": 6
+              }
+            ],
+            "intentObservations": [
+              {
+                "atMs": 560.059125,
+                "pressed": true
+              },
+              {
+                "atMs": 620.823833,
+                "pressed": false
+              },
+              {
+                "atMs": 903.915416,
+                "pressed": true
+              }
+            ],
+            "lastPastedSessionId": null,
+            "lastPastedText": null,
+            "lastTranscript": "Native fixture session 1",
+            "livePcmBytes": 0,
+            "markerViolations": [],
+            "maxActiveCaptures": 1,
+            "maxActiveProviders": 1,
+            "observationOverflow": false,
+            "providerAudioChunks": 6,
+            "providerFailures": 0,
+            "providerMarkers": [
+              {
+                "captureFenceGeneration": 1,
+                "captureGeneration": 1,
+                "captureRunId": 1,
+                "count": 4,
+                "firstSequence": 1,
+                "lastSequence": 4,
+                "providerSessionId": 1
+              },
+              {
+                "captureFenceGeneration": 3,
+                "captureGeneration": 2,
+                "captureRunId": 2,
+                "count": 2,
+                "firstSequence": 1,
+                "lastSequence": 2,
+                "providerSessionId": 1
+              }
+            ],
+            "providerPcmBytes": 3840,
+            "providerResumes": 0,
+            "providerStarts": 1,
+            "providerStops": 0,
+            "sourceEpisodes": []
+          },
+          "historyEntryCount": 0,
+          "liveMode": false,
+          "logicalProviderRunId": 1,
+          "marker": "VOICETEXT_NATIVE_WINDOW_E2E_V1",
+          "nativeClockMs": 936.328416,
+          "nativeInsertionTrace": {
+            "legacyAttempts": [],
+            "overflow": false,
+            "records": []
+          },
+          "nativeReadback": {
+            "armed": false,
+            "clock": "native-process-monotonic-observation",
+            "error": null,
+            "maxSamplingGapMs": 0,
+            "records": [],
+            "samplingGapDefinition": "current read end minus previous read start; conservative sample spacing",
+            "stopped": false,
+            "valid": false
+          },
+          "pausedContinuation": null,
+          "position": {
+            "x": 2096,
+            "y": 1540
+          },
+          "preparedCaptureTokenCount": 0,
+          "readerPreparation": false,
+          "ready": true,
+          "sessionId": 1,
+          "status": "Recording",
+          "terminalMode": false,
+          "visible": true,
+          "windowEpoch": 5,
+          "windowNumber": 117167
+        }
+      },
+      {
+        "label": "stale-key-release",
+        "state": {
+          "captureEpisode": {
+            "generation": 3,
+            "runId": 2
+          },
+          "completedReport": null,
+          "continuationCase": "E41",
+          "continuationMode": true,
+          "coordinatorTrace": [
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "PolicyUpdated",
+              "reason": "None",
+              "runId": null,
+              "sequence": 1,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "PolicyUpdated",
+              "reason": "None",
+              "runId": null,
+              "sequence": 2,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 3,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": 1,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 4,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Idle",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 5,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 5,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 5,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 6,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 6,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 7,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 8,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 9,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 10,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 11,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Recording",
+              "desiredAfter": "Off",
+              "gesture": 1,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 12,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "CaptureStopEnqueued",
+              "reason": "Some(HoldReleased)",
+              "runId": 1,
+              "sequence": 12,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "Some(Hotkey)",
+              "runId": null,
+              "sequence": 12,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 13,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "CaptureStopped",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 14,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 14,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 15,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 16,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": 2,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 17,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Idle",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": 2,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 18,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 18,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 18,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 19,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 19,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 20,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 21,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "IntentRejected",
+              "reason": "None",
+              "runId": null,
+              "sequence": 22,
+              "source": "Some(HoldHotkey)"
+            }
+          ],
+          "fixture": {
+            "activeCaptures": 1,
+            "activeProviders": 1,
+            "audioChunks": 14,
+            "autoPasteTargetCaptures": 0,
+            "autoPastes": 0,
+            "captureEvents": [
+              {
+                "atMs": 561.176416,
+                "generation": 1,
+                "kind": "capture-start"
+              },
+              {
+                "atMs": 563.346,
+                "generation": 1,
+                "kind": "first-pcm"
+              },
+              {
+                "atMs": 649.645666,
+                "generation": 1,
+                "kind": "capture-off"
+              },
+              {
+                "atMs": 649.8011660000001,
+                "generation": 1,
+                "kind": "capture-joined"
+              },
+              {
+                "atMs": 905.524375,
+                "generation": 2,
+                "kind": "capture-start"
+              },
+              {
+                "atMs": 910.473916,
+                "generation": 2,
+                "kind": "first-pcm"
+              }
+            ],
+            "captureMarkers": [
+              {
+                "captureGeneration": 1,
+                "count": 4,
+                "firstSequence": 1,
+                "lastSequence": 4
+              },
+              {
+                "captureGeneration": 2,
+                "count": 10,
+                "firstSequence": 1,
+                "lastSequence": 10
+              }
+            ],
+            "captureRunAssociations": [
+              {
+                "captureFenceGeneration": 1,
+                "captureGeneration": 1,
+                "captureRunId": 1
+              },
+              {
+                "captureFenceGeneration": 3,
+                "captureGeneration": 2,
+                "captureRunId": 2
+              }
+            ],
+            "captureStartLatenciesMs": [
+              1,
+              1
+            ],
+            "captureStarts": 2,
+            "captureStops": 1,
+            "controlResults": [
+              {
+                "cumulativeBytes": 2560,
+                "delivered": true,
+                "logicalRunId": 1,
+                "operation": "pause",
+                "result": {
+                  "current_phase": "paused_reclaimable",
+                  "decision": "accepted",
+                  "eligible_now": true,
+                  "pause_epoch": 1,
+                  "provider_session_id": "p4-1",
+                  "reason": null,
+                  "request_id": "p4-1-1"
+                }
+              },
+              {
+                "cumulativeBytes": 2560,
+                "delivered": true,
+                "logicalRunId": 1,
+                "operation": "continue",
+                "result": {
+                  "current_phase": "active_awaiting_audio",
+                  "decision": "accepted",
+                  "eligible_now": true,
+                  "pause_epoch": 1,
+                  "provider_session_id": "p4-1",
+                  "reason": null,
+                  "request_id": "p4-1-2"
+                }
+              }
+            ],
+            "finals": 0,
+            "firstBWrites": [
+              {
+                "captureGeneration": 2,
+                "cumulativeBytes": 3200,
+                "logicalRunId": 1,
+                "pauseEpoch": 1
+              }
+            ],
+            "firstPcmLatenciesMs": [
+              {
+                "captureGeneration": 1,
+                "configuredDelayMs": 0,
+                "elapsedMs": 3
+              },
+              {
+                "captureGeneration": 2,
+                "configuredDelayMs": 0,
+                "elapsedMs": 6
+              }
+            ],
+            "intentObservations": [
+              {
+                "atMs": 560.059125,
+                "pressed": true
+              },
+              {
+                "atMs": 620.823833,
+                "pressed": false
+              },
+              {
+                "atMs": 903.915416,
+                "pressed": true
+              }
+            ],
+            "lastPastedSessionId": null,
+            "lastPastedText": null,
+            "lastTranscript": "Native fixture session 1",
+            "livePcmBytes": 0,
+            "markerViolations": [],
+            "maxActiveCaptures": 1,
+            "maxActiveProviders": 1,
+            "observationOverflow": false,
+            "providerAudioChunks": 14,
+            "providerFailures": 0,
+            "providerMarkers": [
+              {
+                "captureFenceGeneration": 1,
+                "captureGeneration": 1,
+                "captureRunId": 1,
+                "count": 4,
+                "firstSequence": 1,
+                "lastSequence": 4,
+                "providerSessionId": 1
+              },
+              {
+                "captureFenceGeneration": 3,
+                "captureGeneration": 2,
+                "captureRunId": 2,
+                "count": 10,
+                "firstSequence": 1,
+                "lastSequence": 10,
+                "providerSessionId": 1
+              }
+            ],
+            "providerPcmBytes": 8960,
+            "providerResumes": 0,
+            "providerStarts": 1,
+            "providerStops": 0,
+            "sourceEpisodes": []
+          },
+          "historyEntryCount": 0,
+          "liveMode": false,
+          "logicalProviderRunId": 1,
+          "marker": "VOICETEXT_NATIVE_WINDOW_E2E_V1",
+          "nativeClockMs": 1100.223916,
+          "nativeInsertionTrace": {
+            "legacyAttempts": [],
+            "overflow": false,
+            "records": []
+          },
+          "nativeReadback": {
+            "armed": false,
+            "clock": "native-process-monotonic-observation",
+            "error": null,
+            "maxSamplingGapMs": 0,
+            "records": [],
+            "samplingGapDefinition": "current read end minus previous read start; conservative sample spacing",
+            "stopped": false,
+            "valid": false
+          },
+          "pausedContinuation": null,
+          "position": {
+            "x": 2096,
+            "y": 1540
+          },
+          "preparedCaptureTokenCount": 0,
+          "readerPreparation": false,
+          "ready": true,
+          "sessionId": 1,
+          "status": "Recording",
+          "terminalMode": false,
+          "visible": true,
+          "windowEpoch": 5,
+          "windowNumber": 117167
+        }
+      },
+      {
+        "label": "before stale-vad",
+        "state": {
+          "captureEpisode": {
+            "generation": 3,
+            "runId": 2
+          },
+          "completedReport": null,
+          "continuationCase": "E41",
+          "continuationMode": true,
+          "coordinatorTrace": [
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "PolicyUpdated",
+              "reason": "None",
+              "runId": null,
+              "sequence": 1,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "PolicyUpdated",
+              "reason": "None",
+              "runId": null,
+              "sequence": 2,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 3,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": 1,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 4,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Idle",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 5,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 5,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 5,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 6,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 6,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 7,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 8,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 9,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 10,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 11,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Recording",
+              "desiredAfter": "Off",
+              "gesture": 1,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 12,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "CaptureStopEnqueued",
+              "reason": "Some(HoldReleased)",
+              "runId": 1,
+              "sequence": 12,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "Some(Hotkey)",
+              "runId": null,
+              "sequence": 12,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 13,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "CaptureStopped",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 14,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 14,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 15,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 16,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": 2,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 17,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Idle",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": 2,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 18,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 18,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 18,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 19,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 19,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 20,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 21,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "IntentRejected",
+              "reason": "None",
+              "runId": null,
+              "sequence": 22,
+              "source": "Some(HoldHotkey)"
+            }
+          ],
+          "fixture": {
+            "activeCaptures": 1,
+            "activeProviders": 1,
+            "audioChunks": 14,
+            "autoPasteTargetCaptures": 0,
+            "autoPastes": 0,
+            "captureEvents": [
+              {
+                "atMs": 561.176416,
+                "generation": 1,
+                "kind": "capture-start"
+              },
+              {
+                "atMs": 563.346,
+                "generation": 1,
+                "kind": "first-pcm"
+              },
+              {
+                "atMs": 649.645666,
+                "generation": 1,
+                "kind": "capture-off"
+              },
+              {
+                "atMs": 649.8011660000001,
+                "generation": 1,
+                "kind": "capture-joined"
+              },
+              {
+                "atMs": 905.524375,
+                "generation": 2,
+                "kind": "capture-start"
+              },
+              {
+                "atMs": 910.473916,
+                "generation": 2,
+                "kind": "first-pcm"
+              }
+            ],
+            "captureMarkers": [
+              {
+                "captureGeneration": 1,
+                "count": 4,
+                "firstSequence": 1,
+                "lastSequence": 4
+              },
+              {
+                "captureGeneration": 2,
+                "count": 10,
+                "firstSequence": 1,
+                "lastSequence": 10
+              }
+            ],
+            "captureRunAssociations": [
+              {
+                "captureFenceGeneration": 1,
+                "captureGeneration": 1,
+                "captureRunId": 1
+              },
+              {
+                "captureFenceGeneration": 3,
+                "captureGeneration": 2,
+                "captureRunId": 2
+              }
+            ],
+            "captureStartLatenciesMs": [
+              1,
+              1
+            ],
+            "captureStarts": 2,
+            "captureStops": 1,
+            "controlResults": [
+              {
+                "cumulativeBytes": 2560,
+                "delivered": true,
+                "logicalRunId": 1,
+                "operation": "pause",
+                "result": {
+                  "current_phase": "paused_reclaimable",
+                  "decision": "accepted",
+                  "eligible_now": true,
+                  "pause_epoch": 1,
+                  "provider_session_id": "p4-1",
+                  "reason": null,
+                  "request_id": "p4-1-1"
+                }
+              },
+              {
+                "cumulativeBytes": 2560,
+                "delivered": true,
+                "logicalRunId": 1,
+                "operation": "continue",
+                "result": {
+                  "current_phase": "active_awaiting_audio",
+                  "decision": "accepted",
+                  "eligible_now": true,
+                  "pause_epoch": 1,
+                  "provider_session_id": "p4-1",
+                  "reason": null,
+                  "request_id": "p4-1-2"
+                }
+              }
+            ],
+            "finals": 0,
+            "firstBWrites": [
+              {
+                "captureGeneration": 2,
+                "cumulativeBytes": 3200,
+                "logicalRunId": 1,
+                "pauseEpoch": 1
+              }
+            ],
+            "firstPcmLatenciesMs": [
+              {
+                "captureGeneration": 1,
+                "configuredDelayMs": 0,
+                "elapsedMs": 3
+              },
+              {
+                "captureGeneration": 2,
+                "configuredDelayMs": 0,
+                "elapsedMs": 6
+              }
+            ],
+            "intentObservations": [
+              {
+                "atMs": 560.059125,
+                "pressed": true
+              },
+              {
+                "atMs": 620.823833,
+                "pressed": false
+              },
+              {
+                "atMs": 903.915416,
+                "pressed": true
+              }
+            ],
+            "lastPastedSessionId": null,
+            "lastPastedText": null,
+            "lastTranscript": "Native fixture session 1",
+            "livePcmBytes": 0,
+            "markerViolations": [],
+            "maxActiveCaptures": 1,
+            "maxActiveProviders": 1,
+            "observationOverflow": false,
+            "providerAudioChunks": 14,
+            "providerFailures": 0,
+            "providerMarkers": [
+              {
+                "captureFenceGeneration": 1,
+                "captureGeneration": 1,
+                "captureRunId": 1,
+                "count": 4,
+                "firstSequence": 1,
+                "lastSequence": 4,
+                "providerSessionId": 1
+              },
+              {
+                "captureFenceGeneration": 3,
+                "captureGeneration": 2,
+                "captureRunId": 2,
+                "count": 10,
+                "firstSequence": 1,
+                "lastSequence": 10,
+                "providerSessionId": 1
+              }
+            ],
+            "providerPcmBytes": 8960,
+            "providerResumes": 0,
+            "providerStarts": 1,
+            "providerStops": 0,
+            "sourceEpisodes": []
+          },
+          "historyEntryCount": 0,
+          "liveMode": false,
+          "logicalProviderRunId": 1,
+          "marker": "VOICETEXT_NATIVE_WINDOW_E2E_V1",
+          "nativeClockMs": 1106.345125,
+          "nativeInsertionTrace": {
+            "legacyAttempts": [],
+            "overflow": false,
+            "records": []
+          },
+          "nativeReadback": {
+            "armed": false,
+            "clock": "native-process-monotonic-observation",
+            "error": null,
+            "maxSamplingGapMs": 0,
+            "records": [],
+            "samplingGapDefinition": "current read end minus previous read start; conservative sample spacing",
+            "stopped": false,
+            "valid": false
+          },
+          "pausedContinuation": null,
+          "position": {
+            "x": 2096,
+            "y": 1540
+          },
+          "preparedCaptureTokenCount": 0,
+          "readerPreparation": false,
+          "ready": true,
+          "sessionId": 1,
+          "status": "Recording",
+          "terminalMode": false,
+          "visible": true,
+          "windowEpoch": 5,
+          "windowNumber": 117167
+        }
+      },
+      {
+        "label": "stale-vad",
+        "state": {
+          "captureEpisode": {
+            "generation": 3,
+            "runId": 2
+          },
+          "completedReport": null,
+          "continuationCase": "E41",
+          "continuationMode": true,
+          "coordinatorTrace": [
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "PolicyUpdated",
+              "reason": "None",
+              "runId": null,
+              "sequence": 1,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "PolicyUpdated",
+              "reason": "None",
+              "runId": null,
+              "sequence": 2,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 3,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": 1,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 4,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Idle",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 5,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 5,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 5,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 6,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 6,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 7,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 8,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 9,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 10,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 11,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Recording",
+              "desiredAfter": "Off",
+              "gesture": 1,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 12,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "CaptureStopEnqueued",
+              "reason": "Some(HoldReleased)",
+              "runId": 1,
+              "sequence": 12,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "Some(Hotkey)",
+              "runId": null,
+              "sequence": 12,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 13,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "CaptureStopped",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 14,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 14,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 15,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 16,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": 2,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 17,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Idle",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": 2,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 18,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 18,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 18,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 19,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 19,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 20,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 21,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "IntentRejected",
+              "reason": "None",
+              "runId": null,
+              "sequence": 22,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "IntentRejected",
+              "reason": "None",
+              "runId": null,
+              "sequence": 23,
+              "source": "Some(Vad)"
+            }
+          ],
+          "fixture": {
+            "activeCaptures": 1,
+            "activeProviders": 1,
+            "audioChunks": 23,
+            "autoPasteTargetCaptures": 0,
+            "autoPastes": 0,
+            "captureEvents": [
+              {
+                "atMs": 561.176416,
+                "generation": 1,
+                "kind": "capture-start"
+              },
+              {
+                "atMs": 563.346,
+                "generation": 1,
+                "kind": "first-pcm"
+              },
+              {
+                "atMs": 649.645666,
+                "generation": 1,
+                "kind": "capture-off"
+              },
+              {
+                "atMs": 649.8011660000001,
+                "generation": 1,
+                "kind": "capture-joined"
+              },
+              {
+                "atMs": 905.524375,
+                "generation": 2,
+                "kind": "capture-start"
+              },
+              {
+                "atMs": 910.473916,
+                "generation": 2,
+                "kind": "first-pcm"
+              }
+            ],
+            "captureMarkers": [
+              {
+                "captureGeneration": 1,
+                "count": 4,
+                "firstSequence": 1,
+                "lastSequence": 4
+              },
+              {
+                "captureGeneration": 2,
+                "count": 19,
+                "firstSequence": 1,
+                "lastSequence": 19
+              }
+            ],
+            "captureRunAssociations": [
+              {
+                "captureFenceGeneration": 1,
+                "captureGeneration": 1,
+                "captureRunId": 1
+              },
+              {
+                "captureFenceGeneration": 3,
+                "captureGeneration": 2,
+                "captureRunId": 2
+              }
+            ],
+            "captureStartLatenciesMs": [
+              1,
+              1
+            ],
+            "captureStarts": 2,
+            "captureStops": 1,
+            "controlResults": [
+              {
+                "cumulativeBytes": 2560,
+                "delivered": true,
+                "logicalRunId": 1,
+                "operation": "pause",
+                "result": {
+                  "current_phase": "paused_reclaimable",
+                  "decision": "accepted",
+                  "eligible_now": true,
+                  "pause_epoch": 1,
+                  "provider_session_id": "p4-1",
+                  "reason": null,
+                  "request_id": "p4-1-1"
+                }
+              },
+              {
+                "cumulativeBytes": 2560,
+                "delivered": true,
+                "logicalRunId": 1,
+                "operation": "continue",
+                "result": {
+                  "current_phase": "active_awaiting_audio",
+                  "decision": "accepted",
+                  "eligible_now": true,
+                  "pause_epoch": 1,
+                  "provider_session_id": "p4-1",
+                  "reason": null,
+                  "request_id": "p4-1-2"
+                }
+              }
+            ],
+            "finals": 0,
+            "firstBWrites": [
+              {
+                "captureGeneration": 2,
+                "cumulativeBytes": 3200,
+                "logicalRunId": 1,
+                "pauseEpoch": 1
+              }
+            ],
+            "firstPcmLatenciesMs": [
+              {
+                "captureGeneration": 1,
+                "configuredDelayMs": 0,
+                "elapsedMs": 3
+              },
+              {
+                "captureGeneration": 2,
+                "configuredDelayMs": 0,
+                "elapsedMs": 6
+              }
+            ],
+            "intentObservations": [
+              {
+                "atMs": 560.059125,
+                "pressed": true
+              },
+              {
+                "atMs": 620.823833,
+                "pressed": false
+              },
+              {
+                "atMs": 903.915416,
+                "pressed": true
+              }
+            ],
+            "lastPastedSessionId": null,
+            "lastPastedText": null,
+            "lastTranscript": "Native fixture session 1",
+            "livePcmBytes": 0,
+            "markerViolations": [],
+            "maxActiveCaptures": 1,
+            "maxActiveProviders": 1,
+            "observationOverflow": false,
+            "providerAudioChunks": 23,
+            "providerFailures": 0,
+            "providerMarkers": [
+              {
+                "captureFenceGeneration": 1,
+                "captureGeneration": 1,
+                "captureRunId": 1,
+                "count": 4,
+                "firstSequence": 1,
+                "lastSequence": 4,
+                "providerSessionId": 1
+              },
+              {
+                "captureFenceGeneration": 3,
+                "captureGeneration": 2,
+                "captureRunId": 2,
+                "count": 19,
+                "firstSequence": 1,
+                "lastSequence": 19,
+                "providerSessionId": 1
+              }
+            ],
+            "providerPcmBytes": 14720,
+            "providerResumes": 0,
+            "providerStarts": 1,
+            "providerStops": 0,
+            "sourceEpisodes": []
+          },
+          "historyEntryCount": 0,
+          "liveMode": false,
+          "logicalProviderRunId": 1,
+          "marker": "VOICETEXT_NATIVE_WINDOW_E2E_V1",
+          "nativeClockMs": 1269.210375,
+          "nativeInsertionTrace": {
+            "legacyAttempts": [],
+            "overflow": false,
+            "records": []
+          },
+          "nativeReadback": {
+            "armed": false,
+            "clock": "native-process-monotonic-observation",
+            "error": null,
+            "maxSamplingGapMs": 0,
+            "records": [],
+            "samplingGapDefinition": "current read end minus previous read start; conservative sample spacing",
+            "stopped": false,
+            "valid": false
+          },
+          "pausedContinuation": null,
+          "position": {
+            "x": 2096,
+            "y": 1540
+          },
+          "preparedCaptureTokenCount": 0,
+          "readerPreparation": false,
+          "ready": true,
+          "sessionId": 1,
+          "status": "Recording",
+          "terminalMode": false,
+          "visible": true,
+          "windowEpoch": 5,
+          "windowNumber": 117167
+        }
+      },
+      {
+        "label": "before current key release",
+        "state": {
+          "captureEpisode": {
+            "generation": 3,
+            "runId": 2
+          },
+          "completedReport": null,
+          "continuationCase": "E41",
+          "continuationMode": true,
+          "coordinatorTrace": [
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "PolicyUpdated",
+              "reason": "None",
+              "runId": null,
+              "sequence": 1,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "PolicyUpdated",
+              "reason": "None",
+              "runId": null,
+              "sequence": 2,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 3,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": 1,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 4,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Idle",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 5,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 5,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 5,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 6,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 6,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 7,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 8,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 9,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 10,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 11,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Recording",
+              "desiredAfter": "Off",
+              "gesture": 1,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 12,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "CaptureStopEnqueued",
+              "reason": "Some(HoldReleased)",
+              "runId": 1,
+              "sequence": 12,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "Some(Hotkey)",
+              "runId": null,
+              "sequence": 12,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 13,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "CaptureStopped",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 14,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 14,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 15,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 16,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": 2,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 17,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Idle",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": 2,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 18,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 18,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 18,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 19,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 19,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 20,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 21,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "IntentRejected",
+              "reason": "None",
+              "runId": null,
+              "sequence": 22,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "IntentRejected",
+              "reason": "None",
+              "runId": null,
+              "sequence": 23,
+              "source": "Some(Vad)"
+            }
+          ],
+          "fixture": {
+            "activeCaptures": 1,
+            "activeProviders": 1,
+            "audioChunks": 23,
+            "autoPasteTargetCaptures": 0,
+            "autoPastes": 0,
+            "captureEvents": [
+              {
+                "atMs": 561.176416,
+                "generation": 1,
+                "kind": "capture-start"
+              },
+              {
+                "atMs": 563.346,
+                "generation": 1,
+                "kind": "first-pcm"
+              },
+              {
+                "atMs": 649.645666,
+                "generation": 1,
+                "kind": "capture-off"
+              },
+              {
+                "atMs": 649.8011660000001,
+                "generation": 1,
+                "kind": "capture-joined"
+              },
+              {
+                "atMs": 905.524375,
+                "generation": 2,
+                "kind": "capture-start"
+              },
+              {
+                "atMs": 910.473916,
+                "generation": 2,
+                "kind": "first-pcm"
+              }
+            ],
+            "captureMarkers": [
+              {
+                "captureGeneration": 1,
+                "count": 4,
+                "firstSequence": 1,
+                "lastSequence": 4
+              },
+              {
+                "captureGeneration": 2,
+                "count": 19,
+                "firstSequence": 1,
+                "lastSequence": 19
+              }
+            ],
+            "captureRunAssociations": [
+              {
+                "captureFenceGeneration": 1,
+                "captureGeneration": 1,
+                "captureRunId": 1
+              },
+              {
+                "captureFenceGeneration": 3,
+                "captureGeneration": 2,
+                "captureRunId": 2
+              }
+            ],
+            "captureStartLatenciesMs": [
+              1,
+              1
+            ],
+            "captureStarts": 2,
+            "captureStops": 1,
+            "controlResults": [
+              {
+                "cumulativeBytes": 2560,
+                "delivered": true,
+                "logicalRunId": 1,
+                "operation": "pause",
+                "result": {
+                  "current_phase": "paused_reclaimable",
+                  "decision": "accepted",
+                  "eligible_now": true,
+                  "pause_epoch": 1,
+                  "provider_session_id": "p4-1",
+                  "reason": null,
+                  "request_id": "p4-1-1"
+                }
+              },
+              {
+                "cumulativeBytes": 2560,
+                "delivered": true,
+                "logicalRunId": 1,
+                "operation": "continue",
+                "result": {
+                  "current_phase": "active_awaiting_audio",
+                  "decision": "accepted",
+                  "eligible_now": true,
+                  "pause_epoch": 1,
+                  "provider_session_id": "p4-1",
+                  "reason": null,
+                  "request_id": "p4-1-2"
+                }
+              }
+            ],
+            "finals": 0,
+            "firstBWrites": [
+              {
+                "captureGeneration": 2,
+                "cumulativeBytes": 3200,
+                "logicalRunId": 1,
+                "pauseEpoch": 1
+              }
+            ],
+            "firstPcmLatenciesMs": [
+              {
+                "captureGeneration": 1,
+                "configuredDelayMs": 0,
+                "elapsedMs": 3
+              },
+              {
+                "captureGeneration": 2,
+                "configuredDelayMs": 0,
+                "elapsedMs": 6
+              }
+            ],
+            "intentObservations": [
+              {
+                "atMs": 560.059125,
+                "pressed": true
+              },
+              {
+                "atMs": 620.823833,
+                "pressed": false
+              },
+              {
+                "atMs": 903.915416,
+                "pressed": true
+              }
+            ],
+            "lastPastedSessionId": null,
+            "lastPastedText": null,
+            "lastTranscript": "Native fixture session 1",
+            "livePcmBytes": 0,
+            "markerViolations": [],
+            "maxActiveCaptures": 1,
+            "maxActiveProviders": 1,
+            "observationOverflow": false,
+            "providerAudioChunks": 23,
+            "providerFailures": 0,
+            "providerMarkers": [
+              {
+                "captureFenceGeneration": 1,
+                "captureGeneration": 1,
+                "captureRunId": 1,
+                "count": 4,
+                "firstSequence": 1,
+                "lastSequence": 4,
+                "providerSessionId": 1
+              },
+              {
+                "captureFenceGeneration": 3,
+                "captureGeneration": 2,
+                "captureRunId": 2,
+                "count": 19,
+                "firstSequence": 1,
+                "lastSequence": 19,
+                "providerSessionId": 1
+              }
+            ],
+            "providerPcmBytes": 14720,
+            "providerResumes": 0,
+            "providerStarts": 1,
+            "providerStops": 0,
+            "sourceEpisodes": []
+          },
+          "historyEntryCount": 0,
+          "liveMode": false,
+          "logicalProviderRunId": 1,
+          "marker": "VOICETEXT_NATIVE_WINDOW_E2E_V1",
+          "nativeClockMs": 1275.107791,
+          "nativeInsertionTrace": {
+            "legacyAttempts": [],
+            "overflow": false,
+            "records": []
+          },
+          "nativeReadback": {
+            "armed": false,
+            "clock": "native-process-monotonic-observation",
+            "error": null,
+            "maxSamplingGapMs": 0,
+            "records": [],
+            "samplingGapDefinition": "current read end minus previous read start; conservative sample spacing",
+            "stopped": false,
+            "valid": false
+          },
+          "pausedContinuation": null,
+          "position": {
+            "x": 2096,
+            "y": 1540
+          },
+          "preparedCaptureTokenCount": 0,
+          "readerPreparation": false,
+          "ready": true,
+          "sessionId": 1,
+          "status": "Recording",
+          "terminalMode": false,
+          "visible": true,
+          "windowEpoch": 5,
+          "windowNumber": 117167
+        }
+      },
+      {
+        "label": "current key release stops B",
+        "state": {
+          "captureEpisode": {
+            "generation": 3,
+            "runId": 2
+          },
+          "completedReport": null,
+          "continuationCase": "E41",
+          "continuationMode": true,
+          "coordinatorTrace": [
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "PolicyUpdated",
+              "reason": "None",
+              "runId": null,
+              "sequence": 1,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "PolicyUpdated",
+              "reason": "None",
+              "runId": null,
+              "sequence": 2,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 3,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": 1,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 4,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Idle",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 5,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 5,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 5,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 6,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 6,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 7,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 8,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 9,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 10,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(1), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 11,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Recording",
+              "desiredAfter": "Off",
+              "gesture": 1,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 12,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "CaptureStopEnqueued",
+              "reason": "Some(HoldReleased)",
+              "runId": 1,
+              "sequence": 12,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "Some(Hotkey)",
+              "runId": null,
+              "sequence": 12,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 13,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "CaptureStopped",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 14,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 14,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 15,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 16,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": 2,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 17,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Idle",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": 2,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 18,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartEnqueued",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 18,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Preparing",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 18,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Preparing",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "StartCompleted",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 19,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Starting",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 19,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Starting",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 20,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 21,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": 1,
+              "phase": "IntentRejected",
+              "reason": "None",
+              "runId": null,
+              "sequence": 22,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "IntentRejected",
+              "reason": "None",
+              "runId": null,
+              "sequence": 23,
+              "source": "Some(Vad)"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": null,
+              "phase": "OsReceived",
+              "reason": "None",
+              "runId": null,
+              "sequence": 24,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Recording",
+              "captureBefore": "Recording",
+              "desiredAfter": "On { revision: IntentRevision(3), source: HoldHotkey }",
+              "gesture": 2,
+              "phase": "GestureAccepted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 25,
+              "source": "Some(CarbonHotkey)"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Recording",
+              "desiredAfter": "Off",
+              "gesture": 2,
+              "phase": "IntentApplied",
+              "reason": "None",
+              "runId": null,
+              "sequence": 26,
+              "source": "Some(HoldHotkey)"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "CaptureStopEnqueued",
+              "reason": "Some(HoldReleased)",
+              "runId": 2,
+              "sequence": 26,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "WindowEnqueued",
+              "reason": "Some(Hotkey)",
+              "runId": null,
+              "sequence": 26,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Stopping",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "WindowCompleted",
+              "reason": "None",
+              "runId": null,
+              "sequence": 27,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Stopping",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "CaptureStopped",
+              "reason": "None",
+              "runId": 2,
+              "sequence": 28,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": null,
+              "sequence": 28,
+              "source": "None"
+            },
+            {
+              "captureAfter": "Idle",
+              "captureBefore": "Idle",
+              "desiredAfter": "Off",
+              "gesture": null,
+              "phase": "EffectEnqueued",
+              "reason": "None",
+              "runId": 1,
+              "sequence": 29,
+              "source": "None"
+            }
+          ],
+          "fixture": {
+            "activeCaptures": 0,
+            "activeProviders": 1,
+            "audioChunks": 23,
+            "autoPasteTargetCaptures": 0,
+            "autoPastes": 0,
+            "captureEvents": [
+              {
+                "atMs": 561.176416,
+                "generation": 1,
+                "kind": "capture-start"
+              },
+              {
+                "atMs": 563.346,
+                "generation": 1,
+                "kind": "first-pcm"
+              },
+              {
+                "atMs": 649.645666,
+                "generation": 1,
+                "kind": "capture-off"
+              },
+              {
+                "atMs": 649.8011660000001,
+                "generation": 1,
+                "kind": "capture-joined"
+              },
+              {
+                "atMs": 905.524375,
+                "generation": 2,
+                "kind": "capture-start"
+              },
+              {
+                "atMs": 910.473916,
+                "generation": 2,
+                "kind": "first-pcm"
+              },
+              {
+                "atMs": 1286.286791,
+                "generation": 2,
+                "kind": "capture-off"
+              },
+              {
+                "atMs": 1286.301916,
+                "generation": 2,
+                "kind": "capture-joined"
+              }
+            ],
+            "captureMarkers": [
+              {
+                "captureGeneration": 1,
+                "count": 4,
+                "firstSequence": 1,
+                "lastSequence": 4
+              },
+              {
+                "captureGeneration": 2,
+                "count": 19,
+                "firstSequence": 1,
+                "lastSequence": 19
+              }
+            ],
+            "captureRunAssociations": [
+              {
+                "captureFenceGeneration": 1,
+                "captureGeneration": 1,
+                "captureRunId": 1
+              },
+              {
+                "captureFenceGeneration": 3,
+                "captureGeneration": 2,
+                "captureRunId": 2
+              }
+            ],
+            "captureStartLatenciesMs": [
+              1,
+              1
+            ],
+            "captureStarts": 2,
+            "captureStops": 2,
+            "controlResults": [
+              {
+                "cumulativeBytes": 2560,
+                "delivered": true,
+                "logicalRunId": 1,
+                "operation": "pause",
+                "result": {
+                  "current_phase": "paused_reclaimable",
+                  "decision": "accepted",
+                  "eligible_now": true,
+                  "pause_epoch": 1,
+                  "provider_session_id": "p4-1",
+                  "reason": null,
+                  "request_id": "p4-1-1"
+                }
+              },
+              {
+                "cumulativeBytes": 2560,
+                "delivered": true,
+                "logicalRunId": 1,
+                "operation": "continue",
+                "result": {
+                  "current_phase": "active_awaiting_audio",
+                  "decision": "accepted",
+                  "eligible_now": true,
+                  "pause_epoch": 1,
+                  "provider_session_id": "p4-1",
+                  "reason": null,
+                  "request_id": "p4-1-2"
+                }
+              },
+              {
+                "cumulativeBytes": 14720,
+                "delivered": true,
+                "logicalRunId": 1,
+                "operation": "pause",
+                "result": {
+                  "current_phase": "paused_reclaimable",
+                  "decision": "accepted",
+                  "eligible_now": true,
+                  "pause_epoch": 2,
+                  "provider_session_id": "p4-1",
+                  "reason": null,
+                  "request_id": "p4-1-3"
+                }
+              }
+            ],
+            "finals": 0,
+            "firstBWrites": [
+              {
+                "captureGeneration": 2,
+                "cumulativeBytes": 3200,
+                "logicalRunId": 1,
+                "pauseEpoch": 1
+              }
+            ],
+            "firstPcmLatenciesMs": [
+              {
+                "captureGeneration": 1,
+                "configuredDelayMs": 0,
+                "elapsedMs": 3
+              },
+              {
+                "captureGeneration": 2,
+                "configuredDelayMs": 0,
+                "elapsedMs": 6
+              }
+            ],
+            "intentObservations": [
+              {
+                "atMs": 560.059125,
+                "pressed": true
+              },
+              {
+                "atMs": 620.823833,
+                "pressed": false
+              },
+              {
+                "atMs": 903.915416,
+                "pressed": true
+              },
+              {
+                "atMs": 1281.880458,
+                "pressed": false
+              }
+            ],
+            "lastPastedSessionId": null,
+            "lastPastedText": null,
+            "lastTranscript": "Native fixture session 1",
+            "livePcmBytes": 0,
+            "markerViolations": [],
+            "maxActiveCaptures": 1,
+            "maxActiveProviders": 1,
+            "observationOverflow": false,
+            "providerAudioChunks": 23,
+            "providerFailures": 0,
+            "providerMarkers": [
+              {
+                "captureFenceGeneration": 1,
+                "captureGeneration": 1,
+                "captureRunId": 1,
+                "count": 4,
+                "firstSequence": 1,
+                "lastSequence": 4,
+                "providerSessionId": 1
+              },
+              {
+                "captureFenceGeneration": 3,
+                "captureGeneration": 2,
+                "captureRunId": 2,
+                "count": 19,
+                "firstSequence": 1,
+                "lastSequence": 19,
+                "providerSessionId": 1
+              }
+            ],
+            "providerPcmBytes": 14720,
+            "providerResumes": 0,
+            "providerStarts": 1,
+            "providerStops": 0,
+            "sourceEpisodes": []
+          },
+          "historyEntryCount": 0,
+          "liveMode": false,
+          "logicalProviderRunId": 1,
+          "marker": "VOICETEXT_NATIVE_WINDOW_E2E_V1",
+          "nativeClockMs": 1292.812875,
+          "nativeInsertionTrace": {
+            "legacyAttempts": [],
+            "overflow": false,
+            "records": []
+          },
+          "nativeReadback": {
+            "armed": false,
+            "clock": "native-process-monotonic-observation",
+            "error": null,
+            "maxSamplingGapMs": 0,
+            "records": [],
+            "samplingGapDefinition": "current read end minus previous read start; conservative sample spacing",
+            "stopped": false,
+            "valid": false
+          },
+          "pausedContinuation": {
+            "connectionGeneration": 1,
+            "logicalRunId": 1,
+            "pauseEpoch": 2,
+            "providerSessionId": "p4-1"
+          },
+          "position": {
+            "x": 2096,
+            "y": 1540
+          },
+          "preparedCaptureTokenCount": 0,
+          "readerPreparation": false,
+          "ready": true,
+          "sessionId": 1,
+          "status": "Processing",
+          "terminalMode": false,
+          "visible": false,
+          "windowEpoch": 6,
+          "windowNumber": 117167
+        }
+      }
+    ],
+    "errors": [
+      "Error: Current key release not applied"
+    ],
+    "final": null,
+    "mode": "native-event-case",
+    "passed": false,
+    "releaseToFirstPcmMs": -1
+  }
+}

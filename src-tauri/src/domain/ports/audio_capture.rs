@@ -30,6 +30,16 @@ pub type AudioChunkCallback = Arc<dyn Fn(AudioChunk) + Send + Sync>;
 pub type AudioCaptureErrorCallback = Arc<dyn Fn(AudioError) + Send + Sync>;
 pub type AudioCaptureHealthProbe = Arc<dyn Fn() -> bool + Send + Sync>;
 
+/// Stable identity of one physical capture start.
+///
+/// The application allocates this identity before starting the microphone. Adapters may use it
+/// to fence asynchronous callbacks that can arrive after capture has stopped or restarted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AudioCaptureIdentity {
+    pub run_id: u64,
+    pub generation: u64,
+}
+
 /// Trait defining the contract for audio capture
 ///
 /// This abstraction allows switching between different audio capture implementations
@@ -47,6 +57,10 @@ pub trait AudioCapture: Send + Sync {
 
     /// Stop capturing audio
     async fn stop_capture(&mut self) -> AudioResult<()>;
+
+    /// Binds the identity that the next physical `start_capture` must freeze for its callbacks.
+    /// Implementations without asynchronous run-scoped callbacks may keep the default no-op.
+    fn set_capture_identity(&mut self, _identity: Option<AudioCaptureIdentity>) {}
 
     /// Registers a callback for terminal native stream errors after a successful start.
     /// Implementations without an asynchronous device error channel may keep the default no-op.

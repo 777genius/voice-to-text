@@ -5,9 +5,11 @@ use crate::domain::{SttConnectionCategory, SttConnectionDetails};
 
 /// Event names for Tauri event system
 pub const EVENT_TRANSCRIPTION_PARTIAL: &str = "transcription:partial";
+pub const EVENT_TRANSCRIPTION_TERMINAL: &str = "transcription:terminal";
 pub const EVENT_TRANSCRIPTION_FINAL: &str = "transcription:final";
 pub const EVENT_RECORDING_STATUS: &str = "recording:status";
 pub const EVENT_RECORDING_INTENT_PROJECTION: &str = "recording:intent-projection";
+pub const EVENT_RECORDING_CAPTURE_READINESS: &str = "recording:capture-readiness";
 pub const EVENT_AUDIO_LEVEL: &str = "audio:level";
 pub const EVENT_AUDIO_SPECTRUM: &str = "audio:spectrum";
 pub const EVENT_MICROPHONE_TEST_LEVEL: &str = "microphone_test:level";
@@ -66,7 +68,11 @@ pub struct PartialTranscriptionPayload {
     pub timestamp: i64,
     pub is_segment_final: bool, // true когда сегмент финализирован (is_final=true в Deepgram)
     pub start: f64,             // start время utterance в секундах (от Deepgram)
-    pub duration: f64,          // длительность utterance в секундах (от Deepgram)
+    pub duration: f64,
+    pub delivery_seq: Option<u64>,
+    pub timing_known: bool,
+    pub continuation_delivery: bool,
+    pub completion_v1: bool, // длительность utterance в секундах (от Deepgram)
 }
 
 impl PartialTranscriptionPayload {
@@ -78,6 +84,10 @@ impl PartialTranscriptionPayload {
             is_segment_final: t.is_final, // передаем флаг финализации сегмента
             start: t.start,
             duration: t.duration,
+            delivery_seq: t.delivery_seq,
+            timing_known: t.timing_known,
+            completion_v1: t.completion_v1,
+            continuation_delivery: t.continuation_delivery,
         }
     }
 }
@@ -94,6 +104,10 @@ pub struct FinalTranscriptionPayload {
     pub timestamp: i64,
     pub start: f64,
     pub duration: f64,
+    pub delivery_seq: Option<u64>,
+    pub timing_known: bool,
+    pub continuation_delivery: bool,
+    pub completion_v1: bool,
 }
 
 impl FinalTranscriptionPayload {
@@ -106,8 +120,23 @@ impl FinalTranscriptionPayload {
             timestamp: t.timestamp,
             start: t.start,
             duration: t.duration,
+            delivery_seq: t.delivery_seq,
+            timing_known: t.timing_known,
+            completion_v1: t.completion_v1,
+            continuation_delivery: t.continuation_delivery,
         }
     }
+}
+
+/// Immutable result owned by this run, independent of the visible capture.
+#[derive(Debug, Clone, Serialize)]
+pub struct RunTerminalPayload {
+    pub continuation_delivery: Option<bool>,
+    pub session_id: u64,
+    pub stable_snapshot: String,
+    pub delivery_complete: bool,
+    pub report: Option<crate::application::FinalizeReport>,
+    pub error: Option<String>,
 }
 
 /// Payload for recording status event
@@ -124,32 +153,15 @@ pub struct RecordingStatusPayload {
     pub mode: Option<RecordingMode>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RecordingIntentProjectionPayload {
-    pub run_id: Option<u64>,
-    pub intent_revision: Option<u64>,
-    pub status: RecordingStatus,
-    pub desired_on: bool,
-    pub pending_start: bool,
-    pub processing_jobs: usize,
-    pub shutdown_requested: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fault: Option<RecordingIntentProjectionFault>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum RecordingIntentProjectionFault {
-    StartFailed,
-    RuntimeFailed,
-    StopUncertain,
-    FinalizeFailed,
-}
+#[path = "events/recording_projection.rs"]
+mod recording_projection;
+pub use recording_projection::*;
 
 /// Payload for audio level event
 #[derive(Debug, Clone, Serialize)]
 pub struct AudioLevelPayload {
+    pub run_id: u64,
+    pub capture_generation: u64,
     /// Normalized audio level (0.0 - 1.0)
     pub level: f32,
 }
@@ -157,6 +169,12 @@ pub struct AudioLevelPayload {
 /// Payload for audio spectrum event
 #[derive(Debug, Clone, Serialize)]
 pub struct AudioSpectrumPayload {
+    pub run_id: u64,
+    /// Source chunk Unix milliseconds, allowing sample age to survive UI throttling.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_timestamp_ms: Option<i64>,
+    /// Incoming translation has a session owner but no dictation capture lease.
+    pub capture_generation: Option<u64>,
     /// Normalized bars (48 values, each 0.0 - 1.0)
     pub bars: Vec<f32>,
 }
@@ -317,5 +335,30 @@ mod recording_window_payload_tests {
         let payload =
             serde_json::to_value(RecordingWindowLifecyclePayload { window_epoch: 17 }).unwrap();
         assert_eq!(payload, serde_json::json!({"windowEpoch": 17}));
+    }
+}
+
+#[cfg(test)]
+mod terminal_delivery_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_serializes_explicit_legacy_continuation_and_unknown_modes() {
+        for mode in [Some(false), Some(true), None] {
+            let payload = RunTerminalPayload {
+                continuation_delivery: mode,
+                session_id: 7,
+                stable_snapshot: "recovered".into(),
+                delivery_complete: false,
+                report: None,
+                error: None,
+            };
+            let json = serde_json::to_value(payload).unwrap();
+            assert_eq!(json["session_id"], 7);
+            assert_eq!(
+                json["continuation_delivery"],
+                serde_json::to_value(mode).unwrap()
+            );
+        }
     }
 }

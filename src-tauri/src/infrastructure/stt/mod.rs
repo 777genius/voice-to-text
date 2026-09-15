@@ -179,3 +179,5 @@ mod websocket_tests {
             .expect("drop signal");
     }
 }
+
+pub(crate) use backend::continuation_opt_in;

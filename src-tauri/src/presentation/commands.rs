@@ -1,10 +1,16 @@
-use super::recording_window_lifecycle::{recording_stop_is_current, RecordingHotkeyAction};
+#[path = "commands/continuation.rs"]
+mod continuation;
+pub(crate) mod runtime_failure;
+
+use super::recording_window_lifecycle::{
+    recording_stop_is_current, RecordingHotkeyAction, RecordingWindowLifecycle,
+};
 use super::{
     recording_intent_coordinator as recording_intent, state::RecordingIntentCoordinatorMode,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
@@ -43,9 +49,10 @@ fn classify_transcription_error_type_from_stt(err: &SttError) -> String {
                 "connection".to_string()
             }
         }
-        SttError::Processing(_) | SttError::Unsupported(_) | SttError::Internal(_) => {
-            "processing".to_string()
-        }
+        SttError::Processing(_)
+        | SttError::Unsupported(_)
+        | SttError::Internal(_)
+        | SttError::ContinuationAudioNotStarted => "processing".to_string(),
     }
 }
 
@@ -58,6 +65,26 @@ fn error_details_from_stt(err: &SttError) -> Option<TranscriptionErrorDetailsPay
 
 const TRANSCRIPT_EVENT_QUEUE_CAPACITY: usize = 128;
 const MAX_TRANSCRIPT_EVENT_TEXT_BYTES: usize = 64 * 1024;
+pub(crate) fn initial_continuation_target_eligible(
+    auto_copy: bool,
+    auto_paste: bool,
+    target: Option<&AutoPasteTarget>,
+) -> bool {
+    // Copy-only delivery has no external target to bind or qualify (plan E39).
+    if !auto_paste {
+        return auto_copy;
+    }
+    cfg!(target_os = "macos")
+        && target.is_some_and(crate::infrastructure::auto_paste::continuation_app_qualified)
+}
+
+fn transcript_delivery_deadline(started: tokio::time::Instant) -> tokio::time::Instant {
+    started
+        + crate::application::TranscriptionService::maximum_stop_cleanup_timeout()
+            .saturating_add(TRANSCRIPT_DELIVERY_RESERVE)
+}
+
+const TRANSCRIPT_DELIVERY_RESERVE: Duration = Duration::from_secs(1);
 const RECORDING_SHUTDOWN_FINALIZATION_GRACE: Duration = Duration::from_secs(2);
 const AUTO_PASTE_TARGET_RETENTION: usize = 32;
 
@@ -245,15 +272,39 @@ impl TranscriptEventSender {
 #[derive(Debug, Clone)]
 pub(crate) struct TranscriptDeliveryBarrierPort {
     sender: TranscriptEventSender,
+    delivery: Arc<Mutex<RunTranscriptDelivery>>,
 }
 
+use runtime_failure::RunTranscriptDelivery;
+
 impl TranscriptDeliveryBarrierPort {
+    async fn flush_until(&self, deadline: tokio::time::Instant) -> Result<(), String> {
+        tokio::time::timeout_at(deadline, self.flush())
+            .await
+            .map_err(|_| "transcript delivery deadline exceeded".to_string())?
+    }
+
+    fn close(&self) -> Option<String> {
+        let mut delivery = self.delivery.lock().unwrap_or_else(|p| p.into_inner());
+        delivery.close()
+    }
+
     async fn flush(&self) -> Result<(), String> {
         let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
         self.sender.send_barrier(completion_tx);
         completion_rx
             .await
-            .map_err(|_| "transcript delivery consumer closed before barrier".to_string())
+            .map_err(|_| "transcript delivery consumer closed before barrier".to_string())?;
+        match self
+            .delivery
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .delivery_error
+            .clone()
+        {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 }
 
@@ -318,7 +369,11 @@ fn should_clear_active_mode_after_dictation_failure(
     failed_session_id == current_session_id && matches!(active_mode, Some(RecordingMode::Dictation))
 }
 
-async fn clear_dictation_failure_state_if_current(state: &AppState, session_id: u64) {
+async fn clear_dictation_failure_state_if_current(
+    state: &AppState,
+    session_id: u64,
+    already_cleaned: bool,
+) {
     let _lifecycle_guard = state.recording_lifecycle_guard.lock().await;
     let current_session_id = state
         .active_transcription_session_id
@@ -332,10 +387,14 @@ async fn clear_dictation_failure_state_if_current(state: &AppState, session_id: 
         return;
     }
 
-    state
-        .transcription_service
-        .cleanup_runtime_failure("provider runtime error callback")
-        .await;
+    if !already_cleaned
+        && !state
+            .transcription_service
+            .cleanup_runtime_failure_for_run(session_id, "provider runtime error callback")
+            .await
+    {
+        return;
+    }
 
     if clear_active_transcription_session_id_if_current(state, session_id) {
         let mut active_mode = state.active_recording_mode.write().await;
@@ -346,7 +405,34 @@ async fn clear_dictation_failure_state_if_current(state: &AppState, session_id: 
 }
 
 fn dispatch_transcription_error(app_handle: AppHandle, session_id: u64, err: SttError) {
-    tokio::spawn(async move {
+    dispatch_runtime_error(
+        app_handle,
+        runtime_failure::RuntimeFailureSource::Provider(session_id),
+        err,
+    );
+}
+
+fn dispatch_runtime_error(
+    app_handle: AppHandle,
+    source: runtime_failure::RuntimeFailureSource,
+    err: SttError,
+) {
+    // CPAL device errors arrive on a native thread without a current Tokio handle.
+    tauri::async_runtime::spawn(async move {
+        let Some(state) = app_handle.try_state::<AppState>() else {
+            return;
+        };
+        let Some(session_id) = runtime_failure::resolve_runtime_failure(
+            &state.transcription_service,
+            source,
+            &err.to_string(),
+        )
+        .await
+        else {
+            return;
+        };
+        let physical = source.is_capture();
+        drop(state);
         let error_type = classify_transcription_error_type_from_stt(&err);
         let error_details = error_details_from_stt(&err);
         let error = err.to_string();
@@ -375,16 +461,20 @@ fn dispatch_transcription_error(app_handle: AppHandle, session_id: u64, err: Stt
             );
         }
         if let Some(state) = app_handle.try_state::<AppState>() {
-            clear_dictation_failure_state_if_current(state.inner(), session_id).await;
+            clear_dictation_failure_state_if_current(state.inner(), session_id, physical).await;
         }
         if desired {
-            dispatch_recording_coordinator_event(
-                app_handle,
-                recording_intent::CoordinatorEvent::RuntimeFailed {
-                    run_id: recording_intent::RunId::new(session_id),
-                    error: recording_intent_error_code(&err.to_string()),
-                },
-            );
+            let Some(state) = app_handle.try_state::<AppState>() else {
+                return;
+            };
+            let event = runtime_failure::runtime_failure_event(
+                &state.transcription_service,
+                session_id,
+                recording_intent_error_code(&err.to_string()),
+            )
+            .await;
+            drop(state);
+            dispatch_recording_coordinator_event(app_handle, event);
         }
     });
 }
@@ -611,63 +701,347 @@ struct CoordinatorRunStartSpec {
     emit_start_requested: bool,
 }
 
+// Called while the coordinator mutex still orders reduction. Cancellation is
+// published here too: neither a deferred Begin nor a deferred Cancel can undo a
+// later ordered event. IDs are reducer-owned, monotonic effect identities; only
+// the owning executor retires an entry, after its resource work is terminal.
+// A failed Continue can consume its receiver before physical stop completes.
+// Retire only that receiver's routing token; this is not microphone-release proof.
+pub(crate) async fn retire_consumed_prepared_capture(
+    service: &crate::application::TranscriptionService,
+    tokens: &std::sync::Mutex<
+        std::collections::BTreeMap<u64, crate::application::PreparedCaptureToken>,
+    >,
+    token: crate::application::PreparedCaptureToken,
+) -> bool {
+    if service.retains_prepared_capture(token).await {
+        return false;
+    }
+    let mut tokens = tokens.lock().unwrap_or_else(|p| p.into_inner());
+    if tokens
+        .get(&token.run_id)
+        .is_some_and(|stored| *stored == token)
+    {
+        tokens.remove(&token.run_id);
+    }
+    true
+}
+
+pub(crate) fn retire_prepared_capture_after_stop(
+    tokens: &std::sync::Mutex<
+        std::collections::BTreeMap<u64, crate::application::PreparedCaptureToken>,
+    >,
+    run_id: u64,
+    capture_still_active: bool,
+    pending_retry: Option<(u64, bool)>,
+) {
+    if capture_still_active || matches!(pending_retry, Some((_, false))) {
+        return;
+    }
+    let mut tokens = tokens.lock().unwrap_or_else(|p| p.into_inner());
+    if pending_retry.is_none_or(|(generation, _)| {
+        tokens
+            .get(&run_id)
+            .is_some_and(|token| token.generation == generation)
+    }) {
+        tokens.remove(&run_id);
+    }
+}
+
+pub(crate) fn register_recording_effect_cancellations(
+    cancellations: &std::sync::Mutex<std::collections::BTreeMap<u64, Arc<AtomicBool>>>,
+    effects: &[recording_intent::CoordinatorEffect],
+) {
+    use recording_intent::CoordinatorEffect;
+    let mut tokens = cancellations.lock().unwrap_or_else(|p| p.into_inner());
+    for effect in effects {
+        match effect {
+            CoordinatorEffect::PrepareCapture { effect_id, .. }
+            | CoordinatorEffect::StartRecording { effect_id, .. }
+            | CoordinatorEffect::Continuation(recording_intent::ContinuationEffect::Continue {
+                effect_id,
+                ..
+            }) => {
+                tokens
+                    .entry(effect_id.get())
+                    .or_insert_with(|| Arc::new(AtomicBool::new(false)));
+            }
+            CoordinatorEffect::CancelPrepare { effect_id, .. }
+            | CoordinatorEffect::CancelStart { effect_id, .. } => {
+                if let Some(token) = tokens.get(&effect_id.get()) {
+                    token.store(true, Ordering::Release);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+pub(crate) fn reduce_recording_event_with_cancellation(
+    coordinator: &mut recording_intent::CoordinatorState,
+    cancellations: &std::sync::Mutex<std::collections::BTreeMap<u64, Arc<AtomicBool>>>,
+    event: recording_intent::CoordinatorEvent,
+    now_ns: u64,
+) -> Vec<recording_intent::CoordinatorEffect> {
+    let effects = recording_intent::reduce_at(coordinator, event, now_ns);
+    register_recording_effect_cancellations(cancellations, &effects);
+    effects
+}
+
+async fn execute_registered_recording_resource<
+    T,
+    F: std::future::Future<Output = Result<T, String>>,
+>(
+    cancelled: &AtomicBool,
+    resource: impl FnOnce() -> F,
+) -> Result<T, String> {
+    check_recording_resource_cancellation(cancelled)?;
+    resource().await
+}
+
+// Keep the actual audio admission wait and its cancellation check together.
+// Legacy callers have no coordinator token.
+async fn admit_recording_audio<'a>(
+    guard: &'a tokio::sync::Mutex<()>,
+    cancelled: Option<&AtomicBool>,
+) -> Result<tokio::sync::MutexGuard<'a, ()>, String> {
+    let admission = guard.lock().await;
+    if let Some(cancelled) = cancelled {
+        check_recording_resource_cancellation(cancelled)?;
+    }
+    Ok(admission)
+}
+
+// Never manufacture an uncancelled replacement in the deferred executor. A
+// missing owner is also fail-closed. The shared token remains live through all
+// awaits and existing late-success cleanup; this is not a check of a transient
+// reducer snapshot followed by registration of unrelated cancellation state.
+fn deferred_recording_effect_token(
+    cancellations: &std::sync::Mutex<std::collections::BTreeMap<u64, Arc<AtomicBool>>>,
+    effect_id: recording_intent::EffectId,
+) -> Arc<AtomicBool> {
+    cancellations
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&effect_id.get())
+        .cloned()
+        .unwrap_or_else(|| Arc::new(AtomicBool::new(true)))
+}
+
+fn check_recording_resource_cancellation(cancelled: &AtomicBool) -> Result<(), String> {
+    if cancelled.load(Ordering::Acquire) {
+        Err("recording start cancelled before resource admission".to_string())
+    } else {
+        Ok(())
+    }
+}
+
 /// Applies one event under the small synchronous reducer mutex, then executes all
 /// returned effects after the mutex is released. Completions re-enter this function.
 pub(super) fn dispatch_recording_coordinator_event(
     app_handle: AppHandle,
     event: recording_intent::CoordinatorEvent,
 ) {
+    submit_recording_coordinator_event(app_handle, event)();
+}
+
+// Synchronous semantic submission is safe under the gesture mutex. The returned
+// work must run after releasing it: no effects, emission or await under that lock.
+fn submit_recording_coordinator_event(
+    app_handle: AppHandle,
+    event: recording_intent::CoordinatorEvent,
+) -> Box<dyn FnOnce() + Send> {
     let Some(state) = app_handle.try_state::<AppState>() else {
-        return;
+        return Box::new(|| {});
     };
     if state.recording_intent_coordinator_mode != RecordingIntentCoordinatorMode::Desired {
-        return;
+        return Box::new(|| {});
     }
 
     let event_received_at = Instant::now();
-    let (effects, accepted_panel_revision) = {
+    let (effects, accepted_panel_revision, readiness_payload) = {
         let mut coordinator = state
             .recording_intent_coordinator
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let desired_before = coordinator.desired_recording;
-        let effects =
-            recording_intent::reduce_at(&mut coordinator, event, coordinator_monotonic_ns());
+        let effects = reduce_recording_event_with_cancellation(
+            &mut coordinator,
+            &state.recording_start_cancellations,
+            event,
+            coordinator_monotonic_ns(),
+        );
         let desired_after = coordinator.desired_recording;
         let accepted_panel_revision =
             newly_accepted_panel_revision(event, desired_before, desired_after);
-        (effects, accepted_panel_revision)
+        let readiness_payload = update_recording_capture_readiness(
+            state.inner(),
+            coordinator.capture,
+            !coordinator.processing_jobs.is_empty(),
+            coordinator.fault.is_some(),
+            coordinator.projection().intent_revision.get(),
+            coordinator
+                .capture_identity()
+                .map(|(_, generation)| generation),
+            coordinator.continuation,
+            coordinator.pending_capture_sealed(),
+        );
+        (effects, accepted_panel_revision, readiness_payload)
     };
-    if let Some(revision) = accepted_panel_revision {
-        let mut started = state
-            .recording_panel_intent_started_at
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        started.insert(revision.get(), event_received_at);
-        while started.len() > 64 {
-            started.pop_first();
-        }
-    }
     drop(state);
+    Box::new(move || {
+        let Some(state) = app_handle.try_state::<AppState>() else {
+            return;
+        };
+        continuation::retire_abandoned(state.inner());
+        if let Some(revision) = accepted_panel_revision {
+            let mut started = state
+                .recording_panel_intent_started_at
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            started.insert(revision.get(), event_received_at);
+            while started.len() > 64 {
+                started.pop_first();
+            }
+        }
+        if let Some(payload) = readiness_payload {
+            let _ = app_handle.emit(EVENT_RECORDING_CAPTURE_READINESS, payload);
+        }
+        drop(state);
 
-    // Publish the reducer snapshot before starting any async effect whose
-    // completion could otherwise overtake and be followed by this older snapshot.
-    for effect in effects.iter().copied().filter(|effect| {
-        matches!(
-            effect,
-            recording_intent::CoordinatorEffect::EmitProjection(_)
-        )
-    }) {
-        execute_recording_coordinator_effect(app_handle.clone(), effect);
+        // Publish the reducer snapshot before starting any async effect whose
+        // completion could otherwise overtake and be followed by this older snapshot.
+        for effect in effects.iter().copied().filter(|effect| {
+            matches!(
+                effect,
+                recording_intent::CoordinatorEffect::EmitProjection(_)
+            )
+        }) {
+            execute_recording_coordinator_effect(app_handle.clone(), effect);
+        }
+        for effect in effects.into_iter().filter(|effect| {
+            !matches!(
+                effect,
+                recording_intent::CoordinatorEffect::EmitProjection(_)
+            )
+        }) {
+            execute_recording_coordinator_effect(app_handle.clone(), effect);
+        }
+    })
+}
+
+fn update_recording_capture_readiness(
+    state: &AppState,
+    capture: recording_intent::CaptureState,
+    has_processing: bool,
+    has_fault: bool,
+    intent_revision: u64,
+    capture_generation: Option<u64>,
+    route: Option<recording_intent::ContinuationRoute>,
+    sealed: bool,
+) -> Option<RecordingCaptureReadinessPayload> {
+    let run = capture.run();
+    let (readiness_state, reason) = match capture {
+        recording_intent::CaptureState::Preparing {
+            cancel_requested: true,
+            ..
+        } => (
+            RecordingCaptureReadinessState::Unavailable,
+            RecordingCaptureReadinessReason::Cancelled,
+        ),
+        recording_intent::CaptureState::Preparing { .. } => (
+            RecordingCaptureReadinessState::Unavailable,
+            RecordingCaptureReadinessReason::StartingCapture,
+        ),
+        recording_intent::CaptureState::Buffering { .. } => (
+            RecordingCaptureReadinessState::Buffering,
+            if has_processing {
+                RecordingCaptureReadinessReason::FinalizingPrevious
+            } else {
+                RecordingCaptureReadinessReason::ConnectingProvider
+            },
+        ),
+        recording_intent::CaptureState::Starting {
+            cancel_requested: true,
+            ..
+        } => (
+            RecordingCaptureReadinessState::Unavailable,
+            RecordingCaptureReadinessReason::Cancelled,
+        ),
+        recording_intent::CaptureState::Starting { .. } => (
+            RecordingCaptureReadinessState::Buffering,
+            RecordingCaptureReadinessReason::ConnectingProvider,
+        ),
+        recording_intent::CaptureState::Recording { .. } => (
+            RecordingCaptureReadinessState::Streaming,
+            RecordingCaptureReadinessReason::Recording,
+        ),
+        recording_intent::CaptureState::Stopping { .. }
+        | recording_intent::CaptureState::StopUncertain { .. } => (
+            RecordingCaptureReadinessState::Unavailable,
+            RecordingCaptureReadinessReason::Cancelled,
+        ),
+        recording_intent::CaptureState::Idle => (
+            RecordingCaptureReadinessState::Unavailable,
+            if has_fault {
+                RecordingCaptureReadinessReason::Error
+            } else {
+                RecordingCaptureReadinessReason::Idle
+            },
+        ),
+    };
+    let mut snapshot = state
+        .recording_capture_readiness
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let run_id = run.map(|run| run.run_id.get());
+    let revision = Some(intent_revision);
+    if snapshot.run_id == run_id
+        && snapshot.revision == revision
+        && snapshot.state == readiness_state
+        && snapshot.reason == reason
+        && snapshot.capture_generation == capture_generation
+        && snapshot.logical_run_id == route.map(|route| route.key.logical_run_id.get())
+        && snapshot.capture_ready
+            == route.map(|_| {
+                !sealed
+                    && matches!(
+                        capture,
+                        recording_intent::CaptureState::Buffering { .. }
+                            | recording_intent::CaptureState::Starting { .. }
+                            | recording_intent::CaptureState::Recording { .. }
+                    )
+            })
+        && snapshot.transport_ready
+            == route.map(|route| route.phase == recording_intent::LogicalPhase::Active)
+    {
+        return None;
     }
-    for effect in effects.into_iter().filter(|effect| {
-        !matches!(
-            effect,
-            recording_intent::CoordinatorEffect::EmitProjection(_)
-        )
-    }) {
-        execute_recording_coordinator_effect(app_handle.clone(), effect);
-    }
+    let generation = state
+        .recording_capture_readiness_generation
+        .fetch_add(1, Ordering::AcqRel)
+        .saturating_add(1);
+    *snapshot = RecordingCaptureReadinessPayload {
+        capture_generation,
+        logical_run_id: route.map(|route| route.key.logical_run_id.get()),
+        capture_episode_id: route.and(run_id),
+        capture_ready: route.map(|_| {
+            !sealed
+                && matches!(
+                    capture,
+                    recording_intent::CaptureState::Buffering { .. }
+                        | recording_intent::CaptureState::Starting { .. }
+                        | recording_intent::CaptureState::Recording { .. }
+                )
+        }),
+        transport_ready: route.map(|route| route.phase == recording_intent::LogicalPhase::Active),
+        generation,
+        run_id,
+        revision,
+        state: readiness_state,
+        reason,
+    };
+    Some(snapshot.clone())
 }
 
 pub(crate) fn sync_recording_intent_runtime(
@@ -719,23 +1093,26 @@ pub(crate) fn sync_recording_intent_runtime(
 }
 
 pub(crate) async fn shutdown_recording_intent(app_handle: AppHandle) {
-    let Some(state) = app_handle.try_state::<AppState>() else {
-        return;
+    let (ready, force_off) = {
+        let Some(state) = app_handle.try_state::<AppState>() else {
+            return;
+        };
+        if state.recording_intent_coordinator_mode != RecordingIntentCoordinatorMode::Desired {
+            return;
+        }
+        let ready = state.recording_shutdown_ready.clone();
+        let force_off = state
+            .recording_hotkey_gestures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .force_off(super::recording_hotkey_gestures::ForceOffReason::Shutdown);
+        (ready, force_off)
     };
-    if state.recording_intent_coordinator_mode != RecordingIntentCoordinatorMode::Desired {
-        return;
-    }
-    let ready = state.recording_shutdown_ready.clone();
-    let force_off = state
-        .recording_hotkey_gestures
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .force_off(super::recording_hotkey_gestures::ForceOffReason::Shutdown);
-    drop(state);
+    let submitted = submit_normalized_recording_gesture(app_handle.clone(), force_off);
     let shutdown_ready = ready.notified();
     tokio::pin!(shutdown_ready);
     shutdown_ready.as_mut().enable();
-    dispatch_normalized_recording_gesture(app_handle.clone(), force_off);
+    submitted();
     dispatch_recording_coordinator_event(
         app_handle,
         recording_intent::CoordinatorEvent::ShutdownRequested,
@@ -762,28 +1139,21 @@ pub(super) fn force_off_recording_for_system_sleep(app_handle: AppHandle) {
     if state.recording_intent_coordinator_mode != RecordingIntentCoordinatorMode::Desired {
         return;
     }
-    let intent = state
+    let mut gestures = state
         .recording_hotkey_gestures
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .force_off(super::recording_hotkey_gestures::ForceOffReason::Sleep);
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let intent = gestures.force_off(super::recording_hotkey_gestures::ForceOffReason::Sleep);
+    let submitted = submit_normalized_recording_gesture(app_handle.clone(), intent);
+    drop(gestures);
     drop(state);
-    dispatch_normalized_recording_gesture(app_handle, intent);
+    submitted();
 }
 
 pub(super) fn reset_recording_gestures_after_system_wake(app_handle: &AppHandle) {
-    let Some(state) = app_handle.try_state::<AppState>() else {
-        return;
-    };
-    if state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired {
-        // Sleep already applied ForceOff. Re-clearing only the input latch prevents
-        // a pre-sleep key-up/watch callback from rearming a post-wake gesture.
-        let _ = state
-            .recording_hotkey_gestures
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .force_off(super::recording_hotkey_gestures::ForceOffReason::Sleep);
-    }
+    // A callback can be accepted between sleep and wake. Clearing that latch
+    // must submit the matching ForceOff as well, under the same ordering boundary.
+    force_off_recording_for_system_sleep(app_handle.clone());
 }
 
 fn execute_recording_coordinator_effect(
@@ -791,6 +1161,229 @@ fn execute_recording_coordinator_effect(
     effect: recording_intent::CoordinatorEffect,
 ) {
     match effect {
+        recording_intent::CoordinatorEffect::Continuation(effect) => {
+            continuation::execute(app_handle, effect)
+        }
+        recording_intent::CoordinatorEffect::PrepareCapture { effect_id, run } => {
+            let Some(state) = app_handle.try_state::<AppState>() else {
+                return;
+            };
+            let config = state
+                .recording_intent_policy_snapshots
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&run.policy.version)
+                .cloned();
+            let cancelled =
+                deferred_recording_effect_token(&state.recording_start_cancellations, effect_id);
+            log::info!(
+                "pending_start_requested run_id={} intent_revision={} policy_version={}",
+                run.run_id.get(),
+                run.revision.get(),
+                run.policy.version
+            );
+            let mut stt_config = config.as_ref().map(|config| config.stt.clone());
+            if config.as_ref().is_some_and(|config| config.auto_paste_text) {
+                bind_or_capture_auto_paste_target_for_run(
+                    state.inner(),
+                    run.run_id.get(),
+                    run.revision.get(),
+                );
+            }
+            if !run.policy.show_panel_on_start {
+                continuation::capture_without_panel(&app_handle, run);
+            }
+            if let Some(stt) = stt_config.as_mut() {
+                stt.continuation_target_eligible = initial_continuation_target_eligible(
+                    config
+                        .as_ref()
+                        .is_some_and(|config| config.auto_copy_to_clipboard),
+                    config.as_ref().is_some_and(|config| config.auto_paste_text),
+                    resolve_auto_paste_target(state.inner(), Some(run.run_id.get())).as_ref(),
+                );
+            }
+            drop(state);
+            tauri::async_runtime::spawn(async move {
+                let Some(state) = app_handle.try_state::<AppState>() else {
+                    return;
+                };
+                let result = execute_registered_recording_resource(&cancelled, || async {
+                    let config = config.ok_or_else(|| {
+                        format!(
+                            "recording policy snapshot {} is unavailable",
+                            run.policy.version
+                        )
+                    })?;
+                    if config.recording_mode != RecordingMode::Dictation {
+                        return Err("split capture preparation supports dictation only".to_string());
+                    }
+                    let _audio_guard = state.audio_start_guard.lock().await;
+                    check_recording_resource_cancellation(&cancelled)?;
+                    state
+                        .ensure_audio_capture_device_with_vad_timeout(
+                            config.selected_audio_device.clone(),
+                            app_handle.clone(),
+                            false,
+                            config.vad_silence_timeout_ms,
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let app_level = app_handle.clone();
+                    let on_level = Arc::new(
+                        move |identity: crate::domain::AudioMeterSample, level: f32| {
+                            let _ = app_level.emit(
+                                EVENT_AUDIO_LEVEL,
+                                AudioLevelPayload {
+                                    level,
+                                    run_id: identity.owner.run_id,
+                                    capture_generation: identity.owner.generation,
+                                },
+                            );
+                        },
+                    );
+                    let app_spectrum = app_handle.clone();
+                    let on_spectrum = Arc::new(
+                        move |identity: crate::domain::AudioMeterSample, bars: [f32; 48]| {
+                            let _ = app_spectrum.emit(
+                                EVENT_AUDIO_SPECTRUM,
+                                AudioSpectrumPayload {
+                                    bars: bars.to_vec(),
+                                    run_id: identity.owner.run_id,
+                                    capture_generation: Some(identity.owner.generation),
+                                    source_timestamp_ms: Some(identity.captured_at_ms),
+                                },
+                            );
+                        },
+                    );
+                    let app_error = app_handle.clone();
+                    let run_id = run.run_id.get();
+                    let on_error =
+                        runtime_failure::capture_error_callback(run_id, move |source, error| {
+                            dispatch_runtime_error(app_error.clone(), source, error);
+                        });
+                    let stt_config = stt_config.ok_or_else(|| {
+                        format!(
+                            "recording STT snapshot {} is unavailable",
+                            run.policy.version
+                        )
+                    })?;
+                    state
+                        .transcription_service
+                        .register_continuation_policy(run_id, &config)
+                        .await;
+                    check_recording_resource_cancellation(&cancelled)?;
+                    let token = state
+                        .transcription_service
+                        .prepare_recording_capture(
+                            run_id,
+                            stt_config,
+                            on_level,
+                            on_spectrum,
+                            on_error,
+                        )
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+                    super::native_e2e::record_capture_run(run_id, token.generation);
+                    state
+                        .prepared_capture_tokens
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(run_id, token);
+                    // Successful preparation is capture admission. Report it even
+                    // if Stop raced this completion: the reducer now seals and
+                    // delivers admitted PCM, or explicitly tears down a hard cancel.
+                    Ok(token)
+                })
+                .await;
+                state
+                    .recording_start_cancellations
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&effect_id.get());
+                let capture_still_active = state
+                    .transcription_service
+                    .capture_is_active_for_run(run.run_id.get())
+                    .await;
+                let outcome = match result {
+                    Ok(token) => recording_intent::PrepareOutcome::Succeeded {
+                        generation: token.generation,
+                    },
+                    Err(error) if capture_still_active => {
+                        recording_intent::PrepareOutcome::FailedCaptureActive(
+                            recording_intent_error_code(&error),
+                        )
+                    }
+                    Err(_) if cancelled.load(Ordering::Acquire) => {
+                        recording_intent::PrepareOutcome::Cancelled
+                    }
+                    Err(error) => recording_intent::PrepareOutcome::Failed(
+                        recording_intent_error_code(&error),
+                    ),
+                };
+                drop(state);
+                dispatch_recording_coordinator_event(
+                    app_handle,
+                    recording_intent::CoordinatorEvent::PrepareFinished {
+                        effect_id,
+                        run_id: run.run_id,
+                        outcome,
+                    },
+                );
+            });
+        }
+        recording_intent::CoordinatorEffect::SealStartingCapture { run_id } => {
+            tauri::async_runtime::spawn(async move {
+                let Some(state) = app_handle.try_state::<AppState>() else {
+                    return;
+                };
+                let token = state
+                    .prepared_capture_tokens
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get(&run_id.get())
+                    .copied();
+                let Some(token) = token else {
+                    return;
+                };
+                // Only device-stop failure is retryable. This never restarts
+                // provider admission or replays a possibly accepted PCM write.
+                for attempt in 1..=3 {
+                    let result = state
+                        .transcription_service
+                        .stop_pending_capture(token, false)
+                        .await;
+                    if !state
+                        .transcription_service
+                        .capture_is_active_for_run(run_id.get())
+                        .await
+                    {
+                        return;
+                    }
+                    if attempt == 3 {
+                        let error = result
+                            .err()
+                            .map(|e| recording_intent_error_code(&e.to_string()))
+                            .unwrap_or(recording_intent::ErrorCode(1));
+                        drop(state);
+                        dispatch_recording_coordinator_event(
+                            app_handle,
+                            recording_intent::CoordinatorEvent::RuntimeFailed { run_id, error },
+                        );
+                        return;
+                    }
+                }
+            });
+        }
+        recording_intent::CoordinatorEffect::CancelPrepare { .. }
+        | recording_intent::CoordinatorEffect::CancelStart { .. } => {
+            if let Some(state) = app_handle.try_state::<AppState>() {
+                register_recording_effect_cancellations(
+                    &state.recording_start_cancellations,
+                    &[effect],
+                );
+            }
+        }
         recording_intent::CoordinatorEffect::StartRecording { effect_id, run } => {
             let Some(state) = app_handle.try_state::<AppState>() else {
                 return;
@@ -808,37 +1401,44 @@ fn execute_recording_coordinator_effect(
                     run.revision.get(),
                 );
             }
-            let cancelled = Arc::new(AtomicBool::new(false));
-            state
-                .recording_start_cancellations
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .insert(effect_id.get(), cancelled.clone());
+            let cancelled =
+                deferred_recording_effect_token(&state.recording_start_cancellations, effect_id);
             drop(state);
             tauri::async_runtime::spawn(async move {
                 let Some(state) = app_handle.try_state::<AppState>() else {
                     return;
                 };
-                let result = start_recording_checked(
-                    state.clone(),
-                    app_handle.clone(),
-                    None,
-                    None,
-                    None,
-                    Some(CoordinatorRunStartSpec {
-                        session_id: run.run_id.get(),
-                        policy_version: run.policy.version,
-                        cancelled: cancelled.clone(),
-                        // Desired mode already emits an immediate run-scoped
-                        // projection and owns the window effect. The legacy
-                        // provisional event can finish epoch validation late and
-                        // clear the newly accepted frontend session.
-                        emit_start_requested: false,
-                    }),
-                )
+                let result = execute_registered_recording_resource(&cancelled, || {
+                    start_recording_checked(
+                        state.clone(),
+                        app_handle.clone(),
+                        None,
+                        None,
+                        None,
+                        Some(CoordinatorRunStartSpec {
+                            session_id: run.run_id.get(),
+                            policy_version: run.policy.version,
+                            cancelled: cancelled.clone(),
+                            // Desired mode already emits an immediate run-scoped
+                            // projection and owns the window effect. The legacy
+                            // provisional event can finish epoch validation late and
+                            // clear the newly accepted frontend session.
+                            emit_start_requested: false,
+                        }),
+                    )
+                })
                 .await;
+                let capture_still_active = state
+                    .transcription_service
+                    .capture_is_active_for_run(run.run_id.get())
+                    .await;
                 let outcome = match result {
                     Ok(_) => recording_intent::StartOutcome::Succeeded,
+                    Err(error) if capture_still_active => {
+                        recording_intent::StartOutcome::FailedCaptureActive(
+                            recording_intent_error_code(&error),
+                        )
+                    }
                     Err(_) if cancelled.load(Ordering::Acquire) => {
                         recording_intent::StartOutcome::Cancelled
                     }
@@ -852,6 +1452,7 @@ fn execute_recording_coordinator_effect(
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .remove(&effect_id.get());
                 drop(state);
+                let app_handle_ready = app_handle.clone();
                 dispatch_recording_coordinator_event(
                     app_handle,
                     recording_intent::CoordinatorEvent::StartFinished {
@@ -860,20 +1461,10 @@ fn execute_recording_coordinator_effect(
                         outcome,
                     },
                 );
-            });
-        }
-        recording_intent::CoordinatorEffect::CancelStart { effect_id, .. } => {
-            if let Some(state) = app_handle.try_state::<AppState>() {
-                if let Some(cancelled) = state
-                    .recording_start_cancellations
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .get(&effect_id.get())
-                    .cloned()
-                {
-                    cancelled.store(true, Ordering::Release);
+                if outcome == recording_intent::StartOutcome::Succeeded {
+                    continuation::observe_ready(app_handle_ready, run.run_id);
                 }
-            }
+            });
         }
         recording_intent::CoordinatorEffect::StopRecording {
             effect_id,
@@ -882,37 +1473,103 @@ fn execute_recording_coordinator_effect(
             ..
         } => {
             tauri::async_runtime::spawn(async move {
+                let stop_started_at = Instant::now();
                 let Some(state) = app_handle.try_state::<AppState>() else {
                     return;
                 };
-                let result = stop_recording_and_emit_idle_if_current(
-                    state.inner(),
-                    &app_handle,
-                    matches!(
-                        reason,
-                        recording_intent::StopReason::Hotkey
-                            | recording_intent::StopReason::HoldReleased
-                    ),
-                    Some(run_id.get()),
-                )
-                .await;
-                let service_status = active_recording_status(state.inner()).await;
-                let outcome = match (result, service_status) {
-                    (Ok(_), RecordingStatus::Idle | RecordingStatus::Error) => {
-                        recording_intent::CaptureStopOutcome::Inactive
-                    }
-                    (Err(error), RecordingStatus::Idle | RecordingStatus::Error) => {
-                        recording_intent::CaptureStopOutcome::FailedButInactive(
-                            recording_intent_error_code(&error),
+                let pending_retry = state
+                    .recording_intent_coordinator
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .pending_capture_retry(effect_id, run_id);
+                let mode = *state.active_recording_mode.read().await;
+                let result = if mode == Some(RecordingMode::LiveTranslation) {
+                    stop_recording_and_emit_idle_if_current(
+                        state.inner(),
+                        &app_handle,
+                        matches!(
+                            reason,
+                            recording_intent::StopReason::Hotkey
+                                | recording_intent::StopReason::HoldReleased
+                        ),
+                        Some(run_id.get()),
+                    )
+                    .await
+                } else if let Some((generation, cancel)) = pending_retry {
+                    state
+                        .transcription_service
+                        .stop_pending_capture(
+                            crate::application::PreparedCaptureToken {
+                                run_id: run_id.get(),
+                                generation,
+                            },
+                            cancel,
                         )
+                        .await
+                        .map(|_| "Pending capture stopped".to_string())
+                        .map_err(|e| e.to_string())
+                } else {
+                    state
+                        .transcription_service
+                        .stop_capture_for_run(run_id.get())
+                        .await
+                        .map(|_| "Audio capture stopped".to_string())
+                        .map_err(|error| error.to_string())
+                };
+                let service_status = active_recording_status(state.inner()).await;
+                let capture_still_active = if mode == Some(RecordingMode::LiveTranslation) {
+                    !matches!(
+                        service_status,
+                        RecordingStatus::Idle | RecordingStatus::Error
+                    )
+                } else {
+                    state
+                        .transcription_service
+                        .capture_is_active_for_run(run_id.get())
+                        .await
+                };
+                if let Some((generation, true)) = pending_retry.filter(|_| !capture_still_active) {
+                    {
+                        let mut tokens = state
+                            .prepared_capture_tokens
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner());
+                        if tokens
+                            .get(&run_id.get())
+                            .is_some_and(|token| token.generation == generation)
+                        {
+                            tokens.remove(&run_id.get());
+                        }
                     }
-                    (Err(error), _) => recording_intent::CaptureStopOutcome::StillActive(
+                    continuation::finish_registration(state.inner(), run_id).await;
+                }
+                let outcome = match (result, capture_still_active) {
+                    (Ok(_), false) => recording_intent::CaptureStopOutcome::Inactive,
+                    (Err(error), false) => recording_intent::CaptureStopOutcome::FailedButInactive(
                         recording_intent_error_code(&error),
                     ),
-                    (Ok(_), _) => recording_intent::CaptureStopOutcome::StillActive(
+                    (Err(error), true) => recording_intent::CaptureStopOutcome::StillActive(
+                        recording_intent_error_code(&error),
+                    ),
+                    (Ok(_), true) => recording_intent::CaptureStopOutcome::StillActive(
                         recording_intent::ErrorCode(1),
                     ),
                 };
+                if !capture_still_active {
+                    log::info!(
+                        "previous_capture_released_ms run_id={} elapsed_ms={}",
+                        run_id.get(),
+                        stop_started_at.elapsed().as_millis()
+                    );
+                }
+                // An ordinary pending Stop seals audio; its token is still needed
+                // if Continue refuses and B must connect through the cold route.
+                retire_prepared_capture_after_stop(
+                    &state.prepared_capture_tokens,
+                    run_id.get(),
+                    capture_still_active,
+                    pending_retry,
+                );
                 drop(state);
                 if reason == recording_intent::StopReason::VadTimeout {
                     let _ = app_handle.emit("vad-silence-timeout", ());
@@ -931,6 +1588,25 @@ fn execute_recording_coordinator_effect(
             effect_id, run_id, ..
         } => {
             tauri::async_runtime::spawn(async move {
+                let finalize_started_at = Instant::now();
+                // One clock covers audio drain, provider stop/abort, and Rust
+                // consumer delivery. A wedged consumer cannot retain B forever.
+                let deadline = transcript_delivery_deadline(tokio::time::Instant::now());
+                let (provider_result, report) = match app_handle.try_state::<AppState>() {
+                    Some(state) => {
+                        let result = state
+                            .transcription_service
+                            .finalize_provider_for_run(run_id.get())
+                            .await
+                            .map_err(|error| error.to_string());
+                        let report = state
+                            .transcription_service
+                            .completed_report_for_run(run_id.get())
+                            .await;
+                        (result, report)
+                    }
+                    None => (Err("application state unavailable".to_string()), None),
+                };
                 let barrier = app_handle.try_state::<AppState>().and_then(|state| {
                     state
                         .transcript_delivery_barriers
@@ -939,24 +1615,127 @@ fn execute_recording_coordinator_effect(
                         .get(&run_id.get())
                         .cloned()
                 });
-                let outcome = match barrier {
-                    Some(barrier) => match barrier.flush().await {
-                        Ok(()) => {
-                            if let Some(state) = app_handle.try_state::<AppState>() {
-                                state
-                                    .transcript_delivery_barriers
-                                    .lock()
-                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                    .remove(&run_id.get());
-                            }
-                            recording_intent::FinalizeOutcome::Committed
-                        }
-                        Err(error) => recording_intent::FinalizeOutcome::Failed(
-                            recording_intent_error_code(&error),
-                        ),
-                    },
-                    None => recording_intent::FinalizeOutcome::NoTranscript,
+                // Error outcomes carry stable data too. Always flush before
+                // publishing the immutable terminal result, then fence callbacks.
+                let delivery_result = match barrier.as_ref() {
+                    Some(barrier) => barrier.flush_until(deadline).await,
+                    None => Ok(()),
                 };
+                let delivery_complete = delivery_result.is_ok();
+                let mut error = provider_result
+                    .as_ref()
+                    .err()
+                    .cloned()
+                    .or_else(|| delivery_result.err());
+                let released = report.as_ref().is_some_and(|report| {
+                    matches!(
+                        report.provider_release,
+                        crate::domain::ProviderRelease::Released
+                            | crate::domain::ProviderRelease::Reusable
+                    )
+                });
+                let shared_failure = report.as_ref().is_some_and(|report| report.shared_failure);
+                let snapshot = match barrier.as_ref() {
+                    Some(barrier) => barrier.close(),
+                    None => Some(String::new()),
+                };
+                if let Some(mut stable_snapshot) = snapshot {
+                    // The server snapshot can contain stable data which failed
+                    // local delivery; retain it honestly with incomplete outcome.
+                    if let Some(provider) =
+                        report.as_ref().and_then(|report| report.provider.as_ref())
+                    {
+                        stable_snapshot = provider.stable_snapshot.clone();
+                    }
+                    if let Some(state) = app_handle.try_state::<AppState>() {
+                        let mut delivery = state
+                            .continuation_delivery_runs
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner());
+                        if report.as_ref().and_then(|r| r.continuation_delivery) == Some(true) {
+                            if let Some(policy) = state
+                                .transcription_service
+                                .continuation_policy(run_id.get())
+                            {
+                                delivery.accept(run_id.get(), policy.auto_copy);
+                            }
+                        }
+                        delivery.terminal(run_id.get());
+                    }
+                    if let Err(emit_error) = app_handle.emit(
+                        EVENT_TRANSCRIPTION_TERMINAL,
+                        RunTerminalPayload {
+                            continuation_delivery: report
+                                .as_ref()
+                                .and_then(|r| r.continuation_delivery),
+                            session_id: run_id.get(),
+                            stable_snapshot,
+                            delivery_complete,
+                            report: report.clone(),
+                            error: error.clone(),
+                        },
+                    ) {
+                        log::error!(
+                            "Failed to emit run terminal run_id={}: {}",
+                            run_id.get(),
+                            emit_error
+                        );
+                        error.get_or_insert_with(|| emit_error.to_string());
+                    }
+                }
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    continuation::finish_registration(state.inner(), run_id).await;
+                }
+                let outcome = if !released {
+                    recording_intent::FinalizeOutcome::ReleaseUnconfirmed(
+                        recording_intent_error_code(
+                            error.as_deref().unwrap_or("provider release unconfirmed"),
+                        ),
+                    )
+                } else if let Some(error) = error {
+                    if shared_failure {
+                        recording_intent::FinalizeOutcome::Failed(recording_intent_error_code(
+                            &error,
+                        ))
+                    } else {
+                        recording_intent::FinalizeOutcome::FailedReleased(
+                            recording_intent_error_code(&error),
+                        )
+                    }
+                } else if barrier.is_some() {
+                    recording_intent::FinalizeOutcome::Committed
+                } else {
+                    recording_intent::FinalizeOutcome::NoTranscript
+                };
+                log::info!(
+                    "previous_finalize_completed_ms run_id={} elapsed_ms={} outcome={:?}",
+                    run_id.get(),
+                    finalize_started_at.elapsed().as_millis(),
+                    outcome
+                );
+                if matches!(
+                    outcome,
+                    recording_intent::FinalizeOutcome::Committed
+                        | recording_intent::FinalizeOutcome::NoTranscript
+                        | recording_intent::FinalizeOutcome::FailedReleased(_)
+                ) {
+                    if let Some(state) = app_handle.try_state::<AppState>() {
+                        state
+                            .transcript_delivery_barriers
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .remove(&run_id.get());
+                        if clear_active_transcription_session_id_if_current(
+                            state.inner(),
+                            run_id.get(),
+                        ) {
+                            let mut mode = state.active_recording_mode.write().await;
+                            if matches!(*mode, Some(RecordingMode::Dictation)) {
+                                *mode = None;
+                            }
+                        }
+                    }
+                }
                 dispatch_recording_coordinator_event(
                     app_handle,
                     recording_intent::CoordinatorEvent::FinalizeFinished {
@@ -983,6 +1762,15 @@ fn execute_recording_coordinator_effect(
             policy,
             ..
         } => {
+            if continuation::show_after_context_capture(
+                &app_handle,
+                effect_id,
+                revision,
+                run_id,
+                policy,
+            ) {
+                return;
+            }
             // Showing is the latency-critical acknowledgement of an accepted
             // foreground intent. Commit it synchronously after the reducer lock
             // has been released so callers cannot observe the old window epoch
@@ -1086,23 +1874,30 @@ fn execute_recording_coordinator_effect(
             );
         }
         recording_intent::CoordinatorEffect::EmitProjection(projection) => {
-            let (desired_on, intent_revision) = match projection.desired_recording {
-                recording_intent::DesiredRecording::Off => (false, None),
-                recording_intent::DesiredRecording::On { revision, .. } => {
-                    (true, Some(revision.get()))
-                }
+            let desired_on = match projection.desired_recording {
+                recording_intent::DesiredRecording::Off => false,
+                recording_intent::DesiredRecording::On { .. } => true,
             };
             let _ = app_handle.emit(
                 EVENT_RECORDING_INTENT_PROJECTION,
                 crate::presentation::RecordingIntentProjectionPayload {
+                    logical_run_id: projection.logical_run_id.map(|id| id.get()),
+                    capture_episode_id: projection
+                        .logical_run_id
+                        .and(projection.current_run)
+                        .map(|id| id.get()),
+                    continuation_phase: projection
+                        .continuation_phase
+                        .map(continuation::serialized_phase),
                     run_id: projection.current_run.map(|run| run.get()),
-                    intent_revision,
+                    intent_revision: Some(projection.intent_revision.get()),
                     status: coordinator_projection_status(projection.status),
                     desired_on,
                     pending_start: projection.pending_start,
                     processing_jobs: projection.processing_jobs,
                     shutdown_requested: projection.shutdown_requested,
                     fault: projection.fault.map(coordinator_projection_fault),
+                    fault_run_id: projection.fault_run_id.map(|run| run.get()),
                 },
             );
             let session_id = projection.status_run.map_or(0, |run| run.get());
@@ -1199,9 +1994,54 @@ fn commit_recording_visibility<R: tauri::Runtime, T: Send + 'static>(
     receiver.recv().map_err(|e| e.to_string())?
 }
 
+fn show_recording_native_window<R: tauri::Runtime>(
+    app_handle: &AppHandle<R>,
+    label: &str,
+    fallback: impl FnOnce() -> tauri::Result<()>,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use tauri_nspanel::ManagerExt as _;
+
+        if let Ok(panel) = app_handle.get_webview_panel(label) {
+            // The window has been converted to NSPanel. Tauri's generic show
+            // does not reliably order that panel onto the active Space.
+            panel.show();
+            return Ok(());
+        }
+    }
+
+    fallback().map_err(|error| error.to_string())
+}
+
+fn bind_recording_window_to_foreground_desired_run(
+    lifecycle: &RecordingWindowLifecycle,
+    coordinator: &std::sync::Mutex<recording_intent::CoordinatorState>,
+    desired_coordinator: bool,
+    window_epoch: u64,
+) {
+    if !desired_coordinator {
+        return;
+    }
+    let coordinator = coordinator
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(run) = coordinator.foreground_desired_run() {
+        lifecycle.bind_or_transfer_session_if_current(run.run_id.get(), window_epoch);
+    }
+}
+
 #[tauri::command]
 pub fn get_recording_window_epoch(state: State<'_, AppState>) -> u64 {
     state.recording_window_lifecycle.current()
+}
+
+#[tauri::command]
+pub fn get_recording_window_epoch_for_session(
+    state: State<'_, AppState>,
+    session_id: u64,
+) -> Option<u64> {
+    state.recording_window_lifecycle.session_epoch(session_id)
 }
 
 #[tauri::command]
@@ -1403,7 +2243,6 @@ fn recording_hotkey_release_intent(
     }
 }
 
-#[cfg(target_os = "macos")]
 const HOTKEY_PHYSICAL_RELEASE_POLL_MS: u64 = 16;
 #[cfg(target_os = "macos")]
 const HOTKEY_PHYSICAL_RELEASE_TIMEOUT_MS: u64 = 10_000;
@@ -1796,6 +2635,7 @@ async fn start_live_translation_recording(
     displaced_session_id: u64,
     displaced_recording_mode: Option<RecordingMode>,
     config: AppConfig,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<String, String> {
     use crate::application::services::{
         LiveTranslationCallbacks, LiveTranslationConfig, LiveTranslationError,
@@ -1805,6 +2645,20 @@ async fn start_live_translation_recording(
         EVENT_AUDIO_SPECTRUM, EVENT_TRANSLATION_DELTA, EVENT_TRANSLATION_ERROR,
     };
 
+    if let Some(error) =
+        cancelled.and_then(|token| check_recording_resource_cancellation(token).err())
+    {
+        // The session was claimed by the dispatcher, but translation mode has
+        // not been claimed yet. Preserve the unchanged (or concurrently cleared)
+        // mode and release only our session identity.
+        let _ = state.active_transcription_session_id.compare_exchange(
+            session_id,
+            displaced_session_id,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+        return Err(error);
+    }
     let service = get_or_create_live_translation_service(state).await;
     *state.active_recording_mode.write().await = Some(RecordingMode::LiveTranslation);
 
@@ -1848,6 +2702,9 @@ async fn start_live_translation_recording(
         std::sync::Arc::new(move |bars: [f32; 48]| {
             let payload = AudioSpectrumPayload {
                 bars: bars.to_vec(),
+                run_id: session_id,
+                capture_generation: None,
+                source_timestamp_ms: None,
             };
             let _ = app_handle_spectrum.emit(EVENT_AUDIO_SPECTRUM, payload);
         });
@@ -1928,11 +2785,38 @@ async fn start_live_translation_recording(
         on_status,
     };
 
-    match service.start_translation(translation_cfg, callbacks).await {
+    if let Some(error) =
+        cancelled.and_then(|token| check_recording_resource_cancellation(token).err())
+    {
+        restore_or_clear_failed_start_state_if_current(
+            state,
+            session_id,
+            RecordingMode::LiveTranslation,
+            displaced_session_id,
+            displaced_recording_mode,
+        )
+        .await;
+        return Err(error);
+    }
+    match service
+        .start_translation_cancellable(translation_cfg, callbacks, cancelled)
+        .await
+    {
         Ok(()) => {
             // active session/mode were claimed before service startup. Do not write
             // them again here: a runtime error may already have cleared that state.
             Ok("LiveTranslation started".to_string())
+        }
+        Err(LiveTranslationError::Cancelled) => {
+            restore_or_clear_failed_start_state_if_current(
+                state,
+                session_id,
+                RecordingMode::LiveTranslation,
+                displaced_session_id,
+                displaced_recording_mode,
+            )
+            .await;
+            Err("Recording start cancelled".into())
         }
         Err(err) => {
             let error_type = translation_error_type_to_str(&err).to_string();
@@ -2849,11 +3733,8 @@ async fn start_recording_checked(
 ) -> Result<String, String> {
     log::info!("Command: start_recording");
     let _lifecycle_guard = state.recording_lifecycle_guard.lock().await;
-    if coordinator_run
-        .as_ref()
-        .is_some_and(|run| run.cancelled.load(Ordering::Acquire))
-    {
-        return Err("recording start cancelled before resource admission".to_string());
+    if let Some(run) = coordinator_run.as_ref() {
+        check_recording_resource_cancellation(&run.cancelled)?;
     }
     if expected_press_seq.is_some_and(|seq| {
         hotkey_action_is_stale(
@@ -2865,7 +3746,11 @@ async fn start_recording_checked(
     }) {
         return Ok("Stale recording start ignored".to_string());
     }
-    let _audio_start_guard = state.audio_start_guard.lock().await;
+    let _audio_start_guard = admit_recording_audio(
+        &state.audio_start_guard,
+        coordinator_run.as_ref().map(|run| run.cancelled.as_ref()),
+    )
+    .await?;
     let current_status = active_recording_status(state.inner()).await;
     if recording_start_is_busy(current_status) {
         log::info!(
@@ -2875,15 +3760,29 @@ async fn start_recording_checked(
         let session_id = state
             .active_transcription_session_id
             .load(Ordering::Relaxed);
+        if coordinator_run.is_none()
+            && session_id != 0
+            && matches!(
+                current_status,
+                RecordingStatus::Starting | RecordingStatus::Recording
+            )
+        {
+            let window_epoch = state.recording_window_lifecycle.current();
+            state
+                .recording_window_lifecycle
+                .bind_or_transfer_session_if_current(session_id, window_epoch);
+        }
         let mode = *state.active_recording_mode.read().await;
         if let Some(payload) = active_recording_status_payload(session_id, current_status, mode) {
             if !desired_recording_coordinator_enabled(&app_handle) {
                 let _ = app_handle.emit(EVENT_RECORDING_STATUS, payload);
             }
         }
-        // The direct command fenced old hides before waiting for admission.
-        // Publish its current epoch without resetting the accepted session.
-        emit_recording_window_shown(&app_handle);
+        // Only a direct legacy command fenced this show before admission.
+        // A delayed coordinator admission must not publish a successor's epoch.
+        if coordinator_run.is_none() {
+            emit_recording_window_shown(&app_handle);
+        }
         return Ok("Recording already active".to_string());
     }
 
@@ -2927,6 +3826,9 @@ async fn start_recording_checked(
     ) {
         return Ok("Released hold-to-record start ignored".to_string());
     }
+    if let Some(run) = coordinator_run.as_ref() {
+        check_recording_resource_cancellation(&run.cancelled)?;
+    }
     if let Some(pending) = pending_start.as_mut() {
         pending.disarm();
     }
@@ -2942,9 +3844,10 @@ async fn start_recording_checked(
             client_start_id.as_deref(),
         );
     }
-    if app_handle
-        .get_webview_window("main")
-        .is_some_and(|window| window.is_visible().unwrap_or(false))
+    if coordinator_run.is_none()
+        && app_handle
+            .get_webview_window("main")
+            .is_some_and(|window| window.is_visible().unwrap_or(false))
     {
         emit_recording_window_shown(&app_handle);
     }
@@ -2966,6 +3869,9 @@ async fn start_recording_checked(
             .fetch_add(1, Ordering::Relaxed)
             + 1
     };
+    if coordinator_run.is_none() {
+        state.recording_window_lifecycle.bind_session(session_id);
+    }
     if config.auto_paste_text {
         // Desired-state starts already own an exact session target. Legacy/UI
         // starts bind the last target captured before the recording window was
@@ -2992,6 +3898,7 @@ async fn start_recording_checked(
             displaced_session_id,
             displaced_recording_mode,
             config,
+            coordinator_run.as_ref().map(|run| run.cancelled.as_ref()),
         )
         .await;
     }
@@ -3058,6 +3965,7 @@ async fn start_recording_checked(
     // события идут через один канал и обрабатываются одной задачей последовательно.
     let (transcript_tx, transcript_rx) = transcript_event_channel(TRANSCRIPT_EVENT_QUEUE_CAPACITY);
     let transcript_overflow_reported = Arc::new(AtomicBool::new(false));
+    let run_delivery = Arc::new(Mutex::new(RunTranscriptDelivery::default()));
     if state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired {
         state
             .transcript_delivery_barriers
@@ -3067,50 +3975,124 @@ async fn start_recording_checked(
                 session_id,
                 TranscriptDeliveryBarrierPort {
                     sender: transcript_tx.clone(),
+                    delivery: run_delivery.clone(),
                 },
             );
     }
 
     let app_handle_transcripts = app_handle.clone();
     let state_partial = state.partial_transcription.clone();
+    let active_delivery_session = state.active_transcription_session_id.clone();
     let state_final = state.final_transcription.clone();
     let state_history = state.history.clone();
+    let history_service = state.transcription_service.clone();
+    let accepted_delivery_runs = state.continuation_delivery_runs.clone();
     let state_config = state.config.clone();
 
     tokio::spawn(async move {
         while let Some(event) = transcript_rx.recv().await {
+            let continuation_delivery = match &event {
+                TranscriptEvent::Partial(t) | TranscriptEvent::Final(t) => t.continuation_delivery,
+                _ => false,
+            };
+            if continuation_delivery {
+                // The provider reader stamps immutable Ready metadata before
+                // enqueueing output. Publish native authorization before emit,
+                // without waiting for the independently scheduled projection.
+                if let Some(policy) = history_service.continuation_policy(session_id) {
+                    accepted_delivery_runs
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .accept(session_id, policy.auto_copy);
+                }
+            }
             match event {
                 TranscriptEvent::Partial(transcription) => {
-                    *state_partial.write().await = Some(transcription.text.clone());
+                    if run_delivery
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .terminal
+                    {
+                        continue;
+                    }
+                    {
+                        let mut partial = state_partial.write().await;
+                        if active_delivery_session.load(Ordering::Acquire) == session_id
+                            && !run_delivery
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .terminal
+                        {
+                            *partial = Some(transcription.text.clone());
+                        }
+                    }
 
+                    // Hold the terminal fence through synchronous emit: a
+                    // timeout on another thread cannot publish terminal first.
+                    let mut delivery = run_delivery.lock().unwrap_or_else(|p| p.into_inner());
+                    if delivery.terminal {
+                        continue;
+                    }
                     let payload =
                         PartialTranscriptionPayload::from_transcription(transcription, session_id);
                     if let Err(e) =
                         app_handle_transcripts.emit(EVENT_TRANSCRIPTION_PARTIAL, payload)
                     {
+                        delivery.delivery_error = Some(e.to_string());
                         log::error!("Failed to emit partial transcription event: {}", e);
                     }
                 }
                 TranscriptEvent::Final(transcription) => {
+                    if !run_delivery
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .accept_stable(&transcription)
+                    {
+                        continue;
+                    }
                     // Пустой финал — это только сигнал конца utterance (flush от Finalize
                     // или endpointing на тишине); в историю и last-final его не пишем.
                     if !transcription.text.is_empty() {
-                        *state_final.write().await = Some(transcription.text.clone());
-
-                        state_history.write().await.push(transcription.clone());
-
-                        let max_items = state_config.read().await.max_history_items;
-                        let mut history = state_history.write().await;
-                        let len = history.len();
-                        if len > max_items {
-                            history.drain(0..len - max_items);
+                        {
+                            let mut final_text = state_final.write().await;
+                            if active_delivery_session.load(Ordering::Acquire) == session_id
+                                && !run_delivery
+                                    .lock()
+                                    .unwrap_or_else(|p| p.into_inner())
+                                    .terminal
+                            {
+                                *final_text = Some(transcription.text.clone());
+                            }
                         }
+
+                        let known_logical = accepted_delivery_runs
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .contains(&session_id);
+                        let negotiated = known_logical
+                            || history_service
+                                .continuation_session_for_run(session_id)
+                                .await
+                                .is_some();
+                        let max_items = state_config.read().await.max_history_items;
+                        state_history.write().await.record(
+                            negotiated.then_some(session_id),
+                            transcription.clone(),
+                            max_items,
+                        );
                     }
 
+                    // Hold the terminal fence through synchronous emit: a
+                    // timeout on another thread cannot publish terminal first.
+                    let mut delivery = run_delivery.lock().unwrap_or_else(|p| p.into_inner());
+                    if delivery.terminal {
+                        continue;
+                    }
                     let payload =
                         FinalTranscriptionPayload::from_transcription(transcription, session_id);
                     if let Err(e) = app_handle_transcripts.emit(EVENT_TRANSCRIPTION_FINAL, payload)
                     {
+                        delivery.delivery_error = Some(e.to_string());
                         log::error!("Failed to emit final transcription event: {}", e);
                     }
                 }
@@ -3154,24 +4136,35 @@ async fn start_recording_checked(
     let app_handle_level = app_handle.clone();
 
     // Callback for audio level visualization
-    let on_audio_level = Arc::new(move |level: f32| {
-        let app_handle = app_handle_level.clone();
+    let on_audio_level = Arc::new(
+        move |identity: crate::domain::AudioMeterSample, level: f32| {
+            let app_handle = app_handle_level.clone();
 
-        // Don't spawn task for every level update - just emit directly
-        let payload = AudioLevelPayload { level };
-        let _ = app_handle.emit(EVENT_AUDIO_LEVEL, payload);
-    });
+            // Don't spawn task for every level update - just emit directly
+            let payload = AudioLevelPayload {
+                level,
+                run_id: identity.owner.run_id,
+                capture_generation: identity.owner.generation,
+            };
+            let _ = app_handle.emit(EVENT_AUDIO_LEVEL, payload);
+        },
+    );
 
     let app_handle_spectrum = app_handle.clone();
 
     // Callback for audio spectrum visualization (48 bars)
-    let on_audio_spectrum = Arc::new(move |bars: [f32; 48]| {
-        let app_handle = app_handle_spectrum.clone();
-        let payload = AudioSpectrumPayload {
-            bars: bars.to_vec(),
-        };
-        let _ = app_handle.emit(EVENT_AUDIO_SPECTRUM, payload);
-    });
+    let on_audio_spectrum = Arc::new(
+        move |identity: crate::domain::AudioMeterSample, bars: [f32; 48]| {
+            let app_handle = app_handle_spectrum.clone();
+            let payload = AudioSpectrumPayload {
+                bars: bars.to_vec(),
+                run_id: identity.owner.run_id,
+                capture_generation: Some(identity.owner.generation),
+                source_timestamp_ms: Some(identity.captured_at_ms),
+            };
+            let _ = app_handle.emit(EVENT_AUDIO_SPECTRUM, payload);
+        },
+    );
 
     let app_handle_error = app_handle.clone();
 
@@ -3240,10 +4233,20 @@ async fn start_recording_checked(
     // Пересоздаём audio capture только когда выбранное устройство реально изменилось.
     // Если cached capture сломался/устройство исчезло, ниже будет forced recreate + один retry.
     let selected_device = config.selected_audio_device.clone();
-    if let Err(e) = state
-        .ensure_audio_capture_device(selected_device.clone(), app_handle.clone(), false)
-        .await
-    {
+    let prepared_token = state
+        .prepared_capture_tokens
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&session_id)
+        .copied();
+    let device_result = if prepared_token.is_some() {
+        Ok(())
+    } else {
+        state
+            .ensure_audio_capture_device(selected_device.clone(), app_handle.clone(), false)
+            .await
+    };
+    if let Err(e) = device_result {
         let error_msg = format!("Не удалось инициализировать устройство записи: {}", e);
         let stt_err = SttError::Configuration(e.to_string());
         let error_type = classify_transcription_error_type_from_stt(&stt_err);
@@ -3285,20 +4288,37 @@ async fn start_recording_checked(
     }
 
     // Start recording (async - WebSocket connect, audio capture start)
-    let mut start_result = state
-        .transcription_service
-        .start_recording(
-            on_partial.clone(),
-            on_final.clone(),
-            on_audio_level.clone(),
-            on_audio_spectrum.clone(),
-            on_error.clone(),
-            on_connection_quality.clone(),
-        )
-        .await;
+    let mut start_result =
+        if let (Some(token), Some(run)) = (prepared_token, coordinator_run.as_ref()) {
+            state
+                .transcription_service
+                .connect_prepared_recording(
+                    token,
+                    on_partial.clone(),
+                    on_final.clone(),
+                    on_audio_level.clone(),
+                    on_audio_spectrum.clone(),
+                    on_error.clone(),
+                    on_connection_quality.clone(),
+                    run.cancelled.clone(),
+                )
+                .await
+        } else {
+            state
+                .transcription_service
+                .start_recording(
+                    on_partial.clone(),
+                    on_final.clone(),
+                    on_audio_level.clone(),
+                    on_audio_spectrum.clone(),
+                    on_error.clone(),
+                    on_connection_quality.clone(),
+                )
+                .await
+        };
 
     if let Err(err) = &start_result {
-        if is_audio_capture_start_failure(err) {
+        if prepared_token.is_none() && is_audio_capture_start_failure(err) {
             log::warn!(
                 "[StartLatencyDiag] audio capture start failed; forcing capture recreate and retrying once: {}",
                 err
@@ -3372,9 +4392,17 @@ async fn start_recording_checked(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&session_id);
+        state
+            .prepared_capture_tokens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&session_id);
 
-        // Сначала transcription:error, потом recording:status=Error (во фронте есть логика suppression/retry).
-        on_error(stt);
+        // Explicit teardown is not a provider runtime failure. Its exact start
+        // effect still reports Cancelled and owns the required cleanup.
+        if !e.is::<crate::application::PreparedCaptureCancelled>() {
+            on_error(stt);
+        }
 
         return Err(error);
     }
@@ -3385,6 +4413,11 @@ async fn start_recording_checked(
     state
         .active_transcription_session_id
         .store(session_id, Ordering::Relaxed);
+    state
+        .prepared_capture_tokens
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&session_id);
 
     // Emit Recording status after successful start
     log::debug!("Emitting status: Recording (stopped_via_hotkey: false)");
@@ -3435,6 +4468,22 @@ pub async fn stop_recording(
 pub async fn get_recording_status(state: State<'_, AppState>) -> Result<RecordingStatus, String> {
     log::debug!("Command: get_recording_status");
     Ok(active_recording_status(state.inner()).await)
+}
+
+#[tauri::command]
+pub async fn get_recording_capture_readiness(
+    state: State<'_, AppState>,
+) -> Result<Option<RecordingCaptureReadinessPayload>, String> {
+    if state.recording_intent_coordinator_mode != RecordingIntentCoordinatorMode::Desired {
+        return Ok(None);
+    }
+    Ok(Some(
+        state
+            .recording_capture_readiness
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone(),
+    ))
 }
 
 use tauri::{LogicalSize, PhysicalPosition, Position};
@@ -3591,6 +4640,14 @@ fn bind_last_auto_paste_target_to_session_if_absent(state: &AppState, session_id
 }
 
 fn bind_or_capture_auto_paste_target_for_run(state: &AppState, session_id: u64, revision: u64) {
+    if state
+        .auto_paste_targets_by_session
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains_key(&session_id)
+    {
+        return;
+    }
     if bind_pending_auto_paste_target_to_run(state, session_id, revision) {
         return;
     }
@@ -3650,7 +4707,7 @@ fn save_active_app_target_for_auto_paste(
     intent_revision: Option<u64>,
 ) {
     #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
-    {
+    if !super::native_e2e::live_mode() {
         super::native_e2e::record_auto_paste_target_capture();
         store_captured_auto_paste_target(
             state,
@@ -3663,13 +4720,21 @@ fn save_active_app_target_for_auto_paste(
         );
         return;
     }
-    #[cfg(all(
-        target_os = "macos",
-        not(all(debug_assertions, feature = "native-window-e2e"))
-    ))]
+    #[cfg(target_os = "macos")]
     {
         match crate::infrastructure::auto_paste::get_active_app_target() {
             Some(target) => {
+                #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+                if super::native_e2e::live_mode() && target.bundle_id != "com.apple.TextEdit" {
+                    *state
+                        .last_focused_app_target
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = None;
+                    log::error!(
+                        "Live native test refuses a target outside its new TextEdit document"
+                    );
+                    return;
+                }
                 store_captured_auto_paste_target(
                     state,
                     target.clone(),
@@ -3711,14 +4776,27 @@ pub fn show_window_with_recording_config(
         |pos| window.set_position(pos),
         || {
             let lifecycle = state.recording_window_lifecycle.clone();
+            let coordinator = state.recording_intent_coordinator.clone();
+            let desired_coordinator =
+                state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired;
             let shown_window = window.clone();
             commit_recording_visibility(window.app_handle(), move || {
                 let window_epoch = lifecycle.show(|| {
                     shown_window
                         .set_always_on_top(true)
                         .map_err(|e| e.to_string())?;
-                    shown_window.show().map_err(|e| e.to_string())
+                    show_recording_native_window(
+                        shown_window.app_handle(),
+                        shown_window.label(),
+                        || shown_window.show(),
+                    )
                 })?;
+                bind_recording_window_to_foreground_desired_run(
+                    &lifecycle,
+                    &coordinator,
+                    desired_coordinator,
+                    window_epoch,
+                );
                 let _ = shown_window.emit(
                     EVENT_RECORDING_WINDOW_SHOWN,
                     RecordingWindowLifecyclePayload { window_epoch },
@@ -3728,6 +4806,21 @@ pub fn show_window_with_recording_config(
         },
         recording_window_placement_from_config(config),
     )
+}
+
+/// Only a native user Close requests Stop. Programmatic visibility effects do not.
+pub fn stop_recording_on_native_close(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let event = state
+        .recording_intent_coordinator
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .current_capture_stop(recording_intent::IntentSource::Frontend);
+    if let Some(event) = event {
+        dispatch_recording_coordinator_event(app.clone(), event);
+    }
 }
 
 pub fn hide_recording_webview<R: tauri::Runtime>(window: &WebviewWindow<R>) -> Result<(), String> {
@@ -3751,14 +4844,25 @@ pub fn show_recording_webview<R: tauri::Runtime>(window: &WebviewWindow<R>) -> R
         return window.show().map_err(|error| error.to_string());
     };
     let lifecycle = state.recording_window_lifecycle.clone();
+    let coordinator = state.recording_intent_coordinator.clone();
+    let desired_coordinator =
+        state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired;
     let shown_window = window.clone();
     commit_recording_visibility(window.app_handle(), move || {
         let window_epoch = lifecycle.show(|| {
             shown_window
                 .set_always_on_top(true)
                 .map_err(|e| e.to_string())?;
-            shown_window.show().map_err(|e| e.to_string())
+            show_recording_native_window(shown_window.app_handle(), shown_window.label(), || {
+                shown_window.show()
+            })
         })?;
+        bind_recording_window_to_foreground_desired_run(
+            &lifecycle,
+            &coordinator,
+            desired_coordinator,
+            window_epoch,
+        );
         let _ = shown_window.emit(
             EVENT_RECORDING_WINDOW_SHOWN,
             RecordingWindowLifecyclePayload { window_epoch },
@@ -3805,14 +4909,27 @@ pub fn show_webview_window_with_recording_config<R: tauri::Runtime>(
         |pos| window.set_position(pos),
         || {
             let lifecycle = state.recording_window_lifecycle.clone();
+            let coordinator = state.recording_intent_coordinator.clone();
+            let desired_coordinator =
+                state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired;
             let shown_window = window.clone();
             commit_recording_visibility(window.app_handle(), move || {
                 let window_epoch = lifecycle.show(|| {
                     shown_window
                         .set_always_on_top(true)
                         .map_err(|e| e.to_string())?;
-                    shown_window.show().map_err(|e| e.to_string())
+                    show_recording_native_window(
+                        shown_window.app_handle(),
+                        shown_window.label(),
+                        || shown_window.show(),
+                    )
                 })?;
+                bind_recording_window_to_foreground_desired_run(
+                    &lifecycle,
+                    &coordinator,
+                    desired_coordinator,
+                    window_epoch,
+                );
                 let _ = shown_window.emit(
                     EVENT_RECORDING_WINDOW_SHOWN,
                     RecordingWindowLifecyclePayload { window_epoch },
@@ -5709,6 +6826,20 @@ pub async fn update_stt_config(
     }
     drop(stt_config_guard);
 
+    // STT settings are part of the immutable recording policy. Give this
+    // update its own policy version so an accepted queued run keeps one
+    // coherent AppConfig + STT snapshot.
+    let recording_config_snapshot = state.config.read().await.clone();
+    let recording_policy_version = AppState::bump_revision(&state.app_config_revision)
+        .await
+        .parse::<u64>()
+        .unwrap_or(0);
+    sync_recording_intent_runtime(
+        app_handle.clone(),
+        &recording_config_snapshot,
+        recording_policy_version,
+    );
+
     if incoming_language_changed {
         restart_active_incoming_translation_if_active(state.inner(), &app_handle)
             .await
@@ -7207,6 +8338,7 @@ async fn restore_recording_window_after_auto_paste(
     state: &AppState,
     suppression: AutoPasteWindowSuppression,
     recording_status: RecordingStatus,
+    session_id: Option<u64>,
 ) {
     if !should_restore_recording_window_after_suppression(suppression, recording_status) {
         return;
@@ -7218,17 +8350,26 @@ async fn restore_recording_window_after_auto_paste(
     let result = commit_recording_visibility(app_handle, move || {
         if suppression.hidden {
             // Restore the same window placement, only if no newer start/show owns it.
-            if let Some(window_epoch) =
-                lifecycle.show_if_current(suppression.window_epoch, || {
-                    window.show().map_err(|e| e.to_string())?;
-                    window.set_always_on_top(true).map_err(|e| e.to_string())
-                })?
-            {
-                let _ = window.emit(
-                    EVENT_RECORDING_WINDOW_SHOWN,
-                    RecordingWindowLifecyclePayload { window_epoch },
-                );
-            }
+            let show = || {
+                show_recording_native_window(window.app_handle(), window.label(), || {
+                    window.show()
+                })?;
+                window.set_always_on_top(true).map_err(|e| e.to_string())
+            };
+            let restored_epoch = match session_id {
+                Some(session_id) => lifecycle.restore_if_owned_by_session(
+                    session_id,
+                    suppression.window_epoch,
+                    show,
+                )?,
+                None => lifecycle.restore_if_current(suppression.window_epoch, show)?,
+            };
+            log::debug!(
+                "recording window temporary restore: epoch={}, session={:?}, committed={}",
+                suppression.window_epoch,
+                session_id,
+                restored_epoch.is_some()
+            );
         } else {
             lifecycle.while_current(suppression.window_epoch, || {
                 window.set_always_on_top(true).map_err(|e| e.to_string())
@@ -7387,10 +8528,98 @@ fn hotkey_key_code_for_physical_release_watch(_hotkey: &str) -> Option<u16> {
 
 #[cfg(target_os = "macos")]
 fn macos_physical_key_is_pressed(key_code: u16) -> bool {
+    #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+    super::native_e2e::physical_real_read();
     unsafe {
         // 0 is kCGEventSourceStateCombinedSessionState.
         CGEventSourceKeyState(0, key_code)
     }
+}
+
+// A required modifier may be held on either side. Extra modifiers do not
+// turn a configured chord Up; releasing any required member does.
+#[derive(Clone, Copy)]
+pub(super) struct PhysicalHotkeyChord {
+    pub(super) key: u16,
+    pub(super) modifiers: u8,
+}
+
+impl PhysicalHotkeyChord {
+    fn from_hotkey(hotkey: &str) -> Option<Self> {
+        let key = hotkey_key_code_for_physical_release_watch(hotkey)?;
+        let mut modifiers = 0;
+        for part in hotkey.split('+').map(str::trim) {
+            modifiers |= match part.to_ascii_lowercase().as_str() {
+                "cmd" | "command" | "cmdorctrl" | "super" | "meta" => 1,
+                "shift" => 2,
+                "alt" | "option" => 4,
+                "ctrl" | "control" => 8,
+                _ => 0,
+            };
+        }
+        Some(Self { key, modifiers })
+    }
+
+    pub(super) fn sample_with(
+        self,
+        mut down: impl FnMut(u16) -> bool,
+    ) -> super::recording_hotkey_gestures::PhysicalObservation {
+        use super::recording_hotkey_gestures::PhysicalObservation::{Down, Up};
+        // Carbon virtual key codes, same namespace as the principal-key map.
+        let pairs = [(55, 54), (56, 60), (58, 61), (59, 62)];
+        if !down(self.key)
+            || pairs.iter().enumerate().any(|(bit, &(left, right))| {
+                self.modifiers & (1 << bit) != 0 && !(down(left) || down(right))
+            })
+        {
+            Up
+        } else {
+            Down
+        }
+    }
+}
+
+pub(super) type ChordReader = Arc<
+    dyn Fn(PhysicalHotkeyChord) -> super::recording_hotkey_gestures::PhysicalObservation
+        + Send
+        + Sync,
+>;
+
+fn recording_chord_reader() -> ChordReader {
+    #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+    if let Some(reader) = super::native_e2e::physical_chord_reader() {
+        return reader;
+    }
+    Arc::new(|chord| {
+        // A callback may have cloned the default reader just before installation.
+        // Resolve the debug override again at sampling, under the gesture lock.
+        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+        if let Some(reader) = super::native_e2e::physical_chord_reader() {
+            return reader(chord);
+        }
+        observe_physical_chord(Some(chord))
+    })
+}
+
+fn read_recording_chord(
+    reader: &ChordReader,
+    chord: Option<PhysicalHotkeyChord>,
+) -> super::recording_hotkey_gestures::PhysicalObservation {
+    chord.map_or(
+        super::recording_hotkey_gestures::PhysicalObservation::Unavailable,
+        |chord| reader(chord),
+    )
+}
+
+fn observe_physical_chord(
+    chord: Option<PhysicalHotkeyChord>,
+) -> super::recording_hotkey_gestures::PhysicalObservation {
+    #[cfg(target_os = "macos")]
+    if let Some(chord) = chord {
+        return chord.sample_with(macos_physical_key_is_pressed);
+    }
+    let _ = chord;
+    super::recording_hotkey_gestures::PhysicalObservation::Unavailable
 }
 
 #[cfg(target_os = "macos")]
@@ -7486,11 +8715,17 @@ fn dispatch_normalized_recording_gesture(
     app_handle: AppHandle,
     intent: super::recording_hotkey_gestures::GestureIntent,
 ) {
+    submit_normalized_recording_gesture(app_handle, intent)();
+}
+
+fn submit_normalized_recording_gesture(
+    app_handle: AppHandle,
+    intent: super::recording_hotkey_gestures::GestureIntent,
+) -> Box<dyn FnOnce() + Send> {
     use super::recording_hotkey_gestures::{ForceOffReason, GestureIntent, GestureSource};
 
     if !desired_recording_gesture_is_authorized(&app_handle, intent) {
-        redirect_unauthenticated_recording_intent(app_handle);
-        return;
+        return Box::new(move || redirect_unauthenticated_recording_intent(app_handle));
     }
 
     let event = match intent {
@@ -7527,7 +8762,7 @@ fn dispatch_normalized_recording_gesture(
             })
         }
     };
-    dispatch_recording_coordinator_event(app_handle, event);
+    submit_recording_coordinator_event(app_handle, event)
 }
 
 fn desired_recording_gesture_is_authorized(
@@ -7581,65 +8816,100 @@ fn trace_recording_input(
     );
 }
 
-#[cfg(target_os = "macos")]
+fn record_physical_event(
+    kind: &str,
+    handle: Option<super::recording_hotkey_gestures::PressHandle>,
+    observation: &str,
+    result: &str,
+) {
+    #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+    super::native_e2e::physical_event(kind, handle, observation, result);
+    let _ = (kind, handle, observation, result);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WatchStep {
+    Continue,
+    Finished,
+}
+
+// The asynchronous watcher and debug saved-handle probes share this exact step.
+// Lock order is gesture -> reader state; effects execute after both are released.
+pub(super) fn desired_hotkey_watch_step(
+    app_handle: &AppHandle,
+    handle: super::recording_hotkey_gestures::PressHandle,
+    chord: PhysicalHotkeyChord,
+    reader: &ChordReader,
+) -> WatchStep {
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return WatchStep::Finished;
+    };
+    let submitted = {
+        let mut gestures = state
+            .recording_hotkey_gestures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if gestures.active_press() != Some(handle) {
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            record_physical_event("watcher", Some(handle), "NotRead", "Stale");
+            return WatchStep::Finished;
+        }
+        match reader(chord) {
+            super::recording_hotkey_gestures::PhysicalObservation::Down => {
+                return WatchStep::Continue
+            }
+            super::recording_hotkey_gestures::PhysicalObservation::Unavailable => {
+                return WatchStep::Finished
+            }
+            observation => {
+                let result = gestures.release_observed(Some(handle), observation).1;
+                #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+                record_physical_event(
+                    "watcher",
+                    Some(handle),
+                    "Up",
+                    match result {
+                        super::recording_hotkey_gestures::ReleaseResult::HoldEnded(_) => {
+                            "HoldEnded"
+                        }
+                        super::recording_hotkey_gestures::ReleaseResult::Rearmed => "Rearmed",
+                        _ => "Stale",
+                    },
+                );
+                match result {
+                    super::recording_hotkey_gestures::ReleaseResult::HoldEnded(intent) => Some(
+                        submit_normalized_recording_gesture(app_handle.clone(), intent),
+                    ),
+                    _ => None,
+                }
+            }
+        }
+    };
+    drop(state);
+    if let Some(submitted) = submitted {
+        submitted();
+    }
+    WatchStep::Finished
+}
+
 fn schedule_desired_hotkey_physical_release_watch(
     app_handle: AppHandle,
     handle: super::recording_hotkey_gestures::PressHandle,
-    mode: super::recording_hotkey_gestures::PhysicalHotkeyMode,
-    key_code: Option<u16>,
+    chord: Option<PhysicalHotkeyChord>,
+    reader: ChordReader,
 ) {
-    let Some(key_code) = key_code else {
+    let Some(chord) = chord else {
         return;
     };
     tauri::async_runtime::spawn(async move {
-        let deadline =
-            tokio::time::Instant::now() + Duration::from_millis(HOTKEY_PHYSICAL_RELEASE_TIMEOUT_MS);
         loop {
             tokio::time::sleep(Duration::from_millis(HOTKEY_PHYSICAL_RELEASE_POLL_MS)).await;
-            if macos_physical_key_is_pressed(key_code) {
-                if mode == super::recording_hotkey_gestures::PhysicalHotkeyMode::Hold
-                    || tokio::time::Instant::now() < deadline
-                {
-                    continue;
-                }
-                log::warn!(
-                    "[HotkeyTrace] toggle physical release watcher timed out; recovering latch: gesture={:?}",
-                    handle.gesture_id()
-                );
-            }
-            let Some(state) = app_handle.try_state::<AppState>() else {
+            if desired_hotkey_watch_step(&app_handle, handle, chord, &reader) == WatchStep::Finished
+            {
                 return;
-            };
-            let result = state
-                .recording_hotkey_gestures
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .physical_watcher_released(handle);
-            let recovered_intent = match result {
-                super::recording_hotkey_gestures::ReleaseResult::HoldEnded(intent) => Some(intent),
-                super::recording_hotkey_gestures::ReleaseResult::Rearmed
-                | super::recording_hotkey_gestures::ReleaseResult::Stale => None,
-            };
-            log::debug!(
-                "[HotkeyTrace] physical release recovery result={result:?}, gesture={:?}",
-                handle.gesture_id()
-            );
-            drop(state);
-            if let Some(intent) = recovered_intent {
-                dispatch_normalized_recording_gesture(app_handle.clone(), intent);
             }
-            return;
         }
     });
-}
-
-#[cfg(not(target_os = "macos"))]
-fn schedule_desired_hotkey_physical_release_watch(
-    _app_handle: AppHandle,
-    _handle: super::recording_hotkey_gestures::PressHandle,
-    _mode: super::recording_hotkey_gestures::PhysicalHotkeyMode,
-    _key_code: Option<u16>,
-) {
 }
 
 fn dispatch_recording_hotkey_toggle(app_clone: AppHandle, accepted_press_seq: u64) {
@@ -8655,6 +9925,8 @@ pub async fn register_recording_hotkey(
         );
     }
 
+    let physical_chord = PhysicalHotkeyChord::from_hotkey(&effective_hotkey);
+
     // Создаем обработчик - вызываем toggle напрямую вместо события.
     // Важно: key repeat может присылать несколько Pressed при удержании клавиши,
     // а на macOS bare-key hotkeys иногда дают Released между repeat Pressed.
@@ -8662,7 +9934,12 @@ pub async fn register_recording_hotkey(
     app_handle
         .global_shortcut()
         .on_shortcut(shortcut, move |app, _shortcut, event| {
-            handle_recording_shortcut_event(app, event.state, physical_release_key_code);
+            handle_recording_shortcut_event_with_chord(
+                app,
+                event.state,
+                physical_release_key_code,
+                physical_chord,
+            );
         })
         .map_err(|e| format!("Failed to register hotkey '{}': {}", effective_hotkey, e))?;
 
@@ -8677,7 +9954,24 @@ pub(super) fn handle_recording_shortcut_event(
     event_state: tauri_plugin_global_shortcut::ShortcutState,
     physical_release_key_code: Option<u16>,
 ) {
+    // None leaves a new latch unavailable; an existing latch keeps its binding.
+    // The isolated E42 fixture installs its reader before delivering any press.
+    handle_recording_shortcut_event_with_chord(
+        app,
+        event_state,
+        physical_release_key_code,
+        physical_release_key_code.map(|key| PhysicalHotkeyChord { key, modifiers: 0 }),
+    );
+}
+
+pub(super) fn handle_recording_shortcut_event_with_chord(
+    app: &AppHandle,
+    event_state: tauri_plugin_global_shortcut::ShortcutState,
+    physical_release_key_code: Option<u16>,
+    physical_chord: Option<PhysicalHotkeyChord>,
+) {
     use tauri_plugin_global_shortcut::ShortcutState;
+    let reader = recording_chord_reader();
 
     let Some(state) = app.try_state::<crate::presentation::state::AppState>() else {
         return;
@@ -8697,12 +9991,34 @@ pub(super) fn handle_recording_shortcut_event(
                         .recording_hotkey_gestures
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    let (handle, result) = gestures.os_released();
+                    let handle = gestures.active_press();
+                    let chord = gestures
+                        .observation_binding(
+                            physical_chord.map(|chord| (chord.key, chord.modifiers)),
+                        )
+                        .map(|(key, modifiers)| PhysicalHotkeyChord { key, modifiers });
+                    let observation = read_recording_chord(&reader, chord);
+                    let (handle, result) = gestures.release_observed(handle, observation);
+                    #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+                    record_physical_event(
+                        "released",
+                        handle,
+                        &format!("{observation:?}"),
+                        match result {
+                            super::recording_hotkey_gestures::ReleaseResult::HoldEnded(_) => {
+                                "HoldEnded"
+                            }
+                            super::recording_hotkey_gestures::ReleaseResult::Rearmed => "Rearmed",
+                            _ => "Stale",
+                        },
+                    );
                     match (handle, result) {
                         (Some(handle), result) => match result {
-                            super::recording_hotkey_gestures::ReleaseResult::HoldEnded(intent) => {
-                                (Some(intent), Some(handle.gesture_id()), true)
-                            }
+                            super::recording_hotkey_gestures::ReleaseResult::HoldEnded(intent) => (
+                                Some(submit_normalized_recording_gesture(app.clone(), intent)),
+                                Some(handle.gesture_id()),
+                                true,
+                            ),
                             super::recording_hotkey_gestures::ReleaseResult::Rearmed => {
                                 (None, Some(handle.gesture_id()), true)
                             }
@@ -8724,8 +10040,8 @@ pub(super) fn handle_recording_shortcut_event(
                         recording_intent::InputTracePhase::GestureRejected
                     },
                 );
-                if let Some(intent) = intent {
-                    dispatch_normalized_recording_gesture(app.clone(), intent);
+                if let Some(submitted) = intent {
+                    submitted();
                 }
                 return;
             }
@@ -8746,11 +10062,57 @@ pub(super) fn handle_recording_shortcut_event(
                 } else {
                     super::recording_hotkey_gestures::PhysicalHotkeyMode::Toggle
                 };
-                let accepted = state
-                    .recording_hotkey_gestures
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .press(mode);
+                let accepted = {
+                    let mut gestures = state
+                        .recording_hotkey_gestures
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let chord = gestures
+                        .observation_binding(
+                            physical_chord.map(|chord| (chord.key, chord.modifiers)),
+                        )
+                        .map(|(key, modifiers)| PhysicalHotkeyChord { key, modifiers });
+                    let observation = read_recording_chord(&reader, chord);
+                    let result = gestures.press_observed(mode, observation);
+                    #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+                    record_physical_event(
+                        "pressed",
+                        gestures.active_press(),
+                        &format!("{observation:?}"),
+                        match result {
+                            super::recording_hotkey_gestures::PressResult::Accepted(_) => {
+                                "Accepted"
+                            }
+                            _ => "Duplicate",
+                        },
+                    );
+                    if let (
+                        super::recording_hotkey_gestures::PressResult::Accepted(accepted),
+                        Some(chord),
+                    ) = (result, physical_chord)
+                    {
+                        gestures.bind_physical_chord(accepted.handle, (chord.key, chord.modifiers));
+                    }
+                    let authorized = match result {
+                        super::recording_hotkey_gestures::PressResult::Accepted(accepted) => {
+                            desired_recording_gesture_is_authorized(app, accepted.intent)
+                        }
+                        _ => false,
+                    };
+                    let submitted = match result {
+                        super::recording_hotkey_gestures::PressResult::Accepted(accepted)
+                            if authorized =>
+                        {
+                            Some(submit_normalized_recording_gesture(
+                                app.clone(),
+                                accepted.intent,
+                            ))
+                        }
+                        _ => None,
+                    };
+                    (result, submitted, authorized)
+                };
+                let (accepted, submitted, authorized) = accepted;
                 let super::recording_hotkey_gestures::PressResult::Accepted(accepted) = accepted
                 else {
                     drop(state);
@@ -8763,7 +10125,7 @@ pub(super) fn handle_recording_shortcut_event(
                     return;
                 };
                 drop(state);
-                if !desired_recording_gesture_is_authorized(app, accepted.intent) {
+                if !authorized {
                     trace_recording_input(
                         app.clone(),
                         recording_intent::IntentSource::CarbonHotkey,
@@ -8773,8 +10135,8 @@ pub(super) fn handle_recording_shortcut_event(
                     schedule_desired_hotkey_physical_release_watch(
                         app.clone(),
                         accepted.handle,
-                        mode,
-                        physical_release_key_code,
+                        physical_chord,
+                        reader.clone(),
                     );
                     redirect_unauthenticated_recording_intent(app.clone());
                     return;
@@ -8788,10 +10150,12 @@ pub(super) fn handle_recording_shortcut_event(
                 schedule_desired_hotkey_physical_release_watch(
                     app.clone(),
                     accepted.handle,
-                    mode,
-                    physical_release_key_code,
+                    physical_chord,
+                    reader.clone(),
                 );
-                dispatch_normalized_recording_gesture(app.clone(), accepted.intent);
+                if let Some(submitted) = submitted {
+                    submitted();
+                }
                 return;
             }
         }
@@ -9242,6 +10606,74 @@ pub async fn request_accessibility_permission() -> Result<(), String> {
     crate::infrastructure::auto_paste::open_accessibility_settings().map_err(|e| e.to_string())
 }
 
+/// Guarded delivery uses the same native executor as the service's context gate.
+/// An IPC caller cannot enable continuation or register a target through this command.
+#[tauri::command]
+pub async fn auto_paste_continuation_text(
+    state: State<'_, AppState>,
+    text: String,
+    session_id: u64,
+    delivery_seq: u64,
+) -> Result<crate::infrastructure::continuation_context::GuardedPasteOutcome, String> {
+    use crate::infrastructure::continuation_context::GuardedPasteOutcome;
+    if session_id == 0 || delivery_seq == 0 {
+        return Ok(GuardedPasteOutcome::Unavailable);
+    }
+    if !state
+        .continuation_delivery_runs
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .authorize(session_id, delivery_seq, false)
+    {
+        return Ok(GuardedPasteOutcome::Unavailable);
+    }
+    Ok(state
+        .continuation_context
+        .guarded_paste(session_id, delivery_seq, text)
+        .await)
+}
+
+/// Terminal automatic clipboard publication (empty text is a context-only gate).
+#[tauri::command]
+pub async fn copy_continuation_text(
+    state: State<'_, AppState>,
+    text: String,
+    session_id: u64,
+    delivery_seq: u64,
+) -> Result<crate::infrastructure::continuation_context::GuardedPasteOutcome, String> {
+    use crate::infrastructure::continuation_context::GuardedPasteOutcome;
+    let authorized = state
+        .continuation_delivery_runs
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .authorize(session_id, delivery_seq, !text.is_empty());
+    if !authorized {
+        return Ok(GuardedPasteOutcome::Unavailable);
+    }
+    Ok(state
+        .continuation_context
+        .guarded_copy(session_id, delivery_seq, text)
+        .await)
+}
+
+/// Called after the frontend's entire terminal delivery queue has settled.
+#[tauri::command]
+pub async fn finish_continuation_delivery(
+    state: State<'_, AppState>,
+    session_id: u64,
+    delivery_seq: u64,
+) -> Result<bool, String> {
+    let retired = state
+        .continuation_delivery_runs
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .settle(session_id, delivery_seq);
+    if retired {
+        state.continuation_context.release(session_id).await;
+    }
+    Ok(retired)
+}
+
 /// Автоматически вставляет текст в последнее активное окно
 /// Требует разрешения Accessibility на macOS
 #[tauri::command]
@@ -9252,8 +10684,13 @@ pub async fn auto_paste_text(
     session_id: Option<u64>,
 ) -> Result<(), String> {
     #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
-    return super::native_e2e::record_auto_paste(&text, session_id);
-    let window_epoch_before_paste = state.recording_window_lifecycle.current();
+    if !super::native_e2e::live_mode() {
+        return super::native_e2e::record_auto_paste(&text, session_id);
+    }
+    let window_epoch_before_paste = match session_id {
+        Some(session_id) => state.recording_window_lifecycle.session_epoch(session_id),
+        None => Some(state.recording_window_lifecycle.current()),
+    };
     log::info!("Command: auto_paste_text - text length: {}", text.len());
 
     // Вставки выполняем строго по одной: параллельный вызов перемешал бы
@@ -9313,12 +10750,16 @@ pub async fn auto_paste_text(
         );
         target_for_paste = target.clone();
 
-        window_suppression = suppress_recording_window_for_auto_paste(
-            &app_handle,
-            recording_status_before_paste,
-            window_epoch_before_paste,
-        )
-        .await;
+        window_suppression = if let Some(window_epoch) = window_epoch_before_paste {
+            suppress_recording_window_for_auto_paste(
+                &app_handle,
+                recording_status_before_paste,
+                window_epoch,
+            )
+            .await
+        } else {
+            AutoPasteWindowSuppression::default()
+        };
 
         if crate::infrastructure::auto_paste::frontmost_app_matches_target(&target) {
             log::debug!("Auto-paste target is already frontmost; skipping activation");
@@ -9344,6 +10785,7 @@ pub async fn auto_paste_text(
                 state.inner(),
                 window_suppression,
                 recording_status_after_focus_failure,
+                session_id,
             )
             .await;
             return Err(message);
@@ -9363,6 +10805,19 @@ pub async fn auto_paste_text(
     let paste_result = {
         let target = target_for_paste.clone();
         match tokio::task::spawn_blocking(move || {
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            {
+                crate::infrastructure::continuation_context::observation::with_legacy_session(
+                    session_id,
+                    || {
+                        crate::infrastructure::auto_paste::paste_text_for_target(
+                            &text_clone,
+                            &target,
+                        )
+                    },
+                )
+            }
+            #[cfg(not(all(debug_assertions, feature = "native-window-e2e")))]
             crate::infrastructure::auto_paste::paste_text_for_target(&text_clone, &target)
         })
         .await
@@ -9393,6 +10848,7 @@ pub async fn auto_paste_text(
         state.inner(),
         window_suppression,
         recording_status_after_paste,
+        session_id,
     )
     .await;
 
@@ -9761,7 +11217,9 @@ pub async fn set_auth_session(
 
     // 3) Обновляем токен для STT (чтобы hotkey start_recording всегда имел актуальный access)
     let stt_token = next.session.as_ref().map(|s| s.access_token.clone());
-    state.apply_backend_auth_token_to_stt(stt_token).await;
+    state
+        .apply_backend_auth_token_to_stt(&app_handle, stt_token)
+        .await;
 
     // 4) Bump revisions + invalidations
     // auth-state только если поменялся флаг
@@ -9817,7 +11275,9 @@ pub async fn set_authenticated(
                     .await
                     .backend_auth_token;
                 if current_token.as_deref() != Some(t.as_str()) {
-                    state.apply_backend_auth_token_to_stt(Some(t.clone())).await;
+                    state
+                        .apply_backend_auth_token_to_stt(&app_handle, Some(t.clone()))
+                        .await;
                 }
             }
         }
@@ -9831,14 +11291,20 @@ pub async fn set_authenticated(
     if authenticated {
         if let Some(ref t) = token {
             log::info!("set_authenticated: received token with len: {}", t.len());
-            state.apply_backend_auth_token_to_stt(Some(t.clone())).await;
+            state
+                .apply_backend_auth_token_to_stt(&app_handle, Some(t.clone()))
+                .await;
             log::info!("Backend auth token saved to config");
         } else {
             log::warn!("set_authenticated: authenticated=true but token is None!");
-            state.apply_backend_auth_token_to_stt(None).await;
+            state
+                .apply_backend_auth_token_to_stt(&app_handle, None)
+                .await;
         }
     } else {
-        state.apply_backend_auth_token_to_stt(None).await;
+        state
+            .apply_backend_auth_token_to_stt(&app_handle, None)
+            .await;
         log::info!("Backend auth token cleared from config");
     }
 
@@ -9861,6 +11327,34 @@ pub async fn set_authenticated(
 mod tests {
     use super::*;
     use crate::domain::{AudioChunk, Transcription};
+
+    #[test]
+    fn physical_chord_requires_key_and_each_modifier_on_either_side() {
+        use super::super::recording_hotkey_gestures::PhysicalObservation::{Down, Up};
+        let chord = PhysicalHotkeyChord {
+            key: 7,
+            modifiers: 15,
+        };
+        for held in [[7, 55, 56, 58, 59], [7, 54, 60, 61, 62]] {
+            assert_eq!(chord.sample_with(|key| held.contains(&key)), Down);
+            for missing in held {
+                assert_eq!(
+                    chord.sample_with(|key| key != missing && held.contains(&key)),
+                    Up
+                );
+            }
+        }
+        assert_eq!(
+            PhysicalHotkeyChord {
+                key: 7,
+                modifiers: 0
+            }
+            .sample_with(|key| key == 7),
+            Down
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert!(PhysicalHotkeyChord::from_hotkey("CmdOrCtrl+Shift+X").is_none());
+    }
 
     #[test]
     fn session_scoped_auto_paste_targets_survive_a_new_capture() {
@@ -10083,7 +11577,10 @@ mod tests {
     async fn transcript_delivery_barrier_runs_after_a_capacity_filling_final() {
         let (tx, rx) = transcript_event_channel(1);
         tx.send_final(final_text("terminal")).unwrap();
-        let barrier = TranscriptDeliveryBarrierPort { sender: tx.clone() };
+        let barrier = TranscriptDeliveryBarrierPort {
+            sender: tx.clone(),
+            delivery: Arc::new(Mutex::new(RunTranscriptDelivery::default())),
+        };
 
         let consumer = async move {
             let first = rx.recv().await.expect("final must be queued first");
@@ -10099,6 +11596,97 @@ mod tests {
     }
 
     #[test]
+    fn initial_continuation_copy_only_needs_no_ax_target() {
+        assert!(initial_continuation_target_eligible(true, false, None));
+        assert!(!initial_continuation_target_eligible(false, false, None));
+        assert!(!initial_continuation_target_eligible(false, true, None));
+        assert!(!initial_continuation_target_eligible(true, true, None));
+    }
+
+    #[test]
+    fn initial_continuation_qualification_keeps_other_targets_on_legacy_delivery() {
+        assert!(!initial_continuation_target_eligible(true, true, None));
+        for bundle in [
+            "com.apple.TextEdit",
+            "com.apple.TextEdit.other",
+            "com.google.Chrome",
+        ] {
+            for pid in [0, 42] {
+                let target = AutoPasteTarget {
+                    bundle_id: bundle.into(),
+                    pid,
+                };
+                assert_eq!(
+                    initial_continuation_target_eligible(true, true, Some(&target)),
+                    cfg!(target_os = "macos") && bundle == "com.apple.TextEdit" && pid > 0
+                );
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transcript_delivery_reserve_survives_maximum_provider_cleanup() {
+        let started = tokio::time::Instant::now();
+        let cleanup = crate::application::TranscriptionService::maximum_stop_cleanup_timeout();
+        let deadline = transcript_delivery_deadline(started);
+        // Simulate the longest legal cleanup without sleeping or scheduler jitter.
+        tokio::time::advance(cleanup).await;
+        let cleanup_finished = tokio::time::Instant::now();
+        assert!(cleanup_finished > started + Duration::from_millis(31_500));
+        assert_eq!(deadline - cleanup_finished, TRANSCRIPT_DELIVERY_RESERVE);
+        assert!(TRANSCRIPT_DELIVERY_RESERVE <= RECORDING_SHUTDOWN_FINALIZATION_GRACE);
+        let (tx, rx) = transcript_event_channel(1);
+        let barrier = TranscriptDeliveryBarrierPort {
+            sender: tx,
+            delivery: Arc::new(Mutex::new(RunTranscriptDelivery::default())),
+        };
+        let consumer = async {
+            let Some(TranscriptEvent::Barrier(completion)) = rx.recv().await else {
+                panic!("expected delivery barrier");
+            };
+            tokio::time::sleep(TRANSCRIPT_DELIVERY_RESERVE / 2).await;
+            completion.send(()).unwrap();
+        };
+        let (result, ()) = tokio::join!(barrier.flush_until(deadline), consumer);
+        assert_eq!(result, Ok(()));
+        // A consumer that never acknowledges still expires within the reserve.
+        assert!(barrier.flush_until(deadline).await.is_err());
+        assert_eq!(tokio::time::Instant::now(), deadline);
+    }
+
+    #[tokio::test]
+    async fn transcript_barrier_deadline_fences_late_stable_and_duplicate_terminal() {
+        let (tx, _rx) = transcript_event_channel(1);
+        let barrier = TranscriptDeliveryBarrierPort {
+            sender: tx,
+            delivery: Arc::new(Mutex::new(RunTranscriptDelivery::default())),
+        };
+        assert!(barrier
+            .flush_until(tokio::time::Instant::now())
+            .await
+            .is_err());
+        assert_eq!(barrier.close(), Some(String::new()));
+        assert_eq!(barrier.close(), None);
+        assert!(!barrier
+            .delivery
+            .lock()
+            .unwrap()
+            .accept_stable(&final_text("late")));
+    }
+
+    #[test]
+    fn negotiated_stable_sequence_preserves_repeated_text_and_rejects_replay() {
+        let mut delivery = RunTranscriptDelivery::default();
+        let mut first = final_text("hello");
+        first.delivery_seq = Some(1);
+        assert!(delivery.accept_stable(&first));
+        assert!(!delivery.accept_stable(&first));
+        first.delivery_seq = Some(2);
+        assert!(delivery.accept_stable(&first));
+        assert_eq!(delivery.stable_snapshot, "hello hello");
+    }
+
+    #[test]
     fn recording_shutdown_timeout_covers_service_cleanup_and_finalization() {
         let service_cleanup =
             crate::application::TranscriptionService::maximum_stop_cleanup_timeout()
@@ -10109,5 +11697,595 @@ mod tests {
             service_cleanup.saturating_add(RECORDING_SHUTDOWN_FINALIZATION_GRACE)
         );
         assert!(recording_intent_shutdown_timeout() > Duration::from_secs(35));
+    }
+}
+
+#[cfg(test)]
+mod deferred_recording_cancellation_tests {
+    use super::*;
+    use recording_intent::*;
+    use std::{collections::BTreeMap, sync::Mutex};
+
+    // The resource factory is the fixture service boundary, not a replacement
+    // reducer/effect. Production uses this same executor gate for Prepare and Start.
+    fn ready<T>(future: impl std::future::Future<Output = T>) -> T {
+        struct Wake;
+        impl std::task::Wake for Wake {
+            fn wake(self: Arc<Self>) {}
+        }
+        let waker = std::task::Waker::from(Arc::new(Wake));
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        match future.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(value) => value,
+            std::task::Poll::Pending => panic!("fixture resource unexpectedly suspended"),
+        }
+    }
+
+    struct Adapter {
+        coordinator: Mutex<CoordinatorState>,
+        cancellations: Mutex<BTreeMap<u64, Arc<AtomicBool>>>,
+        capture_admissions: usize,
+        provider_admissions: usize,
+        capture_active: bool,
+        shutdown_ready: bool,
+    }
+
+    impl Adapter {
+        fn new(mode: CaptureMode) -> Self {
+            Self {
+                coordinator: Mutex::new(CoordinatorState::new(RuntimePolicySnapshot {
+                    capture_mode: mode,
+                    show_panel_on_start: false,
+                    ..Default::default()
+                })),
+                cancellations: Mutex::new(BTreeMap::new()),
+                capture_admissions: 0,
+                provider_admissions: 0,
+                capture_active: false,
+                shutdown_ready: false,
+            }
+        }
+        fn submit(&self, event: CoordinatorEvent) -> Vec<CoordinatorEffect> {
+            reduce_recording_event_with_cancellation(
+                &mut self.coordinator.lock().unwrap(),
+                &self.cancellations,
+                event,
+                1,
+            )
+        }
+        fn begin(&self, gesture: u64) -> Vec<CoordinatorEffect> {
+            self.submit(CoordinatorEvent::Intent(RecordingIntent::start(
+                IntentSource::HoldHotkey,
+                Some(GestureId::new(gesture)),
+            )))
+        }
+        fn execute(&mut self, effects: Vec<CoordinatorEffect>) {
+            for effect in effects {
+                match effect {
+                    CoordinatorEffect::CancelPrepare { .. }
+                    | CoordinatorEffect::CancelStart { .. } => {
+                        register_recording_effect_cancellations(&self.cancellations, &[effect]);
+                    }
+                    CoordinatorEffect::PrepareCapture { effect_id, run }
+                    | CoordinatorEffect::StartRecording { effect_id, run } => {
+                        let prepare = matches!(effect, CoordinatorEffect::PrepareCapture { .. });
+                        let cancelled =
+                            deferred_recording_effect_token(&self.cancellations, effect_id);
+                        let result =
+                            ready(execute_registered_recording_resource(&cancelled, || {
+                                if prepare {
+                                    self.capture_admissions += 1;
+                                    self.capture_active = true;
+                                } else {
+                                    self.provider_admissions += 1;
+                                }
+                                std::future::ready(Ok(()))
+                            }));
+                        self.cancellations.lock().unwrap().remove(&effect_id.get());
+                        let completion = if prepare {
+                            CoordinatorEvent::PrepareFinished {
+                                effect_id,
+                                run_id: run.run_id,
+                                outcome: if result.is_err() {
+                                    PrepareOutcome::Cancelled
+                                } else {
+                                    PrepareOutcome::Succeeded { generation: 1 }
+                                },
+                            }
+                        } else {
+                            CoordinatorEvent::StartFinished {
+                                effect_id,
+                                run_id: run.run_id,
+                                outcome: if result.is_err() && self.capture_active {
+                                    StartOutcome::FailedCaptureActive(ErrorCode(1))
+                                } else if result.is_err() {
+                                    StartOutcome::Cancelled
+                                } else {
+                                    StartOutcome::Succeeded
+                                },
+                            }
+                        };
+                        // Completion deliberately re-enters only after the token
+                        // mutex is released, just as in the production executor.
+                        let followups = self.submit(completion);
+                        // Newly emitted starts stay deferred; terminal capture
+                        // cleanup executes against the active fixture resource.
+                        self.execute(
+                            followups
+                                .into_iter()
+                                .filter(|effect| {
+                                    !matches!(
+                                        effect,
+                                        CoordinatorEffect::PrepareCapture { .. }
+                                            | CoordinatorEffect::StartRecording { .. }
+                                    )
+                                })
+                                .collect(),
+                        );
+                    }
+                    CoordinatorEffect::StopRecording {
+                        effect_id, run_id, ..
+                    } => {
+                        self.capture_active = false;
+                        let followups = self.submit(CoordinatorEvent::CaptureStopped {
+                            effect_id,
+                            run_id,
+                            outcome: CaptureStopOutcome::Inactive,
+                        });
+                        self.execute(followups);
+                    }
+                    CoordinatorEffect::ShutdownReady => self.shutdown_ready = true,
+                    _ => {}
+                }
+            }
+        }
+        fn assert_drained(&self) {
+            let state = self.coordinator.lock().unwrap();
+            assert_eq!(state.desired_recording, DesiredRecording::Off);
+            assert_eq!(state.capture, CaptureState::Idle);
+            assert!(!state.projection().pending_start);
+            assert!(state.processing_jobs.is_empty());
+            assert_eq!(state.validate(), Ok(()));
+            assert!(!self.capture_active);
+            assert!(self.cancellations.lock().unwrap().is_empty());
+        }
+    }
+
+    fn delayed_begin(mode: CaptureMode, stop: u8) {
+        let mut adapter = Adapter::new(mode);
+        let deferred = adapter.begin(1); // Pause AFTER ordered reduction/registration.
+        let event = match stop {
+            0 => CoordinatorEvent::Intent(RecordingIntent::stop_expected(
+                IntentSource::HoldHotkey,
+                Some(GestureId::new(1)),
+                None,
+            )),
+            1 => CoordinatorEvent::ForceOff(StopReason::SystemSleep),
+            _ => CoordinatorEvent::ShutdownRequested,
+        };
+        let end = adapter.submit(event);
+        assert!(end.iter().any(|effect| matches!(
+            effect,
+            CoordinatorEffect::CancelPrepare { .. } | CoordinatorEffect::CancelStart { .. }
+        )));
+        adapter.execute(end); // Competing event AND cancellation finish before release.
+        adapter.execute(deferred);
+        assert_eq!(
+            adapter.capture_admissions, 0,
+            "capture admitted after cancellation"
+        );
+        assert_eq!(
+            adapter.provider_admissions, 0,
+            "provider admitted after cancellation"
+        );
+        adapter.assert_drained();
+        if stop == 2 {
+            assert!(adapter.shutdown_ready);
+        }
+    }
+
+    #[test]
+    fn deferred_prepare_after_end() {
+        delayed_begin(CaptureMode::Dictation, 0);
+    }
+    #[test]
+    fn deferred_prepare_after_force_off() {
+        delayed_begin(CaptureMode::Dictation, 1);
+    }
+    #[test]
+    fn deferred_prepare_after_shutdown() {
+        delayed_begin(CaptureMode::Dictation, 2);
+    }
+    #[test]
+    fn deferred_start_after_end() {
+        delayed_begin(CaptureMode::LiveTranslation, 0);
+    }
+    #[test]
+    fn deferred_start_after_force_off() {
+        delayed_begin(CaptureMode::LiveTranslation, 1);
+    }
+    #[test]
+    fn deferred_start_after_shutdown() {
+        delayed_begin(CaptureMode::LiveTranslation, 2);
+    }
+
+    #[test]
+    fn cancelled_owner_does_not_poison_queued_replacement() {
+        let mut adapter = Adapter::new(CaptureMode::Dictation);
+        let a = adapter.begin(1);
+        let end = adapter.submit(CoordinatorEvent::ForceOff(StopReason::SystemSleep));
+        adapter.execute(end);
+        let b = adapter.begin(2);
+        assert!(!b
+            .iter()
+            .any(|e| matches!(e, CoordinatorEffect::PrepareCapture { .. })));
+        adapter.execute(a);
+        assert_eq!(adapter.capture_admissions, 0);
+        let state = adapter.coordinator.lock().unwrap();
+        let CaptureState::Preparing { effect_id, run, .. } = state.capture else {
+            panic!("queued B not reconciled")
+        };
+        assert_ne!(run.run_id.get(), 1);
+        drop(state);
+        assert!(
+            !deferred_recording_effect_token(&adapter.cancellations, effect_id)
+                .load(Ordering::Acquire)
+        );
+        adapter.execute(vec![CoordinatorEffect::PrepareCapture { effect_id, run }]);
+        assert_eq!(adapter.capture_admissions, 1);
+    }
+
+    #[test]
+    fn start_emitted_by_prepare_completion_is_registered_before_force_off() {
+        let mut adapter = Adapter::new(CaptureMode::Dictation);
+        let begin = adapter.begin(1);
+        adapter.execute(begin);
+        let state = adapter.coordinator.lock().unwrap();
+        let CaptureState::Starting { effect_id, run, .. } = state.capture else {
+            panic!("missing provider start")
+        };
+        drop(state);
+        let stop = adapter.submit(CoordinatorEvent::ForceOff(StopReason::SystemSleep));
+        adapter.execute(stop);
+        adapter.execute(vec![CoordinatorEffect::StartRecording { effect_id, run }]);
+        assert_eq!(adapter.capture_admissions, 1); // Existing prepared fixture only.
+        assert_eq!(adapter.provider_admissions, 0);
+        adapter.assert_drained();
+    }
+    #[test]
+    fn ordered_cancel_is_visible_even_before_cancel_executor_runs() {
+        let mut adapter = Adapter::new(CaptureMode::Dictation);
+        let begin = adapter.begin(1);
+        let end = adapter.submit(CoordinatorEvent::ForceOff(StopReason::SystemSleep));
+        adapter.execute(begin);
+        assert_eq!(adapter.capture_admissions, 0);
+        adapter.execute(end); // Late cancellation cannot recreate a retired owner.
+        adapter.assert_drained();
+    }
+
+    #[test]
+    fn registration_preserves_token_identity_and_cancelled_state() {
+        let adapter = Adapter::new(CaptureMode::LiveTranslation);
+        let effects = adapter.begin(1);
+        let effect_id = effects
+            .iter()
+            .find_map(|e| match e {
+                CoordinatorEffect::StartRecording { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .unwrap();
+        let original = deferred_recording_effect_token(&adapter.cancellations, effect_id);
+        adapter.submit(CoordinatorEvent::ForceOff(StopReason::SystemSleep));
+        register_recording_effect_cancellations(&adapter.cancellations, &effects);
+        let retained = deferred_recording_effect_token(&adapter.cancellations, effect_id);
+        assert!(Arc::ptr_eq(&original, &retained));
+        assert!(retained.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn start_cancelled_while_waiting_for_actual_audio_admission() {
+        let mut adapter = Adapter::new(CaptureMode::LiveTranslation);
+        let deferred = adapter.begin(1);
+        let (effect_id, run) = deferred
+            .iter()
+            .find_map(|e| match e {
+                CoordinatorEffect::StartRecording { effect_id, run } => Some((*effect_id, *run)),
+                _ => None,
+            })
+            .unwrap();
+        let token = deferred_recording_effect_token(&adapter.cancellations, effect_id);
+        let audio = tokio::sync::Mutex::new(());
+        let held = ready(audio.lock());
+        let lifecycle = tokio::sync::Mutex::new(());
+        let resources = std::cell::Cell::new(0);
+        let passed_lifecycle = std::cell::Cell::new(false);
+        let mut start = Box::pin(async {
+            let _lifecycle = lifecycle.lock().await;
+            check_recording_resource_cancellation(&token)?;
+            passed_lifecycle.set(true);
+            let _audio = admit_recording_audio(&audio, Some(&token)).await?;
+            resources.set(resources.get() + 1);
+            Ok::<_, String>(())
+        });
+        struct Wake;
+        impl std::task::Wake for Wake {
+            fn wake(self: Arc<Self>) {}
+        }
+        let waker = std::task::Waker::from(Arc::new(Wake));
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(std::future::Future::poll(start.as_mut(), &mut cx).is_pending());
+        assert!(passed_lifecycle.get());
+        let cancel = adapter.submit(CoordinatorEvent::ForceOff(StopReason::SystemSleep));
+        assert!(cancel
+            .iter()
+            .any(|e| matches!(e, CoordinatorEffect::CancelStart { .. })));
+        adapter.execute(cancel); // Complete the competing event before unlocking audio.
+        assert!(token.load(Ordering::Acquire));
+        drop(held);
+        let result = ready(start);
+        assert_eq!(
+            resources.get(),
+            0,
+            "translation resource admitted after audio wait cancellation"
+        );
+        assert!(result.is_err());
+        adapter
+            .cancellations
+            .lock()
+            .unwrap()
+            .remove(&effect_id.get());
+        let followups = adapter.submit(CoordinatorEvent::StartFinished {
+            effect_id,
+            run_id: run.run_id,
+            outcome: StartOutcome::Cancelled,
+        });
+        adapter.execute(followups);
+        adapter.assert_drained();
+    }
+
+    fn retained_continue(toggle: bool) {
+        let mut adapter = Adapter::new(CaptureMode::Dictation);
+        let begin = adapter.begin(1);
+        adapter.execute(begin);
+        let CaptureState::Starting {
+            effect_id, run: a, ..
+        } = adapter.coordinator.lock().unwrap().capture
+        else {
+            panic!("A must be prepared");
+        };
+        adapter.execute(vec![CoordinatorEffect::StartRecording {
+            effect_id,
+            run: a,
+        }]);
+        adapter.submit(CoordinatorEvent::Continuation(
+            ContinuationEvent::Negotiated {
+                logical_run_id: a.run_id,
+                connection_generation: 7,
+            },
+        ));
+        let stop = adapter.submit(CoordinatorEvent::Intent(RecordingIntent::stop(
+            IntentSource::Frontend,
+            None,
+        )));
+        let stop_id = stop
+            .iter()
+            .find_map(|e| match e {
+                CoordinatorEffect::StopRecording { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .unwrap();
+        adapter.capture_active = false;
+        let paused = adapter.submit(CoordinatorEvent::CaptureStopped {
+            effect_id: stop_id,
+            run_id: a.run_id,
+            outcome: CaptureStopOutcome::Inactive,
+        });
+        let (pause_id, key) = paused
+            .iter()
+            .find_map(|e| match e {
+                CoordinatorEffect::Continuation(ContinuationEffect::Pause {
+                    effect_id,
+                    key,
+                    ..
+                }) => Some((*effect_id, *key)),
+                _ => None,
+            })
+            .unwrap();
+        adapter.submit(CoordinatorEvent::Continuation(
+            ContinuationEvent::PauseFinished {
+                effect_id: pause_id,
+                key,
+                pause_epoch: Some(1),
+            },
+        ));
+        assert_eq!(
+            adapter
+                .coordinator
+                .lock()
+                .unwrap()
+                .continuation
+                .unwrap()
+                .phase,
+            LogicalPhase::PausedReclaimable
+        );
+        let begin = adapter.begin(2);
+        let (prepare, b) = begin
+            .iter()
+            .find_map(|e| match e {
+                CoordinatorEffect::PrepareCapture { effect_id, run } => Some((*effect_id, *run)),
+                _ => None,
+            })
+            .unwrap();
+        // Prepared PCM exists before Continue escapes; keep its physical token
+        // until the separately held SealPending cleanup is released.
+        let mut prepared_tokens = BTreeMap::from([(b.run_id.get(), 22)]);
+        adapter.capture_active = true;
+        adapter.cancellations.lock().unwrap().remove(&prepare.get());
+        let retained = adapter.submit(CoordinatorEvent::PrepareFinished {
+            effect_id: prepare,
+            run_id: b.run_id,
+            outcome: PrepareOutcome::Succeeded { generation: 22 },
+        });
+        let (effect_id, key, generation) = retained
+            .iter()
+            .find_map(|e| match e {
+                CoordinatorEffect::Continuation(ContinuationEffect::Continue {
+                    effect_id,
+                    key,
+                    generation,
+                    ..
+                }) => Some((*effect_id, *key, *generation)),
+                _ => None,
+            })
+            .unwrap();
+        let original = deferred_recording_effect_token(&adapter.cancellations, effect_id);
+        let event = if toggle {
+            RecordingIntent::toggle(IntentSource::Frontend, GestureId::new(3))
+        } else {
+            RecordingIntent::stop(IntentSource::Frontend, None)
+        };
+        let competing = adapter.submit(CoordinatorEvent::Intent(event));
+        assert!(!competing
+            .iter()
+            .any(|e| matches!(e, CoordinatorEffect::CancelStart { .. })));
+        let seal = competing
+            .iter()
+            .find_map(|e| match e {
+                CoordinatorEffect::Continuation(ContinuationEffect::SealPending {
+                    effect_id,
+                    cancel,
+                    ..
+                }) => {
+                    assert!(!*cancel, "admitted capture must retain delivery");
+                    Some(*effect_id)
+                }
+                _ => None,
+            })
+            .unwrap();
+        adapter.execute(
+            competing
+                .into_iter()
+                .filter(|e| matches!(e, CoordinatorEffect::CancelStart { .. }))
+                .collect(),
+        );
+        // SealPending remains held. Releasing Continue must use its ordered owner.
+        let token = deferred_recording_effect_token(&adapter.cancellations, effect_id);
+        let mut controls = 0;
+        let mut first_audio = 0;
+        let outcome = ready(continuation::admit_continue(&token, async {
+            controls += 1;
+            first_audio += 1;
+            ContinueAttachOutcome::Attached {
+                context_revision: 1,
+            }
+        }));
+        assert_eq!(
+            controls, 1,
+            "ordinary stop must admit retained Continue once"
+        );
+        assert_eq!(first_audio, 1, "admitted audio must survive ordinary stop");
+        assert!(Arc::ptr_eq(&original, &token));
+        adapter
+            .cancellations
+            .lock()
+            .unwrap()
+            .remove(&effect_id.get());
+        adapter.submit(CoordinatorEvent::Continuation(
+            ContinuationEvent::ContinueFinished {
+                effect_id,
+                key,
+                run_id: b.run_id,
+                generation,
+                outcome,
+            },
+        ));
+        assert_eq!(
+            outcome,
+            ContinueAttachOutcome::Attached {
+                context_revision: 1
+            }
+        );
+        assert!(
+            !token.load(Ordering::Acquire),
+            "ordinary stop must preserve seal/drain admission"
+        );
+        assert!(
+            adapter.capture_active,
+            "held Seal still owns physical release"
+        );
+        assert_eq!(prepared_tokens.get(&b.run_id.get()), Some(&generation));
+        adapter.capture_active = false;
+        prepared_tokens.remove(&b.run_id.get());
+        let released = adapter.submit(CoordinatorEvent::Continuation(
+            ContinuationEvent::PendingCaptureStopped {
+                effect_id: seal,
+                run_id: b.run_id,
+                generation,
+                outcome: CaptureStopOutcome::Inactive,
+            },
+        ));
+        assert!(released.iter().any(|e| matches!(e,
+            CoordinatorEffect::Continuation(ContinuationEffect::Pause { key, .. })
+                if key.logical_run_id == a.run_id)));
+        assert!(prepared_tokens.is_empty());
+        let duplicate = adapter.submit(CoordinatorEvent::Continuation(
+            ContinuationEvent::ContinueFinished {
+                effect_id,
+                key,
+                run_id: b.run_id,
+                generation,
+                outcome: ContinueAttachOutcome::Attached {
+                    context_revision: 2,
+                },
+            },
+        ));
+        assert!(duplicate.is_empty(), "completed Continue must not replay");
+        assert!(adapter.cancellations.lock().unwrap().is_empty());
+        let state = adapter.coordinator.lock().unwrap();
+        assert_eq!(state.capture, CaptureState::Idle);
+        assert!(
+            state.processing_jobs.contains_key(&a.run_id),
+            "logical delivery must survive capture release"
+        );
+        assert_eq!(state.validate(), Ok(()));
+    }
+
+    #[test]
+    fn retained_continue_after_completed_toggle_before_seal() {
+        retained_continue(true);
+    }
+
+    #[test]
+    fn retained_continue_after_ordinary_stop_still_admits_sealed_audio() {
+        retained_continue(false);
+    }
+
+    #[test]
+    fn admitted_continue_settles_attempted_failure_after_cancellation() {
+        let cancelled = AtomicBool::new(false);
+        let settlement = tokio::sync::Mutex::new(());
+        let held = ready(settlement.lock());
+        let attempts = std::cell::Cell::new(0);
+        let mut operation = Box::pin(continuation::admit_continue(&cancelled, async {
+            attempts.set(attempts.get() + 1);
+            let _settled = settlement.lock().await;
+            ContinueAttachOutcome::AttemptedFailure(ErrorCode(9))
+        }));
+        struct Wake;
+        impl std::task::Wake for Wake {
+            fn wake(self: Arc<Self>) {}
+        }
+        let waker = std::task::Waker::from(Arc::new(Wake));
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(std::future::Future::poll(operation.as_mut(), &mut cx).is_pending());
+        assert_eq!(attempts.get(), 1);
+        cancelled.store(true, Ordering::Release);
+        drop(held);
+        assert_eq!(
+            ready(operation),
+            ContinueAttachOutcome::AttemptedFailure(ErrorCode(9))
+        );
+        assert_eq!(attempts.get(), 1, "admitted operation must not be replayed");
     }
 }

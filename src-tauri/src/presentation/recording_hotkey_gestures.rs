@@ -71,6 +71,13 @@ impl HoldToken {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhysicalObservation {
+    Down,
+    Up,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhysicalHotkeyMode {
     Toggle,
     Hold,
@@ -123,6 +130,9 @@ pub enum ReleaseResult {
 struct ActivePress {
     handle: PressHandle,
     mode: PhysicalHotkeyMode,
+    supported: bool,
+    interrupted: bool,
+    physical_binding: Option<(u16, u8)>,
 }
 
 #[derive(Debug, Default)]
@@ -159,7 +169,13 @@ impl RecordingHotkeyGestureNormalizer {
                 &mut self.next_watcher_generation,
             )),
         };
-        self.active_press = Some(ActivePress { handle, mode });
+        self.active_press = Some(ActivePress {
+            handle,
+            mode,
+            supported: false,
+            interrupted: false,
+            physical_binding: None,
+        });
 
         let intent = match mode {
             PhysicalHotkeyMode::Toggle => GestureIntent::Toggle { gesture_id },
@@ -182,6 +198,76 @@ impl RecordingHotkeyGestureNormalizer {
         }
     }
 
+    /// Sample under the caller's latch lock. Up on a Pressed callback is not
+    /// evidence of a new down edge; it may only clear an interrupted latch.
+    pub fn press_observed(
+        &mut self,
+        mode: PhysicalHotkeyMode,
+        observation: PhysicalObservation,
+    ) -> PressResult {
+        if observation == PhysicalObservation::Up {
+            if self.active_press.is_some_and(|p| p.interrupted) {
+                self.active_press = None;
+            }
+            return PressResult::Duplicate;
+        }
+        let result = self.press(mode);
+        if let PressResult::Accepted(_) = result {
+            self.active_press.as_mut().unwrap().supported =
+                observation == PhysicalObservation::Down;
+        }
+        result
+    }
+
+    /// Adapter-owned chord descriptor, frozen with the exact accepted handle.
+    /// Re-registration must not reinterpret an older latch using a new chord.
+    pub fn bind_physical_chord(&mut self, handle: PressHandle, binding: (u16, u8)) {
+        if let Some(active) = self.active_press.as_mut() {
+            if active.handle == handle && active.physical_binding.is_none() {
+                active.physical_binding = Some(binding);
+            }
+        }
+    }
+
+    pub fn physical_binding(&self) -> Option<(u16, u8)> {
+        self.active_press.and_then(|active| active.physical_binding)
+    }
+
+    /// Only a new latch may use the current registration. An active latch with
+    /// no mapped binding has frozen Unavailable support, not a missing default.
+    pub fn observation_binding(&self, registration: Option<(u16, u8)>) -> Option<(u16, u8)> {
+        match self.active_press {
+            Some(active) => active.physical_binding,
+            None => registration,
+        }
+    }
+
+    /// Production/fake-state seam: select handle, sample whole chord and apply
+    /// under one lock. A sample tagged with an old handle is always inert.
+    /// Unavailable retains the ambiguous callback-only debt policy.
+    pub fn release_observed(
+        &mut self,
+        handle: Option<PressHandle>,
+        observation: PhysicalObservation,
+    ) -> (Option<PressHandle>, ReleaseResult) {
+        if handle != self.active_press() {
+            return (handle, ReleaseResult::Stale);
+        }
+        match observation {
+            PhysicalObservation::Down => (handle, ReleaseResult::Stale),
+            PhysicalObservation::Up => (
+                handle,
+                handle.map_or(ReleaseResult::Stale, |h| self.release(h)),
+            ),
+            PhysicalObservation::Unavailable if self.active_press.is_some_and(|p| p.supported) => {
+                // Losing observation support cannot downgrade a supported latch
+                // to anonymous callback ownership. Its exact watcher still owns Up.
+                (handle, ReleaseResult::Stale)
+            }
+            PhysicalObservation::Unavailable => self.os_released(),
+        }
+    }
+
     /// A release is semantic only for the exact active hold token.
     pub fn release(&mut self, handle: PressHandle) -> ReleaseResult {
         let Some(active) = self.active_press else {
@@ -192,6 +278,9 @@ impl RecordingHotkeyGestureNormalizer {
         }
 
         self.active_press = None;
+        if active.interrupted {
+            return ReleaseResult::Rearmed;
+        }
         match active.mode {
             PhysicalHotkeyMode::Toggle => ReleaseResult::Rearmed,
             PhysicalHotkeyMode::Hold => {
@@ -201,8 +290,9 @@ impl RecordingHotkeyGestureNormalizer {
         }
     }
 
-    /// Applies an OS Released callback without borrowing identity from whatever
-    /// press happens to be current when a delayed callback arrives.
+    /// Callback-only fallback: debt protects one delayed callback per recovery.
+    /// Missing callbacks and duplicate old callbacks remain indistinguishable;
+    /// supported adapters must use release_observed even when debt is zero.
     pub fn os_released(&mut self) -> (Option<PressHandle>, ReleaseResult) {
         if self.recovered_release_debt > 0 {
             self.recovered_release_debt -= 1;
@@ -217,20 +307,31 @@ impl RecordingHotkeyGestureNormalizer {
     /// Recovery may only release the exact press it observed. A hold recovery
     /// emits the same semantic HoldEnded intent as the normal OS release path.
     pub fn physical_watcher_released(&mut self, handle: PressHandle) -> ReleaseResult {
+        let supported = self
+            .active_press
+            .is_some_and(|p| p.handle == handle && p.supported);
         let result = self.release(handle);
-        if result != ReleaseResult::Stale {
+        if result != ReleaseResult::Stale && !supported {
             self.recovered_release_debt = self.recovered_release_debt.saturating_add(1);
         }
         result
     }
 
-    /// Clears all gesture state and emits an explicit system force-off intent.
+    /// Stops semantic ownership; supported presses retain an Up rearm barrier.
     pub fn force_off(&mut self, reason: ForceOffReason) -> GestureIntent {
         let interrupted_hold = self.active_press.and_then(|active| {
-            (active.mode == PhysicalHotkeyMode::Hold).then_some(HoldToken(active.handle))
+            (active.mode == PhysicalHotkeyMode::Hold && !active.interrupted)
+                .then_some(HoldToken(active.handle))
         });
-        if self.active_press.take().is_some() {
-            self.recovered_release_debt = self.recovered_release_debt.saturating_add(1);
+        if let Some(active) = self.active_press.as_mut() {
+            if active.supported {
+                // One retained exact handle is a rearm barrier, not a live hold.
+                // Its existing watcher exits at Up; repeats allocate no work.
+                active.interrupted = true;
+            } else {
+                self.active_press = None;
+                self.recovered_release_debt = self.recovered_release_debt.saturating_add(1);
+            }
         }
         self.double_space.reset();
         GestureIntent::ForceOff {
@@ -371,6 +472,185 @@ mod tests {
         let intent = normalizer.double_space_key_down(DoubleSpaceKey::Space, at_ms, false);
         normalizer.double_space_key_up(DoubleSpaceKey::Space);
         intent
+    }
+
+    #[test]
+    fn supported_release_matrix() {
+        use PhysicalObservation::{Down, Up};
+        for old_before_b in [false, true] {
+            for watcher_first in [false, true] {
+                for mode in [PhysicalHotkeyMode::Hold, PhysicalHotkeyMode::Toggle] {
+                    let mut n = RecordingHotkeyGestureNormalizer::new();
+                    // Callback-only A leaves anonymous debt, including missing A-up.
+                    let a = accepted(n.press(PhysicalHotkeyMode::Hold));
+                    n.force_off(ForceOffReason::Sleep);
+                    if old_before_b {
+                        n.os_released();
+                    }
+                    let b = accepted(n.press_observed(mode, Down));
+                    assert_eq!(
+                        n.press_observed(PhysicalHotkeyMode::Hold, Down),
+                        PressResult::Duplicate
+                    );
+                    for _ in 0..3 {
+                        assert_eq!(
+                            n.release_observed(Some(b.handle), Down).1,
+                            ReleaseResult::Stale
+                        );
+                    }
+                    assert_eq!(
+                        n.release_observed(Some(a.handle), Up).1,
+                        ReleaseResult::Stale
+                    );
+                    let expected = match mode {
+                        PhysicalHotkeyMode::Hold => {
+                            ReleaseResult::HoldEnded(GestureIntent::HoldEnded {
+                                token: HoldToken(b.handle),
+                            })
+                        }
+                        PhysicalHotkeyMode::Toggle => ReleaseResult::Rearmed,
+                    };
+                    // No time input: even B shorter than a poll interval ends now.
+                    // Watcher carries B; OS selects current under the same lock.
+                    let first = if watcher_first {
+                        Some(b.handle)
+                    } else {
+                        n.active_press()
+                    };
+                    assert_eq!(n.release_observed(first, Up).1, expected);
+                    assert_eq!(
+                        n.release_observed(Some(b.handle), Up).1,
+                        ReleaseResult::Stale
+                    );
+                    assert_eq!(
+                        n.release_observed(n.active_press(), Up).1,
+                        ReleaseResult::Stale
+                    );
+                    let c = accepted(n.press_observed(mode, Down));
+                    assert_eq!(n.physical_watcher_released(b.handle), ReleaseResult::Stale);
+                    assert_eq!(
+                        n.release_observed(Some(c.handle), Down).1,
+                        ReleaseResult::Stale
+                    );
+                    assert_eq!(n.active_press(), Some(c.handle));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn supported_sleep_rearm_is_bounded_and_requires_observed_up() {
+        use PhysicalObservation::{Down, Up};
+        let mut n = RecordingHotkeyGestureNormalizer::new();
+        for _ in 0..64 {
+            let a = accepted(n.press_observed(PhysicalHotkeyMode::Hold, Down));
+            for _ in 0..4 {
+                n.force_off(ForceOffReason::Sleep);
+                assert_eq!(n.active_press(), Some(a.handle));
+                assert_eq!(
+                    n.press_observed(PhysicalHotkeyMode::Toggle, Down),
+                    PressResult::Duplicate
+                );
+                assert_eq!(
+                    n.release_observed(Some(a.handle), Down).1,
+                    ReleaseResult::Stale
+                );
+            }
+            assert_eq!(
+                n.release_observed(Some(a.handle), Up).1,
+                ReleaseResult::Rearmed
+            );
+            assert_eq!(n.active_press(), None); // watcher terminates
+            assert_eq!(n.recovered_release_debt, 0);
+            let b = accepted(n.press_observed(PhysicalHotkeyMode::Toggle, Down));
+            assert_eq!(
+                n.release_observed(Some(a.handle), Up).1,
+                ReleaseResult::Stale
+            );
+            assert_eq!(
+                n.release_observed(Some(b.handle), Up).1,
+                ReleaseResult::Rearmed
+            );
+            n.force_off(ForceOffReason::Sleep);
+            n.force_off(ForceOffReason::Sleep);
+            assert_eq!(n.active_press(), None);
+        }
+        let a = accepted(n.press_observed(PhysicalHotkeyMode::Hold, Down));
+        n.force_off(ForceOffReason::Sleep);
+        assert_eq!(
+            n.press_observed(PhysicalHotkeyMode::Hold, Up),
+            PressResult::Duplicate
+        );
+        assert_eq!(
+            n.release_observed(Some(a.handle), Up).1,
+            ReleaseResult::Stale
+        );
+        assert!(matches!(
+            n.press_observed(PhysicalHotkeyMode::Hold, Down),
+            PressResult::Accepted(_)
+        ));
+    }
+
+    #[test]
+    fn physical_binding_stays_with_handle_across_config_change_and_sleep() {
+        let mut n = RecordingHotkeyGestureNormalizer::new();
+        let a = accepted(n.press_observed(PhysicalHotkeyMode::Hold, PhysicalObservation::Down));
+        n.bind_physical_chord(a.handle, (7, 3));
+        n.bind_physical_chord(a.handle, (50, 0));
+        n.force_off(ForceOffReason::Sleep);
+        assert_eq!(n.physical_binding(), Some((7, 3)));
+        n.release_observed(Some(a.handle), PhysicalObservation::Up);
+        assert_eq!(n.physical_binding(), None);
+        let b = accepted(n.press_observed(PhysicalHotkeyMode::Toggle, PhysicalObservation::Down));
+        n.bind_physical_chord(a.handle, (7, 3));
+        assert_eq!(n.physical_binding(), None);
+        n.bind_physical_chord(b.handle, (50, 0));
+        assert_eq!(n.physical_binding(), Some((50, 0)));
+    }
+
+    #[test]
+    fn supported_missing_callback_and_temporary_unavailability() {
+        use PhysicalObservation::{Down, Unavailable, Up};
+        let mut n = RecordingHotkeyGestureNormalizer::new();
+        let a = accepted(n.press_observed(PhysicalHotkeyMode::Hold, Down));
+        n.force_off(ForceOffReason::Sleep);
+        // No OS release for A: its token watcher observes Up and rearms.
+        assert_eq!(
+            n.release_observed(Some(a.handle), Up).1,
+            ReleaseResult::Rearmed
+        );
+        let b = accepted(n.press_observed(PhysicalHotkeyMode::Hold, Down));
+        assert_eq!(
+            n.release_observed(Some(b.handle), Unavailable).1,
+            ReleaseResult::Stale
+        );
+        assert_eq!(n.active_press(), Some(b.handle));
+        // No OS release for B either. The same exact watcher boundary ends B.
+        assert_eq!(
+            n.release_observed(Some(b.handle), Up).1,
+            ReleaseResult::HoldEnded(GestureIntent::HoldEnded {
+                token: HoldToken(b.handle)
+            })
+        );
+        assert_eq!(n.recovered_release_debt, 0);
+        assert_eq!(
+            n.release_observed(Some(a.handle), Up).1,
+            ReleaseResult::Stale
+        );
+    }
+
+    #[test]
+    fn unavailable_cannot_distinguish_old_release_from_missing_a_and_b_up() {
+        let mut n = RecordingHotkeyGestureNormalizer::new();
+        accepted(n.press_observed(PhysicalHotkeyMode::Hold, PhysicalObservation::Unavailable));
+        n.force_off(ForceOffReason::Sleep);
+        let b =
+            accepted(n.press_observed(PhysicalHotkeyMode::Hold, PhysicalObservation::Unavailable));
+        assert_eq!(
+            n.release_observed(Some(b.handle), PhysicalObservation::Unavailable),
+            (None, ReleaseResult::Stale)
+        );
+        assert_eq!(n.active_press(), Some(b.handle)); // known fallback liveness limit
     }
 
     #[test]
@@ -707,5 +987,22 @@ mod tests {
         };
         assert_eq!(first.source(), GestureSource::DoubleSpace);
         assert!(second.sequence() > first.sequence());
+    }
+    #[test]
+    fn unavailable_latch_never_borrows_new_mapped_registration() {
+        let mut normalizer = RecordingHotkeyGestureNormalizer::new();
+        let a = accepted(
+            normalizer.press_observed(PhysicalHotkeyMode::Hold, PhysicalObservation::Unavailable),
+        );
+        let mapped = Some((7, 3));
+        assert_eq!(normalizer.observation_binding(mapped), None);
+        assert_eq!(
+            normalizer.press_observed(PhysicalHotkeyMode::Hold, PhysicalObservation::Unavailable,),
+            PressResult::Duplicate
+        );
+        assert_eq!(normalizer.active_press(), Some(a.handle));
+        assert_eq!(normalizer.observation_binding(mapped), None);
+        normalizer.release_observed(Some(a.handle), PhysicalObservation::Unavailable);
+        assert_eq!(normalizer.observation_binding(mapped), mapped);
     }
 }

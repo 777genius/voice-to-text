@@ -1,3 +1,4 @@
+import { tagNativeMeterSource, carryNativeMeterTrace } from '../e2e/nativeMeterEvidence';
 import { ref, watch, onUnmounted, type Ref } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { isTauriAvailable } from '../utils/tauri';
@@ -13,7 +14,12 @@ export interface AudioVisualizerSource {
 
 type AudioSpectrumPayload = {
   bars: number[];
+  run_id: number;
+  capture_generation: number | null;
+  source_timestamp_ms?: number;
 };
+
+export type AudioMeterOwner = { runId: number; kind: 'capture' | 'translation'; captureGeneration?: number | null };
 
 const AUDIO_VISUALIZER_DEBUG = false;
 const SPECTRUM_APPLY_INTERVAL_MS = 50;
@@ -25,6 +31,9 @@ function debugLog(...args: unknown[]) {
 }
 
 export class TauriAudioSpectrumSource implements AudioVisualizerSource {
+  constructor(private readonly getOwner?: () => AudioMeterOwner | null) {}
+
+  private latestGeneration = 0;
   private unlisten: UnlistenFn | null = null;
   private startPromise: Promise<void> | null = null;
   private desiredActive = false;
@@ -32,7 +41,7 @@ export class TauriAudioSpectrumSource implements AudioVisualizerSource {
   private receivedCount = 0;
   private lastLogAt = 0;
   private lastAppliedAt = 0;
-  private pendingBars: number[] | null = null;
+  private pendingBars: AudioSpectrumPayload | null = null;
   private pendingTimer: number | null = null;
 
   private clearPendingTimer() {
@@ -42,9 +51,22 @@ export class TauriAudioSpectrumSource implements AudioVisualizerSource {
     }
   }
 
-  private applyThrottled(bars: number[]) {
+  private accepts(payload: AudioSpectrumPayload): boolean {
+    if (!this.getOwner) return true;
+    const owner = this.getOwner();
+    if (!owner || owner.runId !== payload.run_id) return false;
+    if (owner.kind === 'translation') return payload.capture_generation === null;
+    const generation = payload.capture_generation;
+    if (!Number.isSafeInteger(generation) || generation === null || generation <= 0) return false;
+    if (owner.captureGeneration != null) return generation === owner.captureGeneration;
+    if (generation < this.latestGeneration) return false;
+    this.latestGeneration = generation;
+    return true;
+  }
+
+  private applyThrottled(payload: AudioSpectrumPayload) {
     const onBars = this.onBars;
-    if (!this.desiredActive || !onBars) return;
+    if (!this.desiredActive || !onBars || !this.accepts(payload)) return;
 
     const now = performance.now();
     const elapsed = now - this.lastAppliedAt;
@@ -53,11 +75,11 @@ export class TauriAudioSpectrumSource implements AudioVisualizerSource {
       this.clearPendingTimer();
       this.pendingBars = null;
       this.lastAppliedAt = now;
-      onBars(bars);
+      onBars(payload.bars);
       return;
     }
 
-    this.pendingBars = bars;
+    this.pendingBars = payload;
     if (this.pendingTimer !== null) return;
 
     this.pendingTimer = window.setTimeout(() => {
@@ -66,10 +88,10 @@ export class TauriAudioSpectrumSource implements AudioVisualizerSource {
       this.pendingBars = null;
       if (!pending) return;
       const onBars = this.onBars;
-      if (!this.desiredActive || !onBars) return;
+      if (!this.desiredActive || !onBars || !this.accepts(pending)) return;
 
       this.lastAppliedAt = performance.now();
-      onBars(pending);
+      onBars(pending.bars);
     }, Math.max(0, SPECTRUM_APPLY_INTERVAL_MS - elapsed));
   }
 
@@ -101,7 +123,8 @@ export class TauriAudioSpectrumSource implements AudioVisualizerSource {
         );
       }
 
-      this.applyThrottled(bars);
+      tagNativeMeterSource(bars, event.payload);
+      this.applyThrottled({ ...event.payload, bars });
     })
       .then((unlisten) => {
         if (!this.desiredActive || this.unlisten) {
@@ -137,8 +160,8 @@ export class TauriAudioSpectrumSource implements AudioVisualizerSource {
   }
 }
 
-function createDefaultSource(): AudioVisualizerSource {
-  return new TauriAudioSpectrumSource();
+function createDefaultSource(getOwner?: () => AudioMeterOwner | null): AudioVisualizerSource {
+  return new TauriAudioSpectrumSource(getOwner);
 }
 
 /**
@@ -152,13 +175,14 @@ export function useAudioVisualizer(
   opts?: {
     barCount?: number;
     source?: AudioVisualizerSource;
+    getOwner?: () => AudioMeterOwner | null;
     smoothing?: number; // 0..1, ближе к 1 = плавнее (fallback)
     attackSmoothing?: number; // 0..1, меньше = быстрее растёт
     releaseSmoothing?: number; // 0..1, больше = плавнее падает
   }
 ) {
   const barCount = opts?.barCount ?? 48;
-  const source = opts?.source ?? createDefaultSource();
+  const source = opts?.source ?? createDefaultSource(opts?.getOwner);
   const smoothing = opts?.smoothing ?? 0.8;
   const attackSmoothing =
     opts?.attackSmoothing ?? Math.min(0.75, Math.max(0.0, smoothing - 0.15));
@@ -179,6 +203,7 @@ export function useAudioVisualizer(
       const s = clamped > prev ? attackSmoothing : releaseSmoothing;
       out[i] = prev * s + clamped * (1 - s);
     }
+    carryNativeMeterTrace(next, out);
     bars.value = out;
 
     applyCount += 1;
@@ -201,8 +226,19 @@ export function useAudioVisualizer(
   function stop() {
     debugLog('[AudioVisualizer] stop()');
     source.stop();
-    // Оставляем последние значения — они плавно "погаснут" через opacity в компоненте
+    // A stopped capture must not reappear when the window renders again.
+    bars.value = Array.from({ length: barCount }, () => 0);
   }
+
+  // A -> B can keep `active` true throughout; clear A before B's first sample.
+  watch(
+    () => {
+      const owner = opts?.getOwner?.();
+      return owner ? `${owner.kind}:${owner.runId}` : null;
+    },
+    () => { bars.value = Array.from({ length: barCount }, () => 0); },
+    { flush: 'sync' }
+  );
 
   watch(
     () => active.value,

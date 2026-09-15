@@ -1,8 +1,13 @@
+import { runNativeReaderPreparation } from './nativeReaderPreparation';
+import { runNativeContinuationCase } from './nativeContinuationCases';
+import { runNativeContinuationLive } from './nativeContinuationLive';
+import { runNativeContinuationScenarios } from './nativeContinuationScenarios';
+import { nativeMeterEvidence } from './nativeMeterEvidence';
 /** Real NSPanel/WKWebView/Vue/IPC scenarios; only native audio/STT adapters are fake. */
 import type { Pinia } from 'pinia';
 import { nextTick, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { emit } from '@tauri-apps/api/event';
+import { emit, listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useTranscriptionStore } from '@/stores/transcription';
 import { useAppConfigStore } from '@/stores/appConfig';
@@ -12,14 +17,30 @@ import { startNativeSampler } from './nativeSampler';
 
 interface NativeState {
   ready: boolean;
+  liveMode?: boolean;
+  continuationMode?: boolean;
+  continuationCase?: string;
+  qualificationTrial?: unknown;
+  readerPreparation?: boolean;
+  terminalMode?: boolean;
   status: string;
   sessionId: number;
   windowEpoch: number;
   visible: boolean;
+  preparedCaptureTokenCount: number;
   fixture: {
+    livePcmBytes?: number;
     captureStarts: number; captureStops: number; activeCaptures: number; audioChunks: number;
+    captureStartLatenciesMs: number[];
+    firstPcmLatenciesMs?: Array<{captureGeneration: number; configuredDelayMs: number; elapsedMs: number}>;
     providerStarts: number; providerResumes: number; providerStops: number; providerFailures: number; activeProviders: number;
+    maxActiveProviders: number;
     providerAudioChunks: number; finals: number; lastTranscript: string;
+    captureMarkers: Array<{ captureGeneration: number; firstSequence: number; lastSequence: number; count: number }>;
+    providerMarkers: Array<{ providerSessionId: number; captureRunId: number; captureFenceGeneration: number;
+      captureGeneration: number; firstSequence: number; lastSequence: number; count: number }>;
+    captureRunAssociations: Array<{ captureRunId: number; captureFenceGeneration: number; captureGeneration: number }>;
+    markerViolations: string[];
     autoPasteTargetCaptures: number; autoPastes: number; lastPastedText: string | null;
     lastPastedSessionId: number | null;
   };
@@ -67,6 +88,14 @@ export async function installNativeWindowHooks(pinia: Pinia): Promise<void> {
 export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
   if (import.meta.env.VITE_NATIVE_WINDOW_E2E !== '1' || getCurrentWindow().label !== 'main') return;
   // A Vite flag alone never grants auth bypass or runs scenarios in a normal app.
+  if ((await state()).readerPreparation) { await runNativeReaderPreparation(); return; }
+  if ((await state()).qualificationTrial) { await runNativeContinuationLive(pinia); return; }
+  const continuationCase = (await state()).continuationCase;
+  if (continuationCase === 'E54') { await runRestartCrashScenario(pinia); return; }
+  if (continuationCase) { await runNativeContinuationCase(pinia, continuationCase); return; }
+  if ((await state()).continuationMode) { await runNativeContinuationScenarios(pinia); return; }
+  if ((await state()).liveMode) { await runLiveNativeScenario(pinia); return; }
+  if ((await state()).terminalMode) { await runNativeTerminalScenario(pinia); return; }
   const runStarted = Date.now();
   let confirmed = false;
   const report = { lastProgress: null as unknown, failureContext: null as unknown, elapsedMs: 0, passed: false, completedCycles: 0, hiddenIdleMs: 0, scenarios: [] as string[], observations: [] as unknown[], error: '' };
@@ -106,6 +135,31 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     let listeningSeen = false;
     let recordingSeen = false;
     let holdMode = true;
+    const nativeCaptureStartLatenciesMs: number[] = [];
+    const queuedNativeCaptureStartLatenciesMs: number[] = [];
+
+    const assertMarkerEvidence = (snapshot: NativeState) => {
+      check(snapshot.fixture.maxActiveProviders <= 1,
+        `Fixture observed ${snapshot.fixture.maxActiveProviders} simultaneous providers`);
+      check(snapshot.fixture.markerViolations.length === 0,
+        `Audio marker invariant failed: ${snapshot.fixture.markerViolations.join('; ')}`);
+      const captures = new Map(snapshot.fixture.captureMarkers.map((range) => [range.captureGeneration, range]));
+      const providerGenerations = new Set<number>();
+      for (const range of snapshot.fixture.providerMarkers) {
+        check(range.firstSequence === 1 && range.lastSequence === range.count,
+          `Provider ${range.providerSessionId} has a missing/reordered marker range: ${JSON.stringify(range)}`);
+        check(!providerGenerations.has(range.captureGeneration),
+          `Capture generation ${range.captureGeneration} reached multiple provider sessions`);
+        providerGenerations.add(range.captureGeneration);
+        const captured = captures.get(range.captureGeneration);
+        check(captured && captured.firstSequence === 1 && captured.lastSequence >= range.lastSequence,
+          `Provider received marker range absent from capture ledger: ${JSON.stringify(range)}`);
+        check(range.captureRunId > 0 && range.captureFenceGeneration > 0,
+          `Provider marker lacks an authoritative run/generation fence: ${JSON.stringify(range)}`);
+      }
+    };
+    const latestCaptureGeneration = (snapshot: NativeState) =>
+      snapshot.fixture.captureMarkers[snapshot.fixture.captureMarkers.length - 1]?.captureGeneration ?? 0;
 
     const domText = () => document.querySelector('.mini-transcription-text-inner')?.textContent?.trim() ||
       document.querySelector('.transcription-text')?.textContent?.trim() || '';
@@ -129,16 +183,18 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
       await appConfig.refresh();
       await nextTick();
     };
-    const waitForNewRecording = async (previous: NativeState, requireListening = true) => {
+    const waitForNewRecording = async (previous: NativeState, requireListening = false, timeout = 8_000,
+      listeningWasObserved: () => boolean = () => false) => {
       const recording = await until(state, (s) => s.status === 'Recording' && s.visible && s.sessionId > previous.sessionId,
-        'Hotkey did not create a visible recording');
+        'Hotkey did not create a visible recording', timeout);
       check(!sessions.has(recording.sessionId), 'A new recording reused a session ID');
       sessions.add(recording.sessionId);
       successfulStarts += 1;
       if (requireListening) {
-        await until(async () => ({ listening: store.isListeningPlaceholder, text: domText(),
-          recording: !!document.querySelector('.mini-status-dot.recording, .record-button.recording') }),
-        (ui) => ui.listening && ui.text.length > 0 && ui.recording, 'Visible Listening/Recording UI missing before audio');
+        await until(async () => ({ observed: listeningWasObserved(), listening: store.isListeningPlaceholder,
+          text: domText(), recording: !!document.querySelector('.mini-status-dot.recording, .record-button.recording') }),
+        (ui) => ui.observed || (ui.listening && ui.text.length > 0 && ui.recording),
+        'Visible Listening/Recording UI missing before audio');
         listeningSeen = true;
       } else {
         // Native hotkey can produce audio before a suspended WebView resumes its JS.
@@ -157,13 +213,35 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
       await until(async () => Boolean(document.querySelector('.mini-opening, .mini-closing, .mini-animation-reset')), (busy) => !busy, 'Opening animation never settled');
       return { ...(await state()), expected };
     };
-    const start = async () => {
+    const start = async (requireListening = false) => {
       const previous = await state();
       report.lastProgress = { phase: 'start', completedCycles: report.completedCycles, previousSessionId: previous.sessionId, previousEpoch: previous.windowEpoch };
       await delay(Math.max(0, 130 - (Date.now() - lastPressAt), 60 - (Date.now() - lastReleaseAt)));
-      await hotkey('press');
-      if (!holdMode) await hotkey('release');
-      return waitForNewRecording(previous);
+      let listeningObserved = false;
+      let greenBeforeCaptureReady = false;
+      const sampleTransientUi = () => {
+        const green = !!document.querySelector('.mini-status-dot.recording');
+        listeningObserved ||= store.isListeningPlaceholder && domText().length > 0 && green;
+        greenBeforeCaptureReady ||= green && !store.isCaptureReady;
+      };
+      const observer = new MutationObserver(sampleTransientUi);
+      observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true,
+        attributes: true, attributeFilter: ['class'] });
+      try {
+        sampleTransientUi();
+        await hotkey('press');
+        if (!holdMode) await hotkey('release');
+        const ready = await until(async () => ({ backend: await state(), captureReady: store.isCaptureReady }),
+          (sample) => sample.captureReady && sample.backend.fixture.captureStarts > previous.fixture.captureStarts &&
+            sample.backend.fixture.captureStartLatenciesMs.length > previous.fixture.captureStartLatenciesMs.length,
+        'Accepted start did not publish capture readiness', 2_000);
+        nativeCaptureStartLatenciesMs.push(ready.backend.fixture.captureStartLatenciesMs[
+          ready.backend.fixture.captureStartLatenciesMs.length - 1
+        ]);
+        const recording = await waitForNewRecording(previous, requireListening, 8_000, () => listeningObserved);
+        check(!greenBeforeCaptureReady, 'Recording indicator became green before capture readiness');
+        return recording;
+      } finally { observer.disconnect(); }
     };
     // Watches every DOM class mutation (including old class values), plus native IPC samples.
     const observe = async (duration: number, action: () => Promise<unknown>, expected: string, allowClosing = false) => {
@@ -200,17 +278,26 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
         return sawClosing;
       } finally { observer.disconnect(); }
     };
-    const stop = async () => {
+    const stop = async (timeout = 8_000) => {
       report.lastProgress = { phase: 'stop', completedCycles: report.completedCycles, ui: uiSnapshot() };
       if (holdMode) await hotkey('release');
       else { await hotkey('press'); await hotkey('release'); }
-      await until(state, (s) => s.status === 'Idle' && !s.visible && s.fixture.activeCaptures === 0, 'Stop did not reach Idle/hidden/no capture');
+      await until(state, (s) => s.status === 'Idle' && !s.visible && s.fixture.activeCaptures === 0 &&
+        s.preparedCaptureTokenCount === 0,
+      'Stop did not reach Idle/hidden/no capture/no prepared token', timeout);
       await until(async () => store.isIdle, Boolean, 'Backend stopped but UI did not reach Idle');
     };
 
+    // Observe the transient placeholder from before dispatch. Later rapid cycles
+    // prove readiness and fresh transcripts without racing this short-lived frame.
+    await progress('listening-placeholder-before-audio-starting');
+    let current = await start(true);
+    await stop();
+    report.scenarios.push('visible-listening-before-first-audio');
+
     // Positive current-epoch close, then stale real native hide refusal after reopen.
     await progress('current-and-stale-close-starting');
-    let current = await start();
+    current = await start();
     check(await observe(300, () => emit('recording:window-will-hide-for-hotkey-stop', { windowEpoch: current.windowEpoch }), current.expected, true),
       'Positive control: current close event never animated the real Vue mini panel');
     check(await invoke('hide_recording_window_if_current', { windowEpoch: current.windowEpoch }) === true, 'Current epoch close refused');
@@ -232,7 +319,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     // exact path, including the safe fixture substitute for external-app paste.
     // Let the previous scenario's hotkey-stop grace expire while auto-paste is
     // still disabled, so its transcript cannot contaminate these exact counters.
-    await delay(1_550);
+    await invoke('native_e2e_delay', { durationMs: 1_550 });
     await progress('toggle-auto-hide-autopaste-restart-starting');
     await invoke('update_app_config', {
       holdToRecord: false,
@@ -294,19 +381,23 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     await stop();
     report.scenarios.push('duplicate-direct-start-syncs-epoch-and-ui-minimize');
 
+    await configure({ audioDelayMs: 0 });
     await progress('recording-cycles-starting');
-    for (let cycle = 0; cycle < 22; cycle += 1) {
-      if (cycle === 11) await configure({ keepAlive: true });
+    for (let cycle = 0; cycle < 50; cycle += 1) {
+      if (cycle === 25) await configure({ keepAlive: true });
       current = await start();
       await observe(90, async () => {}, current.expected);
       await stop();
       report.completedCycles += 1;
       if (cycle % 5 === 0) await progress(`recording-cycle-${cycle + 1}`);
     }
-    report.scenarios.push('22-audio-transcript-stop-hide-reopen-cycles');
-    check((await state()).fixture.providerResumes > baseline.fixture.providerResumes, 'Keepalive cycles never resumed a provider');
+    report.scenarios.push('50-audio-transcript-stop-hide-reopen-cycles');
+    const afterRapidCycles = await state();
+    check(afterRapidCycles.preparedCaptureTokenCount === 0,
+      'Rapid recording cycles retained prepared capture registry entries');
+    check(afterRapidCycles.fixture.providerResumes > baseline.fixture.providerResumes, 'Keepalive cycles never resumed a provider');
     report.scenarios.push('cold-and-keepalive-provider-sessions');
-    await configure({ keepAlive: false });
+    await configure({ keepAlive: false, audioDelayMs: 450 });
 
     // Toggle ownership supports replacement intent while the previous stop is still closing.
     await progress('replacement-during-close-starting');
@@ -430,28 +521,156 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     processingSeen = true;
     await hotkey('release');
     await delay(60);
-    const pendingEpoch = (await state()).windowEpoch;
+    const pendingBefore = await state();
+    const pendingEpoch = pendingBefore.windowEpoch;
     await hotkey('press');
-    await until(state, (s) => s.windowEpoch > pendingEpoch && s.status === 'Processing', 'Pending start did not reopen during Processing');
-    await hotkey('press');
+    const pendingReady = await until(async () => ({ backend: await state(), readiness: store.captureReadiness,
+      green: !!document.querySelector('.mini-status-dot.recording:not(.starting):not(.processing)') }),
+    (sample) => sample.backend.windowEpoch > pendingEpoch && sample.backend.status === 'Processing' &&
+      sample.backend.fixture.activeCaptures === 1 && sample.readiness?.state === 'buffering' && sample.green,
+    'Pending start did not capture audio or render green during previous finalize', 2_000);
+    const bufferedPendingBackend = await until(state,
+      (sample) => {
+        const generation = latestCaptureGeneration(sample);
+        return generation > latestCaptureGeneration(pendingBefore) &&
+          sample.fixture.captureRunAssociations.some((association) =>
+            association.captureGeneration === generation && association.captureRunId === pendingReady.readiness?.runId);
+      },
+      'Pending capture readiness produced no new deterministic PCM marker', 2_000);
+    const cancelledCaptureRange = bufferedPendingBackend.fixture.captureMarkers[
+      bufferedPendingBackend.fixture.captureMarkers.length - 1
+    ];
+    const cancelledGeneration = cancelledCaptureRange?.captureGeneration;
+    check(cancelledGeneration && cancelledCaptureRange.firstSequence === 1,
+      'Pending capture produced no deterministic first audio marker');
+    check(pendingReady.backend.fixture.providerStarts === pendingBefore.fixture.providerStarts,
+      'Pending capture opened a second provider before previous finalize');
     await hotkey('release');
     await uiStop;
     const cancelledPending = await state();
     const afterPending = await until(
       state,
-      (sample) => sample.status === 'Idle' && sample.fixture.activeCaptures === 0,
+      (sample) => sample.status === 'Idle' && sample.fixture.activeCaptures === 0 &&
+        sample.preparedCaptureTokenCount === 0,
       'Five-second finalize did not preserve and then cancel pending hold intent',
       8_000,
     );
     check(afterPending.status === 'Idle' && afterPending.fixture.activeCaptures === 0 &&
+      afterPending.preparedCaptureTokenCount === 0 &&
       afterPending.fixture.providerStarts === cancelledPending.fixture.providerStarts,
       'Released pending hold started after finalize');
+    check(!afterPending.fixture.providerMarkers.some((range) => range.captureGeneration === cancelledGeneration),
+      'Cancelled pending capture later delivered audio to a provider');
+    assertMarkerEvidence(afterPending);
     await invoke('hide_recording_window_if_current', { windowEpoch: afterPending.windowEpoch });
     await configure({ stopDelayMs: 130 });
     report.scenarios.push('processing-ui-and-cancelled-pending-hold-start');
 
-    await configure({ failNextStart: true });
+    // Prove that every marker captured while the previous provider finalizes is
+    // delivered exactly once, in order, to only the replacement provider.
+    for (const finalizeDelayMs of [0, 850, 5_000, 12_000]) {
+      await progress(`queued-prebuffer-${finalizeDelayMs}ms-starting`);
+      await configure({ stopDelayMs: finalizeDelayMs, audioDelayMs: 0, keepAlive: false });
+      current = await start();
+      if (finalizeDelayMs === 0) {
+        await stop();
+        assertMarkerEvidence(await state());
+        report.scenarios.push('normal-start-marker-order-finalize-0ms');
+        continue;
+      }
+
+      const previousRun = current;
+      const stopPrevious = store.stopRecording(`native-e2e-queued-${finalizeDelayMs}`);
+      await until(state, (sample) => sample.status === 'Processing' && sample.fixture.activeCaptures === 0,
+        `Previous run never entered Processing for ${finalizeDelayMs}ms finalize`);
+      await hotkey('release');
+      await delay(60);
+      const beforeQueuedIntent = await state();
+      let queuedOpeningEpoch: number | null = null;
+      let unassignedOpeningStarts = 0;
+      const openingStartsByEpoch = new Map<number, number>();
+      const openingSamples: Array<{ elapsedMs: number; animationName: string }> = [];
+      const openingWatchStarted = Date.now();
+      const recordQueuedOpening = (event: AnimationEvent) => {
+        if (!event.animationName.startsWith('mini-pop-in') ||
+          !(event.target instanceof Element) || !event.target.matches('.popover.mini')) return;
+        openingSamples.push({ elapsedMs: Date.now() - openingWatchStarted, animationName: event.animationName });
+        if (queuedOpeningEpoch === null) unassignedOpeningStarts += 1;
+        else openingStartsByEpoch.set(queuedOpeningEpoch, (openingStartsByEpoch.get(queuedOpeningEpoch) ?? 0) + 1);
+      };
+      document.addEventListener('animationstart', recordQueuedOpening);
+      await hotkey('press');
+      const buffered = await until(async () => ({ backend: await state(), readiness: store.captureReadiness,
+        green: !!document.querySelector('.mini-status-dot.recording:not(.starting):not(.processing)') }),
+      (sample) => sample.backend.fixture.activeCaptures === 1 && sample.readiness?.state === 'buffering' && sample.green &&
+        sample.backend.fixture.captureStartLatenciesMs.length > beforeQueuedIntent.fixture.captureStartLatenciesMs.length,
+      `Replacement capture was not ready during ${finalizeDelayMs}ms finalize`, 2_000);
+      queuedNativeCaptureStartLatenciesMs.push(buffered.backend.fixture.captureStartLatenciesMs[
+        buffered.backend.fixture.captureStartLatenciesMs.length - 1
+      ]);
+      check(buffered.backend.fixture.activeProviders === 1 &&
+        buffered.backend.fixture.providerStarts === beforeQueuedIntent.fixture.providerStarts,
+      'Queued capture created a provider before the previous provider finalized');
+      const markerBufferedBackend = await until(state,
+        (sample) => {
+          const generation = latestCaptureGeneration(sample);
+          return generation > latestCaptureGeneration(beforeQueuedIntent) &&
+            sample.fixture.captureRunAssociations.some((association) =>
+              association.captureGeneration === generation && association.captureRunId === buffered.readiness?.runId);
+        },
+        `Queued capture produced no new PCM marker during ${finalizeDelayMs}ms finalize`, 2_000);
+      const earlyRange = markerBufferedBackend.fixture.captureMarkers[
+        markerBufferedBackend.fixture.captureMarkers.length - 1
+      ];
+      check(earlyRange && earlyRange.firstSequence === 1 && earlyRange.count > 0,
+        'Queued capture did not record an early marker range');
+      const captureAssociation = markerBufferedBackend.fixture.captureRunAssociations.find((association) =>
+        association.captureGeneration === earlyRange.captureGeneration);
+      check(captureAssociation && captureAssociation.captureRunId === buffered.readiness?.runId &&
+        captureAssociation.captureFenceGeneration > 0,
+      `Queued PCM marker was not fenced to the readiness run: ${JSON.stringify({ earlyRange, captureAssociation,
+        readiness: buffered.readiness })}`);
+      const bufferedWindowEpoch = buffered.backend.windowEpoch;
+      queuedOpeningEpoch = bufferedWindowEpoch;
+      openingStartsByEpoch.set(bufferedWindowEpoch,
+        (openingStartsByEpoch.get(bufferedWindowEpoch) ?? 0) + unassignedOpeningStarts);
+      try {
+        await stopPrevious;
+        current = await waitForNewRecording(previousRun, false, finalizeDelayMs + 8_000);
+      } finally {
+        document.removeEventListener('animationstart', recordQueuedOpening);
+      }
+      const streamed = await state();
+      const openingCounts = Object.fromEntries(openingStartsByEpoch);
+      const openingCount = [...openingStartsByEpoch.values()].reduce((sum, count) => sum + count, 0);
+      check(bufferedWindowEpoch > beforeQueuedIntent.windowEpoch && streamed.windowEpoch === bufferedWindowEpoch &&
+        openingCount === 1 && openingStartsByEpoch.get(bufferedWindowEpoch) === 1,
+      `Buffering to streaming transition changed epoch or did not preserve exactly one initial opening: ${JSON.stringify({
+        beforeEpoch: beforeQueuedIntent.windowEpoch, bufferedEpoch: bufferedWindowEpoch,
+        streamedEpoch: streamed.windowEpoch, openingCounts, openingSamples })}`);
+      check(streamed.fixture.finals === beforeQueuedIntent.fixture.finals + 1,
+        'Previous provider tail was not finalized exactly once before replacement streaming');
+      const replacementProviderSession = streamed.fixture.providerStarts + streamed.fixture.providerResumes;
+      const delivered = streamed.fixture.providerMarkers.find((range) =>
+        range.providerSessionId === replacementProviderSession &&
+        range.captureGeneration === earlyRange.captureGeneration);
+      check(delivered && delivered.firstSequence === 1 && delivered.lastSequence >= earlyRange.lastSequence,
+        `Early queued audio was lost or delivered out of order: ${JSON.stringify({ earlyRange, delivered })}`);
+      check(delivered.captureRunId === current.sessionId &&
+        delivered.captureFenceGeneration === captureAssociation.captureFenceGeneration,
+      'Streamed marker run/generation differs from its buffered capture fence');
+      assertMarkerEvidence(streamed);
+      report.observations.push({ scenario: 'queued-prebuffer-order', finalizeDelayMs,
+        captureGeneration: earlyRange.captureGeneration, earlyCount: earlyRange.count,
+        deliveredCount: delivered.count, providerSessionId: replacementProviderSession });
+      await stop(finalizeDelayMs + 8_000);
+      report.scenarios.push(`queued-prebuffer-order-finalize-${finalizeDelayMs}ms`);
+    }
+    await configure({ stopDelayMs: 130, audioDelayMs: 450 });
+
+    await configure({ failNextStart: true, startDelayMs: 300, audioDelayMs: 0 });
     await progress('start-failure-ui-error');
+    const beforeFailedStart = await state();
     const failureUiStarted = Date.now();
     const failureUiTransitions: unknown[] = [];
     const captureFailureUi = () => ({ elapsedMs: Date.now() - failureUiStarted, ui: uiSnapshot(),
@@ -464,12 +683,23 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     let lastFailureSample: unknown;
     try {
       await hotkey('press');
+      const failedBuffered = await until(state, (sample) => sample.fixture.activeCaptures === 1 &&
+        sample.fixture.captureMarkers.length > beforeFailedStart.fixture.captureMarkers.length,
+      'Failed provider startup never captured deterministic prebuffer audio', 2_000);
+      const failedCaptureGeneration = failedBuffered.fixture.captureMarkers[
+        failedBuffered.fixture.captureMarkers.length - 1
+      ].captureGeneration;
       await until(async () => {
         const sample = { backend: await state(), ...captureFailureUi() };
         lastFailureSample = sample;
         return sample;
       }, (s) => s.backend.fixture.activeCaptures === 0 && s.error,
       'Failed start did not expose UI error and release capture');
+      const afterFailure = await state();
+      check(!afterFailure.fixture.providerMarkers.some((range) =>
+        range.captureGeneration === failedCaptureGeneration),
+      'Failed provider startup delivered buffered audio to a stale provider');
+      assertMarkerEvidence(afterFailure);
       report.observations.push({ scenario: 'start-failure-ui-error', transitions: failureUiTransitions, last: lastFailureSample });
     } catch (error) {
       report.failureContext = { scenario: 'start-failure-ui-error', transitions: failureUiTransitions, last: lastFailureSample };
@@ -478,6 +708,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     await hotkey('release');
     current = await start();
     await stop();
+    await configure({ startDelayMs: 0, audioDelayMs: 450 });
     report.scenarios.push('start-failure-then-successful-audio-retry');
 
     // A failed first connection emits Starting with a session, then clears native
@@ -623,13 +854,42 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     await stop();
     report.scenarios.push('real-hidden-idle-180s-and-fresh-audio');
     const final = await state();
+    assertMarkerEvidence(final);
+    check(final.preparedCaptureTokenCount === 0,
+      'Prepared capture token registry retained entries after full teardown');
+    const captureLatencyP95 = [...nativeCaptureStartLatenciesMs].sort((a, b) => a - b)[
+      Math.max(0, Math.ceil(nativeCaptureStartLatenciesMs.length * 0.95) - 1)
+    ];
+    const queuedCaptureLatencyP95 = [...queuedNativeCaptureStartLatenciesMs].sort((a, b) => a - b)[
+      Math.max(0, Math.ceil(queuedNativeCaptureStartLatenciesMs.length * 0.95) - 1)
+    ];
+    check(nativeCaptureStartLatenciesMs.length >= 20 && captureLatencyP95 <= 250,
+      `Native hotkey-to-capture-start p95 exceeded 250ms: ${captureLatencyP95}ms`);
+    check(queuedNativeCaptureStartLatenciesMs.length === 3 && queuedCaptureLatencyP95 <= 250,
+      `Queued native hotkey-to-capture-start p95 exceeded 250ms: ${queuedCaptureLatencyP95}ms`);
     check(final.fixture.captureStarts - baseline.fixture.captureStarts === final.fixture.captureStops - baseline.fixture.captureStops,
       'Capture start/stop counters do not balance');
     check(final.fixture.activeCaptures === 0, 'Capture remained active after final stop');
     check(final.fixture.finals - baseline.fixture.finals === successfulStarts, 'Completed provider sessions/finals differ from exact successful recordings');
     check(transcripts.size === successfulStarts && sessions.size === successfulStarts, 'Unique session/transcript count mismatch');
     check(listeningSeen && recordingSeen && processingSeen, 'Missing positive UI status controls');
-    report.observations.push({ successfulStarts, distinctTranscripts: transcripts.size, baseline: baseline.fixture, final: final.fixture });
+    report.observations.push({ successfulStarts, distinctTranscripts: transcripts.size,
+      nativeHotkeyToCaptureStartMs: { samples: nativeCaptureStartLatenciesMs,
+        p95: captureLatencyP95, queuedSamples: queuedNativeCaptureStartLatenciesMs, queuedP95: queuedCaptureLatencyP95,
+        qualification: 'Native monotonic dispatch-to-fake-capture timing measures application scheduling; physical device-open latency requires separate evidence.' },
+      baseline: baseline.fixture, final: final.fixture });
+    const firstPcm = ((await state()).fixture.firstPcmLatenciesMs ?? [])
+      .filter(row => row.configuredDelayMs === 0).map(row => row.elapsedMs).sort((a,b) => a-b);
+    const firstPcmP95 = firstPcm[Math.ceil(firstPcm.length * 0.95) - 1];
+    report.observations.push({ firstPcm: {samples: firstPcm.length, p95Ms: firstPcmP95,
+      source: 'synthetic capture, real native intent and callback dispatch; not physical microphone opening'} });
+    check(firstPcm.length >= 50 && firstPcmP95 <= 250, 'Prepared fixture first PCM p95 exceeds 250ms');
+    const meter = nativeMeterEvidence();
+    report.observations.push({ nativeMeter: meter });
+    check(meter.runs >= 50 && meter.samples >= 50, 'Meter provenance lacks 50 run samples');
+    check(meter.invalidClockSamples === 0, 'Clock discontinuity invalidates meter ages');
+    check(meter.p95AgeMs !== null && meter.p95AgeMs <= 100, 'Meter sample age p95 exceeds 100ms');
+    check(meter.maxAgeMs !== null && meter.maxAgeMs < 1000, 'Meter rendered seconds-old audio despite p95 passing');
     report.passed = true;
     await progress('complete');
   } catch (error) {
@@ -638,4 +898,180 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
   }
   report.elapsedMs = Date.now() - runStarted;
   if (confirmed) await invoke('native_e2e_finish', { report });
+}
+
+/** ASR and native paste stay real; only the microphone source is synthetic PCM. */
+async function runLiveNativeScenario(pinia: Pinia): Promise<void> {
+  const started = Date.now();
+  const report = { mode: 'live-elevenlabs', passed: false, elapsedMs: 0, targetDocument: '',
+    finalText: '', pcmBytes: 0, actualPasteVerified: false, error: '' };
+  try {
+    const config = useAppConfigStore(pinia);
+    const store = useTranscriptionStore(pinia);
+    await config.startSync();
+    await invoke('update_app_config', { showMiniRecordingWindow: true, holdToRecord: false,
+      hideRecordingWindowOnHotkey: false, playCompletionSound: false,
+      autoCopyToClipboard: false, autoPasteText: true });
+    await config.refresh();
+    await invoke('native_e2e_progress', { report: { scenario: 'live-target-preparation' } });
+    check(await invoke<boolean>('check_accessibility_permission'), 'Native test binary needs macOS Accessibility permission before real paste');
+    report.targetDocument = await invoke<string>('native_e2e_prepare_live_target');
+    await invoke('native_e2e_delay', { durationMs: 500 });
+    const waitNative = async (accept: (s: NativeState) => boolean, message: string, timeout: number) => {
+      const epoch = Date.now();
+      while (Date.now() - epoch < timeout) {
+        if (accept(await state())) return;
+        await invoke('native_e2e_delay', {durationMs: 50});
+      }
+      throw new Error(message);
+    };
+    await hotkey('press'); await hotkey('release');
+    await waitNative(s => s.status === 'Recording', 'Live provider never reached Recording', 15000);
+    await invoke('native_e2e_progress', { report: { scenario: 'live-recording' } });
+    await waitNative(s => s.fixture.livePcmBytes === 788288, 'Synthetic PCM capture incomplete', 35000);
+    await invoke('native_e2e_progress', { report: { scenario: 'live-PCM-complete' } });
+    await hotkey('press'); await hotkey('release');
+    await waitNative(s => s.status === 'Idle' && s.fixture.activeCaptures === 0,
+      'Live recording failed to finish', 35000);
+    // Wait on a native timer because the successful stop may have hidden WebView.
+    await invoke('native_e2e_delay', { durationMs: 2000 });
+    report.finalText = store.finalText;
+    report.pcmBytes = (await state()).fixture.livePcmBytes ?? 0;
+    check(report.finalText.includes('книга') && report.finalText.includes('самол'), 'Live transcript lost start/tail');
+    report.passed = true;
+  } catch (error) { report.error = String(error); }
+  report.elapsedMs = Date.now() - started;
+  await invoke('native_e2e_finish', { report });
+}
+
+
+/** Focused native terminal proof; does not claim the separate 50-cycle soak. */
+async function runNativeTerminalScenario(pinia: Pinia) {
+  const report = { mode: 'terminal-cleanup', passed: false, sleepReleased: false,
+    wakeDidNotRestart: false, explicitRestart: false, holdSleepReleased: false,
+    retiredHoldReleaseIgnored: false, holdRestartReleased: false, deviceErrorObserved: false,
+    deviceReleased: false, error: '', elapsedMs: 0 };
+  const started = Date.now();
+  const errors: Array<{ session_id: number; error: string }> = [];
+  const unlisten = await listen<{ session_id: number; error: string }>('transcription:error', event => errors.push(event.payload));
+  const poll = async (predicate: (s: NativeState) => boolean, label: string) => {
+    const deadline = performance.now() + 10_000;
+    do {
+      const current = await state();
+      if (predicate(current)) return current;
+      await invoke('native_e2e_delay', { durationMs: 30 });
+    } while (performance.now() < deadline);
+    throw new Error(label);
+  };
+  const released = (s: NativeState) => s.fixture.activeCaptures === 0 &&
+    s.fixture.activeProviders === 0 && s.preparedCaptureTokenCount === 0;
+  const press = async () => { await hotkey('press'); await hotkey('release'); };
+  const start = async () => {
+    const before = await state();
+    await invoke('native_e2e_delay', { durationMs: 200 });
+    await press();
+    return poll(s => s.status === 'Recording' && s.fixture.captureStarts > before.fixture.captureStarts &&
+      s.fixture.providerAudioChunks > before.fixture.providerAudioChunks, 'No new capture/audio after explicit intent');
+  };
+  try {
+    await poll(s => s.ready, 'Fixture did not become ready');
+    const config = useAppConfigStore(pinia);
+    await config.startSync();
+    await invoke('update_app_config', { holdToRecord: false, showMiniRecordingWindow: true,
+      hideRecordingWindowOnHotkey: true, playCompletionSound: false, autoCopyToClipboard: false, autoPasteText: false });
+    await config.refresh();
+    await invoke('native_e2e_configure', { config: {audioDelayMs: 20, startDelayMs: 0, stopDelayMs: 130, keepAlive: false} });
+    await start();
+    await invoke('native_e2e_hotkey', {action: 'sleep'});
+    const slept = await poll(released, 'Sleep did not release resources');
+    report.sleepReleased = true;
+    await invoke('native_e2e_hotkey', {action: 'wake'});
+    await invoke('native_e2e_delay', {durationMs: 300});
+    const woke = await state();
+    check(released(woke) && woke.fixture.captureStarts === slept.fixture.captureStarts &&
+      woke.fixture.providerStarts === slept.fixture.providerStarts && woke.fixture.providerResumes === slept.fixture.providerResumes,
+    'Wake restarted a cancelled run');
+    report.wakeDidNotRestart = true;
+    await start();
+    await press();
+    await poll(released, 'Explicit restart did not stop cleanly');
+    report.explicitRestart = true;
+    await invoke('update_app_config', { holdToRecord: true });
+    await config.refresh();
+    const beforeHold = await state();
+    await hotkey('press');
+    await poll(s => s.status === 'Recording' && s.fixture.providerAudioChunks > beforeHold.fixture.providerAudioChunks,
+      'Hold did not start before sleep');
+    await invoke('native_e2e_hotkey', {action: 'sleep'});
+    const heldSleep = await poll(released, 'Sleep did not release held capture');
+    report.holdSleepReleased = true;
+    await invoke('native_e2e_hotkey', {action: 'wake'});
+    // Complete the physical gesture interrupted by sleep. Fake input has no
+    // physical-key watcher; omitting this release would leave intentional debt.
+    await hotkey('release');
+    await invoke('native_e2e_delay', {durationMs: 100});
+    const retired = await state();
+    report.retiredHoldReleaseIgnored = released(retired) &&
+      retired.fixture.captureStarts === heldSleep.fixture.captureStarts;
+    check(report.retiredHoldReleaseIgnored, 'Retired pre-sleep release revived capture');
+    await hotkey('press');
+    await poll(s => s.status === 'Recording' && s.fixture.providerAudioChunks > retired.fixture.providerAudioChunks,
+      'Fresh hold after wake did not start');
+    await hotkey('release');
+    await poll(released, 'Fresh hold after wake did not stop');
+    report.holdRestartReleased = true;
+    await invoke('update_app_config', { holdToRecord: false });
+    await config.refresh();
+    const failed = await start();
+    await invoke('native_e2e_hotkey', {action: 'device-loss'});
+    await poll(released, 'Native-thread device loss did not release resources');
+    await invoke('native_e2e_delay', {durationMs: 200});
+    report.deviceErrorObserved = errors.some(e => e.session_id === failed.sessionId && e.error.includes('injected native device loss'));
+    check(report.deviceErrorObserved, 'Run-scoped native device error was not delivered');
+    report.deviceReleased = released(await state());
+    report.passed = report.deviceReleased;
+  } catch (error) { report.error = String(error); }
+  finally { unlisten(); }
+  report.elapsedMs = Date.now() - started;
+  await invoke('native_e2e_finish', { report });
+}
+
+/** E54 deliberately never calls finish: parent owns crash/termination. */
+async function runRestartCrashScenario(pinia: Pinia): Promise<void> {
+  const report = { mode: 'restart-crash', passed: false, errors: [] as string[], ui: {} };
+  const unlisten = await listen('transcription:error', event => report.errors.push(JSON.stringify(event.payload)));
+  try {
+    const store = useTranscriptionStore(pinia);
+    await store.initialize();
+    report.ui = { error: store.error };
+    check(store.error === null, `E54 store initialization failed: ${store.error}`);
+    const config = useAppConfigStore(pinia);
+    const configSynced = await config.startSync();
+    check(configSynced === true, 'E54 config synchronization failed');
+    let reconciledStatus: string | null = null;
+    const initial = await invoke<NativeState & { restartPhase: string }>('native_e2e_state');
+    if (initial.restartPhase === 'A') {
+      await invoke('update_app_config', { holdToRecord: false, showMiniRecordingWindow: true,
+        hideRecordingWindowOnHotkey: true, autoCopyToClipboard: false, autoPasteText: false, playCompletionSound: false });
+      await config.refresh();
+      await invoke('native_e2e_configure', { config: { audioDelayMs: 0, stopDelayMs: 0, keepAlive: false, controlDelayMs: 0 } });
+      await hotkey('press'); await hotkey('release');
+      await until(state, s => s.fixture.providerAudioChunks > 0, 'E54 A never wrote fake audio');
+      await delay(120);
+      await hotkey('press'); await hotkey('release');
+      await until(() => invoke<NativeState & { pausedContinuation: unknown }>('native_e2e_state'),
+        s => s.pausedContinuation !== null && s.fixture.activeCaptures === 0 && s.fixture.activeProviders === 1,
+        'E54 A never reached genuine paused context');
+    } else {
+      check(initial.restartPhase === 'B', 'Invalid restart phase');
+      reconciledStatus = await store.reconcileBackendStatus('native_e54_restart');
+      check(reconciledStatus === 'Idle', 'E54 backend status reconciliation failed');
+    }
+    report.ui = { error: store.error, configSynced, reconciledStatus, status: store.status, desiredOn: store.recordingDesiredOn,
+      pendingStart: store.recordingStartPending, canRequestContinuation: store.canRequestContinuation };
+    check(store.error === null, `E54 store error before checkpoint: ${store.error}`);
+    report.passed = report.errors.length === 0;
+  } catch (error) { report.errors.push(String(error)); }
+  await invoke('native_e2e_progress', { report });
+  unlisten();
 }

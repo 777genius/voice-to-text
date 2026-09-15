@@ -15,3 +15,6 @@ pub use spoken_translation_capability::*;
 pub use stt_provider::*;
 pub use system_audio_capture_factory::*;
 pub use translation_audio_output::*;
+
+pub mod continuation_context;
+pub use continuation_context::*;

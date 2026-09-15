@@ -1,14 +1,58 @@
 //! Lifetime fencing for delayed recording-window operations.
 //! Visibility closures must execute on the native UI thread, where Tauri's
 //! show/hide dispatch is synchronous. Never hold this lock while scheduling it.
-use std::sync::Mutex;
+use std::{collections::BTreeMap, sync::Mutex};
 
 #[derive(Default)]
 pub struct RecordingWindowLifecycle {
     epoch: Mutex<u64>,
+    session_epochs: Mutex<BTreeMap<u64, u64>>,
 }
 
 impl RecordingWindowLifecycle {
+    /// Only capture startup may acquire a visibility lease, never terminal delivery.
+    pub fn bind_session(&self, session_id: u64) {
+        let epoch = self.epoch.lock().unwrap_or_else(|e| e.into_inner());
+        let mut leases = self
+            .session_epochs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        leases.entry(session_id).or_insert(*epoch);
+        while leases.len() > 128 {
+            leases.pop_first();
+        }
+    }
+
+    /// A native show may bind or transfer a lease only after its foreground-run
+    /// owner has been verified outside this lifecycle primitive.
+    pub fn bind_or_transfer_session_if_current(
+        &self,
+        session_id: u64,
+        expected_epoch: u64,
+    ) -> bool {
+        let epoch = self.epoch.lock().unwrap_or_else(|e| e.into_inner());
+        if *epoch != expected_epoch {
+            return false;
+        }
+        let mut leases = self
+            .session_epochs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        leases.insert(session_id, expected_epoch);
+        while leases.len() > 128 {
+            leases.pop_first();
+        }
+        true
+    }
+
+    pub fn session_epoch(&self, session_id: u64) -> Option<u64> {
+        self.session_epochs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&session_id)
+            .copied()
+    }
+
     pub fn current(&self) -> u64 {
         *self.epoch.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -30,18 +74,36 @@ impl RecordingWindowLifecycle {
         Ok(*epoch)
     }
 
-    pub fn show_if_current<E>(
+    pub fn restore_if_current<E>(
         &self,
         expected: u64,
         show: impl FnOnce() -> Result<(), E>,
     ) -> Result<Option<u64>, E> {
-        let mut epoch = self.epoch.lock().unwrap_or_else(|e| e.into_inner());
+        let epoch = self.epoch.lock().unwrap_or_else(|e| e.into_inner());
         if *epoch != expected {
             return Ok(None);
         }
-        *epoch = epoch
-            .checked_add(1)
-            .expect("recording window epoch exhausted");
+        show()?;
+        Ok(Some(*epoch))
+    }
+
+    pub fn restore_if_owned_by_session<E>(
+        &self,
+        session_id: u64,
+        expected: u64,
+        show: impl FnOnce() -> Result<(), E>,
+    ) -> Result<Option<u64>, E> {
+        let epoch = self.epoch.lock().unwrap_or_else(|e| e.into_inner());
+        if *epoch != expected {
+            return Ok(None);
+        }
+        let leases = self
+            .session_epochs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if leases.get(&session_id).copied() != Some(expected) {
+            return Ok(None);
+        }
         show()?;
         Ok(Some(*epoch))
     }
@@ -53,9 +115,15 @@ impl RecordingWindowLifecycle {
     ) -> Result<bool, E> {
         let mut epoch = self.epoch.lock().unwrap_or_else(|e| e.into_inner());
         if *epoch != expected {
+            log::debug!(
+                "recording window close rejected: expected_epoch={}, current_epoch={}",
+                expected,
+                *epoch
+            );
             return Ok(false);
         }
         hide()?;
+        log::debug!("recording window native hide committed: epoch={}", expected);
         // A final close revokes temporary suppression/restore and all old timers.
         *epoch = epoch
             .checked_add(1)
@@ -81,6 +149,81 @@ impl RecordingWindowLifecycle {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn terminal_delivery_cannot_acquire_reopened_successor_window() {
+        let lifecycle = RecordingWindowLifecycle::default();
+        let old = lifecycle.show(|| Ok::<_, ()>(())).unwrap();
+        lifecycle.bind_session(10);
+        lifecycle.hide_if_current(old, || Ok::<_, ()>(())).unwrap();
+        let reopened = lifecycle.show(|| Ok::<_, ()>(())).unwrap();
+        lifecycle.bind_session(11);
+        // Delayed A delivery must still hold A's epoch, even after B starts.
+        lifecycle.bind_session(10);
+        assert_eq!(lifecycle.session_epoch(10), Some(old));
+        assert_eq!(lifecycle.session_epoch(11), Some(reopened));
+        assert!(!lifecycle
+            .while_current(
+                lifecycle.session_epoch(10).unwrap(),
+                || -> Result<(), ()> { panic!("old paste must not suppress successor") }
+            )
+            .unwrap());
+    }
+
+    #[test]
+    fn session_paste_without_reopen_can_suppress_and_restore() {
+        let lifecycle = RecordingWindowLifecycle::default();
+        lifecycle.show(|| Ok::<_, ()>(())).unwrap();
+        lifecycle.bind_session(10);
+        let lease = lifecycle.session_epoch(10).unwrap();
+        assert!(lifecycle.while_current(lease, || Ok::<_, ()>(())).unwrap());
+        let restored = lifecycle
+            .restore_if_owned_by_session(10, lease, || Ok::<_, ()>(()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored, lease);
+        assert_eq!(lifecycle.session_epoch(10), Some(restored));
+        assert_eq!(lifecycle.session_epoch(99), None);
+        assert!(lifecycle
+            .hide_if_current(lease, || Ok::<_, ()>(()))
+            .unwrap());
+        assert_eq!(
+            lifecycle.restore_if_owned_by_session(10, lease, || -> Result<(), ()> {
+                panic!("final close must revoke session restoration")
+            }),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn restore_cannot_transfer_an_epoch_not_owned_by_its_session() {
+        let lifecycle = RecordingWindowLifecycle::default();
+        let old = lifecycle.show(|| Ok::<_, ()>(())).unwrap();
+        lifecycle.bind_session(10);
+        lifecycle.hide_if_current(old, || Ok::<_, ()>(())).unwrap();
+        let successor = lifecycle.show(|| Ok::<_, ()>(())).unwrap();
+        lifecycle.bind_session(11);
+        assert_eq!(
+            lifecycle.restore_if_owned_by_session(10, successor, || -> Result<(), ()> {
+                panic!("old session restored a successor window")
+            }),
+            Ok(None)
+        );
+        assert_eq!(lifecycle.session_epoch(10), Some(old));
+        assert_eq!(lifecycle.session_epoch(11), Some(successor));
+    }
+
+    #[test]
+    fn verified_active_session_can_take_its_reopened_epoch() {
+        let lifecycle = RecordingWindowLifecycle::default();
+        lifecycle.show(|| Ok::<_, ()>(())).unwrap();
+        lifecycle.bind_session(10);
+        let reopened = lifecycle.show(|| Ok::<_, ()>(())).unwrap();
+        assert!(lifecycle.bind_or_transfer_session_if_current(10, reopened));
+        assert_eq!(lifecycle.session_epoch(10), Some(reopened));
+        assert!(!lifecycle.bind_or_transfer_session_if_current(10, reopened - 1));
+        assert!(lifecycle.bind_or_transfer_session_if_current(99, reopened));
+    }
 
     #[test]
     fn hide_queued_before_new_show_cannot_hide_it_at_commit() {
@@ -367,7 +510,7 @@ mod commit_tests {
         let suppressed = lifecycle.start_intent();
         lifecycle.start_intent();
         assert_eq!(
-            lifecycle.show_if_current(suppressed, || -> Result<(), ()> {
+            lifecycle.restore_if_current(suppressed, || -> Result<(), ()> {
                 panic!("old auto-paste restore reopened replacement window")
             }),
             Ok(None)
@@ -383,7 +526,7 @@ mod commit_tests {
             .hide_if_current(epoch, || Ok::<_, ()>(()))
             .unwrap());
         assert_eq!(
-            lifecycle.show_if_current(epoch, || -> Result<(), ()> {
+            lifecycle.restore_if_current(epoch, || -> Result<(), ()> {
                 panic!("restored after close")
             }),
             Ok(None)
@@ -396,20 +539,20 @@ mod commit_tests {
         let epoch = lifecycle.show(|| Ok::<_, ()>(())).unwrap();
         assert!(lifecycle.while_current(epoch, || Ok::<_, ()>(())).unwrap());
         assert!(lifecycle
-            .show_if_current(epoch, || Ok::<_, ()>(()))
+            .restore_if_current(epoch, || Ok::<_, ()>(()))
             .unwrap()
             .is_some());
     }
 
     #[test]
-    fn current_restore_advances_epoch_and_invalidates_old_hide() {
+    fn temporary_restore_preserves_pending_close() {
         let lifecycle = RecordingWindowLifecycle::default();
         let old = lifecycle.start_intent();
         let restored = lifecycle
-            .show_if_current(old, || Ok::<_, ()>(()))
+            .restore_if_current(old, || Ok::<_, ()>(()))
             .unwrap()
             .unwrap();
-        assert!(restored > old);
-        assert!(!lifecycle.hide_if_current(old, || Ok::<_, ()>(())).unwrap());
+        assert_eq!(restored, old);
+        assert!(lifecycle.hide_if_current(old, || Ok::<_, ()>(())).unwrap());
     }
 }

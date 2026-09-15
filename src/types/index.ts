@@ -20,12 +20,20 @@ export interface PartialTranscriptionPayload {
   session_id: number;
   text: string;
   timestamp: number;
+  completion_v1?: boolean;
+  continuation_delivery?: boolean;
+  delivery_seq?: number | null;
+  timing_known?: boolean;
   is_segment_final: boolean; // true когда сегмент финализирован (но речь продолжается)
   start: number; // start время utterance в секундах (от Deepgram)
   duration: number; // длительность utterance в секундах (от Deepgram)
 }
 
 export interface FinalTranscriptionPayload {
+  completion_v1?: boolean;
+  continuation_delivery?: boolean;
+  delivery_seq?: number | null;
+  timing_known?: boolean;
   session_id: number;
   text: string;
   confidence?: number;
@@ -33,6 +41,42 @@ export interface FinalTranscriptionPayload {
   timestamp: number;
   start?: number;
   duration?: number;
+}
+
+export interface ProviderFinalizeReport {
+  reason: 'drained' | 'no_audio' | 'deadline' | 'provider_error' | 'cancelled';
+  tail_evidence: 'no_audio' | 'segment_observed' | 'unconfirmed';
+  provider_release: 'released' | 'reusable' | 'unconfirmed';
+  last_delivery_seq: number;
+  stable_snapshot: string;
+  error?: string | null;
+}
+
+export interface FinalizeReport {
+  run_id: number;
+  audio: {
+    accepted_bytes: number;
+    read_bytes: number;
+    submitted_bytes: number;
+    acknowledged_bytes: number | null;
+    unacknowledged_bytes: number | null;
+    remaining_bytes: number;
+    unknown_bytes: number;
+    reason: 'drained' | 'deadline' | 'cancelled' | 'processor_error';
+  };
+  provider_release: 'released' | 'reusable' | 'unconfirmed';
+  error: string | null;
+  shared_failure: boolean;
+  provider?: ProviderFinalizeReport | null;
+}
+
+export interface TranscriptionTerminalPayload {
+  continuation_delivery?: boolean | null;
+  session_id: number;
+  stable_snapshot: string;
+  delivery_complete: boolean;
+  report: FinalizeReport | null;
+  error: string | null;
 }
 
 export type RecordingMode = 'dictation' | 'live_translation';
@@ -45,15 +89,51 @@ export interface RecordingStatusPayload {
   mode?: RecordingMode;
 }
 
+export type ContinuationPhase = 'active' | 'pausing' | 'paused_reclaimable' | 'continue_pending' | 'active_awaiting_audio' | 'finalizing' | 'terminal';
+export type GuardedPasteOutcome =
+  | { status: 'confirmed'; revision: number }
+  | { status: 'context_mismatch' | 'unavailable' | 'uncertain' };
+
 export interface RecordingIntentProjectionPayload {
-  runId?: number;
-  intentRevision?: number;
+  logicalRunId?: number | null;
+  captureEpisodeId?: number | null;
+  continuationPhase?: ContinuationPhase | null;
+  runId?: number | null;
+  faultRunId?: number | null;
+  intentRevision: number;
   status: RecordingStatus;
   desiredOn: boolean;
   pendingStart: boolean;
   processingJobs: number;
   shutdownRequested: boolean;
   fault?: 'startFailed' | 'runtimeFailed' | 'stopUncertain' | 'finalizeFailed';
+}
+
+export type RecordingCaptureReadinessState = 'unavailable' | 'buffering' | 'streaming';
+
+export type RecordingCaptureReadinessReason =
+  | 'idle'
+  | 'starting-capture'
+  | 'finalizing-previous'
+  | 'connecting-provider'
+  | 'recording'
+  | 'cancelled'
+  | 'error';
+
+export interface RecordingCaptureReadinessPayload {
+  logicalRunId?: number | null;
+  captureEpisodeId?: number | null;
+  captureGeneration?: number | null;
+  captureReady?: boolean;
+  transportReady?: boolean;
+  /** Recording intent revision. Capture readiness is valid only for this exact intent. */
+  revision: number | null;
+  /** Capture run identity. This is deliberately independent from transcript session_id. */
+  runId: number | null;
+  state: RecordingCaptureReadinessState;
+  reason: RecordingCaptureReadinessReason;
+  /** Monotonic native event generation used to reject delayed delivery. */
+  generation: number;
 }
 
 export interface TranslationDeltaPayload {
@@ -170,8 +250,10 @@ export interface ConnectionQualityPayload {
 // Event names (must match Rust backend)
 export const EVENT_TRANSCRIPTION_PARTIAL = 'transcription:partial';
 export const EVENT_TRANSCRIPTION_FINAL = 'transcription:final';
+export const EVENT_TRANSCRIPTION_TERMINAL = 'transcription:terminal';
 export const EVENT_RECORDING_STATUS = 'recording:status';
 export const EVENT_RECORDING_INTENT_PROJECTION = 'recording:intent-projection';
+export const EVENT_RECORDING_CAPTURE_READINESS = 'recording:capture-readiness';
 export const EVENT_TRANSCRIPTION_ERROR = 'transcription:error';
 export const EVENT_CONNECTION_QUALITY = 'connection:quality';
 export const EVENT_TRANSLATION_DELTA = 'translation:delta';

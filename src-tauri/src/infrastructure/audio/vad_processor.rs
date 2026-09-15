@@ -21,6 +21,34 @@ const NOISE_FLOOR_MAX_ABS_I16: u32 = 120;
 const NOISE_FLOOR_RMS_I16: u32 = 90;
 const NO_ACTIVITY_TIMEOUT_MS: u64 = 15_000;
 
+#[derive(Clone, Copy)]
+enum ConfiguredVadMode {
+    Quality,
+    LowBitrate,
+    Aggressive,
+    VeryAggressive,
+}
+
+impl ConfiguredVadMode {
+    fn from_webrtc(mode: VadMode) -> Self {
+        match mode {
+            VadMode::Quality => Self::Quality,
+            VadMode::LowBitrate => Self::LowBitrate,
+            VadMode::Aggressive => Self::Aggressive,
+            VadMode::VeryAggressive => Self::VeryAggressive,
+        }
+    }
+
+    fn as_webrtc(self) -> VadMode {
+        match self {
+            Self::Quality => VadMode::Quality,
+            Self::LowBitrate => VadMode::LowBitrate,
+            Self::Aggressive => VadMode::Aggressive,
+            Self::VeryAggressive => VadMode::VeryAggressive,
+        }
+    }
+}
+
 /// Result of VAD processing
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VadResult {
@@ -38,6 +66,8 @@ pub enum VadResult {
 pub struct VadProcessor {
     /// WebRTC VAD instance
     vad: Vad,
+    /// Mode must be restored after `Vad::reset`, which returns WebRTC VAD to its defaults.
+    mode: ConfiguredVadMode,
     /// Buffer for accumulating samples until we have a full frame
     buffer: Vec<i16>,
     /// Accumulated silence duration
@@ -58,12 +88,14 @@ impl VadProcessor {
     /// # Returns
     /// New VadProcessor instance configured for 16kHz audio
     pub fn new(timeout_ms: Option<u64>, mode: Option<VadMode>) -> SttResult<Self> {
+        let mode = ConfiguredVadMode::from_webrtc(mode.unwrap_or(VadMode::Quality));
         let mut vad = Vad::new();
-        vad.set_mode(mode.unwrap_or(VadMode::Quality));
         vad.set_sample_rate(SampleRate::Rate16kHz);
+        vad.set_mode(mode.as_webrtc());
 
         Ok(Self {
             vad,
+            mode,
             buffer: Vec::with_capacity(FRAME_SIZE_SAMPLES * 2), // Pre-allocate for efficiency
             silence_duration: Duration::from_millis(0),
             saw_activity: false,
@@ -162,6 +194,12 @@ impl VadProcessor {
 
     /// Reset silence counter (useful when manually restarting recording)
     pub fn reset(&mut self) {
+        // WebRTC VAD carries adaptive noise/speech history. A logical recording restart must
+        // start with a fresh detector, otherwise the previous utterance can bias the next one.
+        // The dependency reset also restores 8kHz/Quality defaults, so reapply our configuration.
+        self.vad.reset();
+        self.vad.set_sample_rate(SampleRate::Rate16kHz);
+        self.vad.set_mode(self.mode.as_webrtc());
         self.silence_duration = Duration::from_millis(0);
         self.buffer.clear();
         self.saw_activity = false;
@@ -262,6 +300,29 @@ mod tests {
         vad.reset();
         assert_eq!(vad.buffered_samples(), 0);
         assert_eq!(vad.silence_duration(), Duration::from_millis(0));
+    }
+
+    #[test]
+    fn reset_clears_webrtc_speech_hangover_between_recordings() {
+        let mut vad = VadProcessor::default().unwrap();
+        let speech_like_frame: Vec<i16> = (0..480)
+            .map(|index| if index % 80 < 40 { 3_000 } else { -3_000 })
+            .collect();
+
+        for _ in 0..10 {
+            assert_eq!(
+                vad.process_samples(&speech_like_frame).unwrap(),
+                VadResult::Speech
+            );
+        }
+
+        vad.reset();
+
+        let quiet_frame = vec![130i16; 480];
+        assert_eq!(
+            vad.process_samples(&quiet_frame).unwrap(),
+            VadResult::Silence
+        );
     }
 
     #[test]

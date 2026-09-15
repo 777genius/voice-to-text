@@ -278,8 +278,8 @@ async fn test_start_recording_prevents_double_start() {
 
     let on_partial = Arc::new(|_: Transcription| {});
     let on_final = Arc::new(|_: Transcription| {});
-    let on_audio_level = Arc::new(|_: f32| {});
-    let on_audio_spectrum = Arc::new(|_: [f32; 48]| {});
+    let on_audio_level = Arc::new(|_, _: f32| {});
+    let on_audio_spectrum = Arc::new(|_, _: [f32; 48]| {});
     let on_error = Arc::new(|_err: SttError| {});
     let on_connection_quality = Arc::new(|_: String, _: Option<String>| {});
 
@@ -348,8 +348,8 @@ async fn test_full_recording_lifecycle() {
 
     let on_partial = Arc::new(|_: Transcription| {});
     let on_final = Arc::new(|_: Transcription| {});
-    let on_audio_level = Arc::new(|_: f32| {});
-    let on_audio_spectrum = Arc::new(|_: [f32; 48]| {});
+    let on_audio_level = Arc::new(|_, _: f32| {});
+    let on_audio_spectrum = Arc::new(|_, _: [f32; 48]| {});
     let on_error = Arc::new(|_err: SttError| {});
 
     // Проверяем статус Idle
@@ -403,8 +403,8 @@ async fn test_keep_alive_mode() {
 
     let on_partial = Arc::new(|_: Transcription| {});
     let on_final = Arc::new(|_: Transcription| {});
-    let on_audio_level = Arc::new(|_: f32| {});
-    let on_audio_spectrum = Arc::new(|_: [f32; 48]| {});
+    let on_audio_level = Arc::new(|_, _: f32| {});
+    let on_audio_spectrum = Arc::new(|_, _: [f32; 48]| {});
     let on_error = Arc::new(|_err: SttError| {});
 
     // Старт
@@ -589,8 +589,8 @@ async fn test_keep_alive_connection_resets_on_language_change() {
 
     let on_partial = Arc::new(|_: Transcription| {});
     let on_final = Arc::new(|_: Transcription| {});
-    let on_audio_level = Arc::new(|_: f32| {});
-    let on_audio_spectrum = Arc::new(|_: [f32; 48]| {});
+    let on_audio_level = Arc::new(|_, _: f32| {});
+    let on_audio_spectrum = Arc::new(|_, _: [f32; 48]| {});
     let on_error = Arc::new(|_err: SttError| {});
     let on_connection_quality = Arc::new(|_: String, _: Option<String>| {});
 
@@ -655,8 +655,8 @@ async fn test_recording_status_transitions() {
 
     let on_partial = Arc::new(|_: Transcription| {});
     let on_final = Arc::new(|_: Transcription| {});
-    let on_audio_level = Arc::new(|_: f32| {});
-    let on_audio_spectrum = Arc::new(|_: [f32; 48]| {});
+    let on_audio_level = Arc::new(|_, _: f32| {});
+    let on_audio_spectrum = Arc::new(|_, _: [f32; 48]| {});
     let on_error = Arc::new(|_err: SttError| {});
 
     service

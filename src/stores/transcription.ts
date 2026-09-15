@@ -44,8 +44,12 @@ import {
   ConnectionQuality,
   PartialTranscriptionPayload,
   FinalTranscriptionPayload,
+  TranscriptionTerminalPayload,
   RecordingStatusPayload,
   RecordingIntentProjectionPayload,
+  ContinuationPhase,
+  GuardedPasteOutcome,
+  RecordingCaptureReadinessPayload,
   TranscriptionErrorPayload,
   ConnectionQualityPayload,
   TranslationDeltaPayload,
@@ -57,8 +61,10 @@ import {
   LiveTranslationHealthCheck,
   EVENT_TRANSCRIPTION_PARTIAL,
   EVENT_TRANSCRIPTION_FINAL,
+  EVENT_TRANSCRIPTION_TERMINAL,
   EVENT_RECORDING_STATUS,
   EVENT_RECORDING_INTENT_PROJECTION,
+  EVENT_RECORDING_CAPTURE_READINESS,
   EVENT_TRANSCRIPTION_ERROR,
   EVENT_CONNECTION_QUALITY,
   EVENT_TRANSLATION_DELTA,
@@ -93,9 +99,18 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   // it stays true while a previous run releases capture/finalization resources.
   const recordingDesiredOn = ref<boolean>(false);
   const recordingStartPending = ref<boolean>(false);
+  const recordingIntentRunId = ref<number | null>(null);
+  const continuationPhase = ref<ContinuationPhase | null>(null);
+  const canRequestContinuation = computed(() => continuationPhase.value === 'pausing' || continuationPhase.value === 'paused_reclaimable');
+  const recordingIntentRevision = ref<number | null>(null);
   const recordingIntentFault = ref<NonNullable<RecordingIntentProjectionPayload['fault']> | null>(
     null,
   );
+  const recordingIntentFaultRunId = ref<number | null>(null);
+  const captureReadinessByIntent = shallowRef(
+    new Map<string, RecordingCaptureReadinessPayload>(),
+  );
+  let lastCaptureReadinessGeneration = -1;
   // UI effects consume only statuses accepted by this store's session guards.
   const lastAcceptedRecordingStatus = shallowRef<RecordingStatusPayload | null>(null);
   let recordingStateRevision = 0;
@@ -115,6 +130,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const errorType = ref<TranscriptionErrorPayload['error_type'] | null>(null);
   const errorRaw = ref<string | null>(null);
   const errorDetails = ref<TranscriptionErrorPayload['error_details'] | null>(null);
+  let terminalRecordingErrorSessionId: number | null = null;
   const isDeviceNotFoundError = ref(false);
   const lastFinalizedSegmentKey = ref<string>(''); // последний finalized range (для дедупликации)
   const lastSpeechFinalRangeKey = ref<string>(''); // последний speech_final range (для дедупликации)
@@ -154,6 +170,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     validations: Set<{ promise: Promise<void>; resolve: () => void }>;
   };
   let connectOperation: ConnectOperation | null = null;
+  let connectRetryCleanupRevision: number | null = null;
   const connectClientId = crypto.randomUUID();
   let connectSequence = 0;
 
@@ -170,6 +187,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     const operation = connectOperation;
     if (!operation) return;
     connectOperation = null;
+    connectRetryCleanupRevision = null;
     operation.controller.abort();
     for (const validation of operation.validations) validation.resolve();
     operation.validations.clear();
@@ -213,6 +231,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     errorType.value = null;
     errorRaw.value = null;
     errorDetails.value = null;
+    terminalRecordingErrorSessionId = null;
     isDeviceNotFoundError.value = false;
   }
 
@@ -364,6 +383,18 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   interface AutoPasteSessionLedger {
     readonly sessionId: number | null;
     baseline: string;
+    stableSnapshot: string;
+    interimSnapshot: string;
+    lastDeliverySeq: number;
+    negotiated: boolean;
+    continuation: boolean | null;
+    automaticDeliveryRefused: boolean;
+    nativeDeliverySeq: number;
+    nativeRevision: number;
+    terminal: boolean;
+    detached: boolean;
+    readonly autoCopy: boolean;
+    readonly autoPaste: boolean;
   }
   interface PendingStopFinalization {
     readonly timer: ReturnType<typeof setTimeout>;
@@ -372,6 +403,20 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   }
   let autoPasteQueue: Promise<void> = Promise.resolve();
   const autoPasteLedgers = new Map<number, AutoPasteSessionLedger>();
+  const deliveryRevision = ref(0);
+  const deliveryRecovery = computed(() => {
+    void deliveryRevision.value;
+    return [...autoPasteLedgers.values()].filter(ledger => ledger.automaticDeliveryRefused).map(ledger => ({
+      sessionId: ledger.sessionId,
+      transcript: ledger.stableSnapshot,
+      // This suffix is unconfirmed; an uncertain native effect may have inserted it.
+      unconfirmedText: ledger.stableSnapshot.startsWith(ledger.baseline)
+        ? ledger.stableSnapshot.slice(ledger.baseline.length).trim() : ledger.stableSnapshot,
+    }));
+  });
+  async function copyRecoveryText(text: string): Promise<void> {
+    await invoke('copy_to_clipboard_native', { text });
+  }
   let pendingStopFinalization: PendingStopFinalization | null = null;
 
   const HOTKEY_STOP_LATE_FINAL_GRACE_MS = 1_500;
@@ -397,8 +442,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   type UnlistenFn = () => void;
   let unlistenPartial: UnlistenFn | null = null;
   let unlistenFinal: UnlistenFn | null = null;
+  let unlistenTerminal: UnlistenFn | null = null;
   let unlistenStatus: UnlistenFn | null = null;
   let unlistenIntentProjection: UnlistenFn | null = null;
+  let unlistenCaptureReadiness: UnlistenFn | null = null;
   let unlistenError: UnlistenFn | null = null;
   let unlistenConnectionQuality: UnlistenFn | null = null;
   let unlistenTranslationDelta: UnlistenFn | null = null;
@@ -426,6 +473,98 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   function bumpLastSeenSessionId(next: number): void {
     if (next > lastSeenSessionId.value) {
       lastSeenSessionId.value = next;
+    }
+  }
+
+  function captureReadinessKey(runId: number | null, revision: number | null): string {
+    return `${runId ?? 'none'}:${revision}`;
+  }
+
+  function isCaptureReadinessPayload(value: unknown): value is RecordingCaptureReadinessPayload {
+    if (!value || typeof value !== 'object') return false;
+    const payload = value as Partial<RecordingCaptureReadinessPayload>;
+    return [payload.logicalRunId, payload.captureEpisodeId, payload.captureGeneration].every(id =>
+        id === undefined || id === null || (Number.isSafeInteger(id) && Number(id) > 0)) &&
+      (payload.captureReady === undefined || typeof payload.captureReady === 'boolean') &&
+      (payload.transportReady === undefined || typeof payload.transportReady === 'boolean') &&
+      (payload.revision === null ||
+        (Number.isSafeInteger(payload.revision) && Number(payload.revision) >= 0)) &&
+      (payload.runId === null || (Number.isSafeInteger(payload.runId) && Number(payload.runId) > 0)) &&
+      Number.isSafeInteger(payload.generation) && Number(payload.generation) >= 0 &&
+      ['unavailable', 'buffering', 'streaming'].includes(String(payload.state)) &&
+      ['idle', 'starting-capture', 'finalizing-previous', 'connecting-provider', 'recording', 'cancelled', 'error']
+        .includes(String(payload.reason));
+  }
+
+  function acceptCaptureReadiness(
+    payload: unknown,
+    expectedListenerGeneration: number,
+  ): payload is RecordingCaptureReadinessPayload {
+    if (expectedListenerGeneration !== listenerGeneration || !isCaptureReadinessPayload(payload)) {
+      return false;
+    }
+    if (payload.revision !== null && recordingIntentRevision.value !== null &&
+        payload.revision < recordingIntentRevision.value) return false;
+    if (payload.generation <= lastCaptureReadinessGeneration) return false;
+    lastCaptureReadinessGeneration = payload.generation;
+
+    const next = new Map(captureReadinessByIntent.value);
+    const key = captureReadinessKey(payload.runId, payload.revision);
+    next.delete(key);
+    next.set(key, { ...payload });
+    while (next.size > 32) next.delete(next.keys().next().value!);
+    captureReadinessByIntent.value = next;
+    clientLog('recording_capture_readiness_received', { ...payload }, 'debug');
+    return true;
+  }
+
+  async function refreshCaptureReadiness(
+    reason: string,
+  ): Promise<RecordingCaptureReadinessPayload | null> {
+    const generation = listenerGeneration;
+    try {
+      const payload = await invoke<RecordingCaptureReadinessPayload | null>(
+        'get_recording_capture_readiness',
+      );
+      if (generation !== listenerGeneration || !isCaptureReadinessPayload(payload)) return null;
+      if (payload.revision !== null && recordingIntentRevision.value !== null &&
+          payload.revision < recordingIntentRevision.value) return null;
+      if (payload.generation < lastCaptureReadinessGeneration) return null;
+      if (payload.generation > lastCaptureReadinessGeneration) {
+        if (!acceptCaptureReadiness(payload, generation)) return null;
+      } else {
+        const stored = captureReadinessByIntent.value.get(
+          captureReadinessKey(payload.runId, payload.revision),
+        );
+        if (!stored || stored.generation !== payload.generation ||
+            stored.state !== payload.state || stored.reason !== payload.reason) return null;
+      }
+
+      // The getter is an authoritative resume snapshot. It repairs intent
+      // identity when WebView suspension caused projection events to be missed.
+      if (payload.revision !== null) recordingIntentRevision.value = payload.revision;
+      recordingDesiredOn.value = payload.revision !== null &&
+        payload.reason !== 'idle' && payload.reason !== 'cancelled' && payload.reason !== 'error';
+      recordingStartPending.value = recordingDesiredOn.value && payload.state !== 'streaming';
+      if (!recordingDesiredOn.value) {
+        recordingIntentRunId.value = null;
+        awaitingSessionStart.value = false;
+      }
+
+      if (payload.revision !== null) {
+        captureReadinessByIntent.value = new Map(
+          [...captureReadinessByIntent.value].filter(([, candidate]) =>
+            candidate.revision === null || candidate.revision >= payload.revision!,
+          ),
+        );
+      }
+      return payload;
+    } catch (err) {
+      clientLog('recording_capture_readiness_refresh_failed', {
+        reason,
+        error: formatUnknownError(err),
+      }, 'debug');
+      return null;
     }
   }
 
@@ -480,6 +619,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   }
 
   function setTerminalRecordingErrorStatus(payloadSessionId: number, reason: string): void {
+    terminalRecordingErrorSessionId = payloadSessionId;
     status.value = RecordingStatus.Error;
     markRecordingSessionClosed(payloadSessionId, reason);
     awaitingSessionStart.value = false;
@@ -664,7 +804,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
 
     // Никогда не принимаем события от "закрытых" сессий.
-    if (isRecordingSessionClosed(payloadSessionId)) {
+    if (isRecordingSessionClosed(payloadSessionId) || autoPasteLedgers.get(payloadSessionId)?.terminal ||
+        autoPasteLedgers.get(payloadSessionId)?.detached) {
       return false;
     }
 
@@ -732,9 +873,36 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     const generation = listenerGeneration;
     try {
       const backendStatus = await invoke<RecordingStatus>('get_recording_status');
+      if (revision !== recordingStateRevision || requestId !== reconcileRequestId ||
+          generation !== listenerGeneration) {
+        void refreshCaptureReadiness(`stale_reconcile:${reason}`);
+        return null;
+      }
+      const statusBeforeReadiness = status.value;
+      const sessionBeforeReadiness = sessionId.value;
+      const startRevisionBeforeReadiness = recordingStartRevision;
+      const readinessSnapshot = await refreshCaptureReadiness(`reconcile:${reason}`);
       // A status snapshot has no session id. It cannot supersede events or start
       // intent received while the IPC was pending, even if status changed back.
-      if (revision !== recordingStateRevision || requestId !== reconcileRequestId || generation !== listenerGeneration) {
+      if (requestId !== reconcileRequestId || generation !== listenerGeneration ||
+          status.value !== statusBeforeReadiness || sessionId.value !== sessionBeforeReadiness ||
+          recordingStartRevision !== startRevisionBeforeReadiness) {
+        return null;
+      }
+      const readinessProvesIntentOff = readinessSnapshot !== null &&
+        !(connectOperation && connectRetryCleanupRevision === readinessSnapshot.revision) &&
+        !recordingDesiredOn.value &&
+        (readinessSnapshot.reason === 'idle' || readinessSnapshot.reason === 'cancelled' ||
+          readinessSnapshot.reason === 'error');
+      if (readinessProvesIntentOff &&
+          (backendStatus === RecordingStatus.Starting || backendStatus === RecordingStatus.Recording)) {
+        if (sessionBeforeReadiness === null) {
+          status.value = RecordingStatus.Idle;
+          awaitingSessionStart.value = false;
+          return RecordingStatus.Idle;
+        }
+        // The session may still deliver its final transcript tail. Let its
+        // run-scoped terminal status close it instead of applying an old active snapshot.
         return null;
       }
       const uiLooksLikeStartRace =
@@ -742,7 +910,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         (awaitingSessionStart.value || isConnecting.value || sessionId.value !== null);
       const preserveActiveFlowOnIdle =
         backendStatus === RecordingStatus.Idle &&
-        (uiLooksLikeStartRace || awaitingSessionStart.value || isConnecting.value);
+        (uiLooksLikeStartRace || awaitingSessionStart.value || isConnecting.value ||
+          recordingDesiredOn.value || recordingStartPending.value || isCaptureReady.value);
 
       if (backendStatus === RecordingStatus.Idle) {
         // ВАЖНО: иногда get_recording_status может на короткое время вернуть Idle
@@ -819,6 +988,42 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   const isIdle = computed(() => status.value === RecordingStatus.Idle);
   const isProcessing = computed(() => status.value === RecordingStatus.Processing);
   const hasError = computed(() => status.value === RecordingStatus.Error);
+  const captureReadiness = computed<RecordingCaptureReadinessPayload | null>(() => {
+    if (!recordingDesiredOn.value || recordingIntentRevision.value === null) return null;
+    let current: RecordingCaptureReadinessPayload | null = null;
+    for (const candidate of captureReadinessByIntent.value.values()) {
+      if (candidate.revision !== recordingIntentRevision.value) continue;
+      if (current === null || candidate.generation > current.generation) current = candidate;
+    }
+    return current;
+  });
+  const captureRunId = computed(() => captureReadiness.value?.captureEpisodeId ?? captureReadiness.value?.runId ?? null);
+  const captureGeneration = computed(() => captureReadiness.value?.captureGeneration ?? null);
+  const isCaptureReady = computed(() => {
+    if (captureReadiness.value?.captureReady !== undefined) return captureReadiness.value.captureReady;
+    const state = captureReadiness.value?.state;
+    return state === 'buffering' || state === 'streaming';
+  });
+  const hasCaptureReadinessProtocol = computed(() => captureReadinessByIntent.value.size > 0);
+  let lastIndicatorSignature = '';
+  watch(
+    [captureReadiness, isCaptureReady],
+    ([readiness, ready]) => {
+      const signature = readiness
+        ? `${readiness.revision}:${readiness.runId}:${readiness.state}:${readiness.reason}:${ready}`
+        : `unavailable:${recordingIntentRevision.value}:${ready}`;
+      if (signature === lastIndicatorSignature) return;
+      lastIndicatorSignature = signature;
+      clientLog('indicator_state_changed', {
+        ready,
+        revision: readiness?.revision ?? recordingIntentRevision.value,
+        runId: readiness?.runId ?? null,
+        state: readiness?.state ?? 'unavailable',
+        reason: readiness?.reason ?? 'idle',
+      }, 'info');
+    },
+    { flush: 'sync' },
+  );
   const hasConnectionIssue = computed(() =>
     connectionQuality.value !== ConnectionQuality.Good
   );
@@ -1048,7 +1253,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     const existing = autoPasteLedgers.get(key);
     if (existing) return existing;
 
-    const ledger: AutoPasteSessionLedger = { sessionId, baseline: '' };
+    const ledger: AutoPasteSessionLedger = {
+      sessionId, baseline: '', stableSnapshot: '', interimSnapshot: '', lastDeliverySeq: -1,
+      negotiated: false, terminal: false, detached: false,
+      continuation: null, automaticDeliveryRefused: false, nativeDeliverySeq: 0, nativeRevision: 0,
+      autoCopy: autoCopyEnabled.value, autoPaste: autoPasteEnabled.value,
+    };
     autoPasteLedgers.set(key, ledger);
     while (autoPasteLedgers.size > AUTO_PASTE_SESSION_RETENTION) {
       const oldestKey = autoPasteLedgers.keys().next().value;
@@ -1056,6 +1266,124 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       autoPasteLedgers.delete(oldestKey);
     }
     return ledger;
+  }
+
+  function applyDeliveryMode(ledger: AutoPasteSessionLedger, mode: boolean | null | undefined): void {
+    if (ledger.terminal || typeof mode !== 'boolean') return;
+    if (ledger.continuation !== null && ledger.continuation !== mode) {
+      ledger.automaticDeliveryRefused = true;
+      return;
+    }
+    ledger.continuation = mode;
+  }
+
+  // A delivery belongs to its run even when B already owns the visible buffers.
+  function acceptSequencedStable(payload: PartialTranscriptionPayload | FinalTranscriptionPayload): Promise<boolean> | null {
+    if (payload.delivery_seq == null) return null;
+    if (!Number.isSafeInteger(payload.delivery_seq) || payload.delivery_seq < 0) {
+      return Promise.resolve(false);
+    }
+    let ledger = autoPasteLedgers.get(payload.session_id);
+    if (!ledger) {
+      if (!ensureActiveSessionForIncomingEvent(payload.session_id, 'transcription:stable')) {
+        return Promise.resolve(false);
+      }
+      ledger = captureAutoPasteLedger(payload.session_id);
+    }
+    if (ledger.terminal || payload.delivery_seq <= ledger.lastDeliverySeq) return Promise.resolve(false);
+    // Ordered provider metadata precedes the first effect, even if the intent
+    // projection is still queued. Completion support alone does not select mode.
+    applyDeliveryMode(ledger, payload.continuation_delivery);
+    ledger.negotiated = true;
+    if (pendingStopFinalization?.sessionId === payload.session_id) clearHotkeyStopFinalizeTimer();
+    ledger.lastDeliverySeq = payload.delivery_seq;
+    // An empty ordered stable is still a valid sequence fence, but it confirms
+    // no text. Keep the latest interim recoverable until the terminal outcome
+    // proves whether that draft can be delivered safely.
+    if (!payload.text.trim()) {
+      deliveryRevision.value++;
+      return Promise.resolve(true);
+    }
+    ledger.stableSnapshot = appendTranscriptText(ledger.stableSnapshot, payload.text);
+    ledger.interimSnapshot = '';
+    deliveryRevision.value++;
+    if (sessionId.value === payload.session_id && !awaitingSessionStart.value) {
+      finalText.value = ledger.stableSnapshot;
+      accumulatedText.value = '';
+      partialText.value = '';
+      animatedPartialText.value = '';
+      animatedAccumulatedText.value = '';
+      clearTranscriptionAnimationTimers();
+    }
+    // Queue before yielding. The cumulative snapshot preserves legitimate repeats;
+    // only run + delivery_seq deduplicates provider deliveries.
+    return enqueueTextDelivery('stable_delivery', ledger.stableSnapshot, ledger, false, ledger.autoPaste);
+  }
+
+  function captureLegacyTranscript(payloadSessionId: number): void {
+    const ledger = captureAutoPasteLedger(payloadSessionId);
+    if (ledger.terminal || sessionId.value !== payloadSessionId) return;
+    if (!ledger.negotiated) {
+      ledger.stableSnapshot = appendTranscriptText(finalText.value, accumulatedText.value);
+    }
+    // Empty speech-final events clear the UI partial before terminal arrives.
+    // Retain negotiated recovery data until a stable delivery or terminal owns it.
+    if (!ledger.negotiated || partialText.value.trim()) {
+      ledger.interimSnapshot = partialText.value;
+    }
+  }
+
+  function acceptRunTerminal(payload: TranscriptionTerminalPayload): Promise<boolean> {
+    if (!Number.isSafeInteger(payload.session_id) || payload.session_id <= 0) return Promise.resolve(false);
+    if (payload.report && payload.report.run_id !== undefined && payload.report.run_id !== payload.session_id) {
+      return Promise.resolve(false);
+    }
+    const ledger = autoPasteLedgers.get(payload.session_id) ??
+      (sessionId.value === payload.session_id ? captureAutoPasteLedger(payload.session_id) : undefined);
+    if (!ledger || ledger.terminal) return Promise.resolve(false);
+    applyDeliveryMode(ledger, payload.continuation_delivery);
+    // Missing metadata cannot authorize legacy effects. Keep text recoverable.
+    if (ledger.continuation === null) ledger.automaticDeliveryRefused = true;
+    ledger.terminal = true;
+    ledger.negotiated ||= ledger.continuation === true || !!payload.report?.provider;
+    // Legacy segment-finals arrive as partial events, so the Rust final-only
+    // snapshot can omit stable prefixes already accumulated in this run's ledger.
+    const stableSnapshot = ledger.stableSnapshot || payload.stable_snapshot;
+    const report = payload.report;
+    const canRecoverInterim = ledger.negotiated && !payload.stable_snapshot.trim() &&
+      !ledger.stableSnapshot.trim() && !report?.provider?.stable_snapshot?.trim() &&
+      !!ledger.interimSnapshot.trim() && payload.error === null && payload.delivery_complete === true &&
+      !report?.error && !report?.shared_failure && !report?.provider?.error &&
+      (!report?.audio?.reason || report.audio.reason === 'drained') &&
+      (!report?.provider?.reason || ['drained', 'no_audio'].includes(report.provider.reason));
+    const terminalSnapshot = ledger.negotiated
+      ? (canRecoverInterim ? ledger.interimSnapshot : payload.stable_snapshot)
+      : appendTranscriptText(stableSnapshot, ledger.interimSnapshot);
+    if (canRecoverInterim) {
+      clientLog('transcription_terminal_interim_fallback', {
+        sessionId: payload.session_id,
+        textLength: terminalSnapshot.length,
+      }, 'warn');
+    }
+    ledger.stableSnapshot = terminalSnapshot;
+    deliveryRevision.value++;
+    ledger.interimSnapshot = '';
+    if (pendingStopFinalization?.sessionId === payload.session_id) clearHotkeyStopFinalizeTimer();
+    if (sessionId.value === payload.session_id && !awaitingSessionStart.value) {
+      finalText.value = terminalSnapshot;
+      accumulatedText.value = '';
+      partialText.value = '';
+      animatedPartialText.value = '';
+      animatedAccumulatedText.value = '';
+      clearTranscriptionAnimationTimers();
+    }
+    // Only a successful empty negotiated terminal may recover its interim.
+    // All terminal delivery still passes through the existing immutable ledger.
+    const acknowledgeTerminal = ledger.continuation !== false || payload.continuation_delivery === true;
+    return terminalSnapshot.trim() || acknowledgeTerminal
+      ? enqueueTextDelivery('run_terminal', terminalSnapshot, ledger, ledger.autoCopy, ledger.autoPaste, null,
+          acknowledgeTerminal)
+      : Promise.resolve(true);
   }
 
   function getAutoPasteDelta(currentText: string, alreadyPastedText: string): string {
@@ -1078,12 +1406,55 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     return '';
   }
 
+  async function guardedContinuationCopy(ledger: AutoPasteSessionLedger, text: string): Promise<boolean> {
+    if (ledger.automaticDeliveryRefused || ledger.sessionId === null) return false;
+    try {
+      const outcome = await invoke<GuardedPasteOutcome>('copy_continuation_text', {
+        sessionId: ledger.sessionId, deliverySeq: ++ledger.nativeDeliverySeq, text,
+      });
+      if (outcome.status === 'confirmed' && Number.isSafeInteger(outcome.revision) &&
+          outcome.revision >= ledger.nativeRevision) return true;
+    } catch { /* Unknown automatic effects are never replayed. */ }
+    ledger.automaticDeliveryRefused = true;
+    deliveryRevision.value++;
+    return false;
+  }
+
   async function runAutoPasteCurrentText(
     reason: string,
     currentText: string,
     pasteLedger: AutoPasteSessionLedger,
   ): Promise<boolean> {
     const normalizedCurrent = currentText.trim();
+    if (pasteLedger.continuation) {
+      if (pasteLedger.automaticDeliveryRefused || pasteLedger.sessionId === null) return false;
+      // A changed prefix is not an append and cannot be repaired automatically.
+      if (pasteLedger.baseline && !normalizedCurrent.startsWith(pasteLedger.baseline)) {
+        pasteLedger.automaticDeliveryRefused = true;
+        deliveryRevision.value++;
+        return false;
+      }
+      const remainder = normalizedCurrent.slice(pasteLedger.baseline.length).trim();
+      if (!remainder) return guardedContinuationCopy(pasteLedger, '');
+      const text = pasteLedger.baseline ? ` ${remainder}` : remainder;
+      try {
+        const outcome = await invoke<GuardedPasteOutcome>('auto_paste_continuation_text', {
+          text, sessionId: pasteLedger.sessionId, deliverySeq: ++pasteLedger.nativeDeliverySeq,
+        });
+        if (outcome.status === 'confirmed' && Number.isSafeInteger(outcome.revision) &&
+            outcome.revision > pasteLedger.nativeRevision) {
+          pasteLedger.nativeRevision = outcome.revision;
+          pasteLedger.baseline = normalizedCurrent;
+          deliveryRevision.value++;
+          return true;
+        }
+      } catch {
+        // IPC failure may follow an insertion: no retry or clipboard fallback.
+      }
+      pasteLedger.automaticDeliveryRefused = true;
+        deliveryRevision.value++;
+      return false;
+    }
     const textToInsert = getAutoPasteDelta(normalizedCurrent, pasteLedger.baseline);
 
     if (!textToInsert.trim()) {
@@ -1138,31 +1509,55 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     shouldAutoCopy: boolean,
     shouldAutoPaste: boolean,
     copyOnPasteFailureText: string | null = null,
+    acknowledgeTerminal = false,
   ): Promise<boolean> {
     const textSnapshot = currentText.trim();
     const task = autoPasteQueue
       .catch(() => undefined)
       .then(async () => {
-        if (shouldAutoCopy) {
-          try {
-            await invoke('copy_to_clipboard_native', { text: textSnapshot });
-            console.log('📋 Auto-copied full transcription to clipboard');
-          } catch (err) {
-            console.error('❌ Failed to auto-copy transcription:', err);
+        try {
+          // Empty terminals still own a queue slot, but have no text effects.
+          if (acknowledgeTerminal && !textSnapshot) return true;
+          // Evaluate at execution time, including tasks queued before a refusal.
+          if (pasteLedger.automaticDeliveryRefused) return false;
+          if (shouldAutoCopy && !pasteLedger.continuation) {
+            try {
+              await invoke('copy_to_clipboard_native', { text: textSnapshot });
+              console.log('📋 Auto-copied full transcription to clipboard');
+            } catch (err) {
+              console.error('❌ Failed to auto-copy transcription:', err);
+            }
           }
-        }
 
-        if (!shouldAutoPaste) return true;
-        const pasted = await runAutoPasteCurrentText(reason, textSnapshot, pasteLedger);
-        if (!pasted && copyOnPasteFailureText) {
-          try {
-            await invoke('copy_to_clipboard_native', { text: copyOnPasteFailureText });
-            console.log('📋 Auto-paste fallback copied current utterance to clipboard');
-          } catch (copyErr) {
-            console.error('❌ Failed to copy auto-paste fallback:', copyErr);
+          const pasted = !shouldAutoPaste || await runAutoPasteCurrentText(reason, textSnapshot, pasteLedger);
+          if (pasteLedger.automaticDeliveryRefused) return false;
+          if (shouldAutoCopy && pasteLedger.continuation) {
+            if (!await guardedContinuationCopy(pasteLedger, textSnapshot)) return false;
+          }
+          if (!pasted && copyOnPasteFailureText) {
+            try {
+              await invoke('copy_to_clipboard_native', { text: copyOnPasteFailureText });
+              console.log('📋 Auto-paste fallback copied current utterance to clipboard');
+            } catch (copyErr) {
+              console.error('❌ Failed to copy auto-paste fallback:', copyErr);
+            }
+          }
+          return pasted;
+        } finally {
+          if (acknowledgeTerminal) {
+            // Keep retirement inside the queue, after every earlier native result.
+            // The terminal ledger latch admits this task only once. Unknown cleanup
+            // never retries effects or changes the confirmed insertion baseline.
+            try {
+              const acknowledged = await invoke<boolean>('finish_continuation_delivery', {
+                sessionId: pasteLedger.sessionId, deliverySeq: pasteLedger.nativeDeliverySeq,
+              });
+              if (!acknowledged) console.warn('[AutoPaste] Terminal acknowledgement refused');
+            } catch (err) {
+              console.warn('[AutoPaste] Terminal acknowledgement unknown:', err);
+            }
           }
         }
-        return pasted;
       });
 
     autoPasteQueue = task.then(
@@ -1252,6 +1647,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     pasteLedger = captureAutoPasteLedger(sessionId.value),
   ): Promise<boolean> {
     // Capture session ownership before any clipboard IPC can yield to a reset.
+    if (pasteLedger.terminal || pasteLedger.negotiated) return Promise.resolve(false);
     const currentText = buildCurrentTranscriptionText();
     const shouldAutoCopy = autoCopyEnabled.value;
     const shouldAutoPaste = autoPasteEnabled.value;
@@ -1290,6 +1686,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     const pending = pendingStopFinalization;
     if (!pending) return;
     clearHotkeyStopFinalizeTimer();
+    if (pending.pasteLedger.terminal || pending.pasteLedger.negotiated) return;
 
     const currentText = buildCurrentTranscriptionText();
     markRecordingSessionClosed(pending.sessionId, `settled_before_reset:${reason}`);
@@ -1305,8 +1702,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       reason,
       currentText,
       pending.pasteLedger,
-      autoCopyEnabled.value,
-      autoPasteEnabled.value,
+      pending.pasteLedger.autoCopy,
+      pending.pasteLedger.autoPaste,
     );
   }
 
@@ -1319,6 +1716,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     clearHotkeyStopFinalizeTimer();
 
     const pasteLedger = captureAutoPasteLedger(payloadSessionId);
+    if (pasteLedger.terminal || pasteLedger.negotiated) return;
     let pending!: PendingStopFinalization;
     const timer = setTimeout(() => {
       if (pendingStopFinalization !== pending) return;
@@ -1406,8 +1804,18 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         generation,
         EVENT_TRANSCRIPTION_PARTIAL,
         async (event) => {
+          if (event.payload.is_segment_final) {
+            const delivery = acceptSequencedStable(event.payload);
+            if (delivery) { await delivery; return; }
+          }
           if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:partial')) {
             return;
+          }
+          applyDeliveryMode(captureAutoPasteLedger(event.payload.session_id),
+            event.payload.continuation_delivery);
+          if (event.payload.completion_v1 === true) {
+            captureAutoPasteLedger(event.payload.session_id).negotiated = true;
+            if (pendingStopFinalization?.sessionId === event.payload.session_id) clearHotkeyStopFinalizeTimer();
           }
           // Детальное логирование для отладки
           console.log('📝 PARTIAL EVENT:', {
@@ -1475,6 +1883,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               partialAnimationTimer = null;
             }
 
+            captureLegacyTranscript(event.payload.session_id);
             if (autoPasteEnabled.value && newText.trim()) {
               await autoPasteCurrentText('segment_final');
             }
@@ -1524,6 +1933,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               // Запускаем анимацию для partial текста
               animatePartialText(event.payload.text);
             }
+            captureLegacyTranscript(event.payload.session_id);
           }
         }
       );
@@ -1535,6 +1945,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         generation,
         EVENT_TRANSCRIPTION_FINAL,
         async (event) => {
+          const delivery = acceptSequencedStable(event.payload);
+          if (delivery) { await delivery; return; }
           if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:final')) {
             return;
           }
@@ -1641,7 +2053,14 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             console.log('📋 [AFTER ADD] finalText:', finalText.value);
             console.log('📋 Successfully added utterance to finalText');
 
-            if (autoPasteEnabled.value && currentUtteranceText.trim()) {
+            captureLegacyTranscript(event.payload.session_id);
+            const ledger = captureAutoPasteLedger(event.payload.session_id);
+            // Unsequenced finals cannot authorize negotiated stable delivery, but
+            // their text remains recoverable at a successful empty terminal.
+            if (ledger.negotiated && event.payload.text.trim()) {
+              ledger.interimSnapshot = currentUtteranceText;
+            }
+            if (!ledger.negotiated && autoPasteEnabled.value && currentUtteranceText.trim()) {
               await autoPasteCurrentText(
                 'speech_final',
                 undefined,
@@ -1659,13 +2078,72 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       if (!finalUnlisten) return;
       unlistenFinal = finalUnlisten;
 
+      const terminalUnlisten = await registerStoreListener<TranscriptionTerminalPayload>(
+        generation, EVENT_TRANSCRIPTION_TERMINAL,
+        (event) => { void acceptRunTerminal(event.payload); },
+      );
+      if (!terminalUnlisten) return;
+      unlistenTerminal = terminalUnlisten;
+
       const intentProjectionUnlisten =
         await registerStoreListener<RecordingIntentProjectionPayload>(
           generation,
           EVENT_RECORDING_INTENT_PROJECTION,
           async (event) => {
+            const nextIntentRevision = event.payload.intentRevision;
+            if (!Number.isSafeInteger(nextIntentRevision) || nextIntentRevision < 0) return;
+            if (recordingIntentRevision.value !== null &&
+                nextIntentRevision < recordingIntentRevision.value) {
+              clientLog('recording_intent_projection_ignored', {
+                reason: 'stale_revision',
+                receivedRevision: nextIntentRevision,
+                activeRevision: recordingIntentRevision.value,
+              }, 'warn');
+              return;
+            }
+            const previousIntentRevision = recordingIntentRevision.value;
+            recordingIntentRevision.value = nextIntentRevision;
+
+            const logicalId = event.payload.logicalRunId;
+            if (Number.isSafeInteger(logicalId) && Number(logicalId) > 0 &&
+                ['active', 'pausing', 'paused_reclaimable', 'continue_pending', 'active_awaiting_audio', 'finalizing', 'terminal'].includes(event.payload.continuationPhase ?? '')) {
+              const ledger = captureAutoPasteLedger(Number(logicalId));
+              continuationPhase.value = event.payload.continuationPhase ?? null;
+              applyDeliveryMode(ledger, true);
+              ledger.negotiated = true;
+              if (pendingStopFinalization?.sessionId === logicalId) clearHotkeyStopFinalizeTimer();
+            }
+            if (event.payload.continuationPhase == null) continuationPhase.value = null;
+            const nextRunId = event.payload.runId;
+            const validRunId = Number.isSafeInteger(nextRunId) && Number(nextRunId) > 0
+              ? Number(nextRunId)
+              : null;
+            const nextFaultRunId = event.payload.faultRunId;
+            const validFaultRunId = Number.isSafeInteger(nextFaultRunId) && Number(nextFaultRunId) > 0
+              ? Number(nextFaultRunId)
+              : null;
+            const faultOwnerRunId = Object.prototype.hasOwnProperty.call(event.payload, 'faultRunId')
+              ? validFaultRunId
+              : validRunId;
+            const preservesConnectRetry =
+              event.payload.fault === 'startFailed' &&
+              connectOperation !== null &&
+              faultOwnerRunId !== null &&
+              connectOperation.sessionId === faultOwnerRunId;
             recordingDesiredOn.value = event.payload.desiredOn;
-            recordingIntentFault.value = event.payload.fault ?? null;
+            recordingIntentRunId.value = event.payload.desiredOn ? validRunId : null;
+            if (preservesConnectRetry) {
+              connectRetryCleanupRevision = nextIntentRevision;
+              recordingIntentFault.value = null;
+              recordingIntentFaultRunId.value = null;
+            } else if (event.payload.fault) {
+              recordingIntentFault.value = event.payload.fault;
+              recordingIntentFaultRunId.value = faultOwnerRunId;
+            } else if (previousIntentRevision === null || nextIntentRevision > previousIntentRevision) {
+              connectRetryCleanupRevision = null;
+              recordingIntentFault.value = null;
+              recordingIntentFaultRunId.value = null;
+            }
             recordingStartPending.value =
               event.payload.desiredOn && event.payload.pendingStart;
             clientLog('recording_intent_projection_received', {
@@ -1673,25 +2151,34 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               awaitingSessionStart: awaitingSessionStart.value,
             }, 'debug');
 
-            if (event.payload.fault === 'stopUncertain') {
+            if (event.payload.fault) {
               recordingStartPending.value = false;
               awaitingSessionStart.value = false;
+              if (preservesConnectRetry) return;
               if (connectOperation) cancelConnectOperation();
               status.value = RecordingStatus.Error;
-              closeCurrentRecordingSession('intent_fault:stop_uncertain');
-              const message = i18n.global.t('errors.microphoneStopUncertain');
-              setRecordingError(null, message, null, message);
-              return;
-            }
-
-            if (event.payload.fault === 'finalizeFailed') {
-              recordingStartPending.value = false;
-              awaitingSessionStart.value = false;
-              if (connectOperation) cancelConnectOperation();
-              status.value = RecordingStatus.Error;
-              closeCurrentRecordingSession('intent_fault:finalize_failed');
-              const message = i18n.global.t('errors.transcriptFinalizeFailed');
-              setRecordingError('processing', message, null, message);
+              if (faultOwnerRunId !== null && sessionId.value === faultOwnerRunId) {
+                closeCurrentRecordingSession(`intent_fault:${event.payload.fault}`);
+              }
+              const message = event.payload.fault === 'stopUncertain'
+                ? i18n.global.t('errors.microphoneStopUncertain')
+                : event.payload.fault === 'finalizeFailed'
+                  ? i18n.global.t('errors.transcriptFinalizeFailed')
+                  : i18n.global.t('errors.processing');
+              const preservesRunError =
+                event.payload.fault === 'runtimeFailed' &&
+                faultOwnerRunId !== null &&
+                terminalRecordingErrorSessionId === faultOwnerRunId &&
+                errorType.value !== null &&
+                errorType.value !== 'processing';
+              if (!preservesRunError) {
+                setRecordingError(
+                  event.payload.fault === 'stopUncertain' ? null : 'processing',
+                  message,
+                  null,
+                  message,
+                );
+              }
               return;
             }
 
@@ -1702,7 +2189,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             if (!event.payload.desiredOn) {
               recordingStartPending.value = false;
               awaitingSessionStart.value = false;
+              if (connectOperation && connectRetryCleanupRevision === nextIntentRevision) return;
               if (connectOperation) cancelConnectOperation();
+              if (event.payload.status === RecordingStatus.Starting &&
+                  status.value === RecordingStatus.Starting && validRunId !== null &&
+                  sessionId.value === validRunId) {
+                closeCurrentRecordingSession('intent_cancelled_before_recording');
+                status.value = RecordingStatus.Idle;
+                return;
+              }
               if (sessionId.value === null) {
                 status.value = event.payload.status;
               }
@@ -1711,6 +2206,16 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         );
       if (!intentProjectionUnlisten) return;
       unlistenIntentProjection = intentProjectionUnlisten;
+
+      const captureReadinessUnlisten =
+        await registerStoreListener<RecordingCaptureReadinessPayload>(
+          generation,
+          EVENT_RECORDING_CAPTURE_READINESS,
+          (event) => acceptCaptureReadiness(event.payload, generation),
+        );
+      if (!captureReadinessUnlisten) return;
+      unlistenCaptureReadiness = captureReadinessUnlisten;
+      void refreshCaptureReadiness('initialize');
 
       // Listen to recording status events
       const statusUnlisten = await registerStoreListener<RecordingStatusPayload>(
@@ -1739,6 +2244,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }, 'info');
 
           if (!Number.isSafeInteger(payloadSessionId) || payloadSessionId <= 0) return;
+          const deliveryLedger = autoPasteLedgers.get(payloadSessionId);
+          if (deliveryLedger?.detached || (isStartLike && deliveryLedger?.terminal)) return;
           // A failed newer start may restore an older session when no session is
           // active. Do not use lastSeenSessionId as a permanent high-water mark.
           if (sessionId.value !== null && payloadSessionId < sessionId.value) return;
@@ -1757,6 +2264,20 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               nextStatus,
               payloadSessionId,
               closedSessionIdFloor: closedSessionIdFloor.value,
+            }, 'warn');
+            return;
+          }
+
+          if (status.value === RecordingStatus.Error && recordingIntentFault.value !== null &&
+              recordingIntentFaultRunId.value !== null &&
+              recordingIntentFaultRunId.value !== payloadSessionId &&
+              sessionId.value === payloadSessionId && !isStartLike) {
+            clientLog('recording_status_event_ignored', {
+              reason: 'preserved_transcript_tail_after_cross_run_fault',
+              fault: recordingIntentFault.value,
+              faultRunId: recordingIntentFaultRunId.value,
+              payloadSessionId,
+              nextStatus,
             }, 'warn');
             return;
           }
@@ -1833,6 +2354,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           if (isStartLike) {
             activeRecordingMode.value = event.payload.mode ?? 'dictation';
           }
+          if (isStartLike) captureAutoPasteLedger(payloadSessionId);
           // На Idle после live_translation оставляем mode, чтобы translated text не исчезал мгновенно
           // и auto-copy/paste оставались отключены до cleanup/следующего старта.
           const idleFromLiveTranslation =
@@ -1850,13 +2372,14 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
           if (
             isStartLike &&
+            !(deliveryLedger?.continuation && !deliveryLedger.terminal && !isNewSession) &&
             (isNewSession ||
               (status.value !== RecordingStatus.Starting && status.value !== RecordingStatus.Recording))
           ) {
             console.log('Recording starting/started - clearing all text');
             // Если grace-таймер hotkey-стопа ещё не сработал, досылаем хвост прошлой
             // сессии до очистки буферов — иначе он молча потеряется.
-            resetTextStateBeforeStart('new_session_status');
+            resetTextStateBeforeStart('new_session_status', isNewSession);
           }
 
           // Если статус стал Idle - обрабатываем текущий текст при ЛЮБОЙ остановке
@@ -1959,7 +2482,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         generation,
         EVENT_TRANSCRIPTION_ERROR,
         async (event) => {
-          if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:error')) {
+          const isTerminalRunError =
+            status.value === RecordingStatus.Error &&
+            sessionId.value === null &&
+            (terminalRecordingErrorSessionId !== null
+              ? terminalRecordingErrorSessionId === event.payload.session_id
+              : recordingIntentFault.value === 'runtimeFailed' &&
+                recordingIntentFaultRunId.value === event.payload.session_id);
+          if (!isTerminalRunError &&
+              !ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:error')) {
             return;
           }
           const errorSessionId = event.payload.session_id;
@@ -2792,7 +3323,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             finishErr(failure);
             return;
           }
-          if (intentFault === 'stopUncertain' || intentFault === 'finalizeFailed') {
+          if (intentFault !== null) {
             finishErr('processing');
             return;
           }
@@ -2874,7 +3405,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
-  function resetTextStateBeforeStart(reason = 'reset_before_start'): void {
+  function resetTextStateBeforeStart(reason = 'reset_before_start', force = false): void {
+    if (sessionId.value !== null) {
+      const ledger = autoPasteLedgers.get(sessionId.value);
+      if (!force && ledger?.continuation && !ledger.terminal) return;
+    }
     settlePendingStopBeforeReset(reason);
 
     // Очищаем весь предыдущий текст перед новой записью
@@ -2887,8 +3422,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     operation.phase = 'starting';
     // Начинаем новую сессию "с чистого листа": пока не получим Starting/Recording с новым session_id,
     // игнорируем любые поздние события от прошлых запусков.
-    awaitingSessionStart.value = true;
-    closeCurrentRecordingSession('start_recording_once');
+    const continuing = sessionId.value !== null && autoPasteLedgers.get(sessionId.value)?.continuation &&
+      !autoPasteLedgers.get(sessionId.value)?.terminal;
+    awaitingSessionStart.value = !continuing;
+    if (!continuing) {
+      if (sessionId.value !== null) captureAutoPasteLedger(sessionId.value).detached = true;
+      sessionId.value = null;
+    }
 
     resetTextStateBeforeStart('ui_start');
     status.value = RecordingStatus.Starting;
@@ -3134,6 +3674,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     } finally {
       if (isCurrent()) {
         connectOperation = null;
+        connectRetryCleanupRevision = null;
         resetConnectProgress();
       }
     }
@@ -3161,7 +3702,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     };
   }
 
-  function prepareForRustHotkeyStart(warmStartExpected = false, clientStartId?: string): void {
+  function prepareForRustHotkeyStart(_warmStartExpected = false, clientStartId?: string): void {
     // Native echoes this operation's own command. Its state was already prepared
     // by startRecordingOnce; only an independent start supersedes the retry loop.
     if (clientStartId?.startsWith(`${connectClientId}:`)) return;
@@ -3169,13 +3710,24 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     recordingStateRevision += 1;
     recordingStartRevision += 1;
     clearRateLimitRetryTimer();
+    const preservesFinalizingTranscript =
+      sessionId.value !== null && (status.value === RecordingStatus.Processing ||
+        (autoPasteLedgers.get(sessionId.value)?.continuation && !autoPasteLedgers.get(sessionId.value)?.terminal));
     settlePendingStopBeforeReset('rust_hotkey_start');
 
     suppressPreviousTranscriptionDisplay('rust_hotkey_start');
-    closeCurrentRecordingSession('rust_hotkey_start');
+    if (!preservesFinalizingTranscript) {
+      if (sessionId.value !== null) captureAutoPasteLedger(sessionId.value).detached = true;
+      sessionId.value = null;
+    }
+    // A warm transport hint says nothing about the microphone. Wait for the
+    // run-scoped native readiness event before presenting capture as ready.
+    recordingDesiredOn.value = false;
+    recordingIntentRunId.value = null;
     activeRecordingMode.value = appConfig.recordingMode ?? 'dictation';
-    awaitingSessionStart.value = true;
-    status.value = warmStartExpected ? RecordingStatus.Recording : RecordingStatus.Starting;
+    awaitingSessionStart.value = !(sessionId.value !== null &&
+      autoPasteLedgers.get(sessionId.value)?.continuation && !autoPasteLedgers.get(sessionId.value)?.terminal);
+    status.value = RecordingStatus.Starting;
     clearRecordingErrorState();
     lastConnectFailure.value = null;
     lastConnectFailureRaw.value = '';
@@ -3187,6 +3739,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         sessionId.value !== null || connectOperation !== null) return false;
     recordingStateRevision += 1;
     awaitingSessionStart.value = false;
+    recordingDesiredOn.value = false;
+    recordingStartPending.value = false;
+    recordingIntentRunId.value = null;
     status.value = RecordingStatus.Idle;
     return true;
   }
@@ -3198,7 +3753,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   }
 
   async function stopRecording(reason = 'manual') {
-    const expectedSessionId = sessionId.value ?? connectOperation?.sessionId ?? null;
+    const transcriptSessionAtStop = sessionId.value;
+    const expectedRunId = captureRunId.value ??
+      (recordingDesiredOn.value ? recordingIntentRunId.value : null) ??
+      sessionId.value ?? connectOperation?.sessionId ?? null;
     cancelConnectOperation();
     awaitingSessionStart.value = false;
     const startRevision = recordingStartRevision;
@@ -3207,7 +3765,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     // A new start invalidates this command's continuation, including an ABA restart.
     const isCurrentStop = () => startRevision === recordingStartRevision &&
       generation === listenerGeneration &&
-      (sessionId.value === expectedSessionId || sessionId.value === null);
+      (sessionId.value === transcriptSessionAtStop || sessionId.value === null);
     clearRateLimitRetryTimer();
     try {
       clientLog('recording_stop_requested', {
@@ -3218,7 +3776,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         isConnecting: isConnecting.value,
       }, 'warn');
       status.value = RecordingStatus.Processing;
-      const result = await invoke<string>('stop_recording', { expectedSessionId: expectedSessionId ?? undefined });
+      const result = await invoke<string>('stop_recording', { expectedSessionId: expectedRunId ?? undefined });
       if (!isCurrentStop()) return;
       console.log('Recording stopped:', result);
       if (result === 'Recording stop requested') {
@@ -3272,7 +3830,20 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   }
 
   async function toggleRecording() {
-    if (isRecording.value) {
+    const ledger = sessionId.value !== null ? autoPasteLedgers.get(sessionId.value) : undefined;
+    if (ledger?.continuation && !ledger.terminal) {
+      // Preserve the native Toggle intent: pending B Toggle cancels unsent PCM,
+      // while the explicit Stop command seals and drains it. Do not translate a
+      // toggle into Stop or retry an IPC whose native effect is unknown.
+      try {
+        await invoke('toggle_recording_with_window');
+      } catch (err) {
+        const raw = formatUnknownError(err);
+        setRecordingError(null, raw, null, raw);
+      }
+      return;
+    }
+    if (isRecording.value || recordingDesiredOn.value || isCaptureReady.value) {
       await stopRecording('manual_toggle');
     } else {
       await startRecording();
@@ -3389,6 +3960,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       unlistenPartial();
       unlistenPartial = null;
     }
+    if (unlistenTerminal) {
+      unlistenTerminal();
+      unlistenTerminal = null;
+    }
     if (unlistenFinal) {
       unlistenFinal();
       unlistenFinal = null;
@@ -3400,6 +3975,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     if (unlistenIntentProjection) {
       unlistenIntentProjection();
       unlistenIntentProjection = null;
+    }
+    if (unlistenCaptureReadiness) {
+      unlistenCaptureReadiness();
+      unlistenCaptureReadiness = null;
     }
     if (unlistenError) {
       unlistenError();
@@ -3441,7 +4020,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     settlePendingStopBeforeReset('cleanup');
     recordingDesiredOn.value = false;
     recordingStartPending.value = false;
+    recordingIntentRunId.value = null;
+    recordingIntentRevision.value = null;
     recordingIntentFault.value = null;
+    recordingIntentFaultRunId.value = null;
+    captureReadinessByIntent.value = new Map();
+    lastCaptureReadinessGeneration = -1;
 
     // Очищаем таймеры анимации
     if (partialAnimationTimer) {
@@ -3456,12 +4040,21 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   return {
     // State
+    canRequestContinuation,
+    deliveryRecovery,
+    copyRecoveryText,
     status,
     sessionId,
     closedSessionIdFloor,
     lastAcceptedRecordingStatus,
     recordingDesiredOn,
     recordingStartPending,
+    recordingIntentRunId,
+    recordingIntentFaultRunId: computed(() => recordingIntentFaultRunId.value),
+    recordingIntentRevision,
+    captureReadiness,
+    captureRunId,
+    captureGeneration,
     getRecordingStartRevision: () => recordingStartRevision,
     partialText,
     accumulatedText,
@@ -3491,6 +4084,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     isIdle,
     isProcessing,
     hasError,
+    isCaptureReady,
+    hasCaptureReadinessProtocol,
     hasConnectionIssue,
     canReconnect,
     canActivateLicense,

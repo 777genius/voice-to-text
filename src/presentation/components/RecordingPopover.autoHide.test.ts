@@ -194,9 +194,10 @@ function lastRecordingWindowResizeCall() {
   return calls[calls.length - 1];
 }
 
-function mountRecordingPopover() {
+function mountRecordingPopover(setupStore?: (store: ReturnType<typeof useTranscriptionStore>) => void) {
   const pinia = createPinia();
   setActivePinia(pinia);
+  setupStore?.(useTranscriptionStore());
 
   const root = document.createElement('div');
   document.body.appendChild(root);
@@ -217,6 +218,8 @@ function mountRecordingPopover() {
           errorGeneric: 'Error',
           connecting: 'Connecting',
           listening: 'Listening',
+          starting: 'Starting',
+          processing: 'Processing',
           incomingTranslationEmpty: 'Incoming subtitles will appear here',
           incomingTranslation: 'Incoming translation',
           incomingTranslationMute: 'Mute translated audio',
@@ -292,6 +295,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     cursorOverRecordingWindowMock.value = false;
     invokeMock.mockImplementation(async (command: string) => {
       if (command === 'get_recording_window_epoch') return nativeWindowEpoch.value;
+      if (command === 'get_recording_window_epoch_for_session') return nativeWindowEpoch.value;
       if (command === 'hide_recording_window_if_current') {
         await hideWindowMock();
         return true;
@@ -336,6 +340,181 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     vi.useRealTimers();
     document.body.innerHTML = '';
   });
+
+  it('keeps the mini outgoing translation meter active after capture protocol discovery', async () => {
+    const wrapper = mountRecordingPopover();
+    const store = useTranscriptionStore();
+    store.activeRecordingMode = 'live_translation';
+    store.status = RecordingStatus.Recording;
+    store.sessionId = 41;
+    vi.spyOn(store, 'hasCaptureReadinessProtocol', 'get').mockReturnValue(true);
+    await nextTick();
+    expect(document.querySelector('.mini-status-dot')?.classList.contains('recording')).toBe(true);
+    wrapper.unmount();
+  });
+
+  it.each([true, false])('shows guarded recovery and copies only after explicit action (mini %s)', async (mini) => {
+    appConfigMock.showMiniRecordingWindow = mini;
+    const wrapper = mountRecordingPopover((store) => {
+      vi.spyOn(store, 'deliveryRecovery', 'get').mockReturnValue([
+        { sessionId: 1, transcript: 'confirmed unconfirmed', unconfirmedText: 'unconfirmed' },
+      ]);
+    });
+    const store = useTranscriptionStore();
+    await nextTick();
+    store.sessionId = 1;
+    store.finalText = 'confirmed unconfirmed';
+    await nextTick();
+    const warning = document.querySelector(mini ? '.mini-transcription-text' : '.error-container');
+    expect(warning?.textContent).toContain('Automatic insertion stopped.');
+    const button = mini
+      ? document.querySelector<HTMLButtonElement>('[data-testid="mini-copy-recovery"]')
+      : [...document.querySelectorAll<HTMLButtonElement>('.error-action-button')]
+        .find(button => button.textContent?.includes('Copy unconfirmed text'));
+    expect(button).toBeTruthy();
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'copy_to_clipboard_native')).toHaveLength(0);
+    button!.click();
+    await flushMicrotasks();
+    expect(invokeMock).toHaveBeenCalledWith('copy_to_clipboard_native', { text: 'unconfirmed' });
+    wrapper.unmount();
+  });
+
+  it.each(['transcript', 'starting', 'pending', 'processing', 'error', 'terminal'])(
+    'keeps old A recovery copyable while B owns mini %s', async (surface) => {
+      const wrapper = mountRecordingPopover((store) => {
+        vi.spyOn(store, 'deliveryRecovery', 'get').mockReturnValue([
+          { sessionId: 1, transcript: 'A confirmed unconfirmed', unconfirmedText: 'A unconfirmed' },
+        ]);
+      });
+      const store = useTranscriptionStore();
+      store.sessionId = 2;
+      store.status = RecordingStatus.Recording;
+      store.finalText = 'B current transcript';
+      if (surface === 'starting' || surface === 'pending' || surface === 'processing') {
+        store.finalText = '';
+        store.status = surface === 'processing' ? RecordingStatus.Processing : RecordingStatus.Starting;
+        if (surface === 'pending') {
+          store.sessionId = 1;
+          store.recordingIntentRunId = 2;
+          store.recordingDesiredOn = true;
+        }
+      } else if (surface === 'error') {
+        store.error = 'B failed';
+      } else if (surface === 'terminal') {
+        store.lastAcceptedRecordingStatus = { session_id: 2, status: RecordingStatus.Idle };
+        store.sessionId = null;
+        store.status = RecordingStatus.Idle;
+      }
+      await nextTick();
+      const text = document.querySelector('.mini-transcription-text');
+      expect(text?.textContent?.trim()).toBeTruthy();
+      expect(text?.textContent).not.toContain('Automatic insertion stopped');
+      if (surface === 'transcript' || surface === 'terminal') {
+        expect(text?.textContent).toContain('B current transcript');
+        expect(text?.classList.contains('error')).toBe(false);
+      }
+      const copy = document.querySelector<HTMLButtonElement>('[data-testid="mini-copy-recovery"]');
+      expect(copy).toBeTruthy();
+      copy!.click();
+      await flushMicrotasks();
+      expect(invokeMock).toHaveBeenCalledWith('copy_to_clipboard_native', { text: 'A unconfirmed' });
+      expect(store.deliveryRecovery).toHaveLength(1);
+      // With B's surface cleared, retained recovery becomes the useful idle display.
+      store.finalText = '';
+      store.recordingDesiredOn = false;
+      store.error = null;
+      store.status = RecordingStatus.Idle;
+      await nextTick();
+      expect(text?.textContent).toContain('Automatic insertion stopped');
+      wrapper.unmount();
+    },
+  );
+
+  it.each(['startFailed', 'stopUncertain'])(
+    'preserves pending B %s over A recovery while A still owns the transcript tail', async (fault) => {
+      const wrapper = mountRecordingPopover((store) => {
+        vi.spyOn(store, 'deliveryRecovery', 'get').mockReturnValue([
+          { sessionId: 1, transcript: 'A tail', unconfirmedText: 'A tail' },
+        ]);
+      });
+      const store = useTranscriptionStore();
+      await waitForListenerCount('recording:intent-projection', 1);
+      await waitForListenerCount('recording:status', 1);
+      await emitTauriEvent('recording:status', { session_id: 1, status: 'Recording' });
+      await emitTauriEvent('recording:status', { session_id: 1, status: 'Processing' });
+      await emitTauriEvent('recording:intent-projection', {
+        runId: 2, intentRevision: 2, status: 'Processing', desiredOn: true,
+        pendingStart: true, processingJobs: 1, shutdownRequested: false,
+      });
+      expect(store.sessionId).toBe(1);
+      expect(store.recordingIntentRunId).toBe(2);
+      expect(store.recordingStartPending).toBe(true);
+      await emitTauriEvent('recording:intent-projection', {
+        runId: null, faultRunId: 2, intentRevision: 3, status: 'Error', desiredOn: false,
+        pendingStart: false, processingJobs: 1, shutdownRequested: false, fault,
+      });
+      expect(store.sessionId).toBe(1);
+      expect(store.recordingIntentRunId).toBeNull();
+      expect(store.recordingStartPending).toBe(false);
+      expect(store.recordingIntentFaultRunId).toBe(2);
+      const faultText = store.errorSummary;
+      expect(faultText).toBeTruthy();
+      const expectFaultSurface = () => {
+        expect(store.status).toBe(RecordingStatus.Error);
+        expect(document.querySelector('.mini-transcription-text')?.textContent?.trim()).toBe(faultText);
+        expect(document.querySelector('[data-testid="mini-error-details"]')).not.toBeNull();
+        expect(document.querySelector('[data-testid="mini-copy-recovery"]')).not.toBeNull();
+      };
+      await nextTick();
+      expectFaultSurface();
+      // Same-revision cleanup and the old run's tail must not reclaim B's fault.
+      await emitTauriEvent('recording:intent-projection', {
+        runId: 2, intentRevision: 3, status: 'Processing', desiredOn: false,
+        pendingStart: false, processingJobs: 1, shutdownRequested: false,
+      });
+      await emitTauriEvent('recording:status', { session_id: 1, status: 'Idle' });
+      await nextTick();
+      expectFaultSurface();
+      document.querySelector<HTMLButtonElement>('[data-testid="mini-copy-recovery"]')!.click();
+      await flushMicrotasks();
+      expect(invokeMock).toHaveBeenCalledWith('copy_to_clipboard_native', { text: 'A tail' });
+      expectFaultSurface();
+      wrapper.unmount();
+    },
+  );
+
+  it.each(['retry', 'device', 'license'])(
+    'keeps B %s and details actions alongside A recovery copy', async (action) => {
+      const wrapper = mountRecordingPopover((store) => {
+        vi.spyOn(store, 'deliveryRecovery', 'get').mockReturnValue([
+          { sessionId: 1, transcript: 'A tail', unconfirmedText: 'A tail' },
+        ]);
+        vi.spyOn(store, 'canReconnect', 'get').mockReturnValue(action === 'retry');
+        vi.spyOn(store, 'canOpenSettingsForDevice', 'get').mockReturnValue(action === 'device');
+        vi.spyOn(store, 'canActivateLicense', 'get').mockReturnValue(action === 'license');
+      });
+      const store = useTranscriptionStore();
+      store.sessionId = 2;
+      store.status = RecordingStatus.Error;
+      store.error = 'B current error';
+      await nextTick();
+      expect(document.querySelector('.mini-transcription-text')?.textContent).toContain('B current error');
+      expect(document.querySelector('[data-testid="mini-copy-recovery"]')).not.toBeNull();
+      expect(document.querySelector('[data-testid="mini-error-details"]')).not.toBeNull();
+      expect(document.querySelector('[title="Reconnect"]') !== null).toBe(action === 'retry');
+      expect(document.querySelector('[title="Open settings"]') !== null).toBe(action === 'device');
+      expect(document.querySelector('[title="Activate license"]') !== null).toBe(action === 'license');
+      document.querySelector<HTMLButtonElement>('[data-testid="mini-copy-recovery"]')!.click();
+      await flushMicrotasks();
+      expect(invokeMock).toHaveBeenCalledWith('copy_to_clipboard_native', { text: 'A tail' });
+      document.querySelector<HTMLButtonElement>('[data-testid="mini-error-details"]')!.click();
+      await flushMicrotasks();
+      expect(invokeMock).toHaveBeenCalledWith('show_error_details_window', {
+        summary: 'B current error', details: store.errorFullText,
+      });
+      wrapper.unmount();
+    },
+  );
 
   it('shows mini action buttons only when native cursor is over the mini window', async () => {
     const wrapper = mountRecordingPopover();
@@ -492,6 +671,37 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     wrapper.unmount();
   });
 
+  it('does not replay the mini opening animation when capture becomes streaming', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:capture-readiness', 1);
+    await waitForListenerCount('recording:window-shown', 1);
+
+    await emitTauriEvent('recording:window-shown', {});
+    await vi.advanceTimersByTimeAsync(520);
+    expect(document.querySelector('.mini-opening')).toBeNull();
+
+    await emitTauriEvent('recording:intent-projection', {
+      runId: 20,
+      intentRevision: 4,
+      status: 'Starting',
+      desiredOn: true,
+      pendingStart: false,
+      processingJobs: 0,
+      shutdownRequested: false,
+    });
+    await emitTauriEvent('recording:capture-readiness', {
+      revision: 4,
+      runId: 21,
+      state: 'streaming',
+      reason: 'recording',
+      generation: 1,
+    });
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(document.querySelector('.mini-opening')).toBeNull();
+    wrapper.unmount();
+  });
+
   it('does not consume an opening epoch before mini layout is enabled', async () => {
     appConfigMock.showMiniRecordingWindow = false;
     const wrapper = mountRecordingPopover();
@@ -555,6 +765,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     expect(textInner!.textContent?.trim()).toBe('Incoming subtitles will appear here');
     expect(textInner!.textContent).not.toContain('Press');
     expect(statusDot!.classList.contains('recording')).toBe(true);
+    expect(statusDot!.getAttribute('aria-label')).toContain('Listening');
 
     store.incomingTranslationText = 'перевод собеседника';
     await nextTick();
@@ -564,6 +775,8 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     await nextTick();
     expect(textInner!.textContent?.trim()).toBe('temporary incoming translation failure');
     expect(statusDot!.classList.contains('error')).toBe(true);
+    expect(statusDot!.classList.contains('recording')).toBe(false);
+    expect(statusDot!.getAttribute('aria-label')).toContain('temporary incoming translation failure');
 
     wrapper.unmount();
   });
@@ -809,7 +1022,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     wrapper.unmount();
   });
 
-  it('shows the listening placeholder immediately for a Rust-owned hotkey start', async () => {
+  it('shows honest starting state for a Rust-owned hotkey until capture is ready', async () => {
     const wrapper = mountRecordingPopover();
     await waitForListenerCount('hotkey:toggle-recording', 1);
 
@@ -828,12 +1041,135 @@ describe('RecordingPopover mini auto-hide e2e', () => {
 
     const miniText = document.querySelector('.mini-transcription-text-inner')?.textContent ?? '';
     const statusDot = document.querySelector<HTMLElement>('.mini-status-dot');
-    expect(miniText).toContain('Listening');
+    expect(miniText).toContain('Starting');
     expect(miniText).not.toContain('Old transcript');
     expect(store.isStarting).toBe(true);
-    expect(statusDot?.classList.contains('recording')).toBe(true);
-    expect(statusDot?.classList.contains('starting')).toBe(false);
+    expect(statusDot?.classList.contains('recording')).toBe(false);
+    expect(statusDot?.classList.contains('starting')).toBe(true);
 
+    wrapper.unmount();
+  });
+
+  it('keeps authoritative Recording green when native readiness protocol is absent', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:status', 1);
+    const store = useTranscriptionStore();
+
+    await emitTauriEvent('recording:status', {
+      session_id: 70,
+      status: 'Recording',
+      stopped_via_hotkey: false,
+    });
+
+    const statusDot = document.querySelector<HTMLElement>('.mini-status-dot')!;
+    expect(store.hasCaptureReadinessProtocol).toBe(false);
+    expect(statusDot.classList.contains('recording')).toBe(true);
+    expect(statusDot.getAttribute('aria-label')).toContain('Listening');
+    expect(document.querySelector('.mini-transcription-text-inner')?.textContent).toContain('Listening');
+    wrapper.unmount();
+  });
+
+  it('turns green only for the current intent capture and exposes the transport phase', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:capture-readiness', 1);
+
+    await emitTauriEvent('recording:status', {
+      session_id: 90,
+      status: 'Recording',
+      stopped_via_hotkey: false,
+    });
+    await emitTauriEvent('recording:intent-projection', {
+      runId: 90,
+      intentRevision: 7,
+      status: 'Processing',
+      desiredOn: true,
+      pendingStart: false,
+      processingJobs: 1,
+      shutdownRequested: false,
+    });
+    await emitTauriEvent('recording:capture-readiness', {
+      revision: 7,
+      runId: 101,
+      state: 'buffering',
+      reason: 'finalizing-previous',
+      generation: 1,
+    });
+
+    const statusDot = document.querySelector<HTMLElement>('.mini-status-dot')!;
+    expect(statusDot.classList.contains('recording')).toBe(true);
+    expect(statusDot.classList.contains('starting')).toBe(false);
+    expect(statusDot.classList.contains('processing')).toBe(false);
+    expect(statusDot.getAttribute('aria-label')).toContain('Listening');
+    expect(statusDot.getAttribute('aria-label')).toContain('Processing');
+
+    await emitTauriEvent('recording:status', {
+      session_id: 90,
+      status: 'Processing',
+      stopped_via_hotkey: true,
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(hideWindowMock).not.toHaveBeenCalled();
+
+    await emitTauriEvent('recording:capture-readiness', {
+      revision: 6,
+      runId: 88,
+      state: 'unavailable',
+      reason: 'cancelled',
+      generation: 2,
+    });
+    expect(statusDot.classList.contains('recording')).toBe(true);
+
+    await emitTauriEvent('recording:capture-readiness', {
+      revision: 7,
+      runId: 101,
+      state: 'buffering',
+      reason: 'connecting-provider',
+      generation: 3,
+    });
+    expect(statusDot.getAttribute('aria-label')).toContain('Connecting');
+
+    await emitTauriEvent('recording:capture-readiness', {
+      revision: 7,
+      runId: 101,
+      state: 'unavailable',
+      reason: 'cancelled',
+      generation: 4,
+    });
+    expect(statusDot.classList.contains('recording')).toBe(false);
+    expect(statusDot.classList.contains('processing')).toBe(true);
+
+    wrapper.unmount();
+  });
+
+  it('keeps terminal error red even when the current capture was ready', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:capture-readiness', 1);
+    const store = useTranscriptionStore();
+
+    await emitTauriEvent('recording:intent-projection', {
+      runId: 42,
+      intentRevision: 12,
+      status: 'Starting',
+      desiredOn: true,
+      pendingStart: false,
+      processingJobs: 0,
+      shutdownRequested: false,
+    });
+    await emitTauriEvent('recording:capture-readiness', {
+      revision: 12,
+      runId: 77,
+      state: 'streaming',
+      reason: 'recording',
+      generation: 1,
+    });
+    store.status = RecordingStatus.Error;
+    store.error = 'capture failed';
+    await nextTick();
+
+    const statusDot = document.querySelector<HTMLElement>('.mini-status-dot')!;
+    expect(statusDot.classList.contains('recording')).toBe(false);
+    expect(statusDot.classList.contains('error')).toBe(true);
+    expect(statusDot.getAttribute('aria-label')).toContain('capture failed');
     wrapper.unmount();
   });
 
@@ -1123,6 +1459,40 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     expect(hideWindowMock).toHaveBeenCalledTimes(1);
     wrapper.unmount();
   });
+  it('discards a delayed session lease before a newer show finishes epoch validation', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('hotkey:toggle-recording', 1);
+    await emitTauriEvent('recording:status', { session_id: 80, status: 'Recording' });
+    const lease = deferred<number>();
+    const shownEpoch = deferred<number>();
+    const defaultInvoke = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((command: string, args?: { windowEpoch?: number }) => {
+      if (command === 'get_recording_window_epoch_for_session') return lease.promise;
+      if (command === 'get_recording_window_epoch') return shownEpoch.promise;
+      if (command === 'hide_recording_window_if_current' && args?.windowEpoch !== nativeWindowEpoch.value) {
+        return Promise.resolve(false);
+      }
+      return defaultInvoke(command, args);
+    });
+
+    await emitTauriEvent('recording:status', { session_id: 80, status: 'Processing' });
+    // Native has already shown the replacement. Its WebView epoch query is slower
+    // than the retiring session's lease query, just as after a hidden view resumes.
+    nativeWindowEpoch.value = 2;
+    const shown = tauriEventMock.handlers.get('recording:window-shown')![0]({ payload: { windowEpoch: 2 } });
+    lease.resolve(1);
+    await flushMicrotasks();
+    await nextTick();
+    const closingBeforeValidation = document.querySelector('.mini-closing') !== null;
+    await vi.advanceTimersByTimeAsync(500);
+    shownEpoch.resolve(2);
+    await shown;
+    wrapper.unmount();
+
+    expect(closingBeforeValidation).toBe(false);
+    expect(hideWindowMock).not.toHaveBeenCalled();
+  });
+
   it.each(['recording:start-requested', 'recording:window-shown'])(
     'discards delayed close geometry after %s', async (restartEvent) => {
       const wrapper = mountRecordingPopover();
@@ -1385,6 +1755,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     const newStart = handler({ payload: { windowEpoch: 3 } });
     newQuery.resolve(3);
     await newStart;
+    nativeWindowEpoch.value = 3;
     await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
     useTranscriptionStore().finalText = 'Current recording';
     oldQuery.resolve(2);
@@ -1620,12 +1991,66 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     wrapper.unmount();
   });
 
-  it('uses the synchronized duplicate-start epoch to hide the existing session window', async () => {
+  it.each(['Processing', 'Idle'])('does not lend a reopened window to late %s from a retired session', async (terminal) => {
     const wrapper = mountRecordingPopover();
     await waitForListenerCount('hotkey:toggle-recording', 1);
     const defaultInvoke = invokeMock.getMockImplementation()!;
     invokeMock.mockImplementation((command: string, ...args: any[]) => {
+      if (command === 'get_recording_window_epoch_for_session') return Promise.resolve(1);
+      return defaultInvoke(command, ...args);
+    });
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
+    nativeWindowEpoch.value = 2;
+    await emitTauriEvent('recording:window-shown', {});
+    await emitTauriEvent('recording:status', { session_id: 90, status: terminal, stopped_via_hotkey: true });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(hideWindowMock).not.toHaveBeenCalled();
+    expect(document.querySelector('.mini-closing')).toBeNull();
+    wrapper.unmount();
+  });
+
+  it('keeps the Processing close deadline across temporary native auto-paste restoration', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('hotkey:toggle-recording', 1);
+    const defaultInvoke = invokeMock.getMockImplementation()!;
+    const leases = new Map([[90, nativeWindowEpoch.value]]);
+    invokeMock.mockImplementation(async (command: string, args?: { sessionId?: number; windowEpoch?: number }) => {
+      if (command === 'get_recording_window_epoch_for_session') return leases.get(args!.sessionId!) ?? null;
+      if (command === 'hide_recording_window_if_current') {
+        if (args?.windowEpoch !== nativeWindowEpoch.value) return false;
+        await hideWindowMock();
+        nativeWindowEpoch.value += 1;
+        return true;
+      }
+      return defaultInvoke(command, args);
+    });
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Processing' });
+    await flushMicrotasks();
+
+    // Native suppression/restoration keeps the same visibility lifetime and emits
+    // no user-show event. Rust tests cover the epoch semantics; this UI test
+    // models that native contract without executing macOS restoration.
+    // Provider finalization remains pending; it must not be needed for dismissal.
+    await vi.advanceTimersByTimeAsync(50);
+    expect(useTranscriptionStore().status).toBe('Processing');
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(useTranscriptionStore().status).toBe('Processing');
+    expect(invokeMock).toHaveBeenCalledWith('hide_recording_window_if_current', { windowEpoch: 1 });
+    expect(hideWindowMock).toHaveBeenCalledTimes(1);
+    expect(nativeWindowEpoch.value).toBe(2);
+    wrapper.unmount();
+  });
+
+  it('uses the synchronized duplicate-start epoch to hide the existing session window', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('hotkey:toggle-recording', 1);
+    const defaultInvoke = invokeMock.getMockImplementation()!;
+    let sessionLeaseEpoch = 1;
+    invokeMock.mockImplementation((command: string, ...args: any[]) => {
       if (command === 'get_recording_status') return Promise.resolve('Recording');
+      if (command === 'get_recording_window_epoch_for_session') return Promise.resolve(sessionLeaseEpoch);
       return defaultInvoke(command, ...args);
     });
     await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
@@ -1635,6 +2060,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     // Native's busy-start branch publishes existing status plus window synchronization.
     await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
     await emitTauriEvent('recording:window-shown', {});
+    sessionLeaseEpoch = 2;
     expect(store.finalText).toBe('Current speech');
     await emitTauriEvent('recording:status', { session_id: 90, status: 'Processing' });
     await vi.advanceTimersByTimeAsync(500);
@@ -1660,7 +2086,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('lets a newer shown event reverse an older close that finishes validation first', async () => {
+  it('lets a newer shown event immediately invalidate an older close', async () => {
     const wrapper = mountRecordingPopover();
     await waitForListenerCount('hotkey:toggle-recording', 1);
     await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
@@ -1679,13 +2105,40 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     const newShow = tauriEventMock.handlers.get('recording:window-shown')![0]({ payload: { windowEpoch: 2 } });
     oldQuery.resolve(1);
     await oldClose;
-    expect(store.displayText).not.toContain('Current recording');
+    expect(document.querySelector('.mini-closing')).toBeNull();
+    expect(store.displayText).toContain('Current recording');
     newQuery.resolve(2);
     await newShow;
     await nextTick();
     expect(document.querySelector('.mini-closing')).toBeNull();
     expect(store.displayText).toContain('Current recording');
     expect(hideWindowMock).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it('reveals a newer native show before its epoch validation completes', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('hotkey:toggle-recording', 1);
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
+    await emitTauriEvent('recording:window-will-hide-for-hotkey-stop', { windowEpoch: 1 });
+    await flushMicrotasks();
+    await nextTick();
+    expect(document.querySelector('.mini-closing')).not.toBeNull();
+
+    const validation = deferred<number>();
+    const defaultInvoke = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((command: string, ...args: any[]) => {
+      if (command === 'get_recording_window_epoch') return validation.promise;
+      if (command === 'get_recording_status') return Promise.resolve('Recording');
+      return defaultInvoke(command, ...args);
+    });
+
+    const shown = tauriEventMock.handlers.get('recording:window-shown')![0]({ payload: { windowEpoch: 2 } });
+    await nextTick();
+    expect(document.querySelector('.mini-closing')).toBeNull();
+
+    validation.resolve(2);
+    await shown;
     wrapper.unmount();
   });
 
