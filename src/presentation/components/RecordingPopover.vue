@@ -877,10 +877,11 @@ watch(() => store.lastAcceptedRecordingStatus, (payload) => {
     return;
   }
   if (nextStatus === 'Processing') {
-    // Capture can stop while prebuffered audio is still reaching the provider.
-    // Keep the current transcript visible until terminal Idle so late tail
-    // partials/finals are readable instead of landing behind a hidden window.
-    cancelPendingHideRecordingWindow();
+    if (appConfigStore.showMiniRecordingWindow &&
+        pendingAutoHideSessionId !== payloadSessionId &&
+        completedAutoHideSessionId !== payloadSessionId) {
+      void scheduleHideRecordingWindow('mini window recording finalizing', payloadSessionId);
+    }
     return;
   }
   if (appConfigStore.playCompletionSound) playDoneSound();
