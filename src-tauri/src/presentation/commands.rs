@@ -1992,6 +1992,26 @@ fn commit_recording_visibility<R: tauri::Runtime, T: Send + 'static>(
     receiver.recv().map_err(|e| e.to_string())?
 }
 
+fn show_recording_native_window<R: tauri::Runtime>(
+    app_handle: &AppHandle<R>,
+    label: &str,
+    fallback: impl FnOnce() -> tauri::Result<()>,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use tauri_nspanel::ManagerExt as _;
+
+        if let Ok(panel) = app_handle.get_webview_panel(label) {
+            // The window has been converted to NSPanel. Tauri's generic show
+            // does not reliably order that panel onto the active Space.
+            panel.show();
+            return Ok(());
+        }
+    }
+
+    fallback().map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub fn get_recording_window_epoch(state: State<'_, AppState>) -> u64 {
     state.recording_window_lifecycle.current()
@@ -4717,7 +4737,11 @@ pub fn show_window_with_recording_config(
                     shown_window
                         .set_always_on_top(true)
                         .map_err(|e| e.to_string())?;
-                    shown_window.show().map_err(|e| e.to_string())
+                    show_recording_native_window(
+                        shown_window.app_handle(),
+                        shown_window.label(),
+                        || shown_window.show(),
+                    )
                 })?;
                 let _ = shown_window.emit(
                     EVENT_RECORDING_WINDOW_SHOWN,
@@ -4772,7 +4796,9 @@ pub fn show_recording_webview<R: tauri::Runtime>(window: &WebviewWindow<R>) -> R
             shown_window
                 .set_always_on_top(true)
                 .map_err(|e| e.to_string())?;
-            shown_window.show().map_err(|e| e.to_string())
+            show_recording_native_window(shown_window.app_handle(), shown_window.label(), || {
+                shown_window.show()
+            })
         })?;
         let _ = shown_window.emit(
             EVENT_RECORDING_WINDOW_SHOWN,
@@ -4826,7 +4852,11 @@ pub fn show_webview_window_with_recording_config<R: tauri::Runtime>(
                     shown_window
                         .set_always_on_top(true)
                         .map_err(|e| e.to_string())?;
-                    shown_window.show().map_err(|e| e.to_string())
+                    show_recording_native_window(
+                        shown_window.app_handle(),
+                        shown_window.label(),
+                        || shown_window.show(),
+                    )
                 })?;
                 let _ = shown_window.emit(
                     EVENT_RECORDING_WINDOW_SHOWN,
