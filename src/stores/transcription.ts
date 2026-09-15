@@ -1634,7 +1634,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   }
 
   function restoreCurrentTranscriptionDisplay(): void {
-    if (status.value !== RecordingStatus.Recording || awaitingSessionStart.value ||
+    if ((status.value !== RecordingStatus.Recording && status.value !== RecordingStatus.Processing) ||
+        awaitingSessionStart.value ||
         sessionId.value === null || sessionId.value !== suppressedPreviousSessionId.value) return;
     previousTranscriptionDisplaySuppressed.value = false;
     suppressedPreviousSessionId.value = null;

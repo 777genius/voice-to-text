@@ -1208,7 +1208,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     wrapper.unmount();
   });
 
-  it('starts finalizing and hides only for Processing from the current session', async () => {
+  it('starts finalizing only for the current session and stays visible during Processing', async () => {
     const wrapper = mountRecordingPopover();
     await waitForListenerCount('hotkey:toggle-recording', 1);
 
@@ -1242,7 +1242,8 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     expect(document.querySelector('.mini-status-dot')?.classList.contains('processing')).toBe(true);
 
     await vi.advanceTimersByTimeAsync(500);
-    expect(hideWindowMock).toHaveBeenCalledTimes(1);
+    expect(hideWindowMock).not.toHaveBeenCalled();
+    expect(document.querySelector('.mini-closing')).toBeNull();
     wrapper.unmount();
   });
 
@@ -1258,7 +1259,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     });
     await emitTauriEvent('recording:status', {
       session_id: 42,
-      status: RecordingStatus.Processing,
+      status: RecordingStatus.Idle,
       stopped_via_hotkey: false,
       mode: 'dictation',
     });
@@ -1275,7 +1276,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     wrapper.unmount();
   });
 
-  it('retries on Idle when the Processing hide failed', async () => {
+  it('does not mark a failed Idle hide as successfully suppressed', async () => {
     const wrapper = mountRecordingPopover();
     await waitForListenerCount('hotkey:toggle-recording', 1);
     hideWindowMock.mockRejectedValueOnce(new Error('temporary hide failure'));
@@ -1286,9 +1287,11 @@ describe('RecordingPopover mini auto-hide e2e', () => {
       stopped_via_hotkey: false,
       mode: 'dictation',
     });
+    const store = useTranscriptionStore();
+    const suppress = vi.spyOn(store, 'suppressPreviousTranscriptionDisplay');
     await emitTauriEvent('recording:status', {
       session_id: 62,
-      status: RecordingStatus.Processing,
+      status: RecordingStatus.Idle,
       stopped_via_hotkey: false,
       mode: 'dictation',
     });
@@ -1303,11 +1306,12 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     });
     await vi.advanceTimersByTimeAsync(500);
 
-    expect(hideWindowMock).toHaveBeenCalledTimes(2);
+    expect(hideWindowMock).toHaveBeenCalledTimes(1);
+    expect(suppress).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
-  it('accepts one late final during Processing and does not hide again on Idle', async () => {
+  it('keeps a late final visible through Processing and hides once only after Idle', async () => {
     const wrapper = mountRecordingPopover();
     await waitForListenerCount('hotkey:toggle-recording', 1);
     await waitForListenerCount('transcription:final', 1);
@@ -1325,7 +1329,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
       mode: 'dictation',
     });
     await vi.advanceTimersByTimeAsync(500);
-    expect(hideWindowMock).toHaveBeenCalledTimes(1);
+    expect(hideWindowMock).not.toHaveBeenCalled();
 
     const lateFinal = {
       session_id: 52,
@@ -1338,6 +1342,10 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     await emitTauriEvent('transcription:final', { ...lateFinal, timestamp: 4 });
 
     expect(useTranscriptionStore().finalText).toBe('late clean final');
+    expect(document.querySelector('.mini-transcription-text-inner')?.textContent).toContain('late clean final');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(hideWindowMock).not.toHaveBeenCalled();
+    expect(document.querySelector('.mini-closing')).toBeNull();
 
     await emitTauriEvent('recording:status', {
       session_id: 52,
@@ -1347,6 +1355,9 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     });
     await vi.advanceTimersByTimeAsync(500);
 
+    expect(hideWindowMock).toHaveBeenCalledTimes(1);
+    await emitTauriEvent('recording:status', { session_id: 52, status: RecordingStatus.Idle });
+    await vi.advanceTimersByTimeAsync(500);
     expect(hideWindowMock).toHaveBeenCalledTimes(1);
     wrapper.unmount();
   });
@@ -1466,7 +1477,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
       const geometry = deferred<{ x: number; y: number }>();
       outerPositionMock.mockReturnValueOnce(geometry.promise);
       await emitTauriEvent('recording:status', { session_id: 80, status: 'Recording' });
-      await emitTauriEvent('recording:status', { session_id: 80, status: 'Processing' });
+      await emitTauriEvent('recording:status', { session_id: 80, status: 'Idle' });
       await emitTauriEvent(restartEvent, {});
       geometry.resolve({ x: 100, y: 100 });
       await flushMicrotasks();
@@ -1484,7 +1495,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     const pendingHide = deferred<void>();
     hideWindowMock.mockReturnValueOnce(pendingHide.promise);
     await emitTauriEvent('recording:status', { session_id: 80, status: 'Recording' });
-    await emitTauriEvent('recording:status', { session_id: 80, status: 'Processing' });
+    await emitTauriEvent('recording:status', { session_id: 80, status: 'Idle' });
     await vi.advanceTimersByTimeAsync(500);
     expect(hideWindowMock).toHaveBeenCalledTimes(1);
     await emitTauriEvent('recording:start-requested', {});
@@ -1595,7 +1606,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     await emitTauriEvent('recording:window-shown', {});
     const geometry = deferred<{ x: number; y: number }>();
     outerPositionMock.mockReturnValueOnce(geometry.promise);
-    await emitTauriEvent('recording:status', { session_id: 80, status: 'Processing' });
+    await emitTauriEvent('recording:status', { session_id: 80, status: 'Idle' });
     await vi.advanceTimersByTimeAsync(1);
     expect(document.querySelector('.mini-opening')).toBeNull();
     wrapper.unmount();
@@ -1638,7 +1649,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
       }
       return defaultInvoke(command, args);
     });
-    await emitTauriEvent('recording:status', { session_id: 90, status: 'Processing' });
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Idle' });
     nativeWindowEpoch.value = 2;
     await vi.advanceTimersByTimeAsync(500);
     expect(suppress).not.toHaveBeenCalled();
@@ -1650,7 +1661,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     const wrapper = mountRecordingPopover();
     await waitForListenerCount('hotkey:toggle-recording', 1);
     await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
-    await emitTauriEvent('recording:status', { session_id: 90, status: 'Processing' });
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Idle' });
     useTranscriptionStore().status = RecordingStatus.Starting;
     await vi.advanceTimersByTimeAsync(500);
     expect(hideWindowMock).not.toHaveBeenCalled();
@@ -1662,7 +1673,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     const wrapper = mountRecordingPopover();
     await waitForListenerCount('recording:intent-projection', 1);
     await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
-    await emitTauriEvent('recording:status', { session_id: 90, status: 'Processing' });
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Idle' });
     expect(document.querySelector('.mini-closing')).not.toBeNull();
 
     await emitTauriEvent('recording:intent-projection', {
@@ -1699,7 +1710,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     await start;
     expect(useTranscriptionStore().sessionId).toBe(90);
     expect(useTranscriptionStore().finalText).toBe('Speech already arrived');
-    await emitTauriEvent('recording:status', { session_id: 90, status: 'Processing' });
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Idle' });
     await vi.advanceTimersByTimeAsync(500);
     expect(invokeMock).toHaveBeenCalledWith('hide_recording_window_if_current', { windowEpoch: 2 });
     wrapper.unmount();
@@ -1728,7 +1739,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     await oldStart;
     expect(useTranscriptionStore().sessionId).toBe(90);
     expect(useTranscriptionStore().finalText).toBe('Current recording');
-    await emitTauriEvent('recording:status', { session_id: 90, status: 'Processing' });
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Idle' });
     await vi.advanceTimersByTimeAsync(500);
     expect(invokeMock).toHaveBeenCalledWith('hide_recording_window_if_current', { windowEpoch: 3 });
     wrapper.unmount();
@@ -1816,7 +1827,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
     const geometry = deferred<{ x: number; y: number }>();
     outerPositionMock.mockReturnValueOnce(geometry.promise);
-    await emitTauriEvent('recording:status', { session_id: 90, status: 'Processing' });
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Idle' });
     nativeWindowEpoch.value = 2;
     await emitTauriEvent('recording:start-cancelled', { startWindowEpoch: 0, windowEpoch: 2 });
     geometry.resolve({ x: 100, y: 100 });
@@ -1975,6 +1986,32 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     wrapper.unmount();
   });
 
+  it('restores suppressed text when the same processing session window is shown', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('hotkey:toggle-recording', 1);
+    const defaultInvoke = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((command: string, ...args: any[]) => {
+      if (command === 'get_recording_status') return Promise.resolve('Processing');
+      return defaultInvoke(command, ...args);
+    });
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
+    const store = useTranscriptionStore();
+    store.finalText = 'Current processing transcript';
+    await nextTick();
+    expect(document.querySelector('.mini-transcription-text-inner')?.textContent).toContain('Current processing transcript');
+
+    store.suppressPreviousTranscriptionDisplay('test:temporarily-hidden');
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Processing' });
+    expect(document.querySelector('.mini-transcription-text-inner')?.textContent).not.toContain('Current processing transcript');
+
+    await emitTauriEvent('recording:window-shown', { windowEpoch: 1 });
+    expect(store.sessionId).toBe(90);
+    expect(store.status).toBe(RecordingStatus.Processing);
+    expect(document.querySelector('.mini-transcription-text-inner')?.textContent).toContain('Current processing transcript');
+    expect(hideWindowMock).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
   it('hides on Idle after auto-paste restores the same processing session', async () => {
     const wrapper = mountRecordingPopover();
     await waitForListenerCount('hotkey:toggle-recording', 1);
@@ -2018,7 +2055,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     await emitTauriEvent('recording:window-shown', {});
     sessionLeaseEpoch = 2;
     expect(store.finalText).toBe('Current speech');
-    await emitTauriEvent('recording:status', { session_id: 90, status: 'Processing' });
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Idle' });
     await vi.advanceTimersByTimeAsync(500);
     expect(invokeMock).toHaveBeenCalledWith('hide_recording_window_if_current', { windowEpoch: 2 });
     expect(hideWindowMock).toHaveBeenCalledTimes(1);
@@ -2031,7 +2068,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     const geometry = deferred<{ x: number; y: number }>();
     outerPositionMock.mockReturnValueOnce(geometry.promise);
     await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
-    await emitTauriEvent('recording:status', { session_id: 90, status: 'Processing' });
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Idle' });
     await vi.advanceTimersByTimeAsync(500);
     expect(hideWindowMock).toHaveBeenCalledTimes(1);
     geometry.resolve({ x: 100, y: 100 });
