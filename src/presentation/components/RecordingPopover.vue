@@ -401,6 +401,27 @@ function cancelPendingHideRecordingWindow() {
   isMiniClosing.value = false;
 }
 
+function revealMiniForNewerNativeShow(payload: RecordingWindowLifecyclePayload | undefined) {
+  const epoch = payload?.windowEpoch;
+  if (
+    !useMiniLayout.value ||
+    isComponentUnmounted ||
+    typeof epoch !== 'number' ||
+    !Number.isSafeInteger(epoch) ||
+    epoch < 0 ||
+    (currentWindowEpoch !== null && epoch < currentWindowEpoch) ||
+    (closingWindowEpoch !== null && epoch <= closingWindowEpoch)
+  ) return;
+
+  // Native show has already committed before this event is emitted. Make its
+  // contents visible before IPC validation, which may be delayed while a
+  // previously hidden WebView resumes. A newer native hide is still fenced by
+  // closeRevision below.
+  resetMiniActionState();
+  cancelPendingHideRecordingWindow();
+  clearMiniOpeningAnimation();
+}
+
 function clearHotkeyDebounceTimeout() {
   if (hotkeyDebounceTimeout !== null) {
     window.clearTimeout(hotkeyDebounceTimeout);
@@ -773,6 +794,7 @@ onMounted(async () => {
   // Важно: не очищаем посреди активной записи — иначе можно потерять текст если пользователь скрыл и снова показал окно.
   unlistenWindowShown = await registerRecordingListener<RecordingWindowLifecyclePayload>(EVENT_RECORDING_WINDOW_SHOWN, async (event) => {
     const closeAtRequest = closeRevision;
+    revealMiniForNewerNativeShow(event.payload);
     if (!await acceptWindowEvent(event.payload)) return;
     if (closeAtRequest !== closeRevision && (closingWindowEpoch === null || closingWindowEpoch >= event.payload.windowEpoch)) return;
     resetMiniActionState();

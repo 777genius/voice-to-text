@@ -1995,7 +1995,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('lets a newer shown event reverse an older close that finishes validation first', async () => {
+  it('lets a newer shown event immediately invalidate an older close', async () => {
     const wrapper = mountRecordingPopover();
     await waitForListenerCount('hotkey:toggle-recording', 1);
     await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
@@ -2014,13 +2014,40 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     const newShow = tauriEventMock.handlers.get('recording:window-shown')![0]({ payload: { windowEpoch: 2 } });
     oldQuery.resolve(1);
     await oldClose;
-    expect(store.displayText).not.toContain('Current recording');
+    expect(document.querySelector('.mini-closing')).toBeNull();
+    expect(store.displayText).toContain('Current recording');
     newQuery.resolve(2);
     await newShow;
     await nextTick();
     expect(document.querySelector('.mini-closing')).toBeNull();
     expect(store.displayText).toContain('Current recording');
     expect(hideWindowMock).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it('reveals a newer native show before its epoch validation completes', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('hotkey:toggle-recording', 1);
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
+    await emitTauriEvent('recording:window-will-hide-for-hotkey-stop', { windowEpoch: 1 });
+    await flushMicrotasks();
+    await nextTick();
+    expect(document.querySelector('.mini-closing')).not.toBeNull();
+
+    const validation = deferred<number>();
+    const defaultInvoke = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((command: string, ...args: any[]) => {
+      if (command === 'get_recording_window_epoch') return validation.promise;
+      if (command === 'get_recording_status') return Promise.resolve('Recording');
+      return defaultInvoke(command, ...args);
+    });
+
+    const shown = tauriEventMock.handlers.get('recording:window-shown')![0]({ payload: { windowEpoch: 2 } });
+    await nextTick();
+    expect(document.querySelector('.mini-closing')).toBeNull();
+
+    validation.resolve(2);
+    await shown;
     wrapper.unmount();
   });
 
