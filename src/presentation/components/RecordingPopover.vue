@@ -583,6 +583,7 @@ async function playMiniOpenAnimation() {
 
 async function scheduleHideRecordingWindow(reason: string, sessionId: number | null = null) {
   if (hasPendingCurrentStart()) return;
+  const requestedGeneration = hideGeneration;
   let windowEpoch = currentWindowEpoch;
   if (sessionId !== null) {
     try {
@@ -593,7 +594,10 @@ async function scheduleHideRecordingWindow(reason: string, sessionId: number | n
       return;
     }
   }
-  if (windowEpoch === null || windowEpoch !== currentWindowEpoch || hasPendingCurrentStart() ||
+  // A newer show/start can revoke this close while the lease IPC is pending,
+  // even before that event's own native epoch query has completed.
+  if (requestedGeneration !== hideGeneration ||
+      windowEpoch === null || windowEpoch !== currentWindowEpoch || hasPendingCurrentStart() ||
       isComponentUnmounted) return;
   if (hasVisibleIncomingTranslation.value) {
     if (pendingAutoHideSessionId === sessionId) {

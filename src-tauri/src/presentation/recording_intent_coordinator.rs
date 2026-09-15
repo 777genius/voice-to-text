@@ -1129,6 +1129,17 @@ impl CoordinatorState {
         })
     }
 
+    /// The visible episode can precede provider admission, or be reserved while
+    /// an older capture drains. Never substitute its logical connection owner.
+    pub fn foreground_desired_run(&self) -> Option<RunContext> {
+        let revision = self.desired_recording.revision()?;
+        self.capture
+            .run()
+            .into_iter()
+            .chain(self.reserved_intent_run)
+            .find(|run| self.owns_intent_run(run.run_id, revision) && run.revision == revision)
+    }
+
     pub fn owns_intent_run(&self, id: RunId, revision: IntentRevision) -> bool {
         self.desired_recording.revision() == Some(revision)
             && self
@@ -2953,6 +2964,301 @@ mod tests {
                 outcome: StartOutcome::Succeeded,
             },
         )
+    }
+
+    fn commit_foreground_show(
+        state: &mut CoordinatorState,
+        lifecycle: &crate::presentation::recording_window_lifecycle::RecordingWindowLifecycle,
+        effects: &[CoordinatorEffect],
+    ) -> (RunContext, u64) {
+        let effect_id = effects
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::ShowPanel { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .expect("native show effect");
+        let run = state.foreground_desired_run().expect("foreground episode");
+        let epoch = lifecycle.show(|| Ok::<_, ()>(())).unwrap();
+        assert!(lifecycle.bind_or_transfer_session_if_current(run.run_id.get(), epoch));
+        reduce(
+            state,
+            CoordinatorEvent::WindowFinished {
+                effect_id,
+                outcome: WindowOutcome::Applied {
+                    window_epoch: epoch,
+                },
+            },
+        );
+        (run, epoch)
+    }
+
+    #[test]
+    fn stopped_preparing_or_starting_episode_cannot_close_newer_reserved_show() {
+        use crate::presentation::recording_window_lifecycle::RecordingWindowLifecycle;
+        for stop_before_prepare in [true, false] {
+            let lifecycle = RecordingWindowLifecycle::default();
+            let mut state = CoordinatorState::default();
+            let effects = reduce(
+                &mut state,
+                intent(IntentKind::Start, IntentSource::Frontend, 1),
+            );
+            let (b, b_epoch) = commit_foreground_show(&mut state, &lifecycle, &effects);
+            let prepare_id = effects
+                .iter()
+                .find_map(|effect| match effect {
+                    CoordinatorEffect::PrepareCapture { effect_id, .. } => Some(*effect_id),
+                    _ => None,
+                })
+                .unwrap();
+            let prepare = CoordinatorEvent::PrepareFinished {
+                effect_id: prepare_id,
+                run_id: b.run_id,
+                outcome: PrepareOutcome::Succeeded { generation: 22 },
+            };
+            let mut start_id = None;
+            if !stop_before_prepare {
+                start_id = Some(find_start(&reduce(&mut state, prepare.clone())).0);
+            }
+            let stopped = reduce(
+                &mut state,
+                intent(IntentKind::Stop, IntentSource::Frontend, 2),
+            );
+            if !stop_before_prepare {
+                assert!(
+                    stopped.contains(&CoordinatorEffect::SealStartingCapture { run_id: b.run_id })
+                );
+            }
+            let effects = reduce(
+                &mut state,
+                intent(IntentKind::Start, IntentSource::Frontend, 3),
+            );
+            let (c, c_epoch) = commit_foreground_show(&mut state, &lifecycle, &effects);
+            assert_eq!(state.reserved_intent_run, Some(c));
+            assert_ne!(b.run_id, c.run_id);
+            if stop_before_prepare {
+                let admitted = reduce(&mut state, prepare.clone());
+                assert!(
+                    admitted.contains(&CoordinatorEffect::SealStartingCapture { run_id: b.run_id })
+                );
+                start_id = Some(find_start(&admitted).0);
+            }
+            let drained = complete_start(&mut state, start_id.unwrap(), b.run_id);
+            assert_eq!(find_stop(&drained).1, b.run_id);
+            // Replayed async completions retain B's identity after C's show.
+            reduce(&mut state, prepare);
+            complete_start(&mut state, start_id.unwrap(), b.run_id);
+            assert!(!state.owns_intent_run(b.run_id, b.revision));
+            assert_eq!(state.foreground_desired_run(), Some(c));
+            assert_eq!(lifecycle.session_epoch(b.run_id.get()), Some(b_epoch));
+            assert!(!lifecycle
+                .hide_if_current(b_epoch, || -> Result<(), ()> {
+                    panic!("late B close hid C")
+                })
+                .unwrap());
+            assert_eq!(
+                lifecycle
+                    .restore_if_owned_by_session(b.run_id.get(), c_epoch, || -> Result<(), ()> {
+                        panic!("late B restore touched C")
+                    })
+                    .unwrap(),
+                None
+            );
+            assert_eq!(lifecycle.current(), c_epoch);
+            assert!(lifecycle
+                .hide_if_current(c_epoch, || Ok::<_, ()>(()))
+                .unwrap());
+        }
+    }
+
+    #[test]
+    fn finalizing_predecessor_keeps_buffered_successor_window_ownership() {
+        use crate::presentation::recording_window_lifecycle::RecordingWindowLifecycle;
+        let lifecycle = RecordingWindowLifecycle::default();
+        let mut state = CoordinatorState::default();
+        let effects = reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::Frontend, 1),
+        );
+        let (a, a_epoch) = commit_foreground_show(&mut state, &lifecycle, &effects);
+        let (start_id, _) = finish_prepare_and_find_start(&mut state, &effects);
+        complete_start(&mut state, start_id, a.run_id);
+        let effects = reduce(
+            &mut state,
+            intent(IntentKind::Stop, IntentSource::Frontend, 2),
+        );
+        let (stop_id, _) = find_stop(&effects);
+        let effects = reduce(
+            &mut state,
+            CoordinatorEvent::CaptureStopped {
+                effect_id: stop_id,
+                run_id: a.run_id,
+                outcome: CaptureStopOutcome::Inactive,
+            },
+        );
+        assert_eq!(find_finalize(&effects).1, a.run_id);
+        let effects = reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::Frontend, 3),
+        );
+        let (b, b_epoch) = commit_foreground_show(&mut state, &lifecycle, &effects);
+        let prepare_id = effects
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::PrepareCapture { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .unwrap();
+        reduce(
+            &mut state,
+            CoordinatorEvent::PrepareFinished {
+                effect_id: prepare_id,
+                run_id: b.run_id,
+                outcome: PrepareOutcome::Succeeded { generation: 22 },
+            },
+        );
+        assert!(matches!(state.capture, CaptureState::Buffering { run, .. } if run == b));
+        assert_eq!(state.foreground_desired_run(), Some(b));
+        assert!(state.processing_jobs.contains_key(&a.run_id));
+        assert!(!lifecycle
+            .hide_if_current(a_epoch, || -> Result<(), ()> {
+                panic!("finalizing A hid B")
+            })
+            .unwrap());
+        let effects = reduce(
+            &mut state,
+            intent(IntentKind::Stop, IntentSource::Frontend, 4),
+        );
+        assert!(effects.iter().any(|effect| matches!(effect,
+            CoordinatorEffect::Continuation(ContinuationEffect::SealPending { run_id, .. }) if *run_id == b.run_id
+        )));
+        // This buffered path rejects C until B is sealed; do not invent a C show.
+        let effects = reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::Frontend, 5),
+        );
+        assert!(!effects
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::ShowPanel { .. })));
+        assert!(state.foreground_desired_run().is_none());
+        assert_eq!(lifecycle.current(), b_epoch);
+        assert!(state.validate().is_ok());
+    }
+
+    #[test]
+    fn negotiated_continuation_window_belongs_to_physical_episode() {
+        use crate::presentation::recording_window_lifecycle::RecordingWindowLifecycle;
+        let lifecycle = RecordingWindowLifecycle::default();
+        let mut state = CoordinatorState::default();
+        let effects = reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::Frontend, 1),
+        );
+        let (a, a_epoch) = commit_foreground_show(&mut state, &lifecycle, &effects);
+        let (start_id, _) = finish_prepare_and_find_start(&mut state, &effects);
+        complete_start(&mut state, start_id, a.run_id);
+        reduce(
+            &mut state,
+            CoordinatorEvent::Continuation(ContinuationEvent::Negotiated {
+                logical_run_id: a.run_id,
+                connection_generation: 7,
+            }),
+        );
+        let effects = reduce(
+            &mut state,
+            intent(IntentKind::Stop, IntentSource::Frontend, 2),
+        );
+        let (stop_id, _) = find_stop(&effects);
+        let effects = reduce(
+            &mut state,
+            CoordinatorEvent::CaptureStopped {
+                effect_id: stop_id,
+                run_id: a.run_id,
+                outcome: CaptureStopOutcome::Inactive,
+            },
+        );
+        let (pause_id, key) = effects
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::Continuation(ContinuationEffect::Pause {
+                    effect_id,
+                    key,
+                    ..
+                }) => Some((*effect_id, *key)),
+                _ => None,
+            })
+            .unwrap();
+        reduce(
+            &mut state,
+            CoordinatorEvent::Continuation(ContinuationEvent::PauseFinished {
+                effect_id: pause_id,
+                key,
+                pause_epoch: Some(1),
+            }),
+        );
+        let effects = reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::Frontend, 3),
+        );
+        let (b, b_epoch) = commit_foreground_show(&mut state, &lifecycle, &effects);
+        let prepare_id = effects
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::PrepareCapture { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .unwrap();
+        let effects = reduce(
+            &mut state,
+            CoordinatorEvent::PrepareFinished {
+                effect_id: prepare_id,
+                run_id: b.run_id,
+                outcome: PrepareOutcome::Succeeded { generation: 22 },
+            },
+        );
+        let (attach_id, key) = effects
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::Continuation(ContinuationEffect::Continue {
+                    effect_id,
+                    key,
+                    ..
+                }) => Some((*effect_id, *key)),
+                _ => None,
+            })
+            .unwrap();
+        reduce(
+            &mut state,
+            CoordinatorEvent::Continuation(ContinuationEvent::ContinueFinished {
+                effect_id: attach_id,
+                key,
+                run_id: b.run_id,
+                generation: 22,
+                outcome: ContinueAttachOutcome::Attached {
+                    context_revision: 2,
+                },
+            }),
+        );
+        assert_eq!(state.continuation.unwrap().key.logical_run_id, a.run_id);
+        assert_eq!(state.continuation.unwrap().episode, b.run_id);
+        assert_eq!(state.foreground_desired_run(), Some(b));
+        assert_eq!(state.capture_identity(), Some((b.run_id, 22)));
+        assert_eq!(lifecycle.session_epoch(a.run_id.get()), Some(a_epoch));
+        assert_eq!(lifecycle.session_epoch(b.run_id.get()), Some(b_epoch));
+        assert!(!lifecycle
+            .hide_if_current(a_epoch, || -> Result<(), ()> {
+                panic!("logical owner hid B")
+            })
+            .unwrap());
+        assert_eq!(
+            lifecycle
+                .restore_if_owned_by_session(a.run_id.get(), b_epoch, || -> Result<(), ()> {
+                    panic!("logical owner restored B")
+                })
+                .unwrap(),
+            None
+        );
+        assert!(state.validate().is_ok());
     }
 
     #[test]

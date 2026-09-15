@@ -1459,6 +1459,40 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     expect(hideWindowMock).toHaveBeenCalledTimes(1);
     wrapper.unmount();
   });
+  it('discards a delayed session lease before a newer show finishes epoch validation', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('hotkey:toggle-recording', 1);
+    await emitTauriEvent('recording:status', { session_id: 80, status: 'Recording' });
+    const lease = deferred<number>();
+    const shownEpoch = deferred<number>();
+    const defaultInvoke = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation((command: string, args?: { windowEpoch?: number }) => {
+      if (command === 'get_recording_window_epoch_for_session') return lease.promise;
+      if (command === 'get_recording_window_epoch') return shownEpoch.promise;
+      if (command === 'hide_recording_window_if_current' && args?.windowEpoch !== nativeWindowEpoch.value) {
+        return Promise.resolve(false);
+      }
+      return defaultInvoke(command, args);
+    });
+
+    await emitTauriEvent('recording:status', { session_id: 80, status: 'Processing' });
+    // Native has already shown the replacement. Its WebView epoch query is slower
+    // than the retiring session's lease query, just as after a hidden view resumes.
+    nativeWindowEpoch.value = 2;
+    const shown = tauriEventMock.handlers.get('recording:window-shown')![0]({ payload: { windowEpoch: 2 } });
+    lease.resolve(1);
+    await flushMicrotasks();
+    await nextTick();
+    const closingBeforeValidation = document.querySelector('.mini-closing') !== null;
+    await vi.advanceTimersByTimeAsync(500);
+    shownEpoch.resolve(2);
+    await shown;
+    wrapper.unmount();
+
+    expect(closingBeforeValidation).toBe(false);
+    expect(hideWindowMock).not.toHaveBeenCalled();
+  });
+
   it.each(['recording:start-requested', 'recording:window-shown'])(
     'discards delayed close geometry after %s', async (restartEvent) => {
       const wrapper = mountRecordingPopover();
@@ -1975,27 +2009,37 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     wrapper.unmount();
   });
 
-  it('hides on Idle after auto-paste restores the same processing session', async () => {
+  it('keeps the Processing close deadline across temporary native auto-paste restoration', async () => {
     const wrapper = mountRecordingPopover();
     await waitForListenerCount('hotkey:toggle-recording', 1);
     const defaultInvoke = invokeMock.getMockImplementation()!;
-    let sessionLeaseEpoch = 1;
-    invokeMock.mockImplementation((command: string, ...args: any[]) => {
-      if (command === 'get_recording_window_epoch_for_session') return Promise.resolve(sessionLeaseEpoch);
-      return defaultInvoke(command, ...args);
+    const leases = new Map([[90, nativeWindowEpoch.value]]);
+    invokeMock.mockImplementation(async (command: string, args?: { sessionId?: number; windowEpoch?: number }) => {
+      if (command === 'get_recording_window_epoch_for_session') return leases.get(args!.sessionId!) ?? null;
+      if (command === 'hide_recording_window_if_current') {
+        if (args?.windowEpoch !== nativeWindowEpoch.value) return false;
+        await hideWindowMock();
+        nativeWindowEpoch.value += 1;
+        return true;
+      }
+      return defaultInvoke(command, args);
     });
     await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
     await emitTauriEvent('recording:status', { session_id: 90, status: 'Processing' });
     await flushMicrotasks();
 
-    nativeWindowEpoch.value = 2;
-    sessionLeaseEpoch = 2;
-    await emitTauriEvent('recording:window-shown', {});
-    await emitTauriEvent('recording:status', { session_id: 90, status: 'Idle' });
+    // Native suppression/restoration keeps the same visibility lifetime and emits
+    // no user-show event. Rust tests cover the epoch semantics; this UI test
+    // models that native contract without executing macOS restoration.
+    // Provider finalization remains pending; it must not be needed for dismissal.
+    await vi.advanceTimersByTimeAsync(50);
+    expect(useTranscriptionStore().status).toBe('Processing');
     await vi.advanceTimersByTimeAsync(500);
 
-    expect(invokeMock).toHaveBeenCalledWith('hide_recording_window_if_current', { windowEpoch: 2 });
+    expect(useTranscriptionStore().status).toBe('Processing');
+    expect(invokeMock).toHaveBeenCalledWith('hide_recording_window_if_current', { windowEpoch: 1 });
     expect(hideWindowMock).toHaveBeenCalledTimes(1);
+    expect(nativeWindowEpoch.value).toBe(2);
     wrapper.unmount();
   });
 

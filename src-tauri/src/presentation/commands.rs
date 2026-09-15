@@ -2014,9 +2014,8 @@ fn show_recording_native_window<R: tauri::Runtime>(
     fallback().map_err(|error| error.to_string())
 }
 
-fn rebind_recording_window_to_active_desired_session(
+fn bind_recording_window_to_foreground_desired_run(
     lifecycle: &RecordingWindowLifecycle,
-    active_session_id: &AtomicU64,
     coordinator: &std::sync::Mutex<recording_intent::CoordinatorState>,
     desired_coordinator: bool,
     window_epoch: u64,
@@ -2024,25 +2023,11 @@ fn rebind_recording_window_to_active_desired_session(
     if !desired_coordinator {
         return;
     }
-    let session_id = active_session_id.load(Ordering::Acquire);
-    if session_id == 0 {
-        return;
-    }
     let coordinator = coordinator
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if coordinator.desired_recording.is_on()
-        && matches!(
-            coordinator.capture,
-            recording_intent::CaptureState::Starting { .. }
-                | recording_intent::CaptureState::Recording { .. }
-        )
-        && coordinator
-            .capture
-            .run()
-            .is_some_and(|run| run.run_id.get() == session_id)
-    {
-        lifecycle.rebind_session_if_current(session_id, window_epoch);
+    if let Some(run) = coordinator.foreground_desired_run() {
+        lifecycle.bind_or_transfer_session_if_current(run.run_id.get(), window_epoch);
     }
 }
 
@@ -3775,7 +3760,8 @@ async fn start_recording_checked(
         let session_id = state
             .active_transcription_session_id
             .load(Ordering::Relaxed);
-        if session_id != 0
+        if coordinator_run.is_none()
+            && session_id != 0
             && matches!(
                 current_status,
                 RecordingStatus::Starting | RecordingStatus::Recording
@@ -3784,7 +3770,7 @@ async fn start_recording_checked(
             let window_epoch = state.recording_window_lifecycle.current();
             state
                 .recording_window_lifecycle
-                .rebind_session_if_current(session_id, window_epoch);
+                .bind_or_transfer_session_if_current(session_id, window_epoch);
         }
         let mode = *state.active_recording_mode.read().await;
         if let Some(payload) = active_recording_status_payload(session_id, current_status, mode) {
@@ -3792,9 +3778,11 @@ async fn start_recording_checked(
                 let _ = app_handle.emit(EVENT_RECORDING_STATUS, payload);
             }
         }
-        // The direct command fenced old hides before waiting for admission.
-        // Publish its current epoch without resetting the accepted session.
-        emit_recording_window_shown(&app_handle);
+        // Only a direct legacy command fenced this show before admission.
+        // A delayed coordinator admission must not publish a successor's epoch.
+        if coordinator_run.is_none() {
+            emit_recording_window_shown(&app_handle);
+        }
         return Ok("Recording already active".to_string());
     }
 
@@ -3856,9 +3844,10 @@ async fn start_recording_checked(
             client_start_id.as_deref(),
         );
     }
-    if app_handle
-        .get_webview_window("main")
-        .is_some_and(|window| window.is_visible().unwrap_or(false))
+    if coordinator_run.is_none()
+        && app_handle
+            .get_webview_window("main")
+            .is_some_and(|window| window.is_visible().unwrap_or(false))
     {
         emit_recording_window_shown(&app_handle);
     }
@@ -3880,7 +3869,9 @@ async fn start_recording_checked(
             .fetch_add(1, Ordering::Relaxed)
             + 1
     };
-    state.recording_window_lifecycle.bind_session(session_id);
+    if coordinator_run.is_none() {
+        state.recording_window_lifecycle.bind_session(session_id);
+    }
     if config.auto_paste_text {
         // Desired-state starts already own an exact session target. Legacy/UI
         // starts bind the last target captured before the recording window was
@@ -4785,7 +4776,6 @@ pub fn show_window_with_recording_config(
         |pos| window.set_position(pos),
         || {
             let lifecycle = state.recording_window_lifecycle.clone();
-            let active_session_id = state.active_transcription_session_id.clone();
             let coordinator = state.recording_intent_coordinator.clone();
             let desired_coordinator =
                 state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired;
@@ -4801,9 +4791,8 @@ pub fn show_window_with_recording_config(
                         || shown_window.show(),
                     )
                 })?;
-                rebind_recording_window_to_active_desired_session(
+                bind_recording_window_to_foreground_desired_run(
                     &lifecycle,
-                    &active_session_id,
                     &coordinator,
                     desired_coordinator,
                     window_epoch,
@@ -4855,7 +4844,6 @@ pub fn show_recording_webview<R: tauri::Runtime>(window: &WebviewWindow<R>) -> R
         return window.show().map_err(|error| error.to_string());
     };
     let lifecycle = state.recording_window_lifecycle.clone();
-    let active_session_id = state.active_transcription_session_id.clone();
     let coordinator = state.recording_intent_coordinator.clone();
     let desired_coordinator =
         state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired;
@@ -4869,9 +4857,8 @@ pub fn show_recording_webview<R: tauri::Runtime>(window: &WebviewWindow<R>) -> R
                 shown_window.show()
             })
         })?;
-        rebind_recording_window_to_active_desired_session(
+        bind_recording_window_to_foreground_desired_run(
             &lifecycle,
-            &active_session_id,
             &coordinator,
             desired_coordinator,
             window_epoch,
@@ -4922,7 +4909,6 @@ pub fn show_webview_window_with_recording_config<R: tauri::Runtime>(
         |pos| window.set_position(pos),
         || {
             let lifecycle = state.recording_window_lifecycle.clone();
-            let active_session_id = state.active_transcription_session_id.clone();
             let coordinator = state.recording_intent_coordinator.clone();
             let desired_coordinator =
                 state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired;
@@ -4938,9 +4924,8 @@ pub fn show_webview_window_with_recording_config<R: tauri::Runtime>(
                         || shown_window.show(),
                     )
                 })?;
-                rebind_recording_window_to_active_desired_session(
+                bind_recording_window_to_foreground_desired_run(
                     &lifecycle,
-                    &active_session_id,
                     &coordinator,
                     desired_coordinator,
                     window_epoch,
@@ -8366,23 +8351,25 @@ async fn restore_recording_window_after_auto_paste(
         if suppression.hidden {
             // Restore the same window placement, only if no newer start/show owns it.
             let show = || {
-                window.show().map_err(|e| e.to_string())?;
+                show_recording_native_window(window.app_handle(), window.label(), || {
+                    window.show()
+                })?;
                 window.set_always_on_top(true).map_err(|e| e.to_string())
             };
             let restored_epoch = match session_id {
-                Some(session_id) => lifecycle.show_if_owned_by_session(
+                Some(session_id) => lifecycle.restore_if_owned_by_session(
                     session_id,
                     suppression.window_epoch,
                     show,
                 )?,
-                None => lifecycle.show_if_current(suppression.window_epoch, show)?,
+                None => lifecycle.restore_if_current(suppression.window_epoch, show)?,
             };
-            if let Some(window_epoch) = restored_epoch {
-                let _ = window.emit(
-                    EVENT_RECORDING_WINDOW_SHOWN,
-                    RecordingWindowLifecyclePayload { window_epoch },
-                );
-            }
+            log::debug!(
+                "recording window temporary restore: epoch={}, session={:?}, committed={}",
+                suppression.window_epoch,
+                session_id,
+                restored_epoch.is_some()
+            );
         } else {
             lifecycle.while_current(suppression.window_epoch, || {
                 window.set_always_on_top(true).map_err(|e| e.to_string())
