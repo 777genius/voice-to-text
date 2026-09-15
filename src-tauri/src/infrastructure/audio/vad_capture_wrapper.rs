@@ -240,8 +240,8 @@ impl AudioCapture for VadCaptureWrapper {
         let wrapped_callback = Arc::new(move |chunk: AudioChunk| {
             // Важно: после stop_capture внутренняя аудио-система может ещё кратко вызывать callback.
             // Мы обязаны игнорировать такие "хвосты", иначе VAD может отправить timeout уже в новой сессии.
-            if !running.load(Ordering::Relaxed)
-                || active_generation.load(Ordering::Relaxed) != capture_generation
+            if !running.load(Ordering::Acquire)
+                || active_generation.load(Ordering::Acquire) != capture_generation
             {
                 return;
             }
@@ -281,8 +281,8 @@ impl AudioCapture for VadCaptureWrapper {
             const VAD_FRAME_SIZE: usize = 480;
 
             while buffer.len() >= VAD_FRAME_SIZE {
-                if !running.load(Ordering::Relaxed)
-                    || active_generation.load(Ordering::Relaxed) != capture_generation
+                if !running.load(Ordering::Acquire)
+                    || active_generation.load(Ordering::Acquire) != capture_generation
                 {
                     return;
                 }
@@ -313,6 +313,14 @@ impl AudioCapture for VadCaptureWrapper {
                     }
                 };
 
+                // The generation may change while an old callback waits for the VAD lock.
+                // Recheck under that lock so stale audio cannot enter a freshly reset detector.
+                if !running.load(Ordering::Acquire)
+                    || active_generation.load(Ordering::Acquire) != capture_generation
+                {
+                    return;
+                }
+
                 let vad_result = match vad_guard.process_samples(&vad_frame) {
                     Ok(result) => result,
                     Err(e) => {
@@ -329,6 +337,11 @@ impl AudioCapture for VadCaptureWrapper {
                         // Speech and the pending-stop commit share one lock. If speech wins,
                         // the delayed stop is cancelled before this frame is delivered.
                         if let Ok(mut state) = silence_stop_state.lock() {
+                            if !running.load(Ordering::Acquire)
+                                || active_generation.load(Ordering::Acquire) != capture_generation
+                            {
+                                return;
+                            }
                             if state.pending_token.take().is_some() {
                                 log::info!("VAD: resumed speech cancelled pending stop");
                                 let _ = silence_timer_tx.try_send(SilenceTimerSignal::StateChanged);
@@ -338,6 +351,11 @@ impl AudioCapture for VadCaptureWrapper {
                         on_chunk(AudioChunk::new(frame, 16000, 1));
                     }
                     VadResult::Silence => {
+                        if !running.load(Ordering::Acquire)
+                            || active_generation.load(Ordering::Acquire) != capture_generation
+                        {
+                            return;
+                        }
                         // Silence but below timeout - still pass through
                         log::trace!("VAD: Silence (below timeout)");
                         on_chunk(AudioChunk::new(frame, 16000, 1));
@@ -345,6 +363,12 @@ impl AudioCapture for VadCaptureWrapper {
                     VadResult::SilenceTimeout => {
                         let pending_token = match silence_stop_state.lock() {
                             Ok(mut state) => {
+                                if !running.load(Ordering::Acquire)
+                                    || active_generation.load(Ordering::Acquire)
+                                        != capture_generation
+                                {
+                                    return;
+                                }
                                 if state.committed || state.pending_token.is_some() {
                                     None
                                 } else {
