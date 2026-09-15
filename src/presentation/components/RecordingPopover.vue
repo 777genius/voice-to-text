@@ -581,8 +581,20 @@ async function playMiniOpenAnimation() {
   });
 }
 
-function scheduleHideRecordingWindow(reason: string, sessionId: number | null = null) {
+async function scheduleHideRecordingWindow(reason: string, sessionId: number | null = null) {
   if (hasPendingCurrentStart()) return;
+  let windowEpoch = currentWindowEpoch;
+  if (sessionId !== null) {
+    try {
+      windowEpoch = await invoke<number | null>('get_recording_window_epoch_for_session', {
+        sessionId,
+      });
+    } catch {
+      return;
+    }
+  }
+  if (windowEpoch === null || windowEpoch !== currentWindowEpoch || hasPendingCurrentStart() ||
+      isComponentUnmounted) return;
   if (hasVisibleIncomingTranslation.value) {
     if (pendingAutoHideSessionId === sessionId) {
       pendingAutoHideSessionId = null;
@@ -598,7 +610,6 @@ function scheduleHideRecordingWindow(reason: string, sessionId: number | null = 
   const generation = ++hideGeneration;
   closeRevision += 1;
   closingWindowEpoch = currentWindowEpoch;
-  const windowEpoch = currentWindowEpoch;
   const isCurrentHide = () => generation === hideGeneration && !isComponentUnmounted;
 
   const delay = useMiniLayout.value ? MINI_CLOSE_ANIMATION_MS : 50;
@@ -619,7 +630,6 @@ function scheduleHideRecordingWindow(reason: string, sessionId: number | null = 
     }
 
     try {
-      if (windowEpoch === null) return;
       const hidden = await invoke<boolean>('hide_recording_window_if_current', { windowEpoch });
       if (!hidden || !isCurrentHide()) return;
       if (sessionId !== null) {
@@ -870,17 +880,17 @@ watch(() => store.lastAcceptedRecordingStatus, (payload) => {
     if (appConfigStore.showMiniRecordingWindow &&
         pendingAutoHideSessionId !== payloadSessionId &&
         completedAutoHideSessionId !== payloadSessionId) {
-      scheduleHideRecordingWindow('mini window recording finalizing', payloadSessionId);
+      void scheduleHideRecordingWindow('mini window recording finalizing', payloadSessionId);
     }
     return;
   }
   if (appConfigStore.playCompletionSound) playDoneSound();
   if (appConfigStore.showMiniRecordingWindow) {
     if (completedAutoHideSessionId !== payloadSessionId) {
-      scheduleHideRecordingWindow('mini window recording stopped', payloadSessionId);
+      void scheduleHideRecordingWindow('mini window recording stopped', payloadSessionId);
     }
   } else if (payload.stopped_via_hotkey) {
-    scheduleHideRecordingWindow('stopped via hotkey', payloadSessionId);
+    void scheduleHideRecordingWindow('stopped via hotkey', payloadSessionId);
   }
 }, { flush: 'sync' });
 

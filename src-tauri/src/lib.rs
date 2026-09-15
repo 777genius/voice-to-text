@@ -255,6 +255,7 @@ pub fn run() {
             commands::show_auth_window,
             commands::show_recording_window,
             commands::get_recording_window_epoch,
+            commands::get_recording_window_epoch_for_session,
             commands::hide_recording_window_if_current,
             commands::show_settings_window,
             commands::show_profile_window,

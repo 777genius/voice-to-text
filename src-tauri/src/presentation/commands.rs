@@ -2,13 +2,15 @@
 mod continuation;
 pub(crate) mod runtime_failure;
 
-use super::recording_window_lifecycle::{recording_stop_is_current, RecordingHotkeyAction};
+use super::recording_window_lifecycle::{
+    recording_stop_is_current, RecordingHotkeyAction, RecordingWindowLifecycle,
+};
 use super::{
     recording_intent_coordinator as recording_intent, state::RecordingIntentCoordinatorMode,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
@@ -2012,9 +2014,49 @@ fn show_recording_native_window<R: tauri::Runtime>(
     fallback().map_err(|error| error.to_string())
 }
 
+fn rebind_recording_window_to_active_desired_session(
+    lifecycle: &RecordingWindowLifecycle,
+    active_session_id: &AtomicU64,
+    coordinator: &std::sync::Mutex<recording_intent::CoordinatorState>,
+    desired_coordinator: bool,
+    window_epoch: u64,
+) {
+    if !desired_coordinator {
+        return;
+    }
+    let session_id = active_session_id.load(Ordering::Acquire);
+    if session_id == 0 {
+        return;
+    }
+    let coordinator = coordinator
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if coordinator.desired_recording.is_on()
+        && matches!(
+            coordinator.capture,
+            recording_intent::CaptureState::Starting { .. }
+                | recording_intent::CaptureState::Recording { .. }
+        )
+        && coordinator
+            .capture
+            .run()
+            .is_some_and(|run| run.run_id.get() == session_id)
+    {
+        lifecycle.rebind_session_if_current(session_id, window_epoch);
+    }
+}
+
 #[tauri::command]
 pub fn get_recording_window_epoch(state: State<'_, AppState>) -> u64 {
     state.recording_window_lifecycle.current()
+}
+
+#[tauri::command]
+pub fn get_recording_window_epoch_for_session(
+    state: State<'_, AppState>,
+    session_id: u64,
+) -> Option<u64> {
+    state.recording_window_lifecycle.session_epoch(session_id)
 }
 
 #[tauri::command]
@@ -3733,6 +3775,17 @@ async fn start_recording_checked(
         let session_id = state
             .active_transcription_session_id
             .load(Ordering::Relaxed);
+        if session_id != 0
+            && matches!(
+                current_status,
+                RecordingStatus::Starting | RecordingStatus::Recording
+            )
+        {
+            let window_epoch = state.recording_window_lifecycle.current();
+            state
+                .recording_window_lifecycle
+                .rebind_session_if_current(session_id, window_epoch);
+        }
         let mode = *state.active_recording_mode.read().await;
         if let Some(payload) = active_recording_status_payload(session_id, current_status, mode) {
             if !desired_recording_coordinator_enabled(&app_handle) {
@@ -3827,6 +3880,7 @@ async fn start_recording_checked(
             .fetch_add(1, Ordering::Relaxed)
             + 1
     };
+    state.recording_window_lifecycle.bind_session(session_id);
     if config.auto_paste_text {
         // Desired-state starts already own an exact session target. Legacy/UI
         // starts bind the last target captured before the recording window was
@@ -4731,6 +4785,10 @@ pub fn show_window_with_recording_config(
         |pos| window.set_position(pos),
         || {
             let lifecycle = state.recording_window_lifecycle.clone();
+            let active_session_id = state.active_transcription_session_id.clone();
+            let coordinator = state.recording_intent_coordinator.clone();
+            let desired_coordinator =
+                state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired;
             let shown_window = window.clone();
             commit_recording_visibility(window.app_handle(), move || {
                 let window_epoch = lifecycle.show(|| {
@@ -4743,6 +4801,13 @@ pub fn show_window_with_recording_config(
                         || shown_window.show(),
                     )
                 })?;
+                rebind_recording_window_to_active_desired_session(
+                    &lifecycle,
+                    &active_session_id,
+                    &coordinator,
+                    desired_coordinator,
+                    window_epoch,
+                );
                 let _ = shown_window.emit(
                     EVENT_RECORDING_WINDOW_SHOWN,
                     RecordingWindowLifecyclePayload { window_epoch },
@@ -4790,6 +4855,10 @@ pub fn show_recording_webview<R: tauri::Runtime>(window: &WebviewWindow<R>) -> R
         return window.show().map_err(|error| error.to_string());
     };
     let lifecycle = state.recording_window_lifecycle.clone();
+    let active_session_id = state.active_transcription_session_id.clone();
+    let coordinator = state.recording_intent_coordinator.clone();
+    let desired_coordinator =
+        state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired;
     let shown_window = window.clone();
     commit_recording_visibility(window.app_handle(), move || {
         let window_epoch = lifecycle.show(|| {
@@ -4800,6 +4869,13 @@ pub fn show_recording_webview<R: tauri::Runtime>(window: &WebviewWindow<R>) -> R
                 shown_window.show()
             })
         })?;
+        rebind_recording_window_to_active_desired_session(
+            &lifecycle,
+            &active_session_id,
+            &coordinator,
+            desired_coordinator,
+            window_epoch,
+        );
         let _ = shown_window.emit(
             EVENT_RECORDING_WINDOW_SHOWN,
             RecordingWindowLifecyclePayload { window_epoch },
@@ -4846,6 +4922,10 @@ pub fn show_webview_window_with_recording_config<R: tauri::Runtime>(
         |pos| window.set_position(pos),
         || {
             let lifecycle = state.recording_window_lifecycle.clone();
+            let active_session_id = state.active_transcription_session_id.clone();
+            let coordinator = state.recording_intent_coordinator.clone();
+            let desired_coordinator =
+                state.recording_intent_coordinator_mode == RecordingIntentCoordinatorMode::Desired;
             let shown_window = window.clone();
             commit_recording_visibility(window.app_handle(), move || {
                 let window_epoch = lifecycle.show(|| {
@@ -4858,6 +4938,13 @@ pub fn show_webview_window_with_recording_config<R: tauri::Runtime>(
                         || shown_window.show(),
                     )
                 })?;
+                rebind_recording_window_to_active_desired_session(
+                    &lifecycle,
+                    &active_session_id,
+                    &coordinator,
+                    desired_coordinator,
+                    window_epoch,
+                );
                 let _ = shown_window.emit(
                     EVENT_RECORDING_WINDOW_SHOWN,
                     RecordingWindowLifecyclePayload { window_epoch },
@@ -8266,6 +8353,7 @@ async fn restore_recording_window_after_auto_paste(
     state: &AppState,
     suppression: AutoPasteWindowSuppression,
     recording_status: RecordingStatus,
+    session_id: Option<u64>,
 ) {
     if !should_restore_recording_window_after_suppression(suppression, recording_status) {
         return;
@@ -8277,12 +8365,19 @@ async fn restore_recording_window_after_auto_paste(
     let result = commit_recording_visibility(app_handle, move || {
         if suppression.hidden {
             // Restore the same window placement, only if no newer start/show owns it.
-            if let Some(window_epoch) =
-                lifecycle.show_if_current(suppression.window_epoch, || {
-                    window.show().map_err(|e| e.to_string())?;
-                    window.set_always_on_top(true).map_err(|e| e.to_string())
-                })?
-            {
+            let show = || {
+                window.show().map_err(|e| e.to_string())?;
+                window.set_always_on_top(true).map_err(|e| e.to_string())
+            };
+            let restored_epoch = match session_id {
+                Some(session_id) => lifecycle.show_if_owned_by_session(
+                    session_id,
+                    suppression.window_epoch,
+                    show,
+                )?,
+                None => lifecycle.show_if_current(suppression.window_epoch, show)?,
+            };
+            if let Some(window_epoch) = restored_epoch {
                 let _ = window.emit(
                     EVENT_RECORDING_WINDOW_SHOWN,
                     RecordingWindowLifecyclePayload { window_epoch },
@@ -10605,7 +10700,10 @@ pub async fn auto_paste_text(
     if !super::native_e2e::live_mode() {
         return super::native_e2e::record_auto_paste(&text, session_id);
     }
-    let window_epoch_before_paste = state.recording_window_lifecycle.current();
+    let window_epoch_before_paste = match session_id {
+        Some(session_id) => state.recording_window_lifecycle.session_epoch(session_id),
+        None => Some(state.recording_window_lifecycle.current()),
+    };
     log::info!("Command: auto_paste_text - text length: {}", text.len());
 
     // Вставки выполняем строго по одной: параллельный вызов перемешал бы
@@ -10665,12 +10763,16 @@ pub async fn auto_paste_text(
         );
         target_for_paste = target.clone();
 
-        window_suppression = suppress_recording_window_for_auto_paste(
-            &app_handle,
-            recording_status_before_paste,
-            window_epoch_before_paste,
-        )
-        .await;
+        window_suppression = if let Some(window_epoch) = window_epoch_before_paste {
+            suppress_recording_window_for_auto_paste(
+                &app_handle,
+                recording_status_before_paste,
+                window_epoch,
+            )
+            .await
+        } else {
+            AutoPasteWindowSuppression::default()
+        };
 
         if crate::infrastructure::auto_paste::frontmost_app_matches_target(&target) {
             log::debug!("Auto-paste target is already frontmost; skipping activation");
@@ -10696,6 +10798,7 @@ pub async fn auto_paste_text(
                 state.inner(),
                 window_suppression,
                 recording_status_after_focus_failure,
+                session_id,
             )
             .await;
             return Err(message);
@@ -10758,6 +10861,7 @@ pub async fn auto_paste_text(
         state.inner(),
         window_suppression,
         recording_status_after_paste,
+        session_id,
     )
     .await;
 

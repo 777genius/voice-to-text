@@ -295,6 +295,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     cursorOverRecordingWindowMock.value = false;
     invokeMock.mockImplementation(async (command: string) => {
       if (command === 'get_recording_window_epoch') return nativeWindowEpoch.value;
+      if (command === 'get_recording_window_epoch_for_session') return nativeWindowEpoch.value;
       if (command === 'hide_recording_window_if_current') {
         await hideWindowMock();
         return true;
@@ -1720,6 +1721,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     const newStart = handler({ payload: { windowEpoch: 3 } });
     newQuery.resolve(3);
     await newStart;
+    nativeWindowEpoch.value = 3;
     await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
     useTranscriptionStore().finalText = 'Current recording';
     oldQuery.resolve(2);
@@ -1955,12 +1957,56 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     wrapper.unmount();
   });
 
-  it('uses the synchronized duplicate-start epoch to hide the existing session window', async () => {
+  it.each(['Processing', 'Idle'])('does not lend a reopened window to late %s from a retired session', async (terminal) => {
     const wrapper = mountRecordingPopover();
     await waitForListenerCount('hotkey:toggle-recording', 1);
     const defaultInvoke = invokeMock.getMockImplementation()!;
     invokeMock.mockImplementation((command: string, ...args: any[]) => {
+      if (command === 'get_recording_window_epoch_for_session') return Promise.resolve(1);
+      return defaultInvoke(command, ...args);
+    });
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
+    nativeWindowEpoch.value = 2;
+    await emitTauriEvent('recording:window-shown', {});
+    await emitTauriEvent('recording:status', { session_id: 90, status: terminal, stopped_via_hotkey: true });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(hideWindowMock).not.toHaveBeenCalled();
+    expect(document.querySelector('.mini-closing')).toBeNull();
+    wrapper.unmount();
+  });
+
+  it('hides on Idle after auto-paste restores the same processing session', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('hotkey:toggle-recording', 1);
+    const defaultInvoke = invokeMock.getMockImplementation()!;
+    let sessionLeaseEpoch = 1;
+    invokeMock.mockImplementation((command: string, ...args: any[]) => {
+      if (command === 'get_recording_window_epoch_for_session') return Promise.resolve(sessionLeaseEpoch);
+      return defaultInvoke(command, ...args);
+    });
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Processing' });
+    await flushMicrotasks();
+
+    nativeWindowEpoch.value = 2;
+    sessionLeaseEpoch = 2;
+    await emitTauriEvent('recording:window-shown', {});
+    await emitTauriEvent('recording:status', { session_id: 90, status: 'Idle' });
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(invokeMock).toHaveBeenCalledWith('hide_recording_window_if_current', { windowEpoch: 2 });
+    expect(hideWindowMock).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it('uses the synchronized duplicate-start epoch to hide the existing session window', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('hotkey:toggle-recording', 1);
+    const defaultInvoke = invokeMock.getMockImplementation()!;
+    let sessionLeaseEpoch = 1;
+    invokeMock.mockImplementation((command: string, ...args: any[]) => {
       if (command === 'get_recording_status') return Promise.resolve('Recording');
+      if (command === 'get_recording_window_epoch_for_session') return Promise.resolve(sessionLeaseEpoch);
       return defaultInvoke(command, ...args);
     });
     await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
@@ -1970,6 +2016,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     // Native's busy-start branch publishes existing status plus window synchronization.
     await emitTauriEvent('recording:status', { session_id: 90, status: 'Recording' });
     await emitTauriEvent('recording:window-shown', {});
+    sessionLeaseEpoch = 2;
     expect(store.finalText).toBe('Current speech');
     await emitTauriEvent('recording:status', { session_id: 90, status: 'Processing' });
     await vi.advanceTimersByTimeAsync(500);
