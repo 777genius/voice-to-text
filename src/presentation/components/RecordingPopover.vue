@@ -874,7 +874,7 @@ onMounted(async () => {
 watch(() => store.lastAcceptedRecordingStatus, (payload) => {
   if (!payload || isComponentUnmounted) return;
   const nextStatus = payload.status;
-  const payloadSessionId = payload.session_id;
+  const windowOwnerSessionId = payload.window_owner_session_id ?? payload.session_id;
   if (nextStatus !== 'Processing' && nextStatus !== 'Idle') {
     completedAutoHideSessionId = null;
     cancelPendingHideRecordingWindow();
@@ -882,19 +882,19 @@ watch(() => store.lastAcceptedRecordingStatus, (payload) => {
   }
   if (nextStatus === 'Processing') {
     if (appConfigStore.showMiniRecordingWindow &&
-        pendingAutoHideSessionId !== payloadSessionId &&
-        completedAutoHideSessionId !== payloadSessionId) {
-      void scheduleHideRecordingWindow('mini window recording finalizing', payloadSessionId);
+        pendingAutoHideSessionId !== windowOwnerSessionId &&
+        completedAutoHideSessionId !== windowOwnerSessionId) {
+      void scheduleHideRecordingWindow('mini window recording finalizing', windowOwnerSessionId);
     }
     return;
   }
   if (appConfigStore.playCompletionSound) playDoneSound();
   if (appConfigStore.showMiniRecordingWindow) {
-    if (completedAutoHideSessionId !== payloadSessionId) {
-      void scheduleHideRecordingWindow('mini window recording stopped', payloadSessionId);
+    if (completedAutoHideSessionId !== windowOwnerSessionId) {
+      void scheduleHideRecordingWindow('mini window recording stopped', windowOwnerSessionId);
     }
   } else if (payload.stopped_via_hotkey) {
-    void scheduleHideRecordingWindow('stopped via hotkey', payloadSessionId);
+    void scheduleHideRecordingWindow('stopped via hotkey', windowOwnerSessionId);
   }
 }, { flush: 'sync' });
 

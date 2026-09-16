@@ -142,6 +142,9 @@ pub struct RunTerminalPayload {
 /// Payload for recording status event
 #[derive(Debug, Clone, Serialize)]
 pub struct RecordingStatusPayload {
+    /// Snapshot-qualified physical window lease; session_id still owns the transcript.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_owner_session_id: Option<u64>,
     /// Уникальный идентификатор сессии записи (монотонно растёт).
     pub session_id: u64,
     pub status: RecordingStatus,

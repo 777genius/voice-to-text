@@ -82,6 +82,8 @@ export interface TranscriptionTerminalPayload {
 export type RecordingMode = 'dictation' | 'live_translation';
 
 export interface RecordingStatusPayload {
+  /** Physical window lease captured by this event; session_id remains the transcript owner. */
+  window_owner_session_id?: number;
   session_id: number;
   status: RecordingStatus;
   stopped_via_hotkey?: boolean;

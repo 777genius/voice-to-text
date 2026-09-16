@@ -1708,6 +1708,7 @@ impl AppState {
                 if let Err(error) = app_handle.emit(
                     crate::presentation::events::EVENT_RECORDING_STATUS,
                     crate::presentation::RecordingStatusPayload {
+                        window_owner_session_id: None,
                         session_id: timeout_session_id,
                         status: crate::domain::RecordingStatus::Processing,
                         stopped_via_hotkey: false,
@@ -1730,6 +1731,7 @@ impl AppState {
                         let _ = app_handle.emit(
                             crate::presentation::events::EVENT_RECORDING_STATUS,
                             crate::presentation::RecordingStatusPayload {
+                                window_owner_session_id: None,
                                 session_id: timeout_session_id,
                                 status: crate::domain::RecordingStatus::Idle,
                                 stopped_via_hotkey: false,
@@ -1751,6 +1753,7 @@ impl AppState {
                             let _ = app_handle.emit(
                                 crate::presentation::events::EVENT_RECORDING_STATUS,
                                 crate::presentation::RecordingStatusPayload {
+                                    window_owner_session_id: None,
                                     session_id: timeout_session_id,
                                     status: crate::domain::RecordingStatus::Idle,
                                     stopped_via_hotkey: false,

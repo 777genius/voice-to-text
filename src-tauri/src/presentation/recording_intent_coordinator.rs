@@ -568,6 +568,8 @@ pub struct RecordingStatusProjection {
     pub panel_goal: PanelGoal,
     pub current_run: Option<RunId>,
     pub status_run: Option<RunId>,
+    /// Physical lease owner captured with this continuation status, not its transcript owner.
+    pub window_owner_run: Option<RunId>,
     pub processing_jobs: usize,
     pub pending_start: bool,
     pub stopped_via_hotkey: bool,
@@ -1049,6 +1051,7 @@ pub struct CoordinatorState {
     blocked_start_revision: Option<IntentRevision>,
     panel_failure: Option<PanelFailure>,
     terminal_status_run: Option<RunId>,
+    terminal_window_owner: Option<(RunId, RunId)>,
     last_projection: Option<RecordingStatusProjection>,
     shutdown_ready_emitted: bool,
     event_sequence: u64,
@@ -1096,6 +1099,7 @@ impl CoordinatorState {
             blocked_start_revision: None,
             panel_failure: None,
             terminal_status_run: None,
+            terminal_window_owner: None,
             last_projection: None,
             shutdown_ready_emitted: false,
             event_sequence: 0,
@@ -1285,6 +1289,15 @@ impl CoordinatorState {
             panel_goal: self.desired_panel,
             current_run: self.capture.run().map(|run| run.run_id),
             status_run,
+            window_owner_run: self
+                .continuation
+                .filter(|route| Some(route.key.logical_run_id) == status_run)
+                .map(|route| route.episode)
+                .or_else(|| {
+                    self.terminal_window_owner
+                        .filter(|(logical, _)| Some(*logical) == status_run)
+                        .map(|(_, episode)| episode)
+                }),
             processing_jobs: self.processing_jobs.len(),
             pending_start,
             stopped_via_hotkey: matches!(
@@ -2386,6 +2399,9 @@ fn apply_finalize_finished(
         .continuation
         .is_some_and(|route| route.key.logical_run_id == run_id)
     {
+        state.terminal_window_owner = state
+            .continuation
+            .map(|route| (route.key.logical_run_id, route.episode));
         state.continuation = None;
     }
 
@@ -3243,6 +3259,84 @@ mod tests {
         assert_eq!(state.continuation.unwrap().episode, b.run_id);
         assert_eq!(state.foreground_desired_run(), Some(b));
         assert_eq!(state.capture_identity(), Some((b.run_id, 22)));
+        let effects = reduce(
+            &mut state,
+            intent(IntentKind::Stop, IntentSource::Frontend, 4),
+        );
+        assert_eq!(state.projection().status_run, Some(a.run_id));
+        assert_eq!(state.projection().window_owner_run, Some(b.run_id));
+        let (stop_id, _) = find_stop(&effects);
+        let effects = reduce(
+            &mut state,
+            CoordinatorEvent::CaptureStopped {
+                effect_id: stop_id,
+                run_id: b.run_id,
+                outcome: CaptureStopOutcome::Inactive,
+            },
+        );
+        assert_eq!(state.projection().current_run, None);
+        assert_eq!(state.projection().window_owner_run, Some(b.run_id));
+        let (pause_id, key) = effects
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::Continuation(ContinuationEffect::Pause {
+                    effect_id,
+                    key,
+                    ..
+                }) => Some((*effect_id, *key)),
+                _ => None,
+            })
+            .unwrap();
+        reduce(
+            &mut state,
+            CoordinatorEvent::Continuation(ContinuationEvent::PauseFinished {
+                effect_id: pause_id,
+                key,
+                pause_epoch: Some(2),
+            }),
+        );
+        assert_eq!(state.projection().status, ProjectionStatus::Processing);
+        assert_eq!(state.projection().window_owner_run, Some(b.run_id));
+        let key = state.continuation.unwrap().key;
+        reduce(
+            &mut state,
+            CoordinatorEvent::Continuation(ContinuationEvent::WindowElapsed { key }),
+        );
+        let effects = reduce(
+            &mut state,
+            CoordinatorEvent::Continuation(ContinuationEvent::TerminalObserved {
+                logical_run_id: a.run_id,
+                connection_generation: 7,
+            }),
+        );
+        let finalize_id = effects
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::FinalizeRecording { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .unwrap();
+        reduce(
+            &mut state,
+            CoordinatorEvent::FinalizeFinished {
+                effect_id: finalize_id,
+                run_id: a.run_id,
+                outcome: FinalizeOutcome::Committed,
+            },
+        );
+        assert!(state.continuation.is_none());
+        assert_eq!(state.projection().status, ProjectionStatus::Idle);
+        assert_eq!(state.projection().status_run, Some(a.run_id));
+        assert_eq!(state.projection().window_owner_run, Some(b.run_id));
+        let effects = reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::Frontend, 5),
+        );
+        let (start_id, c) = finish_prepare_and_find_start(&mut state, &effects);
+        complete_start(&mut state, start_id, c.run_id);
+        assert_eq!(state.projection().status_run, Some(c.run_id));
+        assert_eq!(state.projection().window_owner_run, None);
+
         assert_eq!(lifecycle.session_epoch(a.run_id.get()), Some(a_epoch));
         assert_eq!(lifecycle.session_epoch(b.run_id.get()), Some(b_epoch));
         assert!(!lifecycle
@@ -3260,7 +3354,6 @@ mod tests {
         );
         assert!(state.validate().is_ok());
     }
-
     #[test]
     fn physical_generation_fence_rejects_same_run_stale_vad_without_changing_intent() {
         let mut state = recording_state();

@@ -453,6 +453,7 @@ fn dispatch_runtime_error(
             let _ = app_handle.emit(
                 EVENT_RECORDING_STATUS,
                 RecordingStatusPayload {
+                    window_owner_session_id: None,
                     session_id,
                     status: RecordingStatus::Error,
                     stopped_via_hotkey: false,
@@ -599,6 +600,7 @@ fn emit_idle_recording_status(
     let _ = app_handle.emit(
         EVENT_RECORDING_STATUS,
         RecordingStatusPayload {
+            window_owner_session_id: None,
             session_id,
             status: RecordingStatus::Idle,
             stopped_via_hotkey,
@@ -613,6 +615,7 @@ fn active_recording_status_payload(
     mode: Option<RecordingMode>,
 ) -> Option<RecordingStatusPayload> {
     (session_id > 0).then_some(RecordingStatusPayload {
+        window_owner_session_id: None,
         session_id,
         status,
         stopped_via_hotkey: false,
@@ -1905,6 +1908,7 @@ fn execute_recording_coordinator_effect(
                 let _ = app_handle.emit(
                     EVENT_RECORDING_STATUS,
                     RecordingStatusPayload {
+                        window_owner_session_id: projection.window_owner_run.map(|run| run.get()),
                         session_id,
                         status: coordinator_projection_status(projection.status),
                         stopped_via_hotkey: projection.stopped_via_hotkey,
@@ -2667,6 +2671,7 @@ async fn start_live_translation_recording(
         let _ = app_handle.emit(
             EVENT_RECORDING_STATUS,
             RecordingStatusPayload {
+                window_owner_session_id: None,
                 session_id,
                 status: RecordingStatus::Starting,
                 stopped_via_hotkey: false,
@@ -2728,6 +2733,7 @@ async fn start_live_translation_recording(
                 let _ = app_handle_error.emit(
                     EVENT_RECORDING_STATUS,
                     RecordingStatusPayload {
+                        window_owner_session_id: None,
                         session_id,
                         status: RecordingStatus::Error,
                         stopped_via_hotkey: false,
@@ -2769,6 +2775,7 @@ async fn start_live_translation_recording(
                 let _ = app_handle_status.emit(
                     EVENT_RECORDING_STATUS,
                     RecordingStatusPayload {
+                        window_owner_session_id: None,
                         session_id,
                         status,
                         stopped_via_hotkey: false,
@@ -2830,6 +2837,7 @@ async fn start_live_translation_recording(
                 let _ = app_handle.emit(
                     EVENT_RECORDING_STATUS,
                     RecordingStatusPayload {
+                        window_owner_session_id: None,
                         session_id,
                         status: RecordingStatus::Error,
                         stopped_via_hotkey: false,
@@ -2869,6 +2877,7 @@ async fn stop_live_translation_recording(
         let _ = app_handle.emit(
             EVENT_RECORDING_STATUS,
             RecordingStatusPayload {
+                window_owner_session_id: None,
                 session_id,
                 status: RecordingStatus::Processing,
                 stopped_via_hotkey,
@@ -3938,6 +3947,7 @@ async fn start_recording_checked(
                     let _ = app_handle.emit(
                         EVENT_RECORDING_STATUS,
                         RecordingStatusPayload {
+                            window_owner_session_id: None,
                             session_id,
                             status: RecordingStatus::Error,
                             stopped_via_hotkey: false,
@@ -4221,6 +4231,7 @@ async fn start_recording_checked(
             let _ = app_handle.emit(
                 EVENT_RECORDING_STATUS,
                 RecordingStatusPayload {
+                    window_owner_session_id: None,
                     session_id,
                     status: RecordingStatus::Starting,
                     stopped_via_hotkey: false,
@@ -4264,6 +4275,7 @@ async fn start_recording_checked(
             let _ = app_handle.emit(
                 EVENT_RECORDING_STATUS,
                 RecordingStatusPayload {
+                    window_owner_session_id: None,
                     session_id,
                     status: RecordingStatus::Error,
                     stopped_via_hotkey: false,
@@ -4425,6 +4437,7 @@ async fn start_recording_checked(
         let _ = app_handle.emit(
             EVENT_RECORDING_STATUS,
             RecordingStatusPayload {
+                window_owner_session_id: None,
                 session_id,
                 status: RecordingStatus::Recording,
                 stopped_via_hotkey: false,

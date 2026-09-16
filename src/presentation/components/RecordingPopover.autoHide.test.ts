@@ -1208,6 +1208,55 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     wrapper.unmount();
   });
 
+  it('closes continued physical B on release while logical A stays Processing', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('hotkey:toggle-recording', 1);
+    const originalInvoke = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation(async (command: string, args: any) => {
+      if (command === 'get_recording_status') return 'Recording';
+      if (command === 'get_recording_window_epoch_for_session') return new Map([[41, 1], [42, 2]]).get(args.sessionId) ?? null;
+      return originalInvoke(command, args);
+    });
+    await emitTauriEvent('recording:status', { session_id: 41, status: 'Recording' });
+    nativeWindowEpoch.value = 2;
+    await emitTauriEvent('recording:window-shown', { windowEpoch: 2 });
+    const store = useTranscriptionStore();
+    const readiness = vi.spyOn(store, 'isCaptureReady', 'get').mockReturnValue(true);
+    const stoppedB = { session_id: 41, window_owner_session_id: 42, status: 'Processing' };
+    await emitTauriEvent('recording:status', stoppedB);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(hideWindowMock).not.toHaveBeenCalled();
+    readiness.mockReturnValue(false);
+    await emitTauriEvent('recording:status', stoppedB);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(store.sessionId).toBe(41);
+    expect(store.lastAcceptedRecordingStatus?.session_id).toBe(41);
+    expect(store.status).toBe('Processing');
+    expect(invokeMock).toHaveBeenCalledWith('get_recording_window_epoch_for_session', { sessionId: 42 });
+    expect(hideWindowMock).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it.each([undefined, 42])('does not lend newer C window to delayed A status with physical owner %s', async (owner) => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('hotkey:toggle-recording', 1);
+    const originalInvoke = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation(async (command: string, args: any) => {
+      if (command === 'get_recording_status') return 'Recording';
+      if (command === 'get_recording_window_epoch_for_session') return new Map([[41, 1], [42, 2]]).get(args.sessionId) ?? null;
+      return originalInvoke(command, args);
+    });
+    await emitTauriEvent('recording:status', { session_id: 41, status: 'Recording' });
+    nativeWindowEpoch.value = 3;
+    await emitTauriEvent('recording:window-shown', { windowEpoch: 3 });
+    await emitTauriEvent('recording:status', {
+      session_id: 41, window_owner_session_id: owner, status: 'Processing',
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(hideWindowMock).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
   it('starts finalizing and hides only for Processing from the current session', async () => {
     const wrapper = mountRecordingPopover();
     await waitForListenerCount('hotkey:toggle-recording', 1);
