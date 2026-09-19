@@ -91,46 +91,63 @@ const showDuplexHeadsetWarning = computed(() =>
 const hasMiniIncomingTranslation = computed(() =>
   hasVisibleIncomingTranslation.value
 );
-const hasMiniReadyCapture = computed(() =>
-  !hasMiniError.value && (
-    store.isCaptureReady ||
+type MiniCapturePhase = 'idle' | 'starting' | 'listening' | 'processing' | 'error';
+
+interface MiniCaptureProjection {
+  phase: MiniCapturePhase;
+  statusText: string;
+  placeholderText: string;
+}
+
+const miniCaptureProjection = computed<MiniCaptureProjection>(() => {
+  if (hasMiniError.value) {
+    const message = store.incomingTranslationError || store.errorSummary || t('main.errorGeneric');
+    return { phase: 'error', statusText: message, placeholderText: message };
+  }
+
+  const readiness = store.captureReadiness;
+  const hasTerminalReadiness = readiness?.state === 'unavailable' &&
+    ['idle', 'cancelled', 'error'].includes(readiness.reason);
+  const hasIndependentReadyCapture =
     (store.activeRecordingMode === 'live_translation' && store.isRecording) ||
     (!store.hasCaptureReadinessProtocol && store.isRecording) ||
-    store.incomingTranslationStatus === 'Recording'
-  )
-);
-const hasMiniStartingCapture = computed(() =>
-  !hasMiniReadyCapture.value && (
+    store.incomingTranslationStatus === 'Recording';
+
+  if (store.isCaptureReady || hasIndependentReadyCapture) {
+    let statusText = t('main.listening');
+    if (store.isCaptureReady && store.captureReadiness?.reason === 'finalizing-previous') {
+      statusText = `${t('main.listening')} ${t('main.processing')}`;
+    } else if (store.isCaptureReady && store.captureReadiness?.reason === 'connecting-provider') {
+      statusText = `${t('main.listening')} ${t('main.connecting')}`;
+    }
+    return { phase: 'listening', statusText, placeholderText: t('main.listening') };
+  }
+
+  const hasIndependentStartingCapture = store.incomingTranslationStatus === 'Starting';
+  const hasCurrentStartingCapture = !hasTerminalReadiness && (
     store.recordingDesiredOn ||
     store.isConnecting ||
     store.isStarting ||
-    store.isRecording ||
-    store.incomingTranslationStatus === 'Starting'
-  )
-);
-const hasMiniProcessingCapture = computed(() =>
-  !hasMiniReadyCapture.value && (
-    store.isProcessing || store.incomingTranslationStatus === 'Processing'
-  )
-);
-const miniCaptureStatusText = computed(() => {
-  if (hasMiniError.value) {
-    return store.incomingTranslationError || store.errorSummary || t('main.errorGeneric');
-  }
-  if (hasMiniReadyCapture.value) {
-    if (!store.isCaptureReady) return t('main.listening');
-    if (store.captureReadiness?.reason === 'finalizing-previous') {
-      return `${t('main.listening')} ${t('main.processing')}`;
+    store.isRecording
+  );
+  if (hasIndependentStartingCapture || hasCurrentStartingCapture) {
+    let statusText = t('main.starting');
+    if (readiness?.reason === 'finalizing-previous') {
+      statusText = `${t('main.starting')} ${t('main.processing')}`;
+    } else if (readiness?.reason === 'connecting-provider' || store.isConnecting) {
+      statusText = `${t('main.starting')} ${t('main.connecting')}`;
     }
-    if (store.captureReadiness?.reason === 'connecting-provider') {
-      return `${t('main.listening')} ${t('main.connecting')}`;
-    }
-    return t('main.listening');
+    return { phase: 'starting', statusText, placeholderText: t('main.starting') };
   }
-  if (hasMiniProcessingCapture.value) return t('main.processing');
-  if (hasMiniStartingCapture.value) return t('main.starting');
-  return '';
+
+  if (store.isProcessing || store.incomingTranslationStatus === 'Processing') {
+    const message = t('main.processing');
+    return { phase: 'processing', statusText: message, placeholderText: message };
+  }
+
+  return { phase: 'idle', statusText: '', placeholderText: '' };
 });
+const hasMiniReadyCapture = computed(() => miniCaptureProjection.value.phase === 'listening');
 const hasMiniRecognizedText = computed(() =>
   store.hasVisibleTranscriptionText || hasMiniTranslationText.value || hasMiniIncomingTranslationText.value
 );
@@ -175,11 +192,10 @@ const miniCurrentDisplayText = computed(() => {
   if (latestRecognized) return latestRecognized;
   if (store.incomingTranslationText.trim()) return store.incomingTranslationText.trim();
   if (store.isIncomingTranslationActive) return t('main.incomingTranslationEmpty');
-  if (store.isCaptureReady) return t('main.listening');
-  if (store.isConnecting) return t('main.connecting');
-  if (store.isRecording && !store.hasCaptureReadinessProtocol) return t('main.listening');
-  if (store.isStarting || store.isRecording) return t('main.starting');
-  if (store.isProcessing) return store.displayText || t('main.processing');
+  if (miniCaptureProjection.value.phase === 'processing') {
+    return store.displayText || miniCaptureProjection.value.placeholderText;
+  }
+  if (miniCaptureProjection.value.placeholderText) return miniCaptureProjection.value.placeholderText;
   return '';
 });
 
@@ -1153,13 +1169,13 @@ const minimizeWindow = async (event?: Event) => {
           <span
             class="mini-status-dot"
             role="status"
-            :aria-label="miniCaptureStatusText"
-            :title="miniCaptureStatusText"
+            :aria-label="miniCaptureProjection.statusText"
+            :title="miniCaptureProjection.statusText"
             :class="{
-              recording: hasMiniReadyCapture,
-              starting: hasMiniStartingCapture,
-              processing: hasMiniProcessingCapture,
-              error: store.hasError || Boolean(store.error) || Boolean(store.incomingTranslationError),
+              recording: miniCaptureProjection.phase === 'listening',
+              starting: miniCaptureProjection.phase === 'starting',
+              processing: miniCaptureProjection.phase === 'processing',
+              error: miniCaptureProjection.phase === 'error',
             }"
           ></span>
 

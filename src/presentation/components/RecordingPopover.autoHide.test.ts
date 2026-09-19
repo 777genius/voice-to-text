@@ -259,6 +259,19 @@ function mountRecordingPopover(setupStore?: (store: ReturnType<typeof useTranscr
   };
 }
 
+function expectMiniCapturePhase(
+  phase: 'recording' | 'starting' | 'processing' | 'error',
+  text: string,
+) {
+  const statusDot = document.querySelector<HTMLElement>('.mini-status-dot');
+  expect(statusDot).not.toBeNull();
+  for (const candidate of ['recording', 'starting', 'processing', 'error']) {
+    expect(statusDot!.classList.contains(candidate), candidate).toBe(candidate === phase);
+  }
+  expect(statusDot!.getAttribute('aria-label')).toContain(text);
+  expect(document.querySelector('.mini-transcription-text-inner')?.textContent).toContain(text);
+}
+
 describe('RecordingPopover mini auto-hide e2e', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -1046,6 +1059,139 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     expect(store.isStarting).toBe(true);
     expect(statusDot?.classList.contains('recording')).toBe(false);
     expect(statusDot?.classList.contains('starting')).toBe(true);
+
+    wrapper.unmount();
+  });
+
+  it('shows a pending successor as Starting while the previous run is Processing', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:intent-projection', 1);
+    await waitForListenerCount('recording:capture-readiness', 1);
+    await waitForListenerCount('recording:status', 1);
+
+    await emitTauriEvent('recording:status', {
+      session_id: 90,
+      status: RecordingStatus.Recording,
+      stopped_via_hotkey: false,
+    });
+    await emitTauriEvent('recording:status', {
+      session_id: 90,
+      status: RecordingStatus.Processing,
+      stopped_via_hotkey: true,
+    });
+    await emitTauriEvent('recording:intent-projection', {
+      runId: 101,
+      intentRevision: 8,
+      status: RecordingStatus.Processing,
+      desiredOn: true,
+      pendingStart: true,
+      processingJobs: 1,
+      shutdownRequested: false,
+    });
+    await emitTauriEvent('recording:capture-readiness', {
+      revision: 8,
+      runId: 201,
+      state: 'unavailable',
+      reason: 'finalizing-previous',
+      generation: 1,
+    });
+
+    expectMiniCapturePhase('starting', 'Starting');
+    expect(document.querySelector('.mini-status-dot')?.getAttribute('title')).toContain('Processing');
+    wrapper.unmount();
+  });
+
+  it.each([
+    { order: 'intent before readiness', state: 'buffering' as const },
+    { order: 'readiness before intent', state: 'streaming' as const },
+  ])('shows $state capture as Listening with $order', async ({ order, state }) => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:intent-projection', 1);
+    await waitForListenerCount('recording:capture-readiness', 1);
+
+    const intent = {
+      runId: 101,
+      intentRevision: 8,
+      status: RecordingStatus.Processing,
+      desiredOn: true,
+      pendingStart: true,
+      processingJobs: 1,
+      shutdownRequested: false,
+    };
+    const readiness = {
+      revision: 8,
+      runId: 201,
+      state,
+      reason: state === 'buffering' ? 'starting-capture' : 'recording',
+      generation: 1,
+    };
+
+    if (order === 'intent before readiness') {
+      await emitTauriEvent('recording:intent-projection', intent);
+      expectMiniCapturePhase('starting', 'Starting');
+      await emitTauriEvent('recording:capture-readiness', readiness);
+    } else {
+      await emitTauriEvent('recording:capture-readiness', readiness);
+      await emitTauriEvent('recording:intent-projection', intent);
+    }
+
+    expectMiniCapturePhase('recording', 'Listening');
+    wrapper.unmount();
+  });
+
+  it('does not revive a cancelled start before desired-off or from stale readiness after it', async () => {
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:intent-projection', 1);
+    await waitForListenerCount('recording:capture-readiness', 1);
+    await waitForListenerCount('recording:status', 1);
+
+    await emitTauriEvent('recording:status', {
+      session_id: 90,
+      status: RecordingStatus.Recording,
+      stopped_via_hotkey: false,
+    });
+    await emitTauriEvent('recording:status', {
+      session_id: 90,
+      status: RecordingStatus.Processing,
+      stopped_via_hotkey: true,
+    });
+    await emitTauriEvent('recording:intent-projection', {
+      runId: 101,
+      intentRevision: 11,
+      status: RecordingStatus.Processing,
+      desiredOn: true,
+      pendingStart: true,
+      processingJobs: 1,
+      shutdownRequested: false,
+    });
+    expectMiniCapturePhase('starting', 'Starting');
+
+    await emitTauriEvent('recording:capture-readiness', {
+      revision: 11,
+      runId: 201,
+      state: 'unavailable',
+      reason: 'cancelled',
+      generation: 1,
+    });
+    expectMiniCapturePhase('processing', 'Processing');
+
+    await emitTauriEvent('recording:intent-projection', {
+      runId: 101,
+      intentRevision: 11,
+      status: RecordingStatus.Processing,
+      desiredOn: false,
+      pendingStart: false,
+      processingJobs: 1,
+      shutdownRequested: false,
+    });
+    await emitTauriEvent('recording:capture-readiness', {
+      revision: 11,
+      runId: 201,
+      state: 'streaming',
+      reason: 'recording',
+      generation: 2,
+    });
+    expectMiniCapturePhase('processing', 'Processing');
 
     wrapper.unmount();
   });
