@@ -107,6 +107,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     null,
   );
   const recordingIntentFaultRunId = ref<number | null>(null);
+  const lastAcceptedRecordingIntentProjection = shallowRef<RecordingIntentProjectionPayload | null>(
+    null,
+  );
   const captureReadinessByIntent = shallowRef(
     new Map<string, RecordingCaptureReadinessPayload>(),
   );
@@ -2125,6 +2128,21 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             const faultOwnerRunId = Object.prototype.hasOwnProperty.call(event.payload, 'faultRunId')
               ? validFaultRunId
               : validRunId;
+            const nextWindowOwnerRunId = event.payload.windowOwnerRunId;
+            const parsedWindowOwnerRunId = Number.isSafeInteger(nextWindowOwnerRunId) &&
+              Number(nextWindowOwnerRunId) > 0
+              ? Number(nextWindowOwnerRunId)
+              : null;
+            const previousIntentProjection = lastAcceptedRecordingIntentProjection.value;
+            const validWindowOwnerRunId = parsedWindowOwnerRunId ?? (
+              !event.payload.desiredOn &&
+              previousIntentProjection !== null &&
+              !previousIntentProjection.desiredOn &&
+              Number.isSafeInteger(previousIntentProjection.windowOwnerRunId) &&
+              Number(previousIntentProjection.windowOwnerRunId) > 0
+                ? Number(previousIntentProjection.windowOwnerRunId)
+                : null
+            );
             const preservesConnectRetry =
               event.payload.fault === 'startFailed' &&
               connectOperation !== null &&
@@ -2150,6 +2168,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               ...event.payload,
               awaitingSessionStart: awaitingSessionStart.value,
             }, 'debug');
+            lastAcceptedRecordingIntentProjection.value = {
+              ...event.payload,
+              windowOwnerRunId: validWindowOwnerRunId,
+            };
 
             if (event.payload.fault) {
               recordingStartPending.value = false;
@@ -4024,6 +4046,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     recordingIntentRevision.value = null;
     recordingIntentFault.value = null;
     recordingIntentFaultRunId.value = null;
+    lastAcceptedRecordingIntentProjection.value = null;
     captureReadinessByIntent.value = new Map();
     lastCaptureReadinessGeneration = -1;
 
@@ -4052,6 +4075,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     recordingIntentRunId,
     recordingIntentFaultRunId: computed(() => recordingIntentFaultRunId.value),
     recordingIntentRevision,
+    lastAcceptedRecordingIntentProjection,
     captureReadiness,
     captureRunId,
     captureGeneration,

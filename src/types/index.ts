@@ -101,6 +101,8 @@ export interface RecordingIntentProjectionPayload {
   captureEpisodeId?: number | null;
   continuationPhase?: ContinuationPhase | null;
   runId?: number | null;
+  /** Physical recording-window lease owner for this intent revision. */
+  windowOwnerRunId?: number | null;
   faultRunId?: number | null;
   intentRevision: number;
   status: RecordingStatus;

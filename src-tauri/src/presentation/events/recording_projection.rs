@@ -11,6 +11,8 @@ pub struct RecordingIntentProjectionPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub continuation_phase: Option<RecordingContinuationPhase>,
     pub run_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_owner_run_id: Option<u64>,
     pub intent_revision: Option<u64>,
     pub status: RecordingStatus,
     pub desired_on: bool,
@@ -94,6 +96,7 @@ mod tests {
             capture_episode_id: Some(102),
             continuation_phase: Some(RecordingContinuationPhase::ContinuePending),
             run_id: Some(102),
+            window_owner_run_id: Some(102),
             intent_revision: Some(8),
             status: RecordingStatus::Processing,
             desired_on: true,
@@ -107,6 +110,7 @@ mod tests {
         assert_eq!(value["logicalRunId"], 101);
         assert_eq!(value["captureEpisodeId"], 102);
         assert_eq!(value["runId"], 102);
+        assert_eq!(value["windowOwnerRunId"], 102);
         assert_eq!(value["continuationPhase"], "continue_pending");
         assert!(value.get("logical_run_id").is_none());
         for (phase, wire) in [

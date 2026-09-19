@@ -1280,6 +1280,7 @@ impl CoordinatorState {
                 .or_else(|| self.capture.run().map(|run| run.run_id))
                 .or(self.terminal_status_run)
         };
+        let current_run = self.capture.run().map(|run| run.run_id);
         RecordingStatusProjection {
             logical_run_id: self.continuation.map(|route| route.key.logical_run_id),
             continuation_phase: self.continuation.map(|route| route.phase),
@@ -1287,12 +1288,15 @@ impl CoordinatorState {
             desired_recording: self.desired_recording,
             intent_revision: IntentRevision::new(self.ids.intent),
             panel_goal: self.desired_panel,
-            current_run: self.capture.run().map(|run| run.run_id),
+            current_run,
             status_run,
-            window_owner_run: self
-                .continuation
-                .filter(|route| Some(route.key.logical_run_id) == status_run)
-                .map(|route| route.episode)
+            window_owner_run: current_run
+                .filter(|run| !self.desired_recording.is_on() || Some(*run) != status_run)
+                .or_else(|| {
+                    self.continuation
+                        .filter(|route| Some(route.key.logical_run_id) == status_run)
+                        .map(|route| route.episode)
+                })
                 .or_else(|| {
                     self.terminal_window_owner
                         .filter(|(logical, _)| Some(*logical) == status_run)
@@ -1661,6 +1665,7 @@ fn apply_intent(state: &mut CoordinatorState, intent: RecordingIntent, phase: &m
         return;
     }
     if !wants_on {
+        retain_window_owner_for_stop(state);
         note_continuation_stop(state, intent.kind == IntentKind::Toggle);
     }
     let revision = state.next_revision();
@@ -1734,6 +1739,7 @@ fn force_off(state: &mut CoordinatorState, reason: StopReason) {
             *cancel_requested = false;
         }
     }
+    retain_window_owner_for_stop(state);
     note_continuation_stop(state, false);
     // Teardown revokes even a previously sealed pending phrase. Ordinary Stop
     // retains it, but sleep/shutdown/failure cannot authorize later routing.
@@ -1753,6 +1759,18 @@ fn force_off(state: &mut CoordinatorState, reason: StopReason) {
         } else {
             PanelGoal::Preserve
         };
+}
+
+fn retain_window_owner_for_stop(state: &mut CoordinatorState) {
+    let Some(episode) = state.capture.run().map(|run| run.run_id) else {
+        return;
+    };
+    let logical = state
+        .continuation
+        .filter(|route| route.episode == episode)
+        .map(|route| route.key.logical_run_id)
+        .unwrap_or(episode);
+    state.terminal_window_owner = Some((logical, episode));
 }
 
 fn panel_goal_for_off(policy: RuntimePolicySnapshot, source: IntentSource) -> PanelGoal {
@@ -3145,6 +3163,7 @@ mod tests {
             &mut state,
             intent(IntentKind::Stop, IntentSource::Frontend, 4),
         );
+        assert_eq!(state.projection().window_owner_run, Some(b.run_id));
         assert!(effects.iter().any(|effect| matches!(effect,
             CoordinatorEffect::Continuation(ContinuationEffect::SealPending { run_id, .. }) if *run_id == b.run_id
         )));

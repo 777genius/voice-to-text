@@ -1,3 +1,4 @@
+import { runNativeMiniUxScenario } from './nativeMiniUxScenario';
 import { runNativeReaderPreparation } from './nativeReaderPreparation';
 import { runNativeContinuationCase } from './nativeContinuationCases';
 import { runNativeContinuationLive } from './nativeContinuationLive';
@@ -17,6 +18,7 @@ import { startNativeSampler } from './nativeSampler';
 
 interface NativeState {
   ready: boolean;
+  miniUxMode?: boolean;
   liveMode?: boolean;
   continuationMode?: boolean;
   continuationCase?: string;
@@ -88,6 +90,7 @@ export async function installNativeWindowHooks(pinia: Pinia): Promise<void> {
 export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
   if (import.meta.env.VITE_NATIVE_WINDOW_E2E !== '1' || getCurrentWindow().label !== 'main') return;
   // A Vite flag alone never grants auth bypass or runs scenarios in a normal app.
+  if ((await state()).miniUxMode) { await runNativeMiniUxScenario(pinia); return; }
   if ((await state()).readerPreparation) { await runNativeReaderPreparation(); return; }
   if ((await state()).qualificationTrial) { await runNativeContinuationLive(pinia); return; }
   const continuationCase = (await state()).continuationCase;

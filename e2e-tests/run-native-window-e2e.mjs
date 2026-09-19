@@ -12,6 +12,27 @@ import { fileURLToPath } from 'node:url';
 
 const source = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const marker = 'VOICETEXT_NATIVE_WINDOW_E2E_V1';
+
+export function validateMiniUxResult(envelope) {
+  const report = envelope.report;
+  const final = report?.final;
+  const cases = report?.cases;
+  if (envelope.marker !== marker || envelope.passed !== true || report?.passed !== true ||
+      !Array.isArray(cases) || cases.length !== 3 ||
+      cases[0].stop !== 'hotkey' || cases[1].stop !== 'native-close' ||
+      cases[2].stop !== 'background-start-during-hide' || cases[2].backgroundStartingBeforeHide !== true ||
+      cases.some(c => !Number.isFinite(c.hideMs) || c.hideMs < 0 || c.hideMs > 1000 ||
+        c.bufferedBeforeStop !== true || c.oldProviderStillFinalizing !== true || c.observations < 2 ||
+        c.backgroundDidNotReopen !== true || c.markerDeliveryComplete !== true) ||
+      cases[1].successorStayedVisible !== true || report.errors?.length !== 0 ||
+      final?.visible !== false || final?.status !== 'Idle' || final?.preparedCaptureTokenCount !== 0 ||
+      final?.fixture?.activeCaptures !== 0 || final?.fixture?.activeProviders !== 0 ||
+      final?.fixture?.maxActiveProviders !== 1 || final?.fixture?.markerViolations?.length !== 0) {
+    throw new Error('Incomplete mini UX window evidence');
+  }
+  return report;
+}
+
 const excluded = /^(?:\.git|\.codex|\.claude|\.ssh|\.aws|\.npmrc|node_modules|target|dist|\.env(?:\..*)?|auth\.(?:json|toml)|credentials(?:\..*)?)$/i;
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
@@ -31,6 +52,7 @@ export async function verifyPreparationArtifact(directory, resultPath, runtimeFa
 
 export function parseArguments(args) {
   if (args.length === 0) return {};
+  if (args.length === 1 && args[0] === '--mini-ux') return { miniUx: true };
   if (args.length === 1 && args[0] === '--reader-preparation') return { readerPreparation: true };
   if (args[0] === '--reuse-build' && path.isAbsolute(args[1] || '') &&
       ['--qualification-live', '--continuation-case', '--reader-preparation'].includes(args[2])) {
@@ -85,6 +107,7 @@ export function sanitizedEnvironment(directory, inherited = process.env) {
 
 export function executionEnvironment(directory, options) {
   const env = sanitizedEnvironment(directory);
+  if (options.miniUx) env.VOICETEXT_NATIVE_MINI_UX = 'unpaid-v1';
   if (options.readerPreparation) {
     if (options.trialId || options.continuationFake || options.liveFixturePath || options.terminalCleanup || options.harnessConfig) throw new Error('Conflicting preparation mode');
     env.VOICETEXT_NATIVE_READER_PREPARATION = 'unpaid-v1';
@@ -637,6 +660,7 @@ export function validE42PhysicalEvidence(s) {
 }
 
 export function validateResult(envelope) {
+  if (envelope.report?.mode === 'mini-ux') return validateMiniUxResult(envelope);
   if (envelope?.readerPreparation || envelope?.report?.mode === 'reader-preparation') throw new Error('Preparation is not qualification');
   const report = envelope?.report;
   const fixture = envelope?.fixture;
@@ -850,6 +874,8 @@ export async function main(args = process.argv.slice(2)) {
     terminalCleanup = cached.mode === 'terminal-cleanup';
     continuationFake = cached.mode === 'continuation-fake';
     options.continuationCase = cached.continuationCase;
+    options.miniUx = cached.mode === 'mini-ux';
+    if (options.miniUx) env.VOICETEXT_NATIVE_MINI_UX = 'unpaid-v1';
   }
   if (options.artifactDir && continuationFake) Object.assign(env, executionEnvironment(directory, { continuationFake, continuationCase: options.continuationCase }));
   if (terminalCleanup) env.VOICETEXT_NATIVE_TERMINAL = 'test-elevenlabs-stability-20260906';
@@ -893,7 +919,7 @@ export async function main(args = process.argv.slice(2)) {
     await writeFile(path.join(directory, 'native-build.json'), JSON.stringify({ schema: reuseSchema, marker,
       binary: path.basename(binary), ...binding, buildOrigin: binding, originalTauriConfig,
       trialId: trial?.id ?? null, continuationCase: options.continuationCase ?? null,
-      mode: options.readerPreparation ? 'reader-preparation' : trial ? 'continuation-live' : continuationFake ? 'continuation-fake' : liveMode ? 'live-elevenlabs' : terminalCleanup ? 'terminal-cleanup' : 'fixture' }));
+      mode: options.miniUx ? 'mini-ux' : options.readerPreparation ? 'reader-preparation' : trial ? 'continuation-live' : continuationFake ? 'continuation-fake' : liveMode ? 'live-elevenlabs' : terminalCleanup ? 'terminal-cleanup' : 'fixture' }));
   }
   await validateReusableBuild(directory, source);
   const binary = await validateCachedBinary(directory);
@@ -915,11 +941,21 @@ export async function main(args = process.argv.slice(2)) {
   if (proxy) env.VOICETEXT_QUALIFICATION_ENDPOINT = proxy.url;
   const collectBeforeTeardown = trial ? createQualificationCollector(trial, proxyEvents,
     async () => JSON.parse(await readFile(env.VOICE_TO_TEXT_NATIVE_E2E_RESULT, 'utf8')),
-    () => performance.now() - proxyStarted) : undefined;
+    () => performance.now() - proxyStarted) : options.miniUx ? async () => {
+      try {
+        // Read a complete report before retiring the test-owned process. UX and
+        // resource assertions are validated below, independently of termination.
+        JSON.parse(await readFile(env.VOICE_TO_TEXT_NATIVE_E2E_RESULT, 'utf8'));
+        return true;
+      } catch (error) {
+        if (error.code === 'ENOENT' || error instanceof SyntaxError) return false;
+        throw error;
+      }
+    } : undefined;
   try {
     if (interruption) throw interruption;
     // Event/preparation timeout: 30 seconds, then up to 5 seconds SIGTERM grace before SIGKILL.
-    await runOwned(binary, [], { cwd: directory, env }, options.readerPreparation || ['E04', 'E41', 'E42', 'after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle'].includes(options.continuationCase) ? 30_000 : 480_000, path.join(directory, `native-runtime-${randomUUID()}.log`), path.join(directory, 'native-progress.jsonl'), collectBeforeTeardown, path.join(directory, 'native-process-termination.json'));
+    await runOwned(binary, [], { cwd: directory, env }, options.miniUx ? 90_000 : options.readerPreparation || ['E04', 'E41', 'E42', 'after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle'].includes(options.continuationCase) ? 30_000 : 480_000, path.join(directory, `native-runtime-${randomUUID()}.log`), path.join(directory, 'native-progress.jsonl'), collectBeforeTeardown, path.join(directory, 'native-process-termination.json'));
   } catch (error) { runtimeFailure = error; }
   finally {
     if (proxy) {

@@ -21,6 +21,12 @@ use tauri::{AppHandle, Manager, State};
 pub const MARKER: &str = "VOICETEXT_NATIVE_WINDOW_E2E_V1";
 static FIXTURE: OnceLock<Arc<Fixture>> = OnceLock::new();
 static RESULT_PATH: OnceLock<PathBuf> = OnceLock::new();
+// A single test-owned gate puts background admission inside the real close animation.
+static MINI_HOLD_FINALIZE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static MINI_FINALIZE_RELEASE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+fn mini_ux_mode() -> bool {
+    RESULT_PATH.get().is_some() && std::env::var("VOICETEXT_NATIVE_MINI_UX").ok().as_deref() == Some("unpaid-v1")
+}
 static IDLE_WAIT_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 // Installed only by a validated isolated E42 action. This module itself is
@@ -2582,6 +2588,10 @@ impl FixtureProvider {
     }
     async fn finalize(&mut self, keep_alive: bool) -> SttResult<()> {
         let delay = self.shared.timing.lock().unwrap().stop;
+        if mini_ux_mode() && MINI_HOLD_FINALIZE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::timeout(Duration::from_secs(10), MINI_FINALIZE_RELEASE.notified())
+                .await.map_err(|_| SttError::Processing("mini UX finalization gate timed out".into()))?;
+        }
         if self.terminal.lock().unwrap().is_none() {
             tokio::time::sleep(Duration::from_millis(delay)).await;
             self.complete_terminal();
@@ -3013,13 +3023,13 @@ impl SttProvider for FixtureProvider {
 #[tauri::command]
 pub fn native_e2e_close_recording(app_handle: AppHandle) -> Result<(), String> {
     if RESULT_PATH.get().is_none()
-        || !continuation_mode()
-        || !matches!(
+        || !(mini_ux_mode()
+            || (continuation_mode() && matches!(
             std::env::var("VOICETEXT_NATIVE_CONTINUATION_CASE")
                 .ok()
                 .as_deref(),
             Some("seal-close") | Some("after-write-close")
-        )
+        )))
     {
         return Err("native close requires isolated close fixture".into());
     }
@@ -3030,6 +3040,8 @@ pub fn native_e2e_close_recording(app_handle: AppHandle) -> Result<(), String> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FixtureConfig {
+    hold_next_finalize: Option<bool>,
+    release_finalization: Option<bool>,
     start_delay_ms: Option<u64>,
     stop_delay_ms: Option<u64>,
     audio_delay_ms: Option<u64>,
@@ -3045,6 +3057,21 @@ pub async fn native_e2e_configure(
     app_handle: AppHandle,
     config: FixtureConfig,
 ) -> Result<(), String> {
+    if config.release_finalization.is_some() {
+        if !mini_ux_mode() || config.release_finalization != Some(true) ||
+            config.hold_next_finalize.is_some() || config.start_delay_ms.is_some() ||
+            config.stop_delay_ms.is_some() || config.audio_delay_ms.is_some() ||
+            config.fail_next_start.is_some() || config.keep_alive.is_some() ||
+            config.control_delay_ms.is_some() || config.qualification_endpoint.is_some() ||
+            config.source_gate_ready.is_some() {
+            return Err("finalization release requires isolated mini UX gate only".into());
+        }
+        MINI_FINALIZE_RELEASE.notify_one();
+        return Ok(());
+    }
+    if config.hold_next_finalize.is_some() && (!mini_ux_mode() || config.hold_next_finalize != Some(true)) {
+        return Err("finalization hold requires isolated mini UX fixture".into());
+    }
     if config.source_gate_ready.is_some() {
         if config.source_gate_ready != Some(true)
             || !qualification_live()
@@ -3168,6 +3195,9 @@ pub async fn native_e2e_configure(
             return Err("control delay requires qualification and <=1000ms".into());
         }
         timing.control_delay = delay;
+    }
+    if config.hold_next_finalize == Some(true) {
+        MINI_HOLD_FINALIZE.store(true, std::sync::atomic::Ordering::SeqCst);
     }
     if let Some(delay) = config.start_delay_ms {
         timing.start = delay;
@@ -3506,6 +3536,7 @@ pub async fn native_e2e_state(
         result["continuationPending"] = json!(coordinator.continuation.is_some());
     }
 
+    result["miniUxMode"] = json!(mini_ux_mode());
     result["readerPreparation"] = json!(reader_preparation());
     result["diagnosticEffectRefused"] = json!(DIAGNOSTIC_EFFECT_REFUSED.load(std::sync::atomic::Ordering::SeqCst));
     if reader_preparation() { result["qualificationEndpoint"] = json!("ws://127.0.0.1:51867"); }
@@ -4115,7 +4146,9 @@ pub async fn native_e2e_finish(
     // Successful live trials stay alive with the result sealed. The existing runner
     // collects real proxy closes before terminating this process. No timer/sleep
     // can repair a retained provider and no teardown close can qualify the run.
-    if !pre_teardown {
+    // Mini UX evidence is sealed above; its runner owns process teardown just as
+    // the live collector does, without depending on AppKit shutdown callbacks.
+    if !pre_teardown && !mini_ux_mode() {
         native_diagnostic::mark(D::Exit, diagnostic_id);
         if native_diagnostic::active() {
             // Keep the exit owner until draining succeeds or the original absolute

@@ -1893,6 +1893,7 @@ fn execute_recording_coordinator_effect(
                         .continuation_phase
                         .map(continuation::serialized_phase),
                     run_id: projection.current_run.map(|run| run.get()),
+                    window_owner_run_id: projection.window_owner_run.map(|run| run.get()),
                     intent_revision: Some(projection.intent_revision.get()),
                     status: coordinator_projection_status(projection.status),
                     desired_on,

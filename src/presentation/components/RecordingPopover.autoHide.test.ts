@@ -1196,6 +1196,215 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     wrapper.unmount();
   });
 
+  it('hides a stopped buffered successor before background admission and fences a newer window', async () => {
+    nativeWindowEpoch.value = 675;
+    const leases = new Map([[338, 675], [339, 677], [340, 679]]);
+    const hiddenEpochs: number[] = [];
+    let nativeVisible = true;
+    let backendStatus: RecordingStatus = RecordingStatus.Idle;
+    const defaultInvoke = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation(async (
+      command: string,
+      args?: { sessionId?: number; windowEpoch?: number },
+    ) => {
+      if (command === 'get_recording_status') return backendStatus;
+      if (command === 'get_recording_window_epoch_for_session') {
+        return leases.get(args!.sessionId!) ?? null;
+      }
+      if (command === 'hide_recording_window_if_current') {
+        if (!nativeVisible || args?.windowEpoch !== nativeWindowEpoch.value) return false;
+        hiddenEpochs.push(args.windowEpoch);
+        nativeVisible = false;
+        nativeWindowEpoch.value += 1;
+        await hideWindowMock();
+        return true;
+      }
+      return defaultInvoke(command, args);
+    });
+
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('hotkey:toggle-recording', 1);
+
+    await emitTauriEvent('recording:window-shown', { windowEpoch: 675 });
+    backendStatus = RecordingStatus.Recording;
+    await emitTauriEvent('recording:status', {
+      session_id: 338,
+      status: RecordingStatus.Recording,
+      stopped_via_hotkey: false,
+    });
+    backendStatus = RecordingStatus.Processing;
+    await emitTauriEvent('recording:status', {
+      session_id: 338,
+      status: RecordingStatus.Processing,
+      stopped_via_hotkey: true,
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(nativeVisible).toBe(false);
+    expect(hiddenEpochs).toEqual([675]);
+
+    nativeWindowEpoch.value = 677;
+    nativeVisible = true;
+    await emitTauriEvent('recording:window-shown', { windowEpoch: 677 });
+    await emitTauriEvent('recording:intent-projection', {
+      runId: 339,
+      windowOwnerRunId: 339,
+      intentRevision: 679,
+      status: RecordingStatus.Processing,
+      desiredOn: true,
+      pendingStart: true,
+      processingJobs: 1,
+      shutdownRequested: false,
+    });
+    await emitTauriEvent('recording:capture-readiness', {
+      revision: 679,
+      runId: 339,
+      state: 'buffering',
+      reason: 'finalizing-previous',
+      generation: 1,
+    });
+    expectMiniCapturePhase('recording', 'Listening');
+
+    await emitTauriEvent('recording:capture-readiness', {
+      revision: 680,
+      runId: 339,
+      state: 'buffering',
+      reason: 'finalizing-previous',
+      generation: 2,
+    });
+    await emitTauriEvent('recording:intent-projection', {
+      runId: 339,
+      windowOwnerRunId: 339,
+      intentRevision: 680,
+      status: RecordingStatus.Processing,
+      desiredOn: false,
+      pendingStart: false,
+      processingJobs: 1,
+      shutdownRequested: false,
+    });
+    await emitTauriEvent('recording:status', {
+      session_id: 338,
+      status: RecordingStatus.Processing,
+      stopped_via_hotkey: true,
+    });
+    const stoppedClosingFrameText = document.querySelector(
+      '.mini-transcription-text-inner',
+    )?.textContent ?? '';
+    expect(stoppedClosingFrameText).not.toContain('Processing');
+    expect(stoppedClosingFrameText).not.toContain('Starting');
+    expect(document.querySelector('.mini-closing')).not.toBeNull();
+    await vi.advanceTimersByTimeAsync(100);
+
+    await emitTauriEvent('recording:intent-projection', {
+      runId: 339,
+      intentRevision: 680,
+      status: RecordingStatus.Starting,
+      desiredOn: false,
+      pendingStart: false,
+      processingJobs: 0,
+      shutdownRequested: false,
+    });
+    await emitTauriEvent('recording:status', {
+      session_id: 339,
+      status: RecordingStatus.Starting,
+      stopped_via_hotkey: true,
+    });
+    const backgroundAdmissionText = document.querySelector(
+      '.mini-transcription-text-inner',
+    )?.textContent ?? '';
+    await vi.advanceTimersByTimeAsync(400);
+    const hiddenImmediatelyAfterBStop = !nativeVisible;
+
+    backendStatus = RecordingStatus.Starting;
+    nativeWindowEpoch.value = 679;
+    nativeVisible = true;
+    await emitTauriEvent('recording:window-shown', { windowEpoch: 679 });
+    await emitTauriEvent('recording:intent-projection', {
+      runId: 340,
+      windowOwnerRunId: 340,
+      intentRevision: 681,
+      status: RecordingStatus.Starting,
+      desiredOn: true,
+      pendingStart: true,
+      processingJobs: 1,
+      shutdownRequested: false,
+    });
+    expectMiniCapturePhase('starting', 'Starting');
+    expect(document.querySelector('.mini-closing')).toBeNull();
+    await emitTauriEvent('recording:capture-readiness', {
+      revision: 681,
+      runId: 340,
+      state: 'buffering',
+      reason: 'finalizing-previous',
+      generation: 3,
+    });
+    await emitTauriEvent('recording:status', {
+      session_id: 338,
+      status: RecordingStatus.Idle,
+      stopped_via_hotkey: true,
+    });
+    await emitTauriEvent('recording:status', {
+      session_id: 339,
+      status: RecordingStatus.Processing,
+      stopped_via_hotkey: true,
+    });
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(hiddenImmediatelyAfterBStop).toBe(true);
+    expect(hiddenEpochs).toEqual([675, 677]);
+    expect(backgroundAdmissionText).not.toContain('Starting');
+    expect(backgroundAdmissionText).not.toContain('Processing');
+    expect(nativeVisible).toBe(true);
+    expect(nativeWindowEpoch.value).toBe(679);
+    expectMiniCapturePhase('recording', 'Listening');
+    wrapper.unmount();
+  });
+
+  it.each([
+    { mini: true, expectedHideCount: 1 },
+    { mini: false, expectedHideCount: 0 },
+  ])('applies stopped intent ownership only to mini mode (mini $mini)', async ({ mini, expectedHideCount }) => {
+    appConfigMock.showMiniRecordingWindow = mini;
+    nativeWindowEpoch.value = 675;
+    const defaultInvoke = invokeMock.getMockImplementation()!;
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command === 'get_recording_window_epoch_for_session') return 675;
+      if (command === 'hide_recording_window_if_current') {
+        await hideWindowMock();
+        return true;
+      }
+      return defaultInvoke(command, args);
+    });
+
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:status', 1);
+    await waitForListenerCount('recording:intent-projection', 1);
+
+    await emitTauriEvent('recording:status', {
+      session_id: 338,
+      status: RecordingStatus.Idle,
+      stopped_via_hotkey: true,
+    });
+    await emitTauriEvent('recording:intent-projection', {
+      runId: 339,
+      windowOwnerRunId: 339,
+      intentRevision: 680,
+      status: RecordingStatus.Processing,
+      desiredOn: false,
+      pendingStart: false,
+      processingJobs: 1,
+      shutdownRequested: false,
+    });
+    await emitTauriEvent('recording:status', {
+      session_id: 339,
+      status: RecordingStatus.Starting,
+      stopped_via_hotkey: true,
+    });
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(hideWindowMock).toHaveBeenCalledTimes(expectedHideCount);
+    wrapper.unmount();
+  });
+
   it('keeps authoritative Recording green when native readiness protocol is absent', async () => {
     const wrapper = mountRecordingPopover();
     await waitForListenerCount('recording:status', 1);

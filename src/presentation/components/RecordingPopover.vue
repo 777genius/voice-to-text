@@ -99,6 +99,15 @@ interface MiniCaptureProjection {
   placeholderText: string;
 }
 
+const stoppedMiniWindowOwnerRunId = computed<number | null>(() => {
+  if (!appConfigStore.showMiniRecordingWindow) return null;
+  const projection = store.lastAcceptedRecordingIntentProjection;
+  const owner = projection?.windowOwnerRunId;
+  if (!projection || projection.desiredOn || projection.fault || store.hasError || store.error ||
+      !Number.isSafeInteger(owner) || Number(owner) <= 0) return null;
+  return Number(owner);
+});
+
 const miniCaptureProjection = computed<MiniCaptureProjection>(() => {
   if (hasMiniError.value) {
     const message = store.incomingTranslationError || store.errorSummary || t('main.errorGeneric');
@@ -108,9 +117,12 @@ const miniCaptureProjection = computed<MiniCaptureProjection>(() => {
   const readiness = store.captureReadiness;
   const hasTerminalReadiness = readiness?.state === 'unavailable' &&
     ['idle', 'cancelled', 'error'].includes(readiness.reason);
+  const hasStoppedForegroundOwner = stoppedMiniWindowOwnerRunId.value !== null;
   const hasIndependentReadyCapture =
-    (store.activeRecordingMode === 'live_translation' && store.isRecording) ||
-    (!store.hasCaptureReadinessProtocol && store.isRecording) ||
+    (!hasStoppedForegroundOwner && (
+      (store.activeRecordingMode === 'live_translation' && store.isRecording) ||
+      (!store.hasCaptureReadinessProtocol && store.isRecording)
+    )) ||
     store.incomingTranslationStatus === 'Recording';
 
   if (store.isCaptureReady || hasIndependentReadyCapture) {
@@ -126,9 +138,11 @@ const miniCaptureProjection = computed<MiniCaptureProjection>(() => {
   const hasIndependentStartingCapture = store.incomingTranslationStatus === 'Starting';
   const hasCurrentStartingCapture = !hasTerminalReadiness && (
     store.recordingDesiredOn ||
-    store.isConnecting ||
-    store.isStarting ||
-    store.isRecording
+    (!hasStoppedForegroundOwner && (
+      store.isConnecting ||
+      store.isStarting ||
+      store.isRecording
+    ))
   );
   if (hasIndependentStartingCapture || hasCurrentStartingCapture) {
     let statusText = t('main.starting');
@@ -140,7 +154,18 @@ const miniCaptureProjection = computed<MiniCaptureProjection>(() => {
     return { phase: 'starting', statusText, placeholderText: t('main.starting') };
   }
 
-  if (store.isProcessing || store.incomingTranslationStatus === 'Processing') {
+  if (store.incomingTranslationStatus === 'Processing') {
+    const message = t('main.processing');
+    return { phase: 'processing', statusText: message, placeholderText: message };
+  }
+
+  // A stopped foreground capture may continue provider delivery in the
+  // background. Keep its closing frame neutral instead of surfacing that work.
+  if (hasStoppedForegroundOwner) {
+    return { phase: 'idle', statusText: '', placeholderText: '' };
+  }
+
+  if (store.isProcessing) {
     const message = t('main.processing');
     return { phase: 'processing', statusText: message, placeholderText: message };
   }
@@ -892,11 +917,14 @@ watch(() => store.lastAcceptedRecordingStatus, (payload) => {
   const nextStatus = payload.status;
   const windowOwnerSessionId = payload.window_owner_session_id ?? payload.session_id;
   if (nextStatus !== 'Processing' && nextStatus !== 'Idle') {
+    if (stoppedMiniWindowOwnerRunId.value !== null) return;
     completedAutoHideSessionId = null;
     cancelPendingHideRecordingWindow();
     return;
   }
   if (nextStatus === 'Processing') {
+    if (stoppedMiniWindowOwnerRunId.value !== null &&
+        windowOwnerSessionId !== stoppedMiniWindowOwnerRunId.value) return;
     if (appConfigStore.showMiniRecordingWindow &&
         pendingAutoHideSessionId !== windowOwnerSessionId &&
         completedAutoHideSessionId !== windowOwnerSessionId) {
@@ -905,12 +933,26 @@ watch(() => store.lastAcceptedRecordingStatus, (payload) => {
     return;
   }
   if (appConfigStore.playCompletionSound) playDoneSound();
+  if (stoppedMiniWindowOwnerRunId.value !== null &&
+      windowOwnerSessionId !== stoppedMiniWindowOwnerRunId.value) return;
   if (appConfigStore.showMiniRecordingWindow) {
     if (completedAutoHideSessionId !== windowOwnerSessionId) {
       void scheduleHideRecordingWindow('mini window recording stopped', windowOwnerSessionId);
     }
   } else if (payload.stopped_via_hotkey) {
     void scheduleHideRecordingWindow('stopped via hotkey', windowOwnerSessionId);
+  }
+}, { flush: 'sync' });
+
+// Intent ownership is authoritative when a buffered successor is stopped while
+// the status surface still belongs to its finalizing predecessor.
+watch(() => store.lastAcceptedRecordingIntentProjection, (projection) => {
+  const windowOwnerRunId = stoppedMiniWindowOwnerRunId.value;
+  if (!projection || windowOwnerRunId === null || store.hasError || store.error ||
+      !appConfigStore.showMiniRecordingWindow) return;
+  if (pendingAutoHideSessionId !== windowOwnerRunId &&
+      completedAutoHideSessionId !== windowOwnerRunId) {
+    void scheduleHideRecordingWindow('mini window recording intent stopped', windowOwnerRunId);
   }
 }, { flush: 'sync' });
 
@@ -923,7 +965,9 @@ watch([
   () => store.isCaptureReady,
   hasVisibleIncomingTranslation,
 ], () => {
-  if (store.isStarting || store.isRecording || store.hasError || hasVisibleIncomingTranslation.value || hasPendingCurrentStart()) {
+  const hasForegroundStartStatus = stoppedMiniWindowOwnerRunId.value === null &&
+    (store.isStarting || store.isRecording);
+  if (hasForegroundStartStatus || store.hasError || hasVisibleIncomingTranslation.value || hasPendingCurrentStart()) {
     cancelPendingHideRecordingWindow();
   }
 }, { flush: 'sync' });

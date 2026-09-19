@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
-import { snapshotDigest, isolatedTauriConfig, parseArguments, sanitizedEnvironment, validateArtifactDirectory, validateCachedBinary, validateResult } from '../run-native-window-e2e.mjs';
+import { snapshotDigest, isolatedTauriConfig, parseArguments, executionEnvironment, sanitizedEnvironment, validateArtifactDirectory, validateCachedBinary, validateResult } from '../run-native-window-e2e.mjs';
 
 const marker = 'VOICETEXT_NATIVE_WINDOW_E2E_V1';
 
@@ -159,4 +159,30 @@ test('terminal-only evidence cannot bypass any native cleanup phase', () => {
   }
   assert.throws(() => validateResult({...envelope, fixture: {...fixture, activeCaptures: 1}}));
   assert.throws(() => validateResult({...envelope, fixture: {...fixture, captureStops: 2}}));
+});
+
+
+test('mini UX mode stays isolated and validates close, successor and delivery evidence', () => {
+  assert.deepEqual(parseArguments(['--mini-ux']), { miniUx: true });
+  const env = executionEnvironment('/tmp/voicetext-native-e2e-AbCd12', { miniUx: true });
+  assert.equal(env.VOICETEXT_NATIVE_MINI_UX, 'unpaid-v1');
+  assert.equal(env.VOICE_TO_TEXT_BACKEND_URL, 'ws://127.0.0.1:9');
+  assert.equal(env.VOICETEXT_NATIVE_LIVE, undefined);
+  const evidence = { marker, passed: true, report: { mode: 'mini-ux', passed: true, errors: [],
+    cases: ['hotkey', 'native-close', 'background-start-during-hide'].map(stop => ({ stop, hideMs: 180, bufferedBeforeStop: true,
+      oldProviderStillFinalizing: true, observations: 20, backgroundDidNotReopen: true,
+      successorStayedVisible: true, markerDeliveryComplete: true, backgroundStartingBeforeHide: true })),
+    final: { status: 'Idle', visible: false, preparedCaptureTokenCount: 0,
+      fixture: { activeCaptures: 0, activeProviders: 0, maxActiveProviders: 1, markerViolations: [] } } } };
+  assert.equal(validateResult(evidence), evidence.report);
+  for (const mutate of [
+    e => { e.report.cases[0].hideMs = 5000; },
+    e => { e.report.cases[0].backgroundDidNotReopen = false; },
+    e => { e.report.cases[1].successorStayedVisible = false; },
+    e => { e.report.cases[1].markerDeliveryComplete = false; },
+    e => { e.report.final.fixture.activeCaptures = 1; },
+  ]) {
+    const broken = structuredClone(evidence); mutate(broken);
+    assert.throws(() => validateResult(broken), /mini UX window evidence/);
+  }
 });
