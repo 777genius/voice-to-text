@@ -356,7 +356,7 @@ impl IncomingSpokenTranslationService {
                 notify_playback_stopped(&callbacks);
                 return Err(map_capture_start_error(error));
             }
-            Err(StartupCaptureError::Timeout) => {
+            Err(StartupCaptureError::Timeout(_pending_cleanup)) => {
                 close_startup_output(output).await;
                 self.transition_to_error().await;
                 notify_playback_stopped(&callbacks);
@@ -632,7 +632,7 @@ fn map_interpretation_start_error(
 ) -> IncomingSpokenTranslationError {
     match error {
         RealtimeInterpretationStartError::Capture(error) => map_capture_start_error(error),
-        RealtimeInterpretationStartError::Timeout(message) => {
+        RealtimeInterpretationStartError::Timeout { message, .. } => {
             IncomingSpokenTranslationError::Timeout(message)
         }
     }

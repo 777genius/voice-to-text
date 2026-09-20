@@ -181,6 +181,10 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
   Object.assign(warm.report, { warmMode: true, warmReopens: 10, idleAcceptedDelta: 0 });
   warm.report.trace = [{ label: 'warm reopen', captureReady: true }];
   warm.report.warmReadyFrames = Array.from({ length: 10 }, (_, i) => ({ runId: i + 1, revision: i + 1, phase: 'mini-status-dot recording' }));
+  warm.report.warmVisibleFrames = Array.from({ length: 10 }, (_, i) => ({
+    attempt: i + 1, source: 'shown', windowEpoch: i + 1, revision: i + 1, runId: i + 1,
+    captureReady: false, readinessReason: 'activating-warm-capture', phase: 'mini-status-dot', statusText: '',
+  }));
   warm.report.warmReuseOpenCount = 2;
   warm.report.lifecycle = { sleepClosed: true, wakeOpenedOnce: true, terminalCount: 1, recoveryOpenedOnce: true,
     physical: {
@@ -203,6 +207,14 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
     e => { e.report.final.fixture.physicalCloseCount = 2; },
     e => { e.report.warmMode = false; },
     e => { e.report.warmReadyFrames[0].phase = 'mini-status-dot starting'; },
+    e => { delete e.report.warmVisibleFrames; },
+    e => { e.report.warmVisibleFrames = []; },
+    e => { e.report.warmVisibleFrames[0].phase = 'mini-status-dot starting'; },
+    e => { e.report.warmVisibleFrames[0].phase = 'mini-status-dot recording'; },
+    e => { e.report.warmVisibleFrames[0].captureReady = true; },
+    e => { e.report.warmVisibleFrames[0].readinessReason = 'recording'; },
+    e => { e.report.warmVisibleFrames[0].runId = 999; },
+    e => { e.report.warmVisibleFrames[0].windowEpoch = 0; },
   ]) {
     const broken = structuredClone(warm);
     mutate(broken);

@@ -30,7 +30,7 @@ use super::{
     RealtimeInterpretationError, RealtimeInterpretationPolicy, RealtimeInterpretationPorts,
     RealtimeInterpretationSession, RealtimeInterpretationShutdown,
     RealtimeInterpretationStartError, RealtimeInterpretationStop, RealtimeStartupPolicy,
-    StartupCaptureError, StartupOutputError,
+    StartupCaptureError, StartupCleanup, StartupOutputError,
 };
 
 const TRANSLATION_TARGET_LANGUAGE_DEFAULT: &str = "en";
@@ -150,6 +150,7 @@ pub struct LiveTranslationService {
     audio_factory: Arc<dyn PlatformAudioFactory>,
     client_factory: Arc<dyn RealtimeTranslationFactory>,
     startup_policy: RealtimeStartupPolicy,
+    pending_startup_capture_cleanup: Arc<StdMutex<Option<StartupCleanup>>>,
 }
 
 #[derive(Clone)]
@@ -215,6 +216,35 @@ impl LiveTranslationService {
             audio_factory,
             client_factory,
             startup_policy: RealtimeStartupPolicy::default(),
+            pending_startup_capture_cleanup: Arc::new(StdMutex::new(None)),
+        }
+    }
+
+    fn track_startup_capture_cleanup(&self, cleanup: Option<StartupCleanup>) {
+        let mut pending = self.pending_startup_capture_cleanup.lock().unwrap();
+        *pending = cleanup.filter(|cleanup| !cleanup.is_confirmed());
+    }
+
+    pub(crate) fn startup_capture_cleanup_confirmed(&self) -> bool {
+        let mut pending = self.pending_startup_capture_cleanup.lock().unwrap();
+        if pending.as_ref().is_some_and(StartupCleanup::is_confirmed) {
+            *pending = None;
+        }
+        pending.is_none()
+    }
+
+    pub(crate) async fn wait_for_startup_capture_cleanup(&self) {
+        let cleanup = self.pending_startup_capture_cleanup.lock().unwrap().clone();
+        let Some(cleanup) = cleanup else {
+            return;
+        };
+        cleanup.wait().await;
+        let mut pending = self.pending_startup_capture_cleanup.lock().unwrap();
+        if pending
+            .as_ref()
+            .is_some_and(|candidate| candidate.same_as(&cleanup))
+        {
+            *pending = None;
         }
     }
 
@@ -252,6 +282,11 @@ impl LiveTranslationService {
     ) -> Result<(), LiveTranslationError> {
         let is_cancelled = || cancelled.is_some_and(|token| token.load(Ordering::Acquire));
         let _lifecycle_guard = self.lifecycle.lock().await;
+        if !self.startup_capture_cleanup_confirmed() {
+            return Err(LiveTranslationError::Configuration(
+                "Previous microphone startup cleanup is still pending".into(),
+            ));
+        }
         if is_cancelled() {
             return Err(LiveTranslationError::Cancelled);
         }
@@ -385,6 +420,9 @@ impl LiveTranslationService {
             self.startup_policy.device_start_timeout,
         )
         .await;
+        if let Err(StartupCaptureError::Timeout(pending_cleanup)) = &capture_result {
+            self.track_startup_capture_cleanup(pending_cleanup.clone());
+        }
         if is_cancelled() {
             if let Ok(capture) = capture_result {
                 close_startup_capture(capture).await;
@@ -400,7 +438,7 @@ impl LiveTranslationService {
                 self.transition_to_error().await;
                 return Err(error);
             }
-            Err(StartupCaptureError::Timeout) => {
+            Err(StartupCaptureError::Timeout(_pending_cleanup)) => {
                 close_startup_output(output_concrete).await;
                 let error = LiveTranslationError::Timeout(format!(
                     "microphone did not initialize within {} ms",
@@ -506,6 +544,12 @@ impl LiveTranslationService {
             core_callbacks,
         )
         .await;
+        if let Err(RealtimeInterpretationStartError::Timeout {
+            pending_cleanup, ..
+        }) = &session_result
+        {
+            self.track_startup_capture_cleanup(pending_cleanup.clone());
+        }
         if is_cancelled() {
             if let Ok((session, _)) = session_result {
                 session
@@ -521,7 +565,7 @@ impl LiveTranslationService {
                     RealtimeInterpretationStartError::Capture(error) => {
                         LiveTranslationError::Configuration(error.to_string())
                     }
-                    RealtimeInterpretationStartError::Timeout(message) => {
+                    RealtimeInterpretationStartError::Timeout { message, .. } => {
                         LiveTranslationError::Timeout(message)
                     }
                 };
@@ -2297,6 +2341,53 @@ mod tests {
         assert!(state.output_closed.load(Ordering::SeqCst));
         assert_eq!(state.mic_initialize_calls.load(Ordering::SeqCst), 1);
         assert_eq!(svc.get_status().await, RecordingStatus::Error);
+    }
+
+    #[tokio::test]
+    async fn capture_start_timeout_blocks_reuse_until_native_cleanup_confirms() {
+        let audio = Arc::new(TestFactoryState::default());
+        let network = Arc::new(SyntheticRealtimeState::default());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *audio.start_release.lock().unwrap() = Some(release.clone());
+        let mut svc = LiveTranslationService::new_with_factories(
+            Arc::new(TestPlatformAudioFactory {
+                mode: TestFactoryMode::Ready,
+                state: audio.clone(),
+            }),
+            Arc::new(SyntheticRealtimeClientFactory { state: network }),
+        );
+        svc.startup_policy = test_startup_policy();
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(4),
+            svc.start_translation(valid_config(1_302), test_callbacks()),
+        )
+        .await
+        .expect("capture startup timeout and bounded cleanup must settle")
+        .unwrap_err();
+
+        assert!(matches!(error, LiveTranslationError::Timeout(_)));
+        assert!(!svc.startup_capture_cleanup_confirmed());
+        assert_eq!(audio.capture_stop_calls.load(Ordering::SeqCst), 0);
+        let retry = svc
+            .start_translation(valid_config(1_303), test_callbacks())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            retry,
+            LiveTranslationError::Configuration(message)
+                if message.contains("cleanup is still pending")
+        ));
+
+        release.notify_one();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            svc.wait_for_startup_capture_cleanup(),
+        )
+        .await
+        .expect("native capture cleanup must acknowledge after release");
+        assert!(svc.startup_capture_cleanup_confirmed());
+        assert_eq!(audio.capture_stop_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

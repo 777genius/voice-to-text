@@ -29,7 +29,7 @@ use crate::infrastructure::{
 const RECORDING_WINDOW_POSITION_SAVE_SUPPRESSION_MS: i64 = 800;
 const TRANSLATION_APP_EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(4_500);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WarmInputSuspension {
     Sleep = 1,
     Takeover = 2,
@@ -164,6 +164,14 @@ fn audio_capture_device_cache_matches(
     // the saved device name can be the same while the underlying handle is stale
     // or has internally fallen back to the system default input.
     false
+}
+
+fn warm_input_policy_enabled(
+    keep_microphone_ready: bool,
+    recording_mode: RecordingMode,
+    route_eligible: bool,
+) -> bool {
+    keep_microphone_ready && recording_mode == RecordingMode::Dictation && route_eligible
 }
 
 fn is_current_vad_timeout_session(timeout_session_id: u64, active_session_id: u64) -> bool {
@@ -484,6 +492,8 @@ pub struct AppState {
     pub active_audio_capture_device: Arc<RwLock<Option<Option<String>>>>,
     warm_input_suspended: AtomicU8,
     warm_lifecycle_revision: AtomicU64,
+    warm_sleep_revision: AtomicU64,
+    warm_takeover_revision: AtomicU64,
     warm_lifecycle_guard: std::sync::Mutex<()>,
     warm_owner_creation_guard: tokio::sync::Mutex<()>,
     #[cfg(target_os = "macos")]
@@ -647,6 +657,8 @@ impl AppState {
                     active_audio_capture_device: Arc::new(RwLock::new(None)),
                     warm_input_suspended: AtomicU8::new(0),
                     warm_lifecycle_revision: AtomicU64::new(0),
+                    warm_sleep_revision: AtomicU64::new(0),
+                    warm_takeover_revision: AtomicU64::new(0),
                     warm_lifecycle_guard: std::sync::Mutex::new(()),
                     warm_owner_creation_guard: tokio::sync::Mutex::new(()),
                     #[cfg(target_os = "macos")]
@@ -776,6 +788,8 @@ impl AppState {
                     active_audio_capture_device: Arc::new(RwLock::new(Some(None))),
                     warm_input_suspended: AtomicU8::new(0),
                     warm_lifecycle_revision: AtomicU64::new(0),
+                    warm_sleep_revision: AtomicU64::new(0),
+                    warm_takeover_revision: AtomicU64::new(0),
                     warm_lifecycle_guard: std::sync::Mutex::new(()),
                     warm_owner_creation_guard: tokio::sync::Mutex::new(()),
                     #[cfg(target_os = "macos")]
@@ -959,6 +973,8 @@ impl AppState {
             active_audio_capture_device: Arc::new(RwLock::new(Some(None))),
             warm_input_suspended: AtomicU8::new(0),
             warm_lifecycle_revision: AtomicU64::new(0),
+            warm_sleep_revision: AtomicU64::new(0),
+            warm_takeover_revision: AtomicU64::new(0),
             warm_lifecycle_guard: std::sync::Mutex::new(()),
             warm_owner_creation_guard: tokio::sync::Mutex::new(()),
             #[cfg(target_os = "macos")]
@@ -1988,6 +2004,24 @@ impl AppState {
 
     pub fn suspend_warm_input(&self, reason: WarmInputSuspension) {
         let _lifecycle = self.warm_lifecycle_guard.lock().unwrap();
+        if reason == WarmInputSuspension::Sleep
+            && self
+                .warm_sleep_revision
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
+                .is_err()
+        {
+            self.warm_input_suspended
+                .fetch_or(WarmInputSuspension::Shutdown as u8, Ordering::AcqRel);
+        }
+        if reason == WarmInputSuspension::Takeover
+            && self
+                .warm_takeover_revision
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
+                .is_err()
+        {
+            self.warm_input_suspended
+                .fetch_or(WarmInputSuspension::Shutdown as u8, Ordering::AcqRel);
+        }
         if self
             .warm_lifecycle_revision
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
@@ -2016,8 +2050,19 @@ impl AppState {
             return Ok(());
         }
         let config = self.config.read().await;
-        let enabled =
-            config.keep_microphone_ready && config.recording_mode == RecordingMode::Dictation;
+        #[cfg(target_os = "macos")]
+        let route_eligible = {
+            let requested =
+                normalize_audio_capture_device_name(config.selected_audio_device.clone());
+            Self::warm_route_is_eligible(requested.as_deref())
+        };
+        #[cfg(not(target_os = "macos"))]
+        let route_eligible = false;
+        let enabled = warm_input_policy_enabled(
+            config.keep_microphone_ready,
+            config.recording_mode,
+            route_eligible,
+        );
         drop(config);
         if enabled {
             self.resume_warm_input_if_allowed(WarmInputSuspension::Policy)
@@ -2038,6 +2083,41 @@ impl AppState {
 
     pub fn warm_input_revision(&self) -> u64 {
         self.warm_lifecycle_revision.load(Ordering::Acquire)
+    }
+
+    pub fn warm_sleep_revision(&self) -> u64 {
+        self.warm_sleep_revision.load(Ordering::Acquire)
+    }
+
+    pub fn warm_takeover_revision(&self) -> u64 {
+        self.warm_takeover_revision.load(Ordering::Acquire)
+    }
+
+    pub async fn resume_warm_input_after_sleep(&self, sleep_revision: u64) -> Result<(), String> {
+        {
+            let _lifecycle = self.warm_lifecycle_guard.lock().unwrap();
+            if self.warm_sleep_revision() != sleep_revision {
+                return Ok(());
+            }
+            self.warm_input_suspended
+                .fetch_and(!(WarmInputSuspension::Sleep as u8), Ordering::AcqRel);
+        }
+        self.prewarm_warm_input_if_allowed().await
+    }
+
+    pub async fn resume_warm_input_after_takeover(
+        &self,
+        takeover_revision: u64,
+    ) -> Result<(), String> {
+        {
+            let _lifecycle = self.warm_lifecycle_guard.lock().unwrap();
+            if self.warm_takeover_revision() != takeover_revision {
+                return Ok(());
+            }
+            self.warm_input_suspended
+                .fetch_and(!(WarmInputSuspension::Takeover as u8), Ordering::AcqRel);
+        }
+        self.prewarm_warm_input_if_allowed().await
     }
 
     pub async fn resume_warm_input_at_revision(
@@ -2376,22 +2456,56 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         );
         state.suspend_warm_input(WarmInputSuspension::Sleep);
-        let first_sleep = state.warm_input_revision();
-        state.set_authenticated(false).await;
-        state.set_authenticated(true).await;
-        assert!(state.warm_input_is_suspended(WarmInputSuspension::Sleep));
-        assert!(!state.warm_input_is_suspended(WarmInputSuspension::Auth));
-        state.suspend_warm_input(WarmInputSuspension::Sleep);
+        let first_sleep = state.warm_sleep_revision();
+        state.suspend_warm_input(WarmInputSuspension::Auth);
         state
-            .resume_warm_input_at_revision(WarmInputSuspension::Sleep, first_sleep)
-            .await
-            .unwrap();
-        assert!(state.warm_input_is_suspended(WarmInputSuspension::Sleep));
-        state
-            .resume_warm_input_if_allowed(WarmInputSuspension::Sleep)
+            .resume_warm_input_after_sleep(first_sleep)
             .await
             .unwrap();
         assert!(!state.warm_input_is_suspended(WarmInputSuspension::Sleep));
+        assert!(state.warm_input_is_suspended(WarmInputSuspension::Auth));
+        state
+            .resume_warm_input_if_allowed(WarmInputSuspension::Auth)
+            .await
+            .unwrap();
+        assert!(!state.warm_input_is_suspended(WarmInputSuspension::Auth));
+        state.suspend_warm_input(WarmInputSuspension::Sleep);
+        let second_sleep = state.warm_sleep_revision();
+        state
+            .resume_warm_input_after_sleep(first_sleep)
+            .await
+            .unwrap();
+        assert!(state.warm_input_is_suspended(WarmInputSuspension::Sleep));
+        state
+            .resume_warm_input_after_sleep(second_sleep)
+            .await
+            .unwrap();
+        assert!(!state.warm_input_is_suspended(WarmInputSuspension::Sleep));
+        state.suspend_warm_input(WarmInputSuspension::Takeover);
+        let first_takeover = state.warm_takeover_revision();
+        state.suspend_warm_input(WarmInputSuspension::Auth);
+        state
+            .resume_warm_input_after_takeover(first_takeover)
+            .await
+            .unwrap();
+        assert!(!state.warm_input_is_suspended(WarmInputSuspension::Takeover));
+        assert!(state.warm_input_is_suspended(WarmInputSuspension::Auth));
+        state
+            .resume_warm_input_if_allowed(WarmInputSuspension::Auth)
+            .await
+            .unwrap();
+        state.suspend_warm_input(WarmInputSuspension::Takeover);
+        let second_takeover = state.warm_takeover_revision();
+        state
+            .resume_warm_input_after_takeover(first_takeover)
+            .await
+            .unwrap();
+        assert!(state.warm_input_is_suspended(WarmInputSuspension::Takeover));
+        state
+            .resume_warm_input_after_takeover(second_takeover)
+            .await
+            .unwrap();
+        assert!(!state.warm_input_is_suspended(WarmInputSuspension::Takeover));
         state.shutdown_warm_input().await.unwrap();
         state
             .resume_warm_input_if_allowed(WarmInputSuspension::Shutdown)
@@ -2403,10 +2517,24 @@ mod tests {
         audio_capture_device_cache_matches, claim_translation_shutdown, claim_vad_timeout_session,
         is_current_vad_capture_identity, is_current_vad_timeout_session,
         normalize_audio_capture_device_name, restore_vad_timeout_session_claim_if_unclaimed,
-        DeferredVadTimeoutFence, RecordingIntentCoordinatorMode,
+        warm_input_policy_enabled, DeferredVadTimeoutFence, RecordingIntentCoordinatorMode,
     };
     use crate::domain::{AudioCaptureIdentity, RecordingStatus};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    #[test]
+    fn warm_policy_rejects_an_ineligible_selected_route() {
+        assert!(warm_input_policy_enabled(
+            true,
+            crate::domain::RecordingMode::Dictation,
+            true
+        ));
+        assert!(!warm_input_policy_enabled(
+            true,
+            crate::domain::RecordingMode::Dictation,
+            false
+        ));
+    }
 
     #[test]
     fn translation_shutdown_claim_is_exactly_once_for_duplicate_exit_events() {

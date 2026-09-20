@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, Notify};
 
 use crate::domain::{
     AudioCapture, AudioChunkCallback, AudioConfig, AudioError, RealtimeTranslationSession,
@@ -41,9 +41,53 @@ pub(crate) enum StartupOutputError {
     Worker(String),
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct StartupCleanup {
+    confirmed: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+impl StartupCleanup {
+    fn new() -> Self {
+        Self {
+            confirmed: Arc::new(AtomicBool::new(false)),
+            notify: Arc::new(Notify::new()),
+        }
+    }
+
+    fn confirm(&self) {
+        self.confirmed.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+        // Keep one permit for a waiter that observed `false` immediately before
+        // this confirmation but had not yet registered its Notified future.
+        self.notify.notify_one();
+    }
+
+    pub(crate) fn is_confirmed(&self) -> bool {
+        self.confirmed.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn same_as(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.confirmed, &other.confirmed)
+    }
+
+    pub(crate) async fn wait(&self) {
+        loop {
+            if self.is_confirmed() {
+                return;
+            }
+            let notified = self.notify.notified();
+            if self.is_confirmed() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
 pub(crate) enum StartupCaptureError {
     Operation(AudioError),
-    Timeout,
+    Timeout(Option<StartupCleanup>),
     Worker(String),
 }
 
@@ -105,18 +149,19 @@ pub(crate) async fn initialize_startup_capture(
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancelled_in_worker = cancelled.clone();
     let (result_tx, result_rx) = oneshot::channel();
-    let (cleanup_tx, cleanup_rx) = oneshot::channel();
+    let cleanup = StartupCleanup::new();
+    let cleanup_in_worker = cleanup.clone();
     tokio::task::spawn_blocking(move || {
         let result = runtime.block_on(capture.initialize(config));
         if cancelled_in_worker.load(Ordering::SeqCst) {
-            let _ = cleanup_tx.send(());
+            cleanup_in_worker.confirm();
             return;
         }
         let payload = result
             .map(|()| capture)
             .map_err(StartupCaptureError::Operation);
         let _ = result_tx.send(payload);
-        let _ = cleanup_tx.send(());
+        cleanup_in_worker.confirm();
     });
 
     match tokio::time::timeout(timeout, result_rx).await {
@@ -126,8 +171,15 @@ pub(crate) async fn initialize_startup_capture(
         ))),
         Err(_) => {
             cancelled.store(true, Ordering::SeqCst);
-            let _ = tokio::time::timeout(REALTIME_STARTUP_CLEANUP_TIMEOUT, cleanup_rx).await;
-            Err(StartupCaptureError::Timeout)
+            let pending = if tokio::time::timeout(REALTIME_STARTUP_CLEANUP_TIMEOUT, cleanup.wait())
+                .await
+                .is_ok()
+            {
+                None
+            } else {
+                Some(cleanup)
+            };
+            Err(StartupCaptureError::Timeout(pending))
         }
     }
 }
@@ -141,13 +193,14 @@ pub(crate) async fn start_owned_capture(
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancelled_in_worker = cancelled.clone();
     let (result_tx, result_rx) = oneshot::channel();
-    let (cleanup_tx, cleanup_rx) = oneshot::channel();
+    let cleanup = StartupCleanup::new();
+    let cleanup_in_worker = cleanup.clone();
     tokio::task::spawn_blocking(move || {
         let result = runtime.block_on(capture.start_capture(callback));
         if cancelled_in_worker.load(Ordering::SeqCst) {
             let _ = runtime.block_on(capture.stop_capture());
             capture.set_terminal_error_callback(None);
-            let _ = cleanup_tx.send(());
+            cleanup_in_worker.confirm();
             return;
         }
         let payload = match result {
@@ -162,7 +215,7 @@ pub(crate) async fn start_owned_capture(
             let _ = runtime.block_on(capture.stop_capture());
             capture.set_terminal_error_callback(None);
         }
-        let _ = cleanup_tx.send(());
+        cleanup_in_worker.confirm();
     });
 
     match tokio::time::timeout(timeout, result_rx).await {
@@ -172,8 +225,15 @@ pub(crate) async fn start_owned_capture(
         ))),
         Err(_) => {
             cancelled.store(true, Ordering::SeqCst);
-            let _ = tokio::time::timeout(REALTIME_STARTUP_CLEANUP_TIMEOUT, cleanup_rx).await;
-            Err(StartupCaptureError::Timeout)
+            let pending = if tokio::time::timeout(REALTIME_STARTUP_CLEANUP_TIMEOUT, cleanup.wait())
+                .await
+                .is_ok()
+            {
+                None
+            } else {
+                Some(cleanup)
+            };
+            Err(StartupCaptureError::Timeout(pending))
         }
     }
 }

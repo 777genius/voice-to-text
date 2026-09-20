@@ -134,9 +134,10 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     const sessions = new Set<number>();
     const transcripts = new Set<string>();
     let successfulStarts = 0;
-    let processingSeen = false;
+    let stoppedProcessingFrameSeen = false;
     let listeningSeen = false;
     let recordingSeen = false;
+    let sealedPendingStarts = 0;
     let holdMode = true;
     const nativeCaptureStartLatenciesMs: number[] = [];
     const queuedNativeCaptureStartLatenciesMs: number[] = [];
@@ -519,9 +520,14 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     await configure({ stopDelayMs: 5000 });
     current = await start();
     const uiStop = store.stopRecording('native-e2e-processing');
-    await until(async () => ({ backend: await state(), processing: !!document.querySelector('.mini-status-dot.processing, .record-button.processing') }),
-      (s) => s.backend.status === 'Processing' && s.processing, 'Real UI stop never rendered Processing');
-    processingSeen = true;
+    await until(async () => {
+      const status = document.querySelector('.mini-status-dot');
+      return { backend: await state(), neutral: Boolean(status) &&
+        !status?.classList.contains('recording') && !status?.classList.contains('starting') &&
+        !status?.classList.contains('processing') && !status?.classList.contains('error') };
+    }, (s) => s.backend.status === 'Processing' && s.neutral,
+    'Real UI stop never rendered the neutral stopped-owner frame');
+    stoppedProcessingFrameSeen = true;
     await hotkey('release');
     await delay(60);
     const pendingBefore = await state();
@@ -540,34 +546,38 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
             association.captureGeneration === generation && association.captureRunId === pendingReady.readiness?.runId);
       },
       'Pending capture readiness produced no new deterministic PCM marker', 2_000);
-    const cancelledCaptureRange = bufferedPendingBackend.fixture.captureMarkers[
+    const sealedCaptureRange = bufferedPendingBackend.fixture.captureMarkers[
       bufferedPendingBackend.fixture.captureMarkers.length - 1
     ];
-    const cancelledGeneration = cancelledCaptureRange?.captureGeneration;
-    check(cancelledGeneration && cancelledCaptureRange.firstSequence === 1,
+    const sealedGeneration = sealedCaptureRange?.captureGeneration;
+    check(sealedGeneration && sealedCaptureRange.firstSequence === 1,
       'Pending capture produced no deterministic first audio marker');
     check(pendingReady.backend.fixture.providerStarts === pendingBefore.fixture.providerStarts,
       'Pending capture opened a second provider before previous finalize');
     await hotkey('release');
     await uiStop;
-    const cancelledPending = await state();
     const afterPending = await until(
       state,
       (sample) => sample.status === 'Idle' && sample.fixture.activeCaptures === 0 &&
         sample.preparedCaptureTokenCount === 0,
-      'Five-second finalize did not preserve and then cancel pending hold intent',
-      8_000,
+      'Five-second finalize did not preserve and then seal released pending audio',
+      14_000,
     );
     check(afterPending.status === 'Idle' && afterPending.fixture.activeCaptures === 0 &&
       afterPending.preparedCaptureTokenCount === 0 &&
-      afterPending.fixture.providerStarts === cancelledPending.fixture.providerStarts,
-      'Released pending hold started after finalize');
-    check(!afterPending.fixture.providerMarkers.some((range) => range.captureGeneration === cancelledGeneration),
-      'Cancelled pending capture later delivered audio to a provider');
+      afterPending.fixture.providerStarts === pendingBefore.fixture.providerStarts + 1,
+      'Released admitted hold did not start exactly one sealing provider');
+    const sealedProviderRanges = afterPending.fixture.providerMarkers
+      .filter((range) => range.captureGeneration === sealedGeneration);
+    check(sealedProviderRanges.length === 1 && sealedProviderRanges[0].firstSequence === 1 &&
+      sealedProviderRanges[0].lastSequence === sealedCaptureRange.lastSequence &&
+      sealedProviderRanges[0].count === sealedCaptureRange.count,
+    'Released admitted hold did not deliver its buffered PCM exactly once');
+    sealedPendingStarts += 1;
     assertMarkerEvidence(afterPending);
     await invoke('hide_recording_window_if_current', { windowEpoch: afterPending.windowEpoch });
     await configure({ stopDelayMs: 130 });
-    report.scenarios.push('processing-ui-and-cancelled-pending-hold-start');
+    report.scenarios.push('neutral-processing-ui-and-sealed-pending-hold-audio');
 
     // Prove that every marker captured while the previous provider finalizes is
     // delivered exactly once, in order, to only the replacement provider.
@@ -873,9 +883,11 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     check(final.fixture.captureStarts - baseline.fixture.captureStarts === final.fixture.captureStops - baseline.fixture.captureStops,
       'Capture start/stop counters do not balance');
     check(final.fixture.activeCaptures === 0, 'Capture remained active after final stop');
-    check(final.fixture.finals - baseline.fixture.finals === successfulStarts, 'Completed provider sessions/finals differ from exact successful recordings');
+    check(final.fixture.finals - baseline.fixture.finals === successfulStarts + sealedPendingStarts,
+      'Completed provider sessions/finals differ from visible and sealed recordings');
     check(transcripts.size === successfulStarts && sessions.size === successfulStarts, 'Unique session/transcript count mismatch');
-    check(listeningSeen && recordingSeen && processingSeen, 'Missing positive UI status controls');
+    check(listeningSeen && recordingSeen && stoppedProcessingFrameSeen,
+      'Missing listening, recording, or stopped-processing UI frame');
     report.observations.push({ successfulStarts, distinctTranscripts: transcripts.size,
       nativeHotkeyToCaptureStartMs: { samples: nativeCaptureStartLatenciesMs,
         p95: captureLatencyP95, queuedSamples: queuedNativeCaptureStartLatenciesMs, queuedP95: queuedCaptureLatencyP95,

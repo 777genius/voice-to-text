@@ -38,11 +38,37 @@ export function validateMiniUxResult(envelope) {
     final.fixture.physicalOpenCount === final.fixture.physicalCloseCount + 1;
   // Mini UX is an explicit warm acceptance run; cold bypass is not evidence.
   const warmFrames = report?.warmActivationFrames;
+  const visibleFrames = report?.warmVisibleFrames;
+  const readyFrames = report?.warmReadyFrames;
+  const firstVisibleFrames = Array.from({ length: 10 }, (_, index) =>
+    Array.isArray(visibleFrames)
+      ? visibleFrames.find(frame => frame?.attempt === index + 1)
+      : undefined);
+  const visibleFrameEvidenceValid = Array.isArray(visibleFrames) && visibleFrames.length >= 10 &&
+    visibleFrames.length <= 512 && visibleFrames.every(frame =>
+      Number.isSafeInteger(frame?.attempt) && frame.attempt >= 1 && frame.attempt <= 10 &&
+      ['render', 'shown', 'sample'].includes(frame.source) &&
+      Number.isSafeInteger(frame.windowEpoch) && frame.windowEpoch > 0 &&
+      Number.isSafeInteger(frame.revision) && frame.revision > 0 &&
+      Number.isSafeInteger(frame.runId) && frame.runId > 0 &&
+      typeof frame.captureReady === 'boolean' && typeof frame.phase === 'string' &&
+      typeof frame.statusText === 'string') &&
+    firstVisibleFrames.every((frame, index) => {
+      if (!frame) return false;
+      const ready = readyFrames?.[index];
+      const attemptFrames = visibleFrames.filter(candidate => candidate.attempt === index + 1);
+      return frame.captureReady === false && frame.readinessReason === 'activating-warm-capture' &&
+        frame.statusText === '' && !/\b(recording|starting|processing)\b/.test(frame.phase) &&
+        ready?.runId === frame.runId && ready?.revision === frame.revision &&
+        attemptFrames.every(candidate => candidate.windowEpoch === frame.windowEpoch &&
+          candidate.runId === frame.runId && candidate.revision === frame.revision);
+    });
   if (report?.warmMode !== true || report.warmReopens !== 10 || report.idleAcceptedDelta !== 0 ||
        !Array.isArray(report.trace) || report.trace.length === 0 ||
-       !Array.isArray(report.warmReadyFrames) || report.warmReadyFrames.length !== 10 ||
-       report.warmReadyFrames.some(frame => !Number.isSafeInteger(frame.runId) || frame.runId <= 0 ||
+       !Array.isArray(readyFrames) || readyFrames.length !== 10 ||
+       readyFrames.some(frame => !Number.isSafeInteger(frame.runId) || frame.runId <= 0 ||
          !Number.isSafeInteger(frame.revision) || !/\brecording\b/.test(frame.phase) || /\b(starting|processing)\b/.test(frame.phase)) ||
+       !visibleFrameEvidenceValid ||
        !physicalTransitionsValid ||
        report.lifecycle?.sleepClosed !== true || report.lifecycle?.wakeOpenedOnce !== true ||
        report.lifecycle?.terminalCount !== 1 || report.lifecycle?.recoveryOpenedOnce !== true ||

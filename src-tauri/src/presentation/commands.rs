@@ -10,7 +10,7 @@ use super::{
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, Window};
@@ -1285,7 +1285,7 @@ pub(super) fn reset_recording_gestures_after_system_wake(app_handle: &AppHandle)
     let Some(state) = app_handle.try_state::<AppState>() else {
         return;
     };
-    let revision = state.warm_input_revision();
+    let sleep_revision = state.warm_sleep_revision();
     drop(state);
     let app_handle = app_handle.clone();
     tauri::async_runtime::spawn(async move {
@@ -1295,10 +1295,7 @@ pub(super) fn reset_recording_gestures_after_system_wake(app_handle: &AppHandle)
                 log::error!("Warm microphone wake close was not confirmed: {error}");
                 return;
             }
-            if let Err(error) = state
-                .resume_warm_input_at_revision(super::state::WarmInputSuspension::Sleep, revision)
-                .await
-            {
+            if let Err(error) = state.resume_warm_input_after_sleep(sleep_revision).await {
                 log::warn!("Warm microphone wake preparation failed: {error}");
             }
         }
@@ -3074,8 +3071,19 @@ async fn start_live_translation_recording(
         // A failed start may have acquired native input before failing. Only a
         // confirmed service stop permits another owner to open the microphone.
         let external_close_confirmed = service.stop_translation().await.is_ok();
-        if takeover_can_resume(true, external_close_confirmed, false) {
+        let startup_cleanup_confirmed = service.startup_capture_cleanup_confirmed();
+        if takeover_can_resume(
+            true,
+            external_close_confirmed && startup_cleanup_confirmed,
+            false,
+        ) {
             restore_warm_after_takeover(state).await;
+        } else if external_close_confirmed && !startup_cleanup_confirmed {
+            restore_warm_after_startup_cleanup(
+                app_handle.clone(),
+                service.clone(),
+                state.warm_takeover_revision(),
+            );
         }
     }
     result
@@ -3871,9 +3879,12 @@ async fn collect_live_translation_health_check(
 
 async fn live_translation_health_check_busy_reason(state: &AppState) -> Option<String> {
     let recording_status = active_recording_status(state).await;
-    if live_translation_health_check_blocks_recording_status(recording_status) {
+    if audio_takeover_blocks_dictation(
+        recording_status,
+        state.transcription_service.has_capture_owner(),
+    ) {
         return Some(format!(
-            "Recording or outgoing live translation is active ({recording_status:?})"
+            "Recording or outgoing live translation is active or prepared ({recording_status:?})"
         ));
     }
 
@@ -3914,6 +3925,10 @@ fn live_translation_health_check_blocks_recording_status(status: RecordingStatus
         status,
         RecordingStatus::Starting | RecordingStatus::Recording | RecordingStatus::Processing
     )
+}
+
+fn audio_takeover_blocks_dictation(status: RecordingStatus, has_capture_owner: bool) -> bool {
+    has_capture_owner || live_translation_health_check_blocks_recording_status(status)
 }
 
 fn live_translation_health_check_blocks_service_status(
@@ -5706,6 +5721,18 @@ mod snapshot_contract_tests {
         ));
         assert!(!live_translation_health_check_blocks_recording_status(
             RecordingStatus::Error
+        ));
+    }
+
+    #[test]
+    fn audio_takeover_blocks_prepared_capture_while_status_is_idle() {
+        assert!(super::audio_takeover_blocks_dictation(
+            RecordingStatus::Idle,
+            true
+        ));
+        assert!(!super::audio_takeover_blocks_dictation(
+            RecordingStatus::Idle,
+            false
         ));
     }
 
@@ -7773,12 +7800,34 @@ fn takeover_can_resume(
 }
 
 async fn restore_warm_after_takeover(state: &AppState) {
+    let takeover_revision = state.warm_takeover_revision();
     if let Err(error) = state
-        .resume_warm_input_if_allowed(super::state::WarmInputSuspension::Takeover)
+        .resume_warm_input_after_takeover(takeover_revision)
         .await
     {
         log::warn!("Warm microphone restoration after takeover failed: {error}");
     }
+}
+
+fn restore_warm_after_startup_cleanup(
+    app_handle: AppHandle,
+    service: std::sync::Arc<crate::application::services::LiveTranslationService>,
+    takeover_revision: u64,
+) {
+    tauri::async_runtime::spawn(async move {
+        service.wait_for_startup_capture_cleanup().await;
+        let state = app_handle.state::<AppState>();
+        let _audio_start_guard = state.audio_start_guard.lock().await;
+        if !service.startup_capture_cleanup_confirmed() {
+            return;
+        }
+        if let Err(error) = state
+            .resume_warm_input_after_takeover(takeover_revision)
+            .await
+        {
+            log::warn!("Warm microphone restoration after delayed startup cleanup failed: {error}");
+        }
+    });
 }
 
 #[tauri::command]
@@ -7811,7 +7860,10 @@ pub async fn start_microphone_test(
     }
 
     let recording_status = active_recording_status(state.inner()).await;
-    if recording_status != RecordingStatus::Idle {
+    if audio_takeover_blocks_dictation(
+        recording_status,
+        state.transcription_service.has_capture_owner(),
+    ) {
         log::warn!(
             "Microphone test blocked because recording is active: {:?}",
             recording_status
