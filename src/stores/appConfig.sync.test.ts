@@ -43,6 +43,7 @@ describe('useAppConfigStore sync', () => {
       microphone_sensitivity: 100,
       selected_audio_device: null,
       openai_api_key: null,
+      recording_mode: 'dictation' as const,
       ...overrides,
     };
   }
@@ -59,6 +60,7 @@ describe('useAppConfigStore sync', () => {
 
     expect(store.autoPasteText).toBe(true);
     expect(store.showMiniRecordingWindow).toBe(true);
+    expect(store.keepMicrophoneReady).toBe(false);
     expect(store.incomingTranslationDelivery).toBe('captions_only');
     expect(store.incomingTranslationVolume).toBe(100);
   });
@@ -102,6 +104,17 @@ describe('useAppConfigStore sync', () => {
     expect(store.doubleSpaceHotkeyEnabled).toBe(true);
     expect(store.microphoneSensitivity).toBe(120);
     expect(store.selectedAudioDevice).toBe('Mic A');
+  });
+
+  it('syncs keep-ready both ways and defaults legacy snapshots to disabled', () => {
+    const store = useAppConfigStore();
+    store.applySnapshot(makeSnapshotData({ keep_microphone_ready: true }), '1');
+    expect(store.keepMicrophoneReady).toBe(true);
+    store.applySnapshot(makeSnapshotData({ keep_microphone_ready: false }), '2');
+    expect(store.keepMicrophoneReady).toBe(false);
+    store.applySnapshot(makeSnapshotData({ keep_microphone_ready: true }), '3');
+    store.applySnapshot(makeSnapshotData(), '4');
+    expect(store.keepMicrophoneReady).toBe(false);
   });
 
   it('applySnapshot обновляет значения из SnapshotEnvelope', () => {

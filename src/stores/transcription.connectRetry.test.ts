@@ -1264,6 +1264,31 @@ describe('transcription connect-retry reliability', () => {
     store.cleanup();
   });
 
+  it('accepts warm activation only as unavailable and rejects stale activation after stop', async () => {
+    invokeMock.mockResolvedValue(null);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    const intent = { intentRevision: 1, runId: 2, desiredOn: true, pendingStart: true, status: 'Starting' };
+    handlers.get('recording:intent-projection')({ payload: intent });
+    const warm = { revision: 1, runId: 2, state: 'unavailable',
+      reason: 'activating-warm-capture', generation: 1, captureReady: false, transportReady: false };
+    handlers.get('recording:capture-readiness')({ payload: warm });
+    expect(store.captureReadiness?.reason).toBe('activating-warm-capture');
+    expect(store.isCaptureReady).toBe(false);
+    for (const invalid of [{ captureReady: true }, { transportReady: true }, { state: 'buffering' },
+      { revision: null }, { runId: null }]) {
+      handlers.get('recording:capture-readiness')({ payload: { ...warm, generation: 2, ...invalid } });
+      expect(store.captureReadiness?.generation).toBe(1);
+      expect(store.isCaptureReady).toBe(false);
+    }
+    handlers.get('recording:intent-projection')({ payload: {
+      ...intent, intentRevision: 2, desiredOn: false, pendingStart: false, status: 'Idle',
+    } });
+    handlers.get('recording:capture-readiness')({ payload: { ...warm, generation: 3 } });
+    expect(store.captureReadiness).toBeNull();
+    expect(store.isCaptureReady).toBe(false);
+    store.cleanup();
+  });
+
   it('fences capture readiness by intent revision independently from transcript session', async () => {
     invokeMock.mockResolvedValue(null);
     const { handlers, store } = await initializeStoreWithHandlers();

@@ -47,6 +47,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const hideRecordingWindowOnHotkey = ref(false);
   const showMiniRecordingWindow = ref(true);
   const keepRecordingUntilManualStop = ref(false);
+  const keepMicrophoneReady = ref(false);
   const holdToRecord = ref(false);
   const doubleSpaceHotkeyEnabled = ref(false);
   const streamingKeyterms = ref('');
@@ -107,6 +108,7 @@ export const useSettingsStore = defineStore('settings', () => {
     hideRecordingWindowOnHotkey: hideRecordingWindowOnHotkey.value,
     showMiniRecordingWindow: showMiniRecordingWindow.value,
     keepRecordingUntilManualStop: keepRecordingUntilManualStop.value,
+    keepMicrophoneReady: keepMicrophoneReady.value,
     holdToRecord: holdToRecord.value,
     doubleSpaceHotkeyEnabled: doubleSpaceHotkeyEnabled.value,
     streamingKeyterms: streamingKeyterms.value,
@@ -306,6 +308,10 @@ export const useSettingsStore = defineStore('settings', () => {
     keepRecordingUntilManualStop.value = value;
   }
 
+  function setKeepMicrophoneReady(value: boolean) {
+    keepMicrophoneReady.value = value;
+  }
+
   function setHoldToRecord(value: boolean) {
     holdToRecord.value = value;
   }
@@ -395,6 +401,8 @@ export const useSettingsStore = defineStore('settings', () => {
       showMiniRecordingWindow.value = state.showMiniRecordingWindow;
     if (state.keepRecordingUntilManualStop !== undefined)
       keepRecordingUntilManualStop.value = state.keepRecordingUntilManualStop;
+    if (state.keepMicrophoneReady !== undefined)
+      keepMicrophoneReady.value = state.keepMicrophoneReady;
     if (state.holdToRecord !== undefined) holdToRecord.value = state.holdToRecord;
     if (state.doubleSpaceHotkeyEnabled !== undefined)
       doubleSpaceHotkeyEnabled.value = state.doubleSpaceHotkeyEnabled;
@@ -440,6 +448,7 @@ export const useSettingsStore = defineStore('settings', () => {
     hideRecordingWindowOnHotkey,
     showMiniRecordingWindow,
     keepRecordingUntilManualStop,
+    keepMicrophoneReady,
     holdToRecord,
     doubleSpaceHotkeyEnabled,
     streamingKeyterms,
@@ -480,6 +489,7 @@ export const useSettingsStore = defineStore('settings', () => {
     setHideRecordingWindowOnHotkey,
     setShowMiniRecordingWindow,
     setKeepRecordingUntilManualStop,
+    setKeepMicrophoneReady,
     setHoldToRecord,
     setDoubleSpaceHotkeyEnabled,
     setStreamingKeyterms,

@@ -1423,6 +1423,11 @@ mod synthetic_readback {
 #[derive(Default, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Counters {
+    physical_open_count: u64,
+    physical_close_count: u64,
+    raw_callback_count: u64,
+    raw_idle_callback_count: u64,
+    warm_terminal_count: u64,
     intent_observations: Vec<Value>,
     observation_overflow: bool,
     control_results: Vec<Value>,
@@ -1562,6 +1567,24 @@ fn decode_audio_marker(samples: &[i16]) -> Option<AudioMarker> {
         capture_generation: u64::from(words[1]),
         sequence: u64::from(words[2]),
     })
+}
+
+fn scan_audio_markers(tail: &mut Vec<i16>, samples: &[i16]) -> Vec<AudioMarker> {
+    let mut stream = std::mem::take(tail);
+    stream.extend_from_slice(samples);
+    let mut markers = Vec::new();
+    let mut index = 0;
+    while index + AUDIO_MARKER_BITS <= stream.len() {
+        if let Some(marker) = decode_audio_marker(&stream[index..index + AUDIO_MARKER_BITS]) {
+            markers.push(marker);
+            index += AUDIO_MARKER_BITS;
+        } else {
+            index += 1;
+        }
+    }
+    let retain = (AUDIO_MARKER_BITS - 1).min(stream.len());
+    tail.extend_from_slice(&stream[stream.len() - retain..]);
+    markers
 }
 // E63 only: validate every signed-i16 sample, including marker amplitudes and tail.
 fn observe_full_pcm(counters: &mut Counters, seam: &str, chunk: &AudioChunk, marker: AudioMarker) {
@@ -1720,6 +1743,8 @@ pub struct Fixture {
     next_capture_generation: std::sync::atomic::AtomicU64,
     last_hotkey_press_at: Mutex<Option<std::time::Instant>>,
     capture_error: Mutex<Option<crate::domain::AudioCaptureErrorCallback>>,
+    warm_stalled: std::sync::atomic::AtomicBool,
+    warm_route_valid: std::sync::atomic::AtomicBool,
     qualification_source_ready: tokio::sync::Notify,
     capture_stop_release: tokio::sync::Notify,
     saved_capture_events: Mutex<Option<[super::recording_intent_coordinator::CoordinatorEvent; 2]>>,
@@ -1803,6 +1828,215 @@ fn continuation_mode() -> bool {
 
 pub fn fixture() -> Arc<Fixture> {
     FIXTURE.get_or_init(|| Arc::new(Fixture::default())).clone()
+}
+
+/// Only the OS callback source is replaced; ownership, readiness, conversion,
+/// callback admission and lease draining remain production code.
+#[cfg(target_os = "macos")]
+pub(super) fn warm_input_owner(
+) -> AudioResult<Arc<crate::infrastructure::audio::WarmDictationInput>> {
+    use crate::infrastructure::audio::*;
+    struct Factory(Arc<Fixture>);
+    struct Input {
+        shared: Arc<Fixture>,
+        raw: WarmRawCallback,
+        stopped: Arc<std::sync::atomic::AtomicBool>,
+        thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    }
+    impl WarmNativeFactory for Factory {
+        fn open(
+            &mut self,
+            raw: WarmRawCallback,
+            error: AudioCaptureErrorCallback,
+        ) -> AudioResult<Box<dyn WarmNativeInput>> {
+            self.0.counters.lock().unwrap().physical_open_count += 1;
+            *self.0.capture_error.lock().unwrap() = Some(error);
+            Ok(Box::new(Input {
+                shared: self.0.clone(),
+                raw,
+                stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                thread: Mutex::new(None),
+            }))
+        }
+    }
+    impl WarmNativeInput for Input {
+        fn format(&self) -> WarmInputFormat {
+            WarmInputFormat {
+                sample_rate: 16000,
+                channels: 1,
+                effective_name: "TEST warm native input".into(),
+            }
+        }
+        fn validate_route(&self) -> AudioResult<(bool, bool)> {
+            let valid = self
+                .shared
+                .warm_route_valid
+                .load(std::sync::atomic::Ordering::Acquire);
+            Ok((valid, valid))
+        }
+        fn play(&self) -> AudioResult<()> {
+            let shared = self.shared.clone();
+            let raw = self.raw.clone();
+            let stopped = self.stopped.clone();
+            *self.thread.lock().unwrap() = Some(std::thread::spawn(move || {
+                let mut sequence = 0;
+                while !stopped.load(std::sync::atomic::Ordering::Acquire) {
+                    if shared
+                        .warm_stalled
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        std::thread::sleep(Duration::from_millis(20));
+                        continue;
+                    }
+                    sequence += 1;
+                    // 1024 is the production 16 kHz conversion boundary. Markers
+                    // are written upstream so stale/cross-lease delivery is detectable.
+                    let generation = shared
+                        .next_capture_generation
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    let mut samples: Vec<i16> = (0..1024)
+                        .map(|i| if i % 32 < 16 { 5000 } else { -5000 })
+                        .collect();
+                    encode_audio_marker(
+                        &mut samples,
+                        AudioMarker {
+                            capture_generation: generation,
+                            sequence,
+                        },
+                    );
+                    {
+                        let mut counters = shared.counters.lock().unwrap();
+                        counters.raw_callback_count += 1;
+                        if counters.active_captures == 0 {
+                            counters.raw_idle_callback_count += 1;
+                        }
+                    }
+                    raw(WarmRawBlock::I16(&samples));
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }));
+            Ok(())
+        }
+    }
+    impl Drop for Input {
+        fn drop(&mut self) {
+            self.stopped
+                .store(true, std::sync::atomic::Ordering::Release);
+            if let Some(thread) = self.thread.lock().unwrap().take() {
+                let _ = thread.join();
+            }
+            self.shared.counters.lock().unwrap().physical_close_count += 1;
+        }
+    }
+    let shared = fixture();
+    shared
+        .warm_route_valid
+        .store(true, std::sync::atomic::Ordering::Release);
+    WarmDictationInput::with_factory(Box::new(Factory(shared)))
+}
+
+/// Transparent evidence tap around the real lease, never a capture replacement.
+pub(super) fn observe_warm_capture(inner: Box<dyn AudioCapture>) -> Box<dyn AudioCapture> {
+    Box::new(ObservedWarmCapture {
+        inner,
+        generation: None,
+    })
+}
+struct ObservedWarmCapture {
+    inner: Box<dyn AudioCapture>,
+    generation: Option<u64>,
+}
+impl Drop for ObservedWarmCapture {
+    fn drop(&mut self) {
+        if self.generation.take().is_some() {
+            let shared = fixture();
+            let mut counters = shared.counters.lock().unwrap();
+            counters.capture_stops += 1;
+            counters.active_captures = counters.active_captures.saturating_sub(1);
+        }
+    }
+}
+#[async_trait]
+impl AudioCapture for ObservedWarmCapture {
+    async fn initialize(&mut self, config: AudioConfig) -> AudioResult<()> {
+        self.inner.initialize(config).await
+    }
+    fn config(&self) -> AudioConfig {
+        self.inner.config()
+    }
+    fn is_capturing(&self) -> bool {
+        self.inner.is_capturing()
+    }
+    fn health_probe(&self) -> Option<AudioCaptureHealthProbe> {
+        self.inner.health_probe()
+    }
+    fn set_capture_identity(&mut self, identity: Option<AudioCaptureIdentity>) {
+        self.inner.set_capture_identity(identity);
+    }
+    fn set_terminal_error_callback(&mut self, callback: Option<AudioCaptureErrorCallback>) {
+        self.inner
+            .set_terminal_error_callback(callback.map(|callback| {
+                Arc::new(move |error| {
+                    fixture().counters.lock().unwrap().warm_terminal_count += 1;
+                    callback(error);
+                }) as AudioCaptureErrorCallback
+            }));
+    }
+    async fn start_capture(&mut self, callback: AudioChunkCallback) -> AudioResult<()> {
+        let shared = fixture();
+        let generation = shared
+            .next_capture_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let observed = shared.clone();
+        self.inner
+            .start_capture(Arc::new(move |chunk| {
+                let mut counters = observed.counters.lock().unwrap();
+                counters.audio_chunks += 1;
+                match decode_audio_marker(&chunk.data) {
+                    Some(marker) if marker.capture_generation == generation => {
+                        if let Some(range) = counters
+                            .capture_markers
+                            .iter_mut()
+                            .find(|r| r.capture_generation == generation)
+                        {
+                            range.last_sequence = marker.sequence;
+                            range.count += 1;
+                        } else {
+                            counters.capture_markers.push(MarkerRange {
+                                capture_generation: generation,
+                                first_sequence: marker.sequence,
+                                last_sequence: marker.sequence,
+                                count: 1,
+                            });
+                        }
+                    }
+                    _ => record_marker_violation(
+                        &mut counters,
+                        "warm native stale or invalid PCM marker",
+                    ),
+                }
+                drop(counters);
+                callback(chunk);
+            }))
+            .await?;
+        self.generation = Some(generation);
+        let mut counters = shared.counters.lock().unwrap();
+        counters.capture_starts += 1;
+        counters.active_captures += 1;
+        counters.max_active_captures = counters.max_active_captures.max(counters.active_captures);
+        Ok(())
+    }
+    async fn stop_capture(&mut self) -> AudioResult<()> {
+        self.inner.stop_capture().await?;
+        if self.generation.take().is_some() {
+            let shared = fixture();
+            let mut counters = shared.counters.lock().unwrap();
+            counters.capture_stops += 1;
+            counters.active_captures = counters.active_captures.saturating_sub(1);
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn record_capture_run(capture_run_id: u64, capture_fence_generation: u64) {
@@ -2454,6 +2688,7 @@ impl SttProviderFactory for FixtureFactory {
             alive: false,
             capture_generation: None,
             last_marker_sequence: 0,
+            marker_tail: Vec::new(),
             continuation: FakeContinuation::default(),
             continuation_enabled: continuation_mode(),
         }))
@@ -2484,6 +2719,7 @@ struct FixtureProvider {
     alive: bool,
     capture_generation: Option<u64>,
     last_marker_sequence: u64,
+    marker_tail: Vec<i16>,
     continuation: FakeContinuation,
     continuation_enabled: bool,
 }
@@ -2517,6 +2753,7 @@ impl FixtureProvider {
                 "WebSocket connection timeout: Native fixture failed start",
             )));
         }
+        self.marker_tail.clear();
         let mut counters = self.shared.counters.lock().unwrap();
         if resume {
             counters.provider_resumes += 1;
@@ -2639,14 +2876,27 @@ impl SttProvider for FixtureProvider {
         if chunk.data.is_empty() {
             return Ok(());
         }
-        let marker = decode_audio_marker(&chunk.data).ok_or_else(|| {
-            SttError::Processing("native fixture audio marker missing or corrupt".into())
-        })?;
+        let markers = scan_audio_markers(&mut self.marker_tail, &chunk.data);
+        if markers.len() > 1 {
+            return Err(SttError::Processing(
+                "native fixture received multiple capture markers in one VAD chunk".into(),
+            ));
+        }
+        let marker = markers.first().copied();
+        if marker.is_none() && self.capture_generation.is_none() {
+            return Err(SttError::Processing(
+                "native fixture first audio chunk has no capture marker".into(),
+            ));
+        }
+        let capture_generation = marker
+            .map(|marker| marker.capture_generation)
+            .or(self.capture_generation)
+            .expect("first provider chunk requires a capture marker");
         let mut counters = self.shared.counters.lock().unwrap();
         let association = counters
             .capture_run_associations
             .iter()
-            .find(|association| association.capture_generation == marker.capture_generation)
+            .find(|association| association.capture_generation == capture_generation)
             .copied();
         let association = association.or_else(|| {
             counters
@@ -2655,7 +2905,7 @@ impl SttProvider for FixtureProvider {
                 .then_some(CaptureRunAssociation {
                     capture_run_id: 0,
                     capture_fence_generation: 0,
-                    capture_generation: marker.capture_generation,
+                    capture_generation,
                 })
         });
         let Some(association) = association else {
@@ -2663,14 +2913,15 @@ impl SttProvider for FixtureProvider {
                 &mut counters,
                 format!(
                     "capture generation {} reached provider without a run association",
-                    marker.capture_generation
+                    capture_generation
                 ),
             );
             return Err(SttError::Processing(
                 "native fixture capture marker has no run association".into(),
             ));
         };
-        if after_write_case() {
+        if after_write_case() && marker.is_some() {
+            let marker = marker.expect("checked above");
             observe_full_pcm(&mut counters, "provider", chunk, marker);
         }
         counters.provider_audio_chunks += 1;
@@ -2678,68 +2929,80 @@ impl SttProvider for FixtureProvider {
         self.continuation.bytes += (chunk.data.len() * 2) as u64;
         if self.continuation_enabled
             && self.continuation.first_write_gate
-            && self.capture_generation != Some(marker.capture_generation)
+            && self.capture_generation != Some(capture_generation)
         {
             self.capture_generation = None;
             self.last_marker_sequence = 0;
         }
         if let Some(expected) = self.capture_generation {
-            if marker.capture_generation != expected {
+            if capture_generation != expected {
                 record_marker_violation(
                     &mut counters,
                     format!(
                         "provider session {} mixed capture generation {} after {}",
-                        self.session, marker.capture_generation, expected
+                        self.session, capture_generation, expected
                     ),
                 );
             }
         } else {
-            self.capture_generation = Some(marker.capture_generation);
+            self.capture_generation = Some(capture_generation);
         }
-        if marker.sequence != self.last_marker_sequence + 1 {
-            record_marker_violation(
-                &mut counters,
-                format!(
-                    "provider session {} received marker {} after {}",
-                    self.session, marker.sequence, self.last_marker_sequence
-                ),
-            );
-        }
-        if counters.provider_markers.iter().any(|delivery| {
-            delivery.capture_generation == marker.capture_generation
-                && delivery.provider_session_id != self.session
-        }) {
-            record_marker_violation(
-                &mut counters,
-                format!(
-                    "capture generation {} reached multiple provider sessions",
-                    marker.capture_generation
-                ),
-            );
-        }
-        self.last_marker_sequence = marker.sequence;
-        if let Some(range) = counters.provider_markers.iter_mut().find(|range| {
-            range.provider_session_id == self.session
-                && range.capture_generation == marker.capture_generation
-        }) {
-            range.last_sequence = marker.sequence;
-            range.count += 1;
-        } else if counters.provider_markers.len() < MAX_RECORDED_GENERATIONS {
-            counters.provider_markers.push(ProviderMarkerRange {
-                provider_session_id: self.session,
-                capture_run_id: association.capture_run_id,
-                capture_fence_generation: association.capture_fence_generation,
-                capture_generation: marker.capture_generation,
-                first_sequence: marker.sequence,
-                last_sequence: marker.sequence,
-                count: 1,
-            });
-        } else if !counters
-            .marker_violations
-            .iter()
-            .any(|entry| entry == "provider generation summary overflow")
-        {
-            record_marker_violation(&mut counters, "provider generation summary overflow");
+        if let Some(marker) = marker {
+            let expected_sequence =
+                if self.last_marker_sequence == 0 && counters.physical_open_count > 0 {
+                    counters
+                        .capture_markers
+                        .iter()
+                        .find(|range| range.capture_generation == marker.capture_generation)
+                        .map_or(1, |range| range.first_sequence)
+                } else {
+                    self.last_marker_sequence + 1
+                };
+            if marker.sequence != expected_sequence {
+                record_marker_violation(
+                    &mut counters,
+                    format!(
+                        "provider session {} received marker {} after {}",
+                        self.session, marker.sequence, self.last_marker_sequence
+                    ),
+                );
+            }
+            if counters.provider_markers.iter().any(|delivery| {
+                delivery.capture_generation == marker.capture_generation
+                    && delivery.provider_session_id != self.session
+            }) {
+                record_marker_violation(
+                    &mut counters,
+                    format!(
+                        "capture generation {} reached multiple provider sessions",
+                        marker.capture_generation
+                    ),
+                );
+            }
+            self.last_marker_sequence = marker.sequence;
+            if let Some(range) = counters.provider_markers.iter_mut().find(|range| {
+                range.provider_session_id == self.session
+                    && range.capture_generation == marker.capture_generation
+            }) {
+                range.last_sequence = marker.sequence;
+                range.count += 1;
+            } else if counters.provider_markers.len() < MAX_RECORDED_GENERATIONS {
+                counters.provider_markers.push(ProviderMarkerRange {
+                    provider_session_id: self.session,
+                    capture_run_id: association.capture_run_id,
+                    capture_fence_generation: association.capture_fence_generation,
+                    capture_generation: marker.capture_generation,
+                    first_sequence: marker.sequence,
+                    last_sequence: marker.sequence,
+                    count: 1,
+                });
+            } else if !counters
+                .marker_violations
+                .iter()
+                .any(|entry| entry == "provider generation summary overflow")
+            {
+                record_marker_violation(&mut counters, "provider generation summary overflow");
+            }
         }
         if !self.received_audio {
             self.received_audio = true;
@@ -3045,6 +3308,8 @@ pub fn native_e2e_close_recording(app_handle: AppHandle) -> Result<(), String> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FixtureConfig {
+    warm_stalled: Option<bool>,
+    warm_route_valid: Option<bool>,
     hold_next_finalize: Option<bool>,
     release_finalization: Option<bool>,
     start_delay_ms: Option<u64>,
@@ -3062,6 +3327,22 @@ pub async fn native_e2e_configure(
     app_handle: AppHandle,
     config: FixtureConfig,
 ) -> Result<(), String> {
+    if config.warm_stalled.is_some() || config.warm_route_valid.is_some() {
+        if !mini_ux_mode() || live_mode() {
+            return Err("warm controls require isolated mini UX fixture".into());
+        }
+        let shared = fixture();
+        if let Some(stalled) = config.warm_stalled {
+            shared
+                .warm_stalled
+                .store(stalled, std::sync::atomic::Ordering::Release);
+        }
+        if let Some(valid) = config.warm_route_valid {
+            shared
+                .warm_route_valid
+                .store(valid, std::sync::atomic::Ordering::Release);
+        }
+    }
     if config.release_finalization.is_some() {
         if !mini_ux_mode()
             || config.release_finalization != Some(true)
@@ -3229,6 +3510,8 @@ pub async fn native_e2e_configure(
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HotkeyAction {
+    #[serde(rename = "prewarm-input")]
+    PrewarmInput,
     #[serde(rename = "release-capture-stop")]
     ReleaseCaptureStop,
     #[serde(rename = "save-capture-events")]
@@ -3255,6 +3538,13 @@ pub async fn native_e2e_hotkey(
     action: HotkeyAction,
     physical: Option<PhysicalAction>,
 ) -> Result<(), String> {
+    if matches!(action, HotkeyAction::PrewarmInput) {
+        if !mini_ux_mode() || live_mode() {
+            return Err("prewarm requires isolated mini UX fixture".into());
+        }
+        let _guard = state.audio_start_guard.lock().await;
+        return state.prewarm_warm_input_if_allowed().await;
+    }
     if diagnostic_refuses_effect() {
         return Err("diagnostic forbids hotkeys".into());
     }
@@ -4589,6 +4879,7 @@ mod drain_tests {
             alive: false,
             capture_generation: None,
             last_marker_sequence: 0,
+            marker_tail: Vec::new(),
             continuation: FakeContinuation::default(),
             continuation_enabled: true,
         };

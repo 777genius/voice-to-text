@@ -136,6 +136,14 @@ const miniCaptureProjection = computed<MiniCaptureProjection>(() => {
   }
 
   const hasIndependentStartingCapture = store.incomingTranslationStatus === 'Starting';
+  // The store selects readiness for the current intent revision. Warm hardware
+  // alone is not capture admission, so keep this frame neutral until ready.
+  if (!hasIndependentStartingCapture && store.activeRecordingMode === 'dictation' &&
+      store.recordingDesiredOn && readiness?.state === 'unavailable' &&
+      readiness.reason === 'activating-warm-capture' &&
+      store.incomingTranslationStatus !== 'Processing') {
+    return { phase: 'idle', statusText: '', placeholderText: '' };
+  }
   const hasCurrentStartingCapture = !hasTerminalReadiness && (
     store.recordingDesiredOn ||
     (!hasStoppedForegroundOwner && (
@@ -178,6 +186,7 @@ const hasMiniRecognizedText = computed(() =>
 );
 const shouldShowMiniHotkeyPrompt = computed(() =>
   store.isIdle &&
+  !store.recordingDesiredOn &&
   !hasMiniRecognizedText.value &&
   !hasMiniIncomingTranslation.value &&
   !store.error &&

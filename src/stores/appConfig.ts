@@ -26,6 +26,7 @@ export const useAppConfigStore = defineStore('appConfig', () => {
   const hideRecordingWindowOnHotkey = ref(false);
   const showMiniRecordingWindow = ref(true);
   const keepRecordingUntilManualStop = ref(false);
+  const keepMicrophoneReady = ref(false);
   const holdToRecord = ref(false);
   const doubleSpaceHotkeyEnabled = ref(false);
   const microphoneSensitivity = ref(100);
@@ -51,6 +52,7 @@ export const useAppConfigStore = defineStore('appConfig', () => {
       data.show_mini_recording_window ?? showMiniRecordingWindow.value;
     keepRecordingUntilManualStop.value =
       data.keep_recording_until_manual_stop ?? keepRecordingUntilManualStop.value;
+    keepMicrophoneReady.value = data.keep_microphone_ready ?? false;
     holdToRecord.value = data.hold_to_record ?? holdToRecord.value;
     doubleSpaceHotkeyEnabled.value =
       data.double_space_hotkey_enabled ?? doubleSpaceHotkeyEnabled.value;
@@ -135,6 +137,7 @@ export const useAppConfigStore = defineStore('appConfig', () => {
     hideRecordingWindowOnHotkey,
     showMiniRecordingWindow,
     keepRecordingUntilManualStop,
+    keepMicrophoneReady,
     holdToRecord,
     doubleSpaceHotkeyEnabled,
     microphoneSensitivity,

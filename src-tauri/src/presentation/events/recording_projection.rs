@@ -50,6 +50,7 @@ pub enum RecordingCaptureReadinessState {
 pub enum RecordingCaptureReadinessReason {
     Idle,
     StartingCapture,
+    ActivatingWarmCapture,
     FinalizingPrevious,
     ConnectingProvider,
     Recording,
@@ -132,6 +133,10 @@ mod tests {
     }
     #[test]
     fn readiness_separates_event_revision_physical_generation_and_transport_permission() {
+        assert_eq!(
+            serde_json::to_value(RecordingCaptureReadinessReason::ActivatingWarmCapture).unwrap(),
+            "activating-warm-capture"
+        );
         let value = serde_json::to_value(RecordingCaptureReadinessPayload {
             generation: 900,
             run_id: Some(102),

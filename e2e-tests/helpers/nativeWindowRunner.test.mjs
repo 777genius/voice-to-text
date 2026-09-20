@@ -169,20 +169,57 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
   assert.equal(env.VOICE_TO_TEXT_BACKEND_URL, 'ws://127.0.0.1:9');
   assert.equal(env.VOICETEXT_NATIVE_LIVE, undefined);
   const evidence = { marker, passed: true, report: { mode: 'mini-ux', passed: true, errors: [],
+    warmActivationFrames: [{ source: 'render', revision: 8, runId: 201,
+      captureReady: false, phase: 'mini-status-dot', statusText: '' }],
     cases: ['hotkey', 'native-close', 'background-start-during-hide'].map(stop => ({ stop, hideMs: 180, bufferedBeforeStop: true,
       oldProviderStillFinalizing: true, observations: 20, backgroundDidNotReopen: true,
       successorStayedVisible: true, markerDeliveryComplete: true, backgroundStartingBeforeHide: true })),
     final: { status: 'Idle', visible: false, preparedCaptureTokenCount: 0,
       fixture: { activeCaptures: 0, activeProviders: 0, maxActiveProviders: 1, markerViolations: [] } } } };
-  assert.equal(validateResult(evidence), evidence.report);
+  assert.throws(() => validateResult(evidence), /physical warm input evidence/);
+  const warm = structuredClone(evidence);
+  Object.assign(warm.report, { warmMode: true, warmReopens: 10, idleAcceptedDelta: 0 });
+  warm.report.trace = [{ label: 'warm reopen', captureReady: true }];
+  warm.report.warmReadyFrames = Array.from({ length: 10 }, (_, i) => ({ runId: i + 1, revision: i + 1, phase: 'mini-status-dot recording' }));
+  warm.report.warmReuseOpenCount = 2;
+  warm.report.lifecycle = { sleepClosed: true, wakeOpenedOnce: true, terminalCount: 1, recoveryOpenedOnce: true,
+    physical: {
+      warmReopenStart: { open: 1, close: 0 }, warmReopenEnd: { open: 1, close: 0 },
+      policyActive: { open: 1, close: 0 }, policyClosed: { open: 1, close: 1 },
+      policyResumed: { open: 2, close: 1 }, sleepClosed: { open: 2, close: 2 },
+      wakeOpened: { open: 3, close: 2 }, terminalClosed: { open: 3, close: 3 },
+      recoveryOpened: { open: 4, close: 3 },
+    } };
+  warm.report.final.fixture.physicalOpenCount = 4;
+  warm.report.final.fixture.physicalCloseCount = 3;
+  assert.equal(validateResult(warm), warm.report);
+  for (const mutate of [
+    e => { e.report.warmActivationFrames = []; },
+    e => { e.report.trace = []; },
+    e => { e.report.warmReopens = 9; },
+    e => { e.report.idleAcceptedDelta = 1; },
+    e => { e.report.lifecycle.physical.policyResumed.open = 3; },
+    e => { e.report.final.fixture.physicalOpenCount = 5; },
+    e => { e.report.final.fixture.physicalCloseCount = 2; },
+    e => { e.report.warmMode = false; },
+    e => { e.report.warmReadyFrames[0].phase = 'mini-status-dot starting'; },
+  ]) {
+    const broken = structuredClone(warm);
+    mutate(broken);
+    assert.throws(() => validateResult(broken), /physical warm input evidence/);
+  }
   for (const mutate of [
     e => { e.report.cases[0].hideMs = 5000; },
     e => { e.report.cases[0].backgroundDidNotReopen = false; },
     e => { e.report.cases[1].successorStayedVisible = false; },
     e => { e.report.cases[1].markerDeliveryComplete = false; },
     e => { e.report.final.fixture.activeCaptures = 1; },
+    e => { e.report.warmActivationFrames[0].captureReady = true; },
+    e => { e.report.warmActivationFrames[0].phase = 'mini-status-dot starting'; },
+    e => { e.report.warmActivationFrames[0].statusText = 'Listening'; },
+    e => { e.report.warmActivationFrames[0].revision = null; },
   ]) {
-    const broken = structuredClone(evidence); mutate(broken);
+    const broken = structuredClone(warm); mutate(broken);
     assert.throws(() => validateResult(broken), /mini UX window evidence/);
   }
 });

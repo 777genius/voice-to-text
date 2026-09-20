@@ -169,7 +169,7 @@ impl SystemAudioCapture {
         }
     }
 
-    fn device_name_matches(requested: &str, candidate: &str) -> bool {
+    pub(super) fn device_name_matches(requested: &str, candidate: &str) -> bool {
         if requested == candidate {
             return true;
         }
@@ -228,7 +228,7 @@ impl SystemAudioCapture {
         self.device.name().ok()
     }
 
-    fn select_device_and_config(
+    pub(super) fn select_device_and_config(
         host: &Host,
         device_name: Option<&str>,
     ) -> AudioResult<(Device, SupportedStreamConfig)> {

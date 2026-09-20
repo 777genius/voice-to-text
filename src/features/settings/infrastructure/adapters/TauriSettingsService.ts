@@ -89,6 +89,9 @@ class TauriSettingsService {
     if (typeof config.keep_recording_until_manual_stop === 'boolean') {
       args.keepRecordingUntilManualStop = config.keep_recording_until_manual_stop;
     }
+    if (typeof config.keep_microphone_ready === 'boolean') {
+      args.keepMicrophoneReady = config.keep_microphone_ready;
+    }
     if (typeof config.hold_to_record === 'boolean') {
       args.holdToRecord = config.hold_to_record;
     }

@@ -17,8 +17,46 @@ export function validateMiniUxResult(envelope) {
   const report = envelope.report;
   const final = report?.final;
   const cases = report?.cases;
+  const physical = report?.lifecycle?.physical;
+  const validCounts = counts => Number.isSafeInteger(counts?.open) && counts.open >= 0 &&
+    Number.isSafeInteger(counts?.close) && counts.close >= 0 && counts.close <= counts.open;
+  const sameCounts = (left, right) => left.open === right.open && left.close === right.close;
+  const oneOpen = (before, after) => after.open === before.open + 1 && after.close === before.close;
+  const oneClose = (before, after) => after.open === before.open && after.close === before.close + 1;
+  const physicalTransitionsValid = physical && Object.values(physical).every(validCounts) &&
+    sameCounts(physical.warmReopenStart, physical.warmReopenEnd) &&
+    sameCounts(physical.warmReopenEnd, physical.policyActive) &&
+    oneClose(physical.policyActive, physical.policyClosed) &&
+    oneOpen(physical.policyClosed, physical.policyResumed) &&
+    oneClose(physical.policyResumed, physical.sleepClosed) &&
+    oneOpen(physical.sleepClosed, physical.wakeOpened) &&
+    oneClose(physical.wakeOpened, physical.terminalClosed) &&
+    oneOpen(physical.terminalClosed, physical.recoveryOpened) &&
+    report.warmReuseOpenCount === physical.policyResumed.open &&
+    final?.fixture?.physicalOpenCount === physical.recoveryOpened.open &&
+    final?.fixture?.physicalCloseCount === physical.recoveryOpened.close &&
+    final.fixture.physicalOpenCount === final.fixture.physicalCloseCount + 1;
+  // Mini UX is an explicit warm acceptance run; cold bypass is not evidence.
+  const warmFrames = report?.warmActivationFrames;
+  if (report?.warmMode !== true || report.warmReopens !== 10 || report.idleAcceptedDelta !== 0 ||
+       !Array.isArray(report.trace) || report.trace.length === 0 ||
+       !Array.isArray(report.warmReadyFrames) || report.warmReadyFrames.length !== 10 ||
+       report.warmReadyFrames.some(frame => !Number.isSafeInteger(frame.runId) || frame.runId <= 0 ||
+         !Number.isSafeInteger(frame.revision) || !/\brecording\b/.test(frame.phase) || /\b(starting|processing)\b/.test(frame.phase)) ||
+       !physicalTransitionsValid ||
+       report.lifecycle?.sleepClosed !== true || report.lifecycle?.wakeOpenedOnce !== true ||
+       report.lifecycle?.terminalCount !== 1 || report.lifecycle?.recoveryOpenedOnce !== true ||
+       !Array.isArray(warmFrames) || warmFrames.length === 0) {
+    throw new Error('Incomplete physical warm input evidence');
+  }
   if (envelope.marker !== marker || envelope.passed !== true || report?.passed !== true ||
       !Array.isArray(cases) || cases.length !== 3 ||
+      !Array.isArray(warmFrames) || warmFrames.length > 256 ||
+      warmFrames.some(frame => !['render', 'shown', 'sample'].includes(frame.source) ||
+        !Number.isSafeInteger(frame.revision) || frame.revision < 0 ||
+        !Number.isSafeInteger(frame.runId) || frame.runId <= 0 ||
+        frame.captureReady !== false || frame.statusText !== '' || typeof frame.phase !== 'string' ||
+        /\b(recording|starting|processing)\b/.test(frame.phase)) ||
       cases[0].stop !== 'hotkey' || cases[1].stop !== 'native-close' ||
       cases[2].stop !== 'background-start-during-hide' || cases[2].backgroundStartingBeforeHide !== true ||
       cases.some(c => !Number.isFinite(c.hideMs) || c.hideMs < 0 || c.hideMs > 1000 ||

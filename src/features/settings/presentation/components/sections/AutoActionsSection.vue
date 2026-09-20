@@ -15,6 +15,7 @@ const {
   hideRecordingWindowOnHotkey,
   showMiniRecordingWindow,
   keepRecordingUntilManualStop,
+  keepMicrophoneReady,
   holdToRecord,
   doubleSpaceHotkeyEnabled,
   hasAccessibilityPermission,
@@ -126,6 +127,23 @@ const {
           <span class="auto-action-copy">
             <span class="auto-action-label">{{ t('settings.autoActions.manualStopOnly') }}</span>
             <span class="auto-action-hint">{{ t('settings.autoActions.hintManualStopBody') }}</span>
+          </span>
+        </template>
+      </v-checkbox>
+    </div>
+
+    <div v-if="isMacOS" class="auto-action-option">
+      <v-checkbox
+        v-model="keepMicrophoneReady"
+        density="compact"
+        hide-details
+        color="primary"
+        class="auto-action-checkbox"
+      >
+        <template #label>
+          <span class="auto-action-copy">
+            <span class="auto-action-label">{{ t('settings.autoActions.keepMicrophoneReady') }}</span>
+            <span class="auto-action-hint">{{ t('settings.autoActions.hintKeepMicrophoneReady') }}</span>
           </span>
         </template>
       </v-checkbox>

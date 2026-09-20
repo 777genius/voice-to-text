@@ -260,7 +260,7 @@ function mountRecordingPopover(setupStore?: (store: ReturnType<typeof useTranscr
 }
 
 function expectMiniCapturePhase(
-  phase: 'recording' | 'starting' | 'processing' | 'error',
+  phase: 'idle' | 'recording' | 'starting' | 'processing' | 'error',
   text: string,
 ) {
   const statusDot = document.querySelector<HTMLElement>('.mini-status-dot');
@@ -1100,6 +1100,45 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     expect(document.querySelector('.mini-status-dot')?.getAttribute('title')).toContain('Processing');
     wrapper.unmount();
   });
+
+  it.each(['intent-first', 'readiness-first', 'idle-status'])(
+    'keeps warm activation neutral until admitted with %s, then preserves cold fallback', async (order) => {
+      const wrapper = mountRecordingPopover();
+      await waitForListenerCount('recording:intent-projection', 1);
+      await waitForListenerCount('recording:capture-readiness', 1);
+      const intent = { runId: 101, intentRevision: 8,
+        status: order === 'idle-status' ? RecordingStatus.Idle : RecordingStatus.Processing,
+        desiredOn: true, pendingStart: true, processingJobs: 1, shutdownRequested: false };
+      const warm = { revision: 8, runId: 201, state: 'unavailable',
+        reason: 'activating-warm-capture', generation: 1, captureReady: false, transportReady: false };
+      if (order === 'intent-first') {
+        await emitTauriEvent('recording:intent-projection', intent);
+        await emitTauriEvent('recording:capture-readiness', warm);
+      } else {
+        await emitTauriEvent('recording:capture-readiness', warm);
+        await emitTauriEvent('recording:intent-projection', intent);
+      }
+      expectMiniCapturePhase('idle', '');
+      expect(document.querySelector('.mini-status-dot')?.getAttribute('aria-label')).toBe('');
+      expect(document.querySelector('.mini-transcription-text-inner')?.textContent?.trim()).toBe('');
+      const store = useTranscriptionStore();
+      expect(store.isCaptureReady).toBe(false);
+      await emitTauriEvent('recording:capture-readiness', { ...warm, generation: 2,
+        state: 'buffering', reason: 'connecting-provider', captureReady: true });
+      expectMiniCapturePhase('recording', 'Listening');
+      // New revision cannot inherit the old warm/ready projection.
+      await emitTauriEvent('recording:intent-projection', { ...intent, intentRevision: 9 });
+      expectMiniCapturePhase('starting', 'Starting');
+      await emitTauriEvent('recording:capture-readiness', { ...warm, generation: 3 });
+      expectMiniCapturePhase('starting', 'Starting');
+      await emitTauriEvent('recording:capture-readiness', { ...warm, revision: 9, generation: 4 });
+      expectMiniCapturePhase('idle', '');
+      await emitTauriEvent('recording:capture-readiness', { ...warm, revision: 9, generation: 5,
+        reason: 'starting-capture' });
+      expectMiniCapturePhase('starting', 'Starting');
+      wrapper.unmount();
+    },
+  );
 
   it.each([
     { order: 'intent before readiness', state: 'buffering' as const },

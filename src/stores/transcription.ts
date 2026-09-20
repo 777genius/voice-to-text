@@ -490,12 +490,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         id === undefined || id === null || (Number.isSafeInteger(id) && Number(id) > 0)) &&
       (payload.captureReady === undefined || typeof payload.captureReady === 'boolean') &&
       (payload.transportReady === undefined || typeof payload.transportReady === 'boolean') &&
+      (payload.reason !== 'activating-warm-capture' ||
+        (payload.revision != null && payload.runId != null && payload.state === 'unavailable' &&
+          payload.captureReady !== true && payload.transportReady !== true)) &&
       (payload.revision === null ||
         (Number.isSafeInteger(payload.revision) && Number(payload.revision) >= 0)) &&
       (payload.runId === null || (Number.isSafeInteger(payload.runId) && Number(payload.runId) > 0)) &&
       Number.isSafeInteger(payload.generation) && Number(payload.generation) >= 0 &&
       ['unavailable', 'buffering', 'streaming'].includes(String(payload.state)) &&
-      ['idle', 'starting-capture', 'finalizing-previous', 'connecting-provider', 'recording', 'cancelled', 'error']
+      ['idle', 'starting-capture', 'activating-warm-capture', 'finalizing-previous', 'connecting-provider', 'recording', 'cancelled', 'error']
         .includes(String(payload.reason));
   }
 

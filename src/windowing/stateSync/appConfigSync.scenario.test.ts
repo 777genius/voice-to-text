@@ -47,6 +47,7 @@ describe('scenario: app-config sync across windows (mocked tauri)', () => {
       hide_recording_window_on_hotkey: false,
       show_mini_recording_window: false,
       keep_recording_until_manual_stop: false,
+      keep_microphone_ready: false,
       hold_to_record: false,
       double_space_hotkey_enabled: false,
       microphone_sensitivity: 100,
@@ -80,6 +81,9 @@ describe('scenario: app-config sync across windows (mocked tauri)', () => {
             ...currentData,
             keep_recording_until_manual_stop: args.keepRecordingUntilManualStop,
           };
+        }
+        if (typeof args?.keepMicrophoneReady === 'boolean') {
+          currentData = { ...currentData, keep_microphone_ready: args.keepMicrophoneReady };
         }
         if (typeof args?.holdToRecord === 'boolean') {
           currentData = {
@@ -117,6 +121,9 @@ describe('scenario: app-config sync across windows (mocked tauri)', () => {
 
     await appConfigMain.startSync();
     expect(appConfigMain.autoCopyToClipboard).toBe(false);
+    expect(appConfigMain.keepMicrophoneReady).toBe(false);
+    await invokeMock(CMD_UPDATE_APP_CONFIG, { keepMicrophoneReady: true });
+    await vi.waitFor(() => expect(appConfigMain.keepMicrophoneReady).toBe(true));
 
     // "Settings window" toggles auto-copy; main window receives it through state sync.
     await invokeMock(CMD_UPDATE_APP_CONFIG, { autoCopyToClipboard: true });
@@ -130,5 +137,8 @@ describe('scenario: app-config sync across windows (mocked tauri)', () => {
     await vi.waitFor(() => {
       expect(appConfigMain.hideRecordingWindowOnHotkey).toBe(true);
     });
+    expect(appConfigMain.keepMicrophoneReady).toBe(true);
+    await invokeMock(CMD_UPDATE_APP_CONFIG, { keepMicrophoneReady: false });
+    await vi.waitFor(() => expect(appConfigMain.keepMicrophoneReady).toBe(false));
   });
 });

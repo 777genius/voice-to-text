@@ -329,6 +329,20 @@ describe('useSettings saveConfig', () => {
     });
   });
 
+  it.each([true, false])('saves only a changed keep-ready draft (%s)', async (enabled) => {
+    const store = useSettingsStore();
+    store.setLanguage('ru', { persist: false });
+    store.setKeepMicrophoneReady(!enabled);
+    store.capturePersistedState();
+    store.setKeepMicrophoneReady(enabled);
+    tauriSettingsServiceMock.getSttConfig.mockResolvedValue({ language: 'ru', streaming_keyterms: null });
+    tauriSettingsServiceMock.getAppConfig.mockResolvedValue({ keep_microphone_ready: !enabled });
+    tauriSettingsServiceMock.updateAppConfig.mockResolvedValue(undefined);
+    const { saveConfig } = useSettings();
+    await expect(saveConfig()).resolves.toBe(true);
+    expect(tauriSettingsServiceMock.updateAppConfig).toHaveBeenCalledWith({ keep_microphone_ready: enabled });
+  });
+
   it('сохраняет режим записи при удержании хоткея', async () => {
     const store = useSettingsStore();
     store.setLanguage('ru', { persist: false });

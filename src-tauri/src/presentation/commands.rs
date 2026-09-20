@@ -944,6 +944,19 @@ fn update_recording_capture_readiness(
     sealed: bool,
 ) -> Option<RecordingCaptureReadinessPayload> {
     let run = capture.run();
+    let warm_eligible = run.is_some_and(|run| {
+        state
+            .recording_intent_policy_snapshots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&run.policy.version)
+            .is_some_and(|config| config.keep_microphone_ready)
+            && state.warm_capture_is_ready()
+    });
+    let mut snapshot = state
+        .recording_capture_readiness
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (readiness_state, reason) = match capture {
         recording_intent::CaptureState::Preparing {
             cancel_requested: true,
@@ -954,7 +967,15 @@ fn update_recording_capture_readiness(
         ),
         recording_intent::CaptureState::Preparing { .. } => (
             RecordingCaptureReadinessState::Unavailable,
-            RecordingCaptureReadinessReason::StartingCapture,
+            if warm_eligible
+                && (snapshot.run_id != run.map(|run| run.run_id.get())
+                    || snapshot.revision != Some(intent_revision)
+                    || snapshot.reason == RecordingCaptureReadinessReason::ActivatingWarmCapture)
+            {
+                RecordingCaptureReadinessReason::ActivatingWarmCapture
+            } else {
+                RecordingCaptureReadinessReason::StartingCapture
+            },
         ),
         recording_intent::CaptureState::Buffering { .. } => (
             RecordingCaptureReadinessState::Buffering,
@@ -993,10 +1014,6 @@ fn update_recording_capture_readiness(
             },
         ),
     };
-    let mut snapshot = state
-        .recording_capture_readiness
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let run_id = run.map(|run| run.run_id.get());
     let revision = Some(intent_revision);
     if snapshot.run_id == run_id
@@ -1045,6 +1062,87 @@ fn update_recording_capture_readiness(
         reason,
     };
     Some(snapshot.clone())
+}
+
+// The admission budget only changes the projection. It never cancels admitted
+// PCM, and a late timeout cannot overwrite readiness for this or a newer run.
+fn warm_activation_matches(
+    snapshot: &RecordingCaptureReadinessPayload,
+    run_id: u64,
+    revision: u64,
+) -> bool {
+    snapshot.run_id == Some(run_id)
+        && snapshot.revision == Some(revision)
+        && snapshot.reason == RecordingCaptureReadinessReason::ActivatingWarmCapture
+}
+
+#[cfg(test)]
+mod warm_activation_tests {
+    use super::*;
+
+    #[test]
+    fn takeover_restoration_requires_confirmed_close_and_no_active_consumer() {
+        for warm_closed in [false, true] {
+            for external_closed in [false, true] {
+                for started in [false, true] {
+                    assert_eq!(
+                        takeover_can_resume(warm_closed, external_closed, started),
+                        (warm_closed, external_closed, started) == (true, true, false)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn activation_deadline_cannot_demote_ready_cancelled_or_successor_capture() {
+        let mut snapshot = RecordingCaptureReadinessPayload {
+            capture_generation: None,
+            logical_run_id: None,
+            capture_episode_id: None,
+            capture_ready: Some(false),
+            transport_ready: Some(false),
+            generation: 1,
+            run_id: Some(7),
+            revision: Some(9),
+            state: RecordingCaptureReadinessState::Unavailable,
+            reason: RecordingCaptureReadinessReason::ActivatingWarmCapture,
+        };
+        assert!(warm_activation_matches(&snapshot, 7, 9));
+        assert!(!warm_activation_matches(&snapshot, 6, 9));
+        assert!(!warm_activation_matches(&snapshot, 7, 8));
+        for reason in [
+            RecordingCaptureReadinessReason::Recording,
+            RecordingCaptureReadinessReason::ConnectingProvider,
+            RecordingCaptureReadinessReason::Cancelled,
+            RecordingCaptureReadinessReason::StartingCapture,
+        ] {
+            snapshot.reason = reason;
+            assert!(!warm_activation_matches(&snapshot, 7, 9));
+        }
+    }
+}
+
+fn expire_warm_capture_activation(app_handle: &AppHandle, run_id: u64, revision: u64) {
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return;
+    };
+    let payload = {
+        let mut snapshot = state
+            .recording_capture_readiness
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !warm_activation_matches(&snapshot, run_id, revision) {
+            return;
+        }
+        snapshot.reason = RecordingCaptureReadinessReason::StartingCapture;
+        snapshot.generation = state
+            .recording_capture_readiness_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
+        snapshot.clone()
+    };
+    let _ = app_handle.emit(EVENT_RECORDING_CAPTURE_READINESS, payload);
 }
 
 pub(crate) fn sync_recording_intent_runtime(
@@ -1096,6 +1194,12 @@ pub(crate) fn sync_recording_intent_runtime(
 }
 
 pub(crate) async fn shutdown_recording_intent(app_handle: AppHandle) {
+    if let Some(state) = app_handle.try_state::<AppState>() {
+        state.suspend_warm_input(super::state::WarmInputSuspension::Shutdown);
+        if let Err(error) = state.shutdown_warm_input().await {
+            log::error!("Warm microphone shutdown was not confirmed: {error}");
+        }
+    }
     let (ready, force_off) = {
         let Some(state) = app_handle.try_state::<AppState>() else {
             return;
@@ -1139,6 +1243,27 @@ pub(super) fn force_off_recording_for_system_sleep(app_handle: AppHandle) {
     let Some(state) = app_handle.try_state::<AppState>() else {
         return;
     };
+    state.suspend_warm_input(super::state::WarmInputSuspension::Sleep);
+    let close_handle = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Some(state) = close_handle.try_state::<AppState>() {
+            let _guard = state.audio_start_guard.lock().await;
+            if !state.warm_input_is_suspended(super::state::WarmInputSuspension::Sleep) {
+                return;
+            }
+            if let Err(error) = state.close_warm_input().await {
+                log::error!("Warm microphone sleep close was not confirmed: {error}");
+            }
+        }
+    });
+    drop(state);
+    reset_recording_power_gesture(app_handle);
+}
+
+fn reset_recording_power_gesture(app_handle: AppHandle) {
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return;
+    };
     if state.recording_intent_coordinator_mode != RecordingIntentCoordinatorMode::Desired {
         return;
     }
@@ -1156,7 +1281,28 @@ pub(super) fn force_off_recording_for_system_sleep(app_handle: AppHandle) {
 pub(super) fn reset_recording_gestures_after_system_wake(app_handle: &AppHandle) {
     // A callback can be accepted between sleep and wake. Clearing that latch
     // must submit the matching ForceOff as well, under the same ordering boundary.
-    force_off_recording_for_system_sleep(app_handle.clone());
+    reset_recording_power_gesture(app_handle.clone());
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return;
+    };
+    let revision = state.warm_input_revision();
+    drop(state);
+    let app_handle = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Some(state) = app_handle.try_state::<AppState>() {
+            let _guard = state.audio_start_guard.lock().await;
+            if let Err(error) = state.close_warm_input().await {
+                log::error!("Warm microphone wake close was not confirmed: {error}");
+                return;
+            }
+            if let Err(error) = state
+                .resume_warm_input_at_revision(super::state::WarmInputSuspension::Sleep, revision)
+                .await
+            {
+                log::warn!("Warm microphone wake preparation failed: {error}");
+            }
+        }
+    });
 }
 
 fn execute_recording_coordinator_effect(
@@ -1168,6 +1314,15 @@ fn execute_recording_coordinator_effect(
             continuation::execute(app_handle, effect)
         }
         recording_intent::CoordinatorEffect::PrepareCapture { effect_id, run } => {
+            let admission_handle = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                expire_warm_capture_activation(
+                    &admission_handle,
+                    run.run_id.get(),
+                    run.revision.get(),
+                );
+            });
             let Some(state) = app_handle.try_state::<AppState>() else {
                 return;
             };
@@ -1222,15 +1377,27 @@ fn execute_recording_coordinator_effect(
                     }
                     let _audio_guard = state.audio_start_guard.lock().await;
                     check_recording_resource_cancellation(&cancelled)?;
+                    if state.microphone_test.read().await.is_testing {
+                        return Err("Microphone test is active".to_string());
+                    }
+                    if !state.warm_capture_is_ready() {
+                        expire_warm_capture_activation(
+                            &app_handle,
+                            run.run_id.get(),
+                            run.revision.get(),
+                        );
+                    }
                     state
-                        .ensure_audio_capture_device_with_vad_timeout(
+                        .ensure_audio_capture_with_policy(
                             config.selected_audio_device.clone(),
                             app_handle.clone(),
                             false,
                             config.vad_silence_timeout_ms,
+                            config.keep_microphone_ready,
                         )
                         .await
                         .map_err(|error| error.to_string())?;
+                    check_recording_resource_cancellation(&cancelled)?;
                     let app_level = app_handle.clone();
                     let on_level = Arc::new(
                         move |identity: crate::domain::AudioMeterSample, level: f32| {
@@ -1308,6 +1475,10 @@ fn execute_recording_coordinator_effect(
                     .transcription_service
                     .capture_is_active_for_run(run.run_id.get())
                     .await;
+                if !capture_still_active {
+                    reconcile_warm_input_after_capture_release(state.inner(), "prepare completion")
+                        .await;
+                }
                 let outcome = match result {
                     Ok(token) => recording_intent::PrepareOutcome::Succeeded {
                         generation: token.generation,
@@ -1361,6 +1532,11 @@ fn execute_recording_coordinator_effect(
                         .capture_is_active_for_run(run_id.get())
                         .await
                     {
+                        reconcile_warm_input_after_capture_release(
+                            state.inner(),
+                            "sealed pending capture",
+                        )
+                        .await;
                         return;
                     }
                     if attempt == 3 {
@@ -1435,6 +1611,10 @@ fn execute_recording_coordinator_effect(
                     .transcription_service
                     .capture_is_active_for_run(run.run_id.get())
                     .await;
+                if !capture_still_active {
+                    reconcile_warm_input_after_capture_release(state.inner(), "start completion")
+                        .await;
+                }
                 let outcome = match result {
                     Ok(_) => recording_intent::StartOutcome::Succeeded,
                     Err(error) if capture_still_active => {
@@ -1559,6 +1739,8 @@ fn execute_recording_coordinator_effect(
                     ),
                 };
                 if !capture_still_active {
+                    reconcile_warm_input_after_capture_release(state.inner(), "recording stop")
+                        .await;
                     log::info!(
                         "previous_capture_released_ms run_id={} elapsed_ms={}",
                         run_id.get(),
@@ -2520,6 +2702,7 @@ async fn stop_recording_and_emit_idle_if_current(
 
     match state.transcription_service.stop_recording().await {
         Ok(result) => {
+            reconcile_warm_input_after_capture_release(state, "legacy recording stop").await;
             let session_id = take_active_transcription_session_id(state);
             log::info!(
                 "Recording stop completed: stopped_via_hotkey={}, session_id={}, result={}",
@@ -2534,6 +2717,8 @@ async fn stop_recording_and_emit_idle_if_current(
         Err(err) => {
             let current_status = state.transcription_service.get_status().await;
             if current_status == RecordingStatus::Idle {
+                reconcile_warm_input_after_capture_release(state, "legacy recording stop recovery")
+                    .await;
                 let session_id = take_active_transcription_session_id(state);
                 log::warn!(
                     "Recording stop returned error after service recovered to Idle; emitting Idle status: {}",
@@ -2553,6 +2738,31 @@ async fn stop_recording_and_emit_idle_if_current(
                 Err(err.to_string())
             }
         }
+    }
+}
+
+async fn reconcile_warm_input_after_capture_release(state: &AppState, context: &'static str) {
+    // Policy writes deliberately do not revoke an active lease. Once the
+    // service proves that ownership is gone, reconcile against the latest
+    // config immediately instead of retaining a physical stream until the next
+    // start or lifecycle event. sync_warm_input_policy rechecks ownership under
+    // audio_start_guard, so a successor that won the race remains untouched.
+    if state.transcription_service.has_capture_owner() {
+        return;
+    }
+    let keep_ready_enabled = {
+        let config = state.config.read().await;
+        config.keep_microphone_ready && config.recording_mode == RecordingMode::Dictation
+    };
+    // A normal stop already leaves an enabled owner warm. More importantly, a
+    // terminal device loss must remain closed until a new explicit intent; this
+    // release hook is only the deferred half of disabling the policy while a
+    // lease was active.
+    if keep_ready_enabled {
+        return;
+    }
+    if let Err(error) = state.sync_warm_input_policy().await {
+        log::warn!("Warm microphone policy reconciliation failed after {context}: {error}");
     }
 }
 
@@ -2664,6 +2874,8 @@ async fn start_live_translation_recording(
         );
         return Err(error);
     }
+    state.suspend_warm_input(super::state::WarmInputSuspension::Takeover);
+    state.close_warm_input().await?;
     let service = get_or_create_live_translation_service(state).await;
     *state.active_recording_mode.write().await = Some(RecordingMode::LiveTranslation);
 
@@ -2804,9 +3016,10 @@ async fn start_live_translation_recording(
             displaced_recording_mode,
         )
         .await;
+        restore_warm_after_takeover(state).await;
         return Err(error);
     }
-    match service
+    let result = match service
         .start_translation_cancellable(translation_cfg, callbacks, cancelled)
         .await
     {
@@ -2856,7 +3069,16 @@ async fn start_live_translation_recording(
             .await;
             Err(err.to_string())
         }
+    };
+    if result.is_err() {
+        // A failed start may have acquired native input before failing. Only a
+        // confirmed service stop permits another owner to open the microphone.
+        let external_close_confirmed = service.stop_translation().await.is_ok();
+        if takeover_can_resume(true, external_close_confirmed, false) {
+            restore_warm_after_takeover(state).await;
+        }
     }
+    result
 }
 
 async fn stop_live_translation_recording(
@@ -2887,13 +3109,23 @@ async fn stop_live_translation_recording(
         );
     }
 
+    let mut capture_closed = true;
     if let Some(svc) = service {
         if let Err(e) = svc.stop_translation().await {
+            capture_closed = false;
             log::warn!("LiveTranslationService stop returned error: {}", e);
         }
     }
 
     *state.active_recording_mode.write().await = None;
+    if capture_closed {
+        if let Err(error) = state
+            .resume_warm_input_if_allowed(super::state::WarmInputSuspension::Takeover)
+            .await
+        {
+            log::warn!("Warm microphone preparation after translation failed: {error}");
+        }
+    }
     emit_idle_recording_status(
         app_handle,
         session_id,
@@ -3425,9 +3657,12 @@ async fn check_virtual_output_open(
 async fn check_microphone_capture(
     factory: &DefaultPlatformAudioFactory,
     selected_device: Option<String>,
-) -> LiveTranslationHealthCheckItem {
+) -> (LiveTranslationHealthCheckItem, bool) {
     if let Err(err) = factory.microphone_preflight() {
-        return health_item("microphone", "Microphone", false, true, err.to_string());
+        return (
+            health_item("microphone", "Microphone", false, true, err.to_string()),
+            true,
+        );
     }
 
     let mut capture = match factory
@@ -3435,7 +3670,10 @@ async fn check_microphone_capture(
     {
         Ok(capture) => capture,
         Err(err) => {
-            return health_item("microphone", "Microphone", false, true, err.to_string());
+            return (
+                health_item("microphone", "Microphone", false, true, err.to_string()),
+                true,
+            );
         }
     };
 
@@ -3447,24 +3685,37 @@ async fn check_microphone_capture(
         })
         .await
     {
-        return health_item("microphone", "Microphone", false, true, err.to_string());
+        return (
+            health_item("microphone", "Microphone", false, true, err.to_string()),
+            true,
+        );
     }
 
     match capture.start_capture(Arc::new(|_| {})).await {
         Ok(()) => {
             tokio::time::sleep(Duration::from_millis(250)).await;
             let stop_result = capture.stop_capture().await;
-            health_item(
-                "microphone",
-                "Microphone",
-                stop_result.is_ok(),
-                true,
-                stop_result
-                    .map(|_| "Microphone capture starts and stops".to_string())
-                    .unwrap_or_else(|err| err.to_string()),
+            let closed = stop_result.is_ok();
+            (
+                health_item(
+                    "microphone",
+                    "Microphone",
+                    stop_result.is_ok(),
+                    true,
+                    stop_result
+                        .map(|_| "Microphone capture starts and stops".to_string())
+                        .unwrap_or_else(|err| err.to_string()),
+                ),
+                closed,
             )
         }
-        Err(err) => health_item("microphone", "Microphone", false, true, err.to_string()),
+        Err(err) => {
+            let closed = capture.stop_capture().await.is_ok();
+            (
+                health_item("microphone", "Microphone", false, true, err.to_string()),
+                closed,
+            )
+        }
     }
 }
 
@@ -3571,6 +3822,8 @@ async fn collect_live_translation_health_check(
     if let Some(message) = live_translation_health_check_busy_reason(state).await {
         return Ok(live_translation_health_check_busy(message));
     }
+    state.suspend_warm_input(super::state::WarmInputSuspension::Takeover);
+    state.close_warm_input().await?;
 
     let app_config = state.config.read().await.clone();
     let selected_device = app_config
@@ -3600,11 +3853,15 @@ async fn collect_live_translation_health_check(
         check_openai_key(openai_api_key),
     );
     items.push(virtual_output);
+    let (microphone, external_close_confirmed) = microphone;
     items.push(microphone);
     items.push(system_audio);
     items.push(openai);
 
     let ok = items.iter().all(|item| !item.required || item.ok);
+    if takeover_can_resume(true, external_close_confirmed, false) {
+        restore_warm_after_takeover(state).await;
+    }
     Ok(LiveTranslationHealthCheck {
         ok,
         checked_at_ms: now_ms_u64(),
@@ -5988,6 +6245,7 @@ mod snapshot_contract_tests {
                 hide_recording_window_on_hotkey: false,
                 show_mini_recording_window: false,
                 keep_recording_until_manual_stop: false,
+                keep_microphone_ready: false,
                 hold_to_record: false,
                 double_space_hotkey_enabled: false,
                 selected_audio_device: None,
@@ -6027,6 +6285,7 @@ mod snapshot_contract_tests {
         assert!(data.contains_key("hide_recording_window_on_hotkey"));
         assert!(data.contains_key("show_mini_recording_window"));
         assert!(data.contains_key("keep_recording_until_manual_stop"));
+        assert_eq!(data["keep_microphone_ready"], false);
         assert!(data.contains_key("hold_to_record"));
         assert!(data.contains_key("double_space_hotkey_enabled"));
         assert!(data.contains_key("selected_audio_device"));
@@ -6890,6 +7149,7 @@ pub struct AppConfigSnapshotData {
     pub hide_recording_window_on_hotkey: bool,
     pub show_mini_recording_window: bool,
     pub keep_recording_until_manual_stop: bool,
+    pub keep_microphone_ready: bool,
     pub hold_to_record: bool,
     pub double_space_hotkey_enabled: bool,
     pub selected_audio_device: Option<String>,
@@ -6914,6 +7174,7 @@ pub async fn get_app_config_snapshot(
         hide_recording_window_on_hotkey: config.hide_recording_window_on_hotkey,
         show_mini_recording_window: config.show_mini_recording_window,
         keep_recording_until_manual_stop: config.keep_recording_until_manual_stop,
+        keep_microphone_ready: config.keep_microphone_ready,
         hold_to_record: config.hold_to_record,
         double_space_hotkey_enabled: config.double_space_hotkey_enabled,
         selected_audio_device: config.selected_audio_device,
@@ -7136,6 +7397,7 @@ pub async fn update_app_config(
     hide_recording_window_on_hotkey: Option<bool>,
     show_mini_recording_window: Option<bool>,
     keep_recording_until_manual_stop: Option<bool>,
+    keep_microphone_ready: Option<bool>,
     hold_to_record: Option<bool>,
     double_space_hotkey_enabled: Option<bool>,
     selected_audio_device: Option<String>,
@@ -7158,6 +7420,7 @@ pub async fn update_app_config(
         && hide_recording_window_on_hotkey.is_none()
         && show_mini_recording_window.is_none()
         && keep_recording_until_manual_stop.is_none()
+        && keep_microphone_ready.is_none()
         && hold_to_record.is_none()
         && double_space_hotkey_enabled.is_none()
         && selected_audio_device.is_none()
@@ -7259,6 +7522,13 @@ pub async fn update_app_config(
                 show_mini_window
             );
             config.show_mini_recording_window = show_mini_window;
+            any_changed = true;
+        }
+    }
+
+    if let Some(keep_ready) = keep_microphone_ready {
+        if config.keep_microphone_ready != keep_ready {
+            config.keep_microphone_ready = keep_ready;
             any_changed = true;
         }
     }
@@ -7471,6 +7741,9 @@ pub async fn update_app_config(
         ));
     }
 
+    if let Err(error) = state.sync_warm_input_policy().await {
+        log::warn!("Warm microphone policy update failed: {error}");
+    }
     log::info!("App configuration updated and saved successfully");
     Ok(())
 }
@@ -7491,6 +7764,23 @@ fn enqueue_microphone_test_chunk(
     tx.try_send(chunk).is_ok()
 }
 
+fn takeover_can_resume(
+    warm_close_confirmed: bool,
+    external_close_confirmed: bool,
+    started: bool,
+) -> bool {
+    warm_close_confirmed && external_close_confirmed && !started
+}
+
+async fn restore_warm_after_takeover(state: &AppState) {
+    if let Err(error) = state
+        .resume_warm_input_if_allowed(super::state::WarmInputSuspension::Takeover)
+        .await
+    {
+        log::warn!("Warm microphone restoration after takeover failed: {error}");
+    }
+}
+
 #[tauri::command]
 pub async fn start_microphone_test(
     state: State<'_, AppState>,
@@ -7501,6 +7791,7 @@ pub async fn start_microphone_test(
     #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
     return Err("Real microphone tests disabled in native fixture".into());
     log::info!("Command: start_microphone_test - device: {:?}", device_name);
+    let _audio_start_guard = state.audio_start_guard.lock().await;
 
     #[cfg(target_os = "macos")]
     {
@@ -7537,7 +7828,12 @@ pub async fn start_microphone_test(
         return Err("Microphone test already running".to_string());
     }
 
+    state.suspend_warm_input(super::state::WarmInputSuspension::Takeover);
+    state.close_warm_input().await?;
+
     // Создаем новый audio capture для теста с выбранным устройством
+    let mut external_close_confirmed = true;
+    let result = async {
     let device_to_use = device_name
         .as_deref()
         .map(str::trim)
@@ -7657,22 +7953,33 @@ pub async fn start_microphone_test(
     });
 
     // Запускаем захват
-    capture
-        .start_capture(on_chunk)
-        .await
-        .map_err(|e| format!("Failed to start audio capture: {}", e))?;
+    if let Err(error) = capture.start_capture(on_chunk).await {
+        external_close_confirmed = capture.stop_capture().await.is_ok();
+        if !external_close_confirmed {
+            test_state.capture = Some(capture);
+            test_state.is_testing = true;
+        }
+        return Err(format!("Failed to start audio capture: {error}"));
+    }
 
     test_state.capture = Some(capture);
     test_state.is_testing = true;
 
     log::info!("Microphone test started");
     Ok(())
+    }.await;
+    drop(test_state);
+    if takeover_can_resume(true, external_close_confirmed, result.is_ok()) {
+        restore_warm_after_takeover(state.inner()).await;
+    }
+    result
 }
 
 /// Stop microphone test and return recorded audio
 #[tauri::command]
 pub async fn stop_microphone_test(state: State<'_, AppState>) -> Result<Vec<i16>, String> {
     log::info!("Command: stop_microphone_test");
+    let _audio_start_guard = state.audio_start_guard.lock().await;
 
     let mut test_state = state.microphone_test.write().await;
 
@@ -7682,10 +7989,10 @@ pub async fn stop_microphone_test(state: State<'_, AppState>) -> Result<Vec<i16>
 
     // Останавливаем захват
     if let Some(mut capture) = test_state.capture.take() {
-        capture
-            .stop_capture()
-            .await
-            .map_err(|e| format!("Failed to stop audio capture: {}", e))?;
+        if let Err(error) = capture.stop_capture().await {
+            test_state.capture = Some(capture);
+            return Err(format!("Failed to stop audio capture: {error}"));
+        }
     }
 
     test_state.is_testing = false;
@@ -7700,6 +8007,13 @@ pub async fn stop_microphone_test(state: State<'_, AppState>) -> Result<Vec<i16>
         "Microphone test stopped, buffer size: {} samples",
         buffer.len()
     );
+    drop(test_state);
+    if let Err(error) = state
+        .resume_warm_input_if_allowed(super::state::WarmInputSuspension::Takeover)
+        .await
+    {
+        log::warn!("Warm microphone preparation after test failed: {error}");
+    }
     Ok(buffer)
 }
 
