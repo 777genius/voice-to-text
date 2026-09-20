@@ -546,11 +546,11 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
             association.captureGeneration === generation && association.captureRunId === pendingReady.readiness?.runId);
       },
       'Pending capture readiness produced no new deterministic PCM marker', 2_000);
-    const sealedCaptureRange = bufferedPendingBackend.fixture.captureMarkers[
+    const admittedCaptureRange = bufferedPendingBackend.fixture.captureMarkers[
       bufferedPendingBackend.fixture.captureMarkers.length - 1
     ];
-    const sealedGeneration = sealedCaptureRange?.captureGeneration;
-    check(sealedGeneration && sealedCaptureRange.firstSequence === 1,
+    const sealedGeneration = admittedCaptureRange?.captureGeneration;
+    check(sealedGeneration && admittedCaptureRange.firstSequence === 1,
       'Pending capture produced no deterministic first audio marker');
     check(pendingReady.backend.fixture.providerStarts === pendingBefore.fixture.providerStarts,
       'Pending capture opened a second provider before previous finalize');
@@ -567,9 +567,13 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
       afterPending.preparedCaptureTokenCount === 0 &&
       afterPending.fixture.providerStarts === pendingBefore.fixture.providerStarts + 1,
       'Released admitted hold did not start exactly one sealing provider');
+    const sealedCaptureRanges = afterPending.fixture.captureMarkers
+      .filter((range) => range.captureGeneration === sealedGeneration);
+    const sealedCaptureRange = sealedCaptureRanges[sealedCaptureRanges.length - 1];
     const sealedProviderRanges = afterPending.fixture.providerMarkers
       .filter((range) => range.captureGeneration === sealedGeneration);
-    check(sealedProviderRanges.length === 1 && sealedProviderRanges[0].firstSequence === 1 &&
+    check(sealedCaptureRange && sealedProviderRanges.length === 1 &&
+      sealedProviderRanges[0].firstSequence === sealedCaptureRange.firstSequence &&
       sealedProviderRanges[0].lastSequence === sealedCaptureRange.lastSequence &&
       sealedProviderRanges[0].count === sealedCaptureRange.count,
     'Released admitted hold did not deliver its buffered PCM exactly once');

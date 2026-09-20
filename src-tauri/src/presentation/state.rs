@@ -148,7 +148,7 @@ impl Default for MicrophoneTestState {
     }
 }
 
-fn normalize_audio_capture_device_name(device_name: Option<String>) -> Option<String> {
+pub(crate) fn normalize_audio_capture_device_name(device_name: Option<String>) -> Option<String> {
     device_name
         .as_deref()
         .map(str::trim)
@@ -1029,6 +1029,7 @@ impl AppState {
         self.is_authenticated_runtime
             .store(authenticated, Ordering::Release);
         drop(guarded);
+        let _audio_start_guard = self.audio_start_guard.lock().await;
         if !authenticated {
             self.suspend_warm_input(WarmInputSuspension::Auth);
             if let Err(error) = self.close_warm_input().await {
@@ -1983,7 +1984,7 @@ impl AppState {
     }
 
     #[cfg(target_os = "macos")]
-    fn warm_route_is_eligible(requested: Option<&str>) -> bool {
+    pub(crate) fn warm_route_is_eligible(requested: Option<&str>) -> bool {
         #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
         {
             let _ = requested;
@@ -2512,6 +2513,35 @@ mod tests {
             .await
             .unwrap();
         assert!(state.warm_input_is_suspended(WarmInputSuspension::Shutdown));
+    }
+
+    #[tokio::test]
+    async fn authenticated_prewarm_waits_for_audio_admission() {
+        use super::AppState;
+        let service = std::sync::Arc::new(crate::application::TranscriptionService::new(
+            Box::new(crate::infrastructure::audio::MockAudioCapture::new()),
+            std::sync::Arc::new(crate::infrastructure::DefaultSttProviderFactory::new()),
+        ));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = std::sync::Arc::new(AppState::from_recording_ports(
+            service,
+            crate::domain::AppConfig::default(),
+            tx,
+            rx,
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        ));
+        let admission = state.audio_start_guard.lock().await;
+        let auth_state = state.clone();
+        let task = tokio::spawn(async move {
+            auth_state.set_authenticated(true).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!task.is_finished());
+        drop(admission);
+        tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("auth prewarm remained blocked after admission released")
+            .expect("auth prewarm task panicked");
     }
     use super::{
         audio_capture_device_cache_matches, claim_translation_shutdown, claim_vad_timeout_session,

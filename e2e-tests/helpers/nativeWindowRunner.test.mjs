@@ -197,6 +197,12 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
   warm.report.final.fixture.physicalOpenCount = 4;
   warm.report.final.fixture.physicalCloseCount = 3;
   assert.equal(validateResult(warm), warm.report);
+  const readyFirstVisible = structuredClone(warm);
+  readyFirstVisible.report.warmVisibleFrames[0].captureReady = true;
+  readyFirstVisible.report.warmVisibleFrames[0].readinessReason = 'recording';
+  readyFirstVisible.report.warmVisibleFrames[0].phase = 'mini-status-dot recording';
+  readyFirstVisible.report.warmVisibleFrames[0].statusText = 'Recording';
+  assert.equal(validateResult(readyFirstVisible), readyFirstVisible.report);
   for (const mutate of [
     e => { e.report.warmActivationFrames = []; },
     e => { e.report.trace = []; },
@@ -215,6 +221,14 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
     e => { e.report.warmVisibleFrames[0].readinessReason = 'recording'; },
     e => { e.report.warmVisibleFrames[0].runId = 999; },
     e => { e.report.warmVisibleFrames[0].windowEpoch = 0; },
+    e => {
+      e.report.warmVisibleFrames[1].windowEpoch = e.report.warmVisibleFrames[0].windowEpoch;
+      e.report.warmVisibleFrames[1].runId = e.report.warmVisibleFrames[0].runId;
+      e.report.warmVisibleFrames[1].revision = e.report.warmVisibleFrames[0].revision;
+      e.report.warmReadyFrames[1].runId = e.report.warmReadyFrames[0].runId;
+      e.report.warmReadyFrames[1].revision = e.report.warmReadyFrames[0].revision;
+    },
+    e => { e.report.warmVisibleFrames[1].windowEpoch = e.report.warmVisibleFrames[0].windowEpoch - 1; },
   ]) {
     const broken = structuredClone(warm);
     mutate(broken);
