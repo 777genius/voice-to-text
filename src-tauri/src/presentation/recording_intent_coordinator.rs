@@ -3229,6 +3229,7 @@ mod tests {
                 effect_id: pause_id,
                 key,
                 pause_epoch: Some(1),
+                continue_window: std::time::Duration::from_secs(2),
             }),
         );
         let effects = reduce(
@@ -3312,6 +3313,7 @@ mod tests {
                 effect_id: pause_id,
                 key,
                 pause_epoch: Some(2),
+                continue_window: std::time::Duration::from_secs(2),
             }),
         );
         assert_eq!(state.projection().status, ProjectionStatus::Processing);

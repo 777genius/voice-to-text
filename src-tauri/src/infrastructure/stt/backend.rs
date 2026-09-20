@@ -582,6 +582,7 @@ impl BackendProvider {
                         current_phase: status.current_phase,
                         eligible_now: status.eligible_now,
                         reason: None,
+                        continue_window_ms: None,
                     })
                 }
                 _ => Err(SttError::Processing(
@@ -1612,8 +1613,17 @@ impl SttProvider for BackendProvider {
                                         }
                                     }
 
-                                    ServerMessage::PauseAccepted { result, .. }
-                                    | ServerMessage::PauseRejected { result }
+                                    ServerMessage::PauseAccepted {
+                                        mut result,
+                                        continue_window_ms,
+                                    } => {
+                                        result.continue_window_ms = Some(continue_window_ms);
+                                        continuation
+                                            .lock()
+                                            .unwrap()
+                                            .deliver(ControlReply::Mutation(result));
+                                    }
+                                    ServerMessage::PauseRejected { result }
                                     | ServerMessage::ContinueResult { result }
                                     | ServerMessage::PauseRestoreResult { result } => {
                                         continuation
@@ -3047,6 +3057,7 @@ mod tests {
             current_phase: crate::domain::ContinuationPhase::PausedReclaimable,
             eligible_now: true,
             reason: None,
+            continue_window_ms: None,
         };
         provider
             .continuation
@@ -3220,7 +3231,7 @@ mod tests {
                                     "current_phase": if pause { "paused_reclaimable" } else { "active_awaiting_audio" }
                                 });
                                 if pause {
-                                    reply["continue_window_ms"] = 2000.into();
+                                    reply["continue_window_ms"] = 5000.into();
                                 }
                                 if !recover {
                                     ws.send(Message::Text(reply.to_string().into()))
@@ -3321,6 +3332,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(paused.pause_epoch, Some(1));
+            assert_eq!(paused.continue_window_ms, (!recover).then_some(5000));
             let sent_a = provider.audio_delivery_progress().unwrap().sent_bytes;
             assert_eq!(sent_a, 200);
             let accepted = provider

@@ -1,6 +1,7 @@
 //! Negotiated EL route within the recording reducer. Capture identity always names
 //! the physical episode; this route owns the single logical provider/delivery job.
 use super::*;
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ContinuationKey {
@@ -48,6 +49,7 @@ pub enum ContinuationEvent {
         effect_id: EffectId,
         key: ContinuationKey,
         pause_epoch: Option<u64>,
+        continue_window: Duration,
     },
     ContinueFinished {
         effect_id: EffectId,
@@ -97,6 +99,7 @@ pub enum ContinuationEffect {
     WaitForWindow {
         key: ContinuationKey,
         stopped_at_ns: u64,
+        continue_window: Duration,
     },
 }
 impl ContinuationEffect {
@@ -379,6 +382,7 @@ pub(super) fn apply_continuation_event(
             effect_id,
             key,
             pause_epoch,
+            continue_window,
         } => {
             if state.in_flight.get(&effect_id) != Some(&PendingEffect::Pause { key })
                 || !state
@@ -398,6 +402,7 @@ pub(super) fn apply_continuation_event(
                     ContinuationEffect::WaitForWindow {
                         key: route.key,
                         stopped_at_ns: route.stopped_at_ns.unwrap(),
+                        continue_window,
                     },
                 ));
             } else {
@@ -914,6 +919,7 @@ mod tests {
                 effect_id,
                 key,
                 pause_epoch: Some(epoch),
+                continue_window: Duration::from_secs(2),
             },
         );
         state.continuation.unwrap().key
@@ -1159,6 +1165,7 @@ mod tests {
                     effect_id: pause_id,
                     key,
                     pause_epoch: Some(1),
+                    continue_window: Duration::from_secs(2),
                 },
             );
             assert_eq!(effects.iter().any(|e| matches!(e, CoordinatorEffect::Continuation(ContinuationEffect::Continue { run, .. }) if run.run_id == b.run_id)), !cancel);
@@ -2100,8 +2107,16 @@ mod tests {
                 effect_id: pause_id,
                 key,
                 pause_epoch: Some(1),
+                continue_window: Duration::from_secs(5),
             },
         );
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            CoordinatorEffect::Continuation(ContinuationEffect::WaitForWindow {
+                continue_window,
+                ..
+            }) if *continue_window == Duration::from_secs(5)
+        )));
         let (_, continued_key, run, _) = continue_effect(&effects);
         assert_eq!(run, b);
         assert_eq!(continued_key.pause_epoch, 1);

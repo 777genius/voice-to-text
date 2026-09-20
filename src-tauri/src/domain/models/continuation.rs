@@ -43,6 +43,10 @@ pub struct ContinuationControlResult {
     pub eligible_now: bool,
     #[serde(deserialize_with = "required_nullable")]
     pub reason: Option<ControlRejection>,
+    /// Present only on the matching PauseAccepted response. Status-only
+    /// recovery has no advertised duration and keeps the conservative window.
+    #[serde(skip)]
+    pub continue_window_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

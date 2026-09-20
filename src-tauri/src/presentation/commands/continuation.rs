@@ -163,12 +163,14 @@ pub(super) fn execute(app: AppHandle, effect: Effect) {
                 let result = service
                     .pause_for_continuation(key.logical_run_id.get(), stopped_at(stopped_at_ns))
                     .await;
-                let pause_epoch = result
-                    .ok()
-                    .filter(|lease| {
-                        lease.session.connection_generation == key.connection_generation
-                    })
-                    .map(|lease| lease.pause_epoch);
+                let lease = result.ok().filter(|lease| {
+                    lease.session.connection_generation == key.connection_generation
+                });
+                let pause_epoch = lease.as_ref().map(|lease| lease.pause_epoch);
+                let continue_window = lease
+                    .as_ref()
+                    .map(|lease| lease.continue_window)
+                    .unwrap_or(Duration::from_secs(2));
                 drop(state);
                 emit(
                     app,
@@ -176,6 +178,7 @@ pub(super) fn execute(app: AppHandle, effect: Effect) {
                         effect_id,
                         key,
                         pause_epoch,
+                        continue_window,
                     },
                 );
             }
@@ -310,9 +313,13 @@ pub(super) fn execute(app: AppHandle, effect: Effect) {
                     },
                 );
             }
-            Effect::WaitForWindow { key, stopped_at_ns } => {
+            Effect::WaitForWindow {
+                key,
+                stopped_at_ns,
+                continue_window,
+            } => {
                 drop(state);
-                tokio::time::sleep_until(stopped_at(stopped_at_ns) + Duration::from_secs(2)).await;
+                tokio::time::sleep_until(stopped_at(stopped_at_ns) + continue_window).await;
                 emit(app, Event::WindowElapsed { key });
             }
             Effect::ObserveTerminal {

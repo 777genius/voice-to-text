@@ -12111,6 +12111,7 @@ mod deferred_recording_cancellation_tests {
                 effect_id: pause_id,
                 key,
                 pause_epoch: Some(1),
+                continue_window: Duration::from_secs(5),
             },
         ));
         assert_eq!(

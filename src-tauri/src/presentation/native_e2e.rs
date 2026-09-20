@@ -2857,6 +2857,7 @@ impl SttProvider for FixtureProvider {
                 && c.paused_at
                     .is_some_and(|at| at.elapsed() < Duration::from_millis(2000)),
             reason,
+            continue_window_ms: None,
         };
         let fault = std::env::var("VOICETEXT_NATIVE_CONTINUATION_CASE").ok();
         if label == "continue" && fault.as_deref() == Some("stale-epoch") {

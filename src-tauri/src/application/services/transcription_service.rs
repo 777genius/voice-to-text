@@ -413,10 +413,25 @@ pub struct PausedContinuation {
     pub pause_epoch: u64,
     pub pause_request_id: String,
     pub stopped_at: Instant,
+    pub continue_window: Duration,
 }
 impl PausedContinuation {
     pub fn deadline(&self) -> Instant {
-        self.stopped_at + Duration::from_millis(2000)
+        self.stopped_at + self.continue_window
+    }
+}
+
+const LEGACY_CONTINUE_WINDOW: Duration = Duration::from_secs(2);
+const MAX_CONTINUE_WINDOW: Duration = Duration::from_secs(5);
+
+fn negotiated_continue_window(advertised_ms: Option<u64>) -> Duration {
+    let Some(window) = advertised_ms.map(Duration::from_millis) else {
+        return LEGACY_CONTINUE_WINDOW;
+    };
+    if window.is_zero() || window > MAX_CONTINUE_WINDOW {
+        LEGACY_CONTINUE_WINDOW
+    } else {
+        window
     }
 }
 
@@ -1025,6 +1040,7 @@ impl TranscriptionService {
             pause_epoch,
             pause_request_id: result.request_id,
             stopped_at,
+            continue_window: negotiated_continue_window(result.continue_window_ms),
         };
         *self.paused_continuation.lock().unwrap() = Some(paused.clone());
         Ok(paused)
@@ -3481,6 +3497,24 @@ impl TranscriptionService {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn continue_window_negotiation_preserves_legacy_and_caps_untrusted_values() {
+        assert_eq!(negotiated_continue_window(None), Duration::from_secs(2));
+        assert_eq!(
+            negotiated_continue_window(Some(2000)),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            negotiated_continue_window(Some(5000)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(negotiated_continue_window(Some(0)), Duration::from_secs(2));
+        assert_eq!(
+            negotiated_continue_window(Some(5001)),
+            Duration::from_secs(2)
+        );
+    }
+
+    #[test]
     fn el_stop_budget_tracks_own_source_backlog_and_preserves_dg_deadline() {
         let a = AudioAccounting::new(Arc::new(AtomicUsize::new(0)));
         a.observe_source_format(16_000, 1);
@@ -4723,7 +4757,7 @@ mod tests {
                         log.pause_sample_counts.push(count);
                     }
                     if self.first_b_mode == 5 {
-                        tokio::time::sleep(Duration::from_millis(2100)).await;
+                        tokio::time::sleep(Duration::from_millis(1500)).await;
                     }
                     self.epoch += 1;
                     PausedReclaimable
@@ -4770,6 +4804,7 @@ mod tests {
                 current_phase: phase,
                 eligible_now: true,
                 reason: None,
+                continue_window_ms: Some(5000),
             })
         }
     }
@@ -5211,7 +5246,7 @@ mod tests {
                                             "type": match kind { "pause" => "pause_accepted", "continue" => "continue_result", _ => "pause_restore_result" },
                                             "request_id":v["request_id"],"provider_session_id":"composed",
                                             "pause_epoch":7,"decision":if kind == "pause_restore" {"rejected"} else {"accepted"},
-                                            "eligible_now":kind != "pause_restore", "reason":null, "continue_window_ms":2000,
+                                            "eligible_now":kind != "pause_restore", "reason":null, "continue_window_ms":5000,
                                             "current_phase":if kind == "pause" {"paused_reclaimable"} else {"active_awaiting_audio"}});
                                         if kind == operation {
                                             delayed = Some(reply);
@@ -5366,7 +5401,12 @@ mod tests {
             let mut settled = pause_settled;
             let mut finalize_effects = Vec::new();
             let epoch = paused.as_ref().ok().map(|p| p.pause_epoch);
-            let effects = c::reduce(&mut state, c::CoordinatorEvent::Continuation(c::ContinuationEvent::PauseFinished { effect_id: pause, key, pause_epoch: epoch }));
+            let continue_window = paused
+                .as_ref()
+                .ok()
+                .map(|p| p.continue_window)
+                .unwrap_or(Duration::from_secs(2));
+            let effects = c::reduce(&mut state, c::CoordinatorEvent::Continuation(c::ContinuationEvent::PauseFinished { effect_id: pause, key, pause_epoch: epoch, continue_window }));
             let permits = answer == "direct" || answer == "permit";
             if operation == "pause" && !permits {
                 let error = paused.as_ref().unwrap_err();
@@ -5386,7 +5426,14 @@ mod tests {
                 assert_eq!(lease.session, session);
                 assert_eq!(lease.pause_epoch, 7);
                 assert_eq!(lease.stopped_at, stopped);
-                assert_eq!(lease.deadline(), stopped + Duration::from_secs(2));
+                let expected_window = if operation == "continue" || answer == "direct" {
+                    Duration::from_secs(5)
+                } else {
+                    // A lost PauseAccepted recovered only through legacy status
+                    // metadata cannot safely infer the newer server window.
+                    Duration::from_secs(2)
+                };
+                assert_eq!(lease.deadline(), stopped + expected_window);
                 assert_eq!(state.continuation.as_ref().unwrap().stopped_at_ns, stop_ns);
                 let (attach, key) = effects.iter().find_map(|e| match e {
                     c::CoordinatorEffect::Continuation(c::ContinuationEffect::Continue { effect_id, key, .. }) => Some((*effect_id, *key)), _ => None,
@@ -6574,6 +6621,57 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn negotiated_continue_accepts_buffered_b_after_three_seconds_on_same_provider() {
+        let (service, log, _, _) = continuation_service_fixture(false, 0, None).await;
+        service.stop_capture_for_run(101).await.unwrap();
+        let stopped_at = Instant::now();
+        let paused = service
+            .pause_for_continuation(101, stopped_at)
+            .await
+            .unwrap();
+        let token = prepare_continued_b(&service).await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert!(matches!(
+            service
+                .continue_prepared_capture(token, paused, Instant::now(), Default::default())
+                .await
+                .unwrap(),
+            ContinueCaptureOutcome::Attached {
+                logical_run_id: 101,
+                ..
+            }
+        ));
+        assert_eq!(log.lock().unwrap().starts, 1);
+        assert_eq!(log.lock().unwrap().samples.len(), 960);
+        service.stop_capture_for_run(token.run_id).await.unwrap();
+        service.finalize_provider_for_run(101).await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn negotiated_continue_rejects_exact_desktop_deadline_without_b_write() {
+        let (service, log, _, _) = continuation_service_fixture(false, 0, None).await;
+        service.stop_capture_for_run(101).await.unwrap();
+        let stopped_at = Instant::now();
+        let paused = service
+            .pause_for_continuation(101, stopped_at)
+            .await
+            .unwrap();
+        let token = prepare_continued_b(&service).await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(
+            service
+                .continue_prepared_capture(token, paused, Instant::now(), Default::default())
+                .await
+                .unwrap(),
+            ContinueCaptureOutcome::Unsent(ContinuationRefusal::Expired)
+        );
+        assert_eq!(log.lock().unwrap().operations.len(), 1);
+        assert_eq!(log.lock().unwrap().samples.len(), 480);
+        service.cancel_prepared_capture(token).await.unwrap();
+        service.finalize_provider_for_run(101).await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn hundred_unsent_start_cancel_cycles_keep_one_lease_and_bounded_slots() {
         let (service, log, _, _) = continuation_service_fixture(false, 0, None).await;
         service.stop_capture_for_run(101).await.unwrap();
@@ -6608,6 +6706,7 @@ mod tests {
             assert_eq!(log.lock().unwrap().samples.len(), 480);
             tokio::time::advance(Duration::from_millis(30)).await;
         }
+        tokio::time::advance(Duration::from_secs(2)).await;
         assert!(Instant::now() >= paused.deadline());
         service.finalize_provider_for_run(101).await.unwrap();
     }
@@ -6621,9 +6720,11 @@ mod tests {
             .pause_for_continuation(101, stopped_at)
             .await
             .unwrap();
-        assert!(Instant::now() >= stopped_at + Duration::from_secs(2));
+        assert!(Instant::now() >= stopped_at + Duration::from_millis(1500));
         assert_eq!(paused.stopped_at, stopped_at);
+        assert_eq!(paused.deadline(), stopped_at + Duration::from_secs(5));
         let token = prepare_continued_b(&service).await;
+        tokio::time::sleep_until(paused.deadline()).await;
         assert_eq!(
             service
                 .continue_prepared_capture(token, paused, Instant::now(), Default::default())
@@ -6727,6 +6828,7 @@ mod tests {
                 effect_id: pause,
                 key,
                 pause_epoch: Some(lease.pause_epoch),
+                continue_window: lease.continue_window,
             }),
         );
         assert_eq!(coordinator.processing_jobs.len(), 1);
