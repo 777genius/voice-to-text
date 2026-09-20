@@ -2188,7 +2188,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
                   ? i18n.global.t('errors.transcriptFinalizeFailed')
                   : i18n.global.t('errors.processing');
               const preservesRunError =
-                event.payload.fault === 'runtimeFailed' &&
+                (event.payload.fault === 'runtimeFailed' || event.payload.fault === 'startFailed') &&
                 faultOwnerRunId !== null &&
                 terminalRecordingErrorSessionId === faultOwnerRunId &&
                 errorType.value !== null &&
@@ -2509,7 +2509,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             sessionId.value === null &&
             (terminalRecordingErrorSessionId !== null
               ? terminalRecordingErrorSessionId === event.payload.session_id
-              : recordingIntentFault.value === 'runtimeFailed' &&
+              : (recordingIntentFault.value === 'runtimeFailed' || recordingIntentFault.value === 'startFailed') &&
                 recordingIntentFaultRunId.value === event.payload.session_id);
           if (!isTerminalRunError &&
               !ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:error')) {

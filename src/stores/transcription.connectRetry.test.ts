@@ -1067,7 +1067,53 @@ describe('transcription connect-retry reliability', () => {
     },
   );
 
-  it('does not carry a previous run provider error into a failed new run', async () => {
+  it.each(['error-first', 'projection-first'] as const)(
+    'keeps the connection timeout diagnosis when startFailed arrives %s',
+    async (order) => {
+      invokeMock.mockResolvedValue(null);
+      const { handlers, store } = await initializeStoreWithHandlers();
+      await handlers.get('recording:status')({
+        payload: { session_id: 502, status: 'Starting', stopped_via_hotkey: false },
+      });
+      const timeoutError = () => handlers.get('transcription:error')({
+        payload: {
+          session_id: 502,
+          error: 'Connection error: WS connection timeout',
+          error_type: 'timeout',
+          error_details: { category: 'timeout' },
+        },
+      });
+      const startFailure = () => handlers.get('recording:intent-projection')({
+        payload: {
+          runId: null,
+          faultRunId: 502,
+          intentRevision: 1,
+          status: 'Error',
+          desiredOn: true,
+          pendingStart: true,
+          processingJobs: 0,
+          shutdownRequested: false,
+          fault: 'startFailed',
+        },
+      });
+      if (order === 'error-first') {
+        await timeoutError();
+        await startFailure();
+      } else {
+        await startFailure();
+        await timeoutError();
+      }
+
+      expect(store.status).toBe('Error');
+      expect(store.sessionId).toBeNull();
+      expect(store.errorType).toBe('timeout');
+      expect(store.errorFullText).toContain('WS connection timeout');
+      expect(store.errorFullText).toContain('"category": "timeout"');
+      expect(store.recordingStartPending).toBe(false);
+    },
+  );
+
+  it.each(['runtimeFailed', 'startFailed'] as const)('does not carry a previous run provider error into a failed new run (%s)', async (fault) => {
     invokeMock.mockResolvedValue(null);
     const { handlers, store } = await initializeStoreWithHandlers();
     await handlers.get('recording:status')({
@@ -1091,7 +1137,7 @@ describe('transcription connect-retry reliability', () => {
         pendingStart: false,
         processingJobs: 0,
         shutdownRequested: false,
-        fault: 'runtimeFailed',
+        fault,
       },
     });
 
@@ -1127,7 +1173,7 @@ describe('transcription connect-retry reliability', () => {
         pendingStart: false,
         processingJobs: 0,
         shutdownRequested: false,
-        fault: 'runtimeFailed',
+        fault,
       },
     });
 
