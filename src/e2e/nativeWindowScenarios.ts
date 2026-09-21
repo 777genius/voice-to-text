@@ -596,7 +596,9 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     check(pendingReady.backend.fixture.providerStarts === pendingBefore.fixture.providerStarts,
       'Pending capture opened a second provider before previous finalize');
     await hotkey('release');
+    await progress('processing-pending-before-ui-stop-await');
     await uiStop;
+    await progress('processing-pending-after-ui-stop-await');
     const afterPending = await until(
       state,
       (sample) => sample.status === 'Idle' && sample.fixture.activeCaptures === 0 &&
