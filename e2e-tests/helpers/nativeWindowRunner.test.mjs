@@ -257,6 +257,8 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
     e => { e.report.cases[1].markerDeliveryComplete = false; },
     e => { e.report.final.fixture.activeCaptures = 1; },
     e => { e.report.final.fixture.providerPcmLedgers[0].hash = 'fedcba9876543210'; },
+    e => { e.report.final.fixture.capturePcmLedgers.push({ captureGeneration: 2, chunks: 1,
+      samples: 400, hash: 'fedcba9876543210' }); },
     e => { e.report.warmActivationFrames[0].captureReady = true; },
     e => { e.report.warmActivationFrames[0].phase = 'mini-status-dot starting'; },
     e => { e.report.warmActivationFrames[0].statusText = 'Listening'; },

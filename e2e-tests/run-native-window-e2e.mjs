@@ -43,10 +43,14 @@ export function validateMiniUxResult(envelope) {
   const capturePcmLedgers = final?.fixture?.capturePcmLedgers;
   const providerPcmLedgers = final?.fixture?.providerPcmLedgers;
   const exactPcmEvidenceValid = Array.isArray(capturePcmLedgers) && Array.isArray(providerPcmLedgers) &&
-    providerPcmLedgers.length > 0 && providerPcmLedgers.every(provider => {
-      const capture = capturePcmLedgers.find(candidate =>
-        candidate?.captureGeneration === provider?.captureGeneration);
-      return capture && Number.isSafeInteger(capture.chunks) && capture.chunks > 0 &&
+    capturePcmLedgers.length > 0 && capturePcmLedgers.length === providerPcmLedgers.length &&
+    new Set(capturePcmLedgers.map(ledger => ledger?.captureGeneration)).size === capturePcmLedgers.length &&
+    new Set(providerPcmLedgers.map(ledger => ledger?.captureGeneration)).size === providerPcmLedgers.length &&
+    capturePcmLedgers.every(capture => {
+      const provider = providerPcmLedgers.find(candidate =>
+        candidate?.captureGeneration === capture?.captureGeneration);
+      return provider && Number.isSafeInteger(capture.captureGeneration) && capture.captureGeneration > 0 &&
+        Number.isSafeInteger(capture.chunks) && capture.chunks > 0 &&
         Number.isSafeInteger(capture.samples) && capture.samples > 0 &&
         typeof capture.hash === 'string' && /^[0-9a-f]{16}$/.test(capture.hash) &&
         capture.chunks === provider.chunks && capture.samples === provider.samples &&
