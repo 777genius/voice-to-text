@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
-import { snapshotDigest, isolatedTauriConfig, parseArguments, executionEnvironment, sanitizedEnvironment, validateArtifactDirectory, validateCachedBinary, validateResult } from '../run-native-window-e2e.mjs';
+import { assertOwnedProcessGroupGone, snapshotDigest, isolatedTauriConfig, parseArguments, executionEnvironment, sanitizedEnvironment, validateArtifactDirectory, validateCachedBinary, validateResult } from '../run-native-window-e2e.mjs';
 
 const marker = 'VOICETEXT_NATIVE_WINDOW_E2E_V1';
 
@@ -106,11 +106,34 @@ test('cached executable requires feature marker and matching checksum; no proces
 });
 
 test('passing envelope requires full non-skipped wall time, distinct cases, balanced capture', () => {
-  const valid = { marker, passed: true, fixture: { captureStarts: 35, captureStops: 35, activeCaptures: 0, activeProviders: 0 }, report: { passed: true, completedCycles: 22, hiddenIdleMs: 180000, elapsedMs: 220000, scenarios: Array.from({ length: 12 }, (_, i) => `scenario-${i}`) } };
+  const association = { captureGeneration: 1, captureRunId: 1, captureFenceGeneration: 1 };
+  const captureMarker = { captureGeneration: 1, count: 1, firstSequence: 1, lastSequence: 1 };
+  const fixture = { captureStarts: 35, captureStops: 35, providerStarts: 1, providerStops: 1,
+    providerResumes: 0, activeCaptures: 0, activeProviders: 0, maxActiveCaptures: 1,
+    maxActiveProviders: 1, observationOverflow: false, markerViolations: [],
+    captureRunAssociations: [association], captureMarkers: [captureMarker],
+    providerMarkers: [{ ...captureMarker, ...association, providerSessionId: 1 }],
+    capturePcmLedgers: [{ captureGeneration: 1, chunks: 2, samples: 800, hash: '0123456789abcdef' }],
+    providerPcmLedgers: [{ captureGeneration: 1, chunks: 2, samples: 800, hash: '0123456789abcdef' }] };
+  const valid = { marker, passed: true, fixture, report: { passed: true, completedCycles: 50,
+    hiddenIdleMs: 180000, elapsedMs: 220000,
+    scenarios: Array.from({ length: 12 }, (_, i) => `scenario-${i}`) } };
   assert.equal(validateResult(valid), valid.report);
-  for (const edit of [v => { v.marker = 'normal'; }, v => { v.report.skipped = true; }, v => { v.report.hiddenIdleMs = 179999; }, v => { v.report.elapsedMs = Infinity; }, v => { v.fixture.captureStops--; }, v => { v.fixture.activeCaptures = 1; }, v => { v.fixture.activeProviders = 1; }, v => { v.report.scenarios[1] = v.report.scenarios[0]; }]) {
+  for (const edit of [v => { v.marker = 'normal'; }, v => { v.report.skipped = true; },
+    v => { v.report.hiddenIdleMs = 179999; }, v => { v.report.elapsedMs = Infinity; },
+    v => { v.report.completedCycles = 49; }, v => { v.fixture.captureStops--; },
+    v => { v.fixture.activeCaptures = 1; }, v => { v.fixture.activeProviders = 1; },
+    v => { v.fixture.markerViolations.push('gap'); },
+    v => { v.fixture.providerPcmLedgers[0].hash = 'fedcba9876543210'; },
+    v => { v.report.scenarios[1] = v.report.scenarios[0]; }]) {
     const invalid = structuredClone(valid); edit(invalid); assert.throws(() => validateResult(invalid), /incomplete/);
   }
+});
+
+test('owned native cleanup requires confirmed process-group disappearance', () => {
+  assert.doesNotThrow(() => assertOwnedProcessGroupGone(true));
+  assert.throws(() => assertOwnedProcessGroupGone(false), /process group did not terminate/);
+  assert.throws(() => assertOwnedProcessGroupGone(undefined), /process group did not terminate/);
 });
 
 // Exercise the real project bootstrap configuration instead of a duplicate toy shape.
@@ -175,9 +198,16 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
       oldProviderStillFinalizing: true, observations: 20, backgroundDidNotReopen: true,
       successorStayedVisible: true, markerDeliveryComplete: true, backgroundStartingBeforeHide: true })),
     final: { status: 'Idle', visible: false, preparedCaptureTokenCount: 0,
-      fixture: { activeCaptures: 0, activeProviders: 0, maxActiveProviders: 1, markerViolations: [],
+      fixture: { captureStarts: 1, captureStops: 1, providerStarts: 1, providerStops: 1,
+        providerResumes: 0, activeCaptures: 0, activeProviders: 0, maxActiveCaptures: 1,
+        maxActiveProviders: 1, observationOverflow: false, markerViolations: [],
+        captureRunAssociations: [{ captureGeneration: 1, captureRunId: 1, captureFenceGeneration: 1 }],
+        captureMarkers: [{ captureGeneration: 1, count: 1, firstSequence: 1, lastSequence: 1 }],
+        providerMarkers: [{ captureGeneration: 1, captureRunId: 1, captureFenceGeneration: 1,
+          providerSessionId: 1, count: 1, firstSequence: 1, lastSequence: 1 }],
         capturePcmLedgers: [{ captureGeneration: 1, chunks: 2, samples: 800, hash: '0123456789abcdef' }],
         providerPcmLedgers: [{ captureGeneration: 1, chunks: 2, samples: 800, hash: '0123456789abcdef' }] } } } };
+  evidence.fixture = structuredClone(evidence.report.final.fixture);
   assert.throws(() => validateResult(evidence), /physical warm input evidence/);
   const warm = structuredClone(evidence);
   Object.assign(warm.report, { warmMode: true, warmReopens: 10, idleAcceptedDelta: 0 });
@@ -255,8 +285,21 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
     e => { e.report.cases[0].backgroundDidNotReopen = false; },
     e => { e.report.cases[1].successorStayedVisible = false; },
     e => { e.report.cases[1].markerDeliveryComplete = false; },
+    e => { delete e.report.cases[0].observations; },
     e => { e.report.final.fixture.activeCaptures = 1; },
+    e => { e.fixture.activeProviders = 1; },
+    e => { e.fixture.markerViolations.push('gap'); },
+    e => { e.fixture.captureStops = 0; },
     e => { e.report.final.fixture.providerPcmLedgers[0].hash = 'fedcba9876543210'; },
+    e => { e.fixture.capturePcmLedgers[0].hash = 'fedcba9876543210'; },
+    e => {
+      e.report.final.fixture.capturePcmLedgers = [];
+      e.report.final.fixture.providerPcmLedgers = [];
+    },
+    e => {
+      e.report.final.fixture.capturePcmLedgers[0].captureGeneration = 999;
+      e.report.final.fixture.providerPcmLedgers[0].captureGeneration = 999;
+    },
     e => { e.report.final.fixture.capturePcmLedgers.push({ captureGeneration: 2, chunks: 1,
       samples: 400, hash: 'fedcba9876543210' }); },
     e => { e.report.warmActivationFrames[0].captureReady = true; },

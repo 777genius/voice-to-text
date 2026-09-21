@@ -649,6 +649,7 @@ fn owner_loop(
     let mut failed_revision = None;
     let mut last_route_check = Instant::now();
     let mut last_route_revision = None;
+    let mut route_change_pending = false;
     loop {
         let (revision, desired, shutdown) = match shared.control.lock() {
             Ok(control) => (control.revision, control.desired, control.shutdown),
@@ -659,9 +660,7 @@ fn owner_loop(
             Ok(snapshot) => snapshot,
             Err(_) => return,
         };
-        let active = snapshot.1.is_some();
         let healthy = snapshot.0.is_some_and(|(_, healthy, _)| healthy);
-        let mut route_matches = true;
         if desired
             && healthy
             && (last_route_revision != Some(revision)
@@ -672,7 +671,7 @@ fn owner_loop(
             if let Some(native) = input.as_ref() {
                 match native.validate_route() {
                     Ok((valid, matches)) => {
-                        route_matches = matches;
+                        route_change_pending = !matches;
                         if !valid {
                             shared.fail(
                                 generation.unwrap(),
@@ -684,19 +683,30 @@ fn owner_loop(
                 }
             }
         }
-        let healthy = shared
-            .gate
-            .snapshot()
-            .ok()
-            .and_then(|s| s.0)
-            .is_some_and(|(_, healthy, _)| healthy);
-        if generation.is_some() && (!desired || !healthy || (!active && !route_matches)) {
+        if desired && route_change_pending {
+            if let Some(current) = generation {
+                match shared.gate.invalidate_if_idle(current) {
+                    Ok(true) => route_change_pending = false,
+                    Ok(false) => {}
+                    Err(_) => return,
+                }
+            }
+        }
+        let (healthy, active) = match shared.gate.snapshot() {
+            Ok((physical, lease)) => (
+                physical.is_some_and(|(_, healthy, _)| healthy),
+                lease.is_some(),
+            ),
+            Err(_) => return,
+        };
+        if generation.is_some() && (!desired || !healthy) {
             let current = generation.unwrap();
             let _ = shared.gate.invalidate(current);
             // Native handle construction/play/drop all happen on this thread.
             drop(input.take());
             if shared.gate.close_ack(current).is_ok() {
                 generation = None;
+                route_change_pending = false;
                 let control = shared.control.lock().unwrap();
                 let mut observation = shared.observation.lock().unwrap();
                 observation.closed = true;
@@ -917,6 +927,8 @@ mod tests {
         opens: AtomicUsize,
         closes: AtomicUsize,
         route_valid: std::sync::atomic::AtomicBool,
+        route_matches: std::sync::atomic::AtomicBool,
+        route_barrier: Mutex<Option<(mpsc::SyncSender<()>, mpsc::Receiver<()>)>>,
         open_barrier: Mutex<Option<(mpsc::SyncSender<()>, mpsc::Receiver<()>)>>,
         sample_rate: AtomicUsize,
     }
@@ -957,7 +969,14 @@ mod tests {
             Ok(())
         }
         fn validate_route(&self) -> AudioResult<(bool, bool)> {
-            Ok((self.0.route_valid.load(Ordering::SeqCst), true))
+            if let Some((entered, release)) = self.0.route_barrier.lock().unwrap().take() {
+                entered.send(()).unwrap();
+                release.recv().unwrap();
+            }
+            Ok((
+                self.0.route_valid.load(Ordering::SeqCst),
+                self.0.route_matches.load(Ordering::SeqCst),
+            ))
         }
     }
     impl Drop for FakeInput {
@@ -970,6 +989,7 @@ mod tests {
     fn setup() -> (Arc<Source>, Arc<WarmDictationInput>) {
         let source = Arc::new(Source::default());
         source.route_valid.store(true, Ordering::SeqCst);
+        source.route_matches.store(true, Ordering::SeqCst);
         source.sample_rate.store(48_000, Ordering::SeqCst);
         let owner =
             WarmDictationInput::with_factory(Box::new(FakeFactory(source.clone()))).unwrap();
@@ -1227,6 +1247,60 @@ mod tests {
             .attach_prepared(b.clone(), identity, episode(&b.format))
             .unwrap();
         owner.shared.gate.release(&lease, Duration::ZERO).unwrap();
+        owner.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn route_change_waits_for_attach_racing_validation() {
+        let (source, owner) = setup();
+        let ticket = owner.prepare().await.unwrap();
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        *source.route_barrier.lock().unwrap() = Some((entered_tx, release_rx));
+        source.route_matches.store(false, Ordering::SeqCst);
+
+        let callback_source = source.clone();
+        let callbacks = tokio::spawn(async move {
+            for _ in 0..100 {
+                raw(&callback_source, &[0; 1023]);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let entered = tokio::task::spawn_blocking(move || entered_rx.recv().unwrap());
+        entered.await.unwrap();
+        let lease = owner
+            .attach_prepared(
+                ticket.clone(),
+                AudioCaptureIdentity {
+                    run_id: 1,
+                    generation: 1,
+                },
+                Episode {
+                    processor: Mutex::new(
+                        EpisodePcm::new(ticket.format.sample_rate, ticket.format.channels).unwrap(),
+                    ),
+                    on_chunk: Arc::new(|_| {}),
+                    on_error: None,
+                },
+            )
+            .unwrap();
+        release_tx.send(()).unwrap();
+        callbacks.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(source.closes.load(Ordering::SeqCst), 0);
+        assert!(owner.shared.gate.snapshot().unwrap().0.unwrap().1);
+        assert!(lease.permit().unwrap().is_some());
+
+        source.route_matches.store(true, Ordering::SeqCst);
+        owner.shared.gate.release(&lease, Duration::ZERO).unwrap();
+        for _ in 0..100 {
+            if source.opens.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(source.closes.load(Ordering::SeqCst), 1);
+        assert_eq!(source.opens.load(Ordering::SeqCst), 2);
         owner.close().await.unwrap();
     }
 

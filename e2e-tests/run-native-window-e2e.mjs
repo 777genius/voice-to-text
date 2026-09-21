@@ -13,6 +13,64 @@ import { fileURLToPath } from 'node:url';
 const source = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const marker = 'VOICETEXT_NATIVE_WINDOW_E2E_V1';
 
+const positiveSafeInteger = value => Number.isSafeInteger(value) && value > 0;
+
+function generationMap(rows, validate) {
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  const generations = new Map();
+  for (const row of rows) {
+    if (!positiveSafeInteger(row?.captureGeneration) || !validate(row) ||
+        generations.has(row.captureGeneration)) return null;
+    generations.set(row.captureGeneration, row);
+  }
+  return generations;
+}
+
+function validateExactPcmEvidence(fixture, requireEveryCaptureDelivered) {
+  const validLedger = ledger => positiveSafeInteger(ledger.chunks) &&
+    positiveSafeInteger(ledger.samples) && typeof ledger.hash === 'string' &&
+    /^[0-9a-f]{16}$/.test(ledger.hash);
+  const validCaptureMarker = row => positiveSafeInteger(row.count) &&
+    positiveSafeInteger(row.firstSequence) && positiveSafeInteger(row.lastSequence) &&
+    row.firstSequence <= row.lastSequence;
+  const validProviderMarker = row => validCaptureMarker(row) &&
+    positiveSafeInteger(row.captureRunId) && positiveSafeInteger(row.captureFenceGeneration) &&
+    positiveSafeInteger(row.providerSessionId);
+  const validAssociation = row => positiveSafeInteger(row.captureRunId) &&
+    positiveSafeInteger(row.captureFenceGeneration);
+  const captures = generationMap(fixture?.capturePcmLedgers, validLedger);
+  const providers = generationMap(fixture?.providerPcmLedgers, validLedger);
+  const captureMarkers = generationMap(fixture?.captureMarkers, validCaptureMarker);
+  const providerMarkers = generationMap(fixture?.providerMarkers, validProviderMarker);
+  const associations = generationMap(fixture?.captureRunAssociations, validAssociation);
+  if (!captures || !providers || !captureMarkers || !providerMarkers || !associations ||
+      captures.size !== captureMarkers.size || providers.size !== providerMarkers.size ||
+      (requireEveryCaptureDelivered && captures.size !== providers.size)) return false;
+  const sameGenerations = (left, right) =>
+    left.size === right.size && [...left.keys()].every(generation => right.has(generation));
+  if (!sameGenerations(captures, captureMarkers) ||
+      !sameGenerations(providers, providerMarkers)) return false;
+  for (const [generation, provider] of providers) {
+    const capture = captures.get(generation);
+    const marker = providerMarkers.get(generation);
+    const association = associations.get(generation);
+    if (!capture || !marker || !association || capture.chunks !== provider.chunks ||
+        capture.samples !== provider.samples || capture.hash !== provider.hash ||
+        marker.captureRunId !== association.captureRunId ||
+        marker.captureFenceGeneration !== association.captureFenceGeneration) return false;
+  }
+  return [...captureMarkers.keys()].every(generation => associations.has(generation));
+}
+
+function validateTerminalFixture(fixture, requireEveryCaptureDelivered) {
+  return fixture && Number.isSafeInteger(fixture.captureStarts) && fixture.captureStarts > 0 &&
+    fixture.captureStarts === fixture.captureStops && fixture.activeCaptures === 0 &&
+    fixture.activeProviders === 0 && fixture.maxActiveCaptures === 1 &&
+    fixture.maxActiveProviders === 1 && fixture.observationOverflow === false &&
+    Array.isArray(fixture.markerViolations) && fixture.markerViolations.length === 0 &&
+    validateExactPcmEvidence(fixture, requireEveryCaptureDelivered);
+}
+
 export function validateMiniUxResult(envelope) {
   const report = envelope.report;
   const final = report?.final;
@@ -40,22 +98,8 @@ export function validateMiniUxResult(envelope) {
   const warmFrames = report?.warmActivationFrames;
   const visibleFrames = report?.warmVisibleFrames;
   const readyFrames = report?.warmReadyFrames;
-  const capturePcmLedgers = final?.fixture?.capturePcmLedgers;
-  const providerPcmLedgers = final?.fixture?.providerPcmLedgers;
-  const exactPcmEvidenceValid = Array.isArray(capturePcmLedgers) && Array.isArray(providerPcmLedgers) &&
-    capturePcmLedgers.length > 0 && capturePcmLedgers.length === providerPcmLedgers.length &&
-    new Set(capturePcmLedgers.map(ledger => ledger?.captureGeneration)).size === capturePcmLedgers.length &&
-    new Set(providerPcmLedgers.map(ledger => ledger?.captureGeneration)).size === providerPcmLedgers.length &&
-    capturePcmLedgers.every(capture => {
-      const provider = providerPcmLedgers.find(candidate =>
-        candidate?.captureGeneration === capture?.captureGeneration);
-      return provider && Number.isSafeInteger(capture.captureGeneration) && capture.captureGeneration > 0 &&
-        Number.isSafeInteger(capture.chunks) && capture.chunks > 0 &&
-        Number.isSafeInteger(capture.samples) && capture.samples > 0 &&
-        typeof capture.hash === 'string' && /^[0-9a-f]{16}$/.test(capture.hash) &&
-        capture.chunks === provider.chunks && capture.samples === provider.samples &&
-        capture.hash === provider.hash;
-    });
+  const exactPcmEvidenceValid = validateTerminalFixture(final?.fixture, true) &&
+    validateTerminalFixture(envelope.fixture, true);
   const firstVisibleFrames = Array.from({ length: 10 }, (_, index) =>
     Array.isArray(visibleFrames)
       ? visibleFrames.find(frame => frame?.attempt === index + 1)
@@ -120,7 +164,8 @@ export function validateMiniUxResult(envelope) {
       cases[0].stop !== 'hotkey' || cases[1].stop !== 'native-close' ||
       cases[2].stop !== 'background-start-during-hide' || cases[2].backgroundStartingBeforeHide !== true ||
       cases.some(c => !Number.isFinite(c.hideMs) || c.hideMs < 0 || c.hideMs > 1000 ||
-        c.bufferedBeforeStop !== true || c.oldProviderStillFinalizing !== true || c.observations < 2 ||
+        c.bufferedBeforeStop !== true || c.oldProviderStillFinalizing !== true ||
+        !Number.isSafeInteger(c.observations) || c.observations < 2 ||
         c.backgroundDidNotReopen !== true || c.markerDeliveryComplete !== true) ||
       cases[1].successorStayedVisible !== true || report.errors?.length !== 0 ||
       final?.visible !== false || final?.status !== 'Idle' || final?.preparedCaptureTokenCount !== 0 ||
@@ -352,6 +397,7 @@ export async function runOwned(command, args, options, timeoutMs, logPath, progr
       await writeFile(terminationPath, JSON.stringify({ pid: child.pid,
         signal: child.signalCode, checkpointCollected: collected, failure: primaryFailure ? String(primaryFailure) : null,
         exited: child.exitCode !== null || child.signalCode !== null, groupGone }), { flag: 'wx' });
+      assertOwnedProcessGroupGone(groupGone);
     }
     } catch (error) {
       if (primaryFailure) throw new AggregateError([primaryFailure, error], `${primaryFailure.message}; process cleanup: ${error.message}`, { cause: primaryFailure });
@@ -361,6 +407,10 @@ export async function runOwned(command, args, options, timeoutMs, logPath, progr
       await new Promise((resolve) => output.end(resolve));
     }
   }
+}
+
+export function assertOwnedProcessGroupGone(groupGone) {
+  if (groupGone !== true) throw new Error('Owned native process group did not terminate');
 }
 
 export async function snapshotDigest(directory) {
@@ -908,11 +958,16 @@ export function validateResult(envelope) {
   }
   if (envelope?.marker !== marker || envelope.passed !== true || !report || !fixture ||
       !Number.isFinite(report.elapsedMs) || report.elapsedMs < 180_000 || report.elapsedMs > 480_000 ||
+      report.elapsedMs < report.hiddenIdleMs ||
       !Number.isSafeInteger(fixture.captureStarts) || fixture.captureStarts <= 0 ||
       fixture.activeCaptures !== 0 || fixture.activeProviders !== 0 || fixture.captureStarts !== fixture.captureStops ||
+      fixture.maxActiveCaptures !== 1 || fixture.maxActiveProviders !== 1 ||
+      fixture.observationOverflow !== false || !Array.isArray(fixture.markerViolations) ||
+      fixture.markerViolations.length !== 0 || !validateExactPcmEvidence(fixture, false) ||
+      fixture.providerStops !== fixture.providerStarts + fixture.providerResumes ||
       !Array.isArray(report.scenarios) || new Set(report.scenarios).size !== report.scenarios.length ||
       report.scenarios.some((name) => typeof name !== 'string' || !name) || report.scenarios.length < 12 ||
-      report.passed !== true || !Number.isSafeInteger(report.completedCycles) || report.completedCycles < 20 ||
+      report.passed !== true || report.completedCycles !== 50 ||
       !Number.isFinite(report.hiddenIdleMs) || report.hiddenIdleMs < 180_000 || report.skipped) {
     throw new Error(`Native result is incomplete: ${JSON.stringify(envelope)}`);
   }

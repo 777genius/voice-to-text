@@ -372,6 +372,25 @@ impl<T> WarmCaptureGate<T> {
         self.invalidate_matching(generation, None)
     }
 
+    /// Atomically retire an idle physical input at an episode boundary. A route
+    /// change may be discovered while another thread is attaching a prepared
+    /// lease, so a prior snapshot is never sufficient proof that the input is
+    /// still idle.
+    pub fn invalidate_if_idle(&self, generation: u64) -> Result<bool, GateError> {
+        let mut state = self.state.lock().map_err(|_| GateError::Poisoned)?;
+        if state.lease.is_some() {
+            return Ok(false);
+        }
+        let Some(physical) = state.physical.as_mut() else {
+            return Ok(false);
+        };
+        if physical.generation != generation || !physical.healthy {
+            return Ok(false);
+        }
+        physical.healthy = false;
+        Ok(true)
+    }
+
     pub fn invalidate_lease(
         &self,
         lease: &Arc<Lease<T>>,
@@ -587,6 +606,18 @@ mod tests {
         assert!(gate.invalidate_lease(&a).unwrap().is_none());
         assert!(b.permit().unwrap().is_some());
         assert!(gate.snapshot().unwrap().0.unwrap().1);
+    }
+
+    #[test]
+    fn idle_invalidation_serializes_with_attach() {
+        let (gate, physical) = ready();
+        let lease = gate.attach(1, 1, (), NOW, FRESH).unwrap();
+        assert!(!gate.invalidate_if_idle(physical).unwrap());
+        assert!(gate.snapshot().unwrap().0.unwrap().1);
+        gate.release(&lease, Duration::ZERO).unwrap();
+        assert!(gate.invalidate_if_idle(physical).unwrap());
+        assert!(!gate.snapshot().unwrap().0.unwrap().1);
+        assert!(!gate.invalidate_if_idle(physical).unwrap());
     }
 
     #[test]
