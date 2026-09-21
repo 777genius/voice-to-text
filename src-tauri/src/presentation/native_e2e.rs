@@ -1453,6 +1453,8 @@ struct Counters {
     provider_audio_chunks: u64,
     capture_markers: Vec<MarkerRange>,
     provider_markers: Vec<ProviderMarkerRange>,
+    capture_pcm_ledgers: Vec<PcmLedger>,
+    provider_pcm_ledgers: Vec<PcmLedger>,
     capture_run_associations: Vec<CaptureRunAssociation>,
     marker_violations: Vec<String>,
     finals: u64,
@@ -1523,6 +1525,85 @@ struct CaptureRunAssociation {
     capture_run_id: u64,
     capture_fence_generation: u64,
     capture_generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PcmLedger {
+    capture_generation: u64,
+    chunks: u64,
+    samples: u64,
+    #[serde(serialize_with = "serialize_pcm_hash")]
+    hash: u64,
+}
+
+fn serialize_pcm_hash<S>(hash: &u64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&format!("{hash:016x}"))
+}
+
+const FNV1A_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV1A_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn fnv1a_update(hash: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(FNV1A_PRIME);
+    }
+}
+
+fn record_pcm_ledger(ledgers: &mut Vec<PcmLedger>, generation: u64, chunk: &AudioChunk) {
+    let index = if let Some(index) = ledgers
+        .iter()
+        .position(|ledger| ledger.capture_generation == generation)
+    {
+        index
+    } else if ledgers.len() < MAX_RECORDED_GENERATIONS {
+        ledgers.push(PcmLedger {
+            capture_generation: generation,
+            chunks: 0,
+            samples: 0,
+            hash: FNV1A_OFFSET_BASIS,
+        });
+        ledgers.len() - 1
+    } else {
+        return;
+    };
+    let ledger = &mut ledgers[index];
+    ledger.chunks += 1;
+    ledger.samples += chunk.data.len() as u64;
+    fnv1a_update(&mut ledger.hash, &chunk.sample_rate.to_le_bytes());
+    fnv1a_update(&mut ledger.hash, &chunk.channels.to_le_bytes());
+    fnv1a_update(&mut ledger.hash, &(chunk.data.len() as u64).to_le_bytes());
+    for sample in &chunk.data {
+        fnv1a_update(&mut ledger.hash, &sample.to_le_bytes());
+    }
+}
+
+fn pcm_ledgers_match(capture: &PcmLedger, provider: &PcmLedger) -> bool {
+    capture.capture_generation == provider.capture_generation
+        && capture.chunks == provider.chunks
+        && capture.samples == provider.samples
+        && capture.hash == provider.hash
+}
+
+fn marker_sequence_is_valid(
+    physical_open_count: u64,
+    last_sequence: u64,
+    first_capture_sequence: u64,
+    current_sequence: u64,
+) -> bool {
+    if physical_open_count > 0 {
+        if last_sequence == 0 {
+            current_sequence == first_capture_sequence
+        } else {
+            current_sequence > last_sequence
+        }
+    } else {
+        current_sequence == last_sequence.saturating_add(1)
+    }
 }
 
 const AUDIO_MARKER_MAGIC: u32 = 0x56A1_7E2E;
@@ -1661,6 +1742,57 @@ fn full_pcm_rejects_intact_header_truncation_and_equal_length_corruption() {
             }
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn exact_pcm_ledger_rejects_changed_or_dropped_markerless_audio() {
+    let generation = 7;
+    let marker = AudioMarker {
+        capture_generation: generation,
+        sequence: 1,
+    };
+    let mut marked = vec![5000; 320];
+    encode_audio_marker(&mut marked, marker);
+    let markerless = AudioChunk::new(vec![1234; 480], 16000, 1);
+    let marked = AudioChunk::new(marked, 16000, 1);
+    let marker_range = MarkerRange {
+        capture_generation: generation,
+        first_sequence: 1,
+        last_sequence: 1,
+        count: 1,
+    };
+
+    let mut capture = Vec::new();
+    record_pcm_ledger(&mut capture, generation, &marked);
+    record_pcm_ledger(&mut capture, generation, &markerless);
+
+    let mut changed = Vec::new();
+    record_pcm_ledger(&mut changed, generation, &marked);
+    let mut corrupted = markerless.clone();
+    corrupted.data[479] ^= 1;
+    record_pcm_ledger(&mut changed, generation, &corrupted);
+
+    let mut dropped = Vec::new();
+    record_pcm_ledger(&mut dropped, generation, &marked);
+
+    assert_eq!(
+        marker_range, marker_range,
+        "marker evidence remains identical"
+    );
+    assert!(!pcm_ledgers_match(&capture[0], &changed[0]));
+    assert!(!pcm_ledgers_match(&capture[0], &dropped[0]));
+}
+
+#[cfg(test)]
+#[test]
+fn warm_marker_order_allows_pre_admission_gaps_but_rejects_replay() {
+    assert!(marker_sequence_is_valid(1, 0, 41, 41));
+    assert!(marker_sequence_is_valid(1, 41, 41, 43));
+    assert!(!marker_sequence_is_valid(1, 43, 41, 43));
+    assert!(!marker_sequence_is_valid(1, 43, 41, 42));
+    assert!(marker_sequence_is_valid(0, 41, 41, 42));
+    assert!(!marker_sequence_is_valid(0, 41, 41, 43));
 }
 
 fn after_write_case() -> bool {
@@ -1989,12 +2121,15 @@ impl AudioCapture for ObservedWarmCapture {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
         let observed = shared.clone();
+        let marker_tail = Arc::new(Mutex::new(Vec::new()));
         self.inner
             .start_capture(Arc::new(move |chunk| {
                 let mut counters = observed.counters.lock().unwrap();
                 counters.audio_chunks += 1;
-                match decode_audio_marker(&chunk.data) {
-                    Some(marker) if marker.capture_generation == generation => {
+                record_pcm_ledger(&mut counters.capture_pcm_ledgers, generation, &chunk);
+                let markers = scan_audio_markers(&mut marker_tail.lock().unwrap(), &chunk.data);
+                for marker in markers {
+                    if marker.capture_generation == generation {
                         if let Some(range) = counters
                             .capture_markers
                             .iter_mut()
@@ -2010,11 +2145,12 @@ impl AudioCapture for ObservedWarmCapture {
                                 count: 1,
                             });
                         }
+                    } else {
+                        record_marker_violation(
+                            &mut counters,
+                            "warm native stale or invalid PCM marker",
+                        );
                     }
-                    _ => record_marker_violation(
-                        &mut counters,
-                        "warm native stale or invalid PCM marker",
-                    ),
                 }
                 drop(counters);
                 callback(chunk);
@@ -2541,6 +2677,11 @@ impl AudioCapture for FixtureCapture {
                     if first.swap(false, std::sync::atomic::Ordering::SeqCst) {
                         record_first_pcm(&observed, capture_generation, 0, pressed_at);
                     }
+                    record_pcm_ledger(
+                        &mut observed.counters.lock().unwrap().capture_pcm_ledgers,
+                        capture_generation,
+                        &chunk,
+                    );
                     on_chunk(chunk);
                 });
                 emit_qualification_source(&shared, source, paced_chunk).await;
@@ -2569,7 +2710,13 @@ impl AudioCapture for FixtureCapture {
                     if sequence == 0 {
                         record_first_pcm(&shared, capture_generation, delay, pressed_at);
                     }
-                    on_chunk(AudioChunk::new(samples, 16000, 1));
+                    let chunk = AudioChunk::new(samples, 16000, 1);
+                    record_pcm_ledger(
+                        &mut shared.counters.lock().unwrap().capture_pcm_ledgers,
+                        capture_generation,
+                        &chunk,
+                    );
+                    on_chunk(chunk);
                     sequence += 1;
                     continue;
                 }
@@ -2617,11 +2764,13 @@ impl AudioCapture for FixtureCapture {
                 if sequence == 1 {
                     record_first_pcm(&shared, capture_generation, delay, pressed_at);
                 }
-                on_chunk(AudioChunk::new(
-                    samples,
-                    config.sample_rate,
-                    config.channels,
-                ));
+                let chunk = AudioChunk::new(samples, config.sample_rate, config.channels);
+                record_pcm_ledger(
+                    &mut shared.counters.lock().unwrap().capture_pcm_ledgers,
+                    capture_generation,
+                    &chunk,
+                );
+                on_chunk(chunk);
             }
         }));
         Ok(())
@@ -2920,6 +3069,11 @@ impl SttProvider for FixtureProvider {
                 "native fixture capture marker has no run association".into(),
             ));
         };
+        record_pcm_ledger(
+            &mut counters.provider_pcm_ledgers,
+            capture_generation,
+            chunk,
+        );
         if after_write_case() && marker.is_some() {
             let marker = marker.expect("checked above");
             observe_full_pcm(&mut counters, "provider", chunk, marker);
@@ -2948,17 +3102,17 @@ impl SttProvider for FixtureProvider {
             self.capture_generation = Some(capture_generation);
         }
         if let Some(marker) = marker {
-            let expected_sequence =
-                if self.last_marker_sequence == 0 && counters.physical_open_count > 0 {
-                    counters
-                        .capture_markers
-                        .iter()
-                        .find(|range| range.capture_generation == marker.capture_generation)
-                        .map_or(1, |range| range.first_sequence)
-                } else {
-                    self.last_marker_sequence + 1
-                };
-            if marker.sequence != expected_sequence {
+            let first_capture_sequence = counters
+                .capture_markers
+                .iter()
+                .find(|range| range.capture_generation == marker.capture_generation)
+                .map_or(1, |range| range.first_sequence);
+            if !marker_sequence_is_valid(
+                counters.physical_open_count,
+                self.last_marker_sequence,
+                first_capture_sequence,
+                marker.sequence,
+            ) {
                 record_marker_violation(
                     &mut counters,
                     format!(

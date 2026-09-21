@@ -175,7 +175,9 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
       oldProviderStillFinalizing: true, observations: 20, backgroundDidNotReopen: true,
       successorStayedVisible: true, markerDeliveryComplete: true, backgroundStartingBeforeHide: true })),
     final: { status: 'Idle', visible: false, preparedCaptureTokenCount: 0,
-      fixture: { activeCaptures: 0, activeProviders: 0, maxActiveProviders: 1, markerViolations: [] } } } };
+      fixture: { activeCaptures: 0, activeProviders: 0, maxActiveProviders: 1, markerViolations: [],
+        capturePcmLedgers: [{ captureGeneration: 1, chunks: 2, samples: 800, hash: '0123456789abcdef' }],
+        providerPcmLedgers: [{ captureGeneration: 1, chunks: 2, samples: 800, hash: '0123456789abcdef' }] } } } };
   assert.throws(() => validateResult(evidence), /physical warm input evidence/);
   const warm = structuredClone(evidence);
   Object.assign(warm.report, { warmMode: true, warmReopens: 10, idleAcceptedDelta: 0 });
@@ -203,6 +205,20 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
   readyFirstVisible.report.warmVisibleFrames[0].phase = 'mini-status-dot recording';
   readyFirstVisible.report.warmVisibleFrames[0].statusText = 'Recording';
   assert.equal(validateResult(readyFirstVisible), readyFirstVisible.report);
+  const providerConnecting = structuredClone(warm);
+  providerConnecting.report.warmVisibleFrames.push({
+    ...providerConnecting.report.warmVisibleFrames[0], source: 'render', captureReady: true,
+    readinessReason: 'connecting-provider', phase: 'mini-status-dot recording',
+    statusText: 'Recording - connecting',
+  });
+  assert.equal(validateResult(providerConnecting), providerConnecting.report);
+  const lateUnreadyRecording = structuredClone(warm);
+  lateUnreadyRecording.report.warmVisibleFrames.push({
+    ...lateUnreadyRecording.report.warmVisibleFrames[0], source: 'sample',
+    captureReady: false, readinessReason: 'starting-capture',
+    phase: 'mini-status-dot recording', statusText: 'Recording',
+  });
+  assert.throws(() => validateResult(lateUnreadyRecording), /physical warm input evidence/);
   for (const mutate of [
     e => { e.report.warmActivationFrames = []; },
     e => { e.report.trace = []; },
@@ -240,6 +256,7 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
     e => { e.report.cases[1].successorStayedVisible = false; },
     e => { e.report.cases[1].markerDeliveryComplete = false; },
     e => { e.report.final.fixture.activeCaptures = 1; },
+    e => { e.report.final.fixture.providerPcmLedgers[0].hash = 'fedcba9876543210'; },
     e => { e.report.warmActivationFrames[0].captureReady = true; },
     e => { e.report.warmActivationFrames[0].phase = 'mini-status-dot starting'; },
     e => { e.report.warmActivationFrames[0].statusText = 'Listening'; },

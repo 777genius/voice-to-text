@@ -40,6 +40,18 @@ export function validateMiniUxResult(envelope) {
   const warmFrames = report?.warmActivationFrames;
   const visibleFrames = report?.warmVisibleFrames;
   const readyFrames = report?.warmReadyFrames;
+  const capturePcmLedgers = final?.fixture?.capturePcmLedgers;
+  const providerPcmLedgers = final?.fixture?.providerPcmLedgers;
+  const exactPcmEvidenceValid = Array.isArray(capturePcmLedgers) && Array.isArray(providerPcmLedgers) &&
+    providerPcmLedgers.length > 0 && providerPcmLedgers.every(provider => {
+      const capture = capturePcmLedgers.find(candidate =>
+        candidate?.captureGeneration === provider?.captureGeneration);
+      return capture && Number.isSafeInteger(capture.chunks) && capture.chunks > 0 &&
+        Number.isSafeInteger(capture.samples) && capture.samples > 0 &&
+        typeof capture.hash === 'string' && /^[0-9a-f]{16}$/.test(capture.hash) &&
+        capture.chunks === provider.chunks && capture.samples === provider.samples &&
+        capture.hash === provider.hash;
+    });
   const firstVisibleFrames = Array.from({ length: 10 }, (_, index) =>
     Array.isArray(visibleFrames)
       ? visibleFrames.find(frame => frame?.attempt === index + 1)
@@ -51,6 +63,9 @@ export function validateMiniUxResult(envelope) {
   const advancingWindowEpochs = firstVisibleFrames.every((frame, index) =>
     Boolean(frame) && (index === 0 || Boolean(firstVisibleFrames[index - 1]) &&
       frame.windowEpoch > firstVisibleFrames[index - 1].windowEpoch));
+  const captureReadyRecording = frame => frame.captureReady === true &&
+    ['finalizing-previous', 'connecting-provider', 'recording'].includes(frame.readinessReason) &&
+    /\brecording\b/.test(frame.phase) && !/\b(starting|processing)\b/.test(frame.phase);
   const visibleFrameEvidenceValid = Array.isArray(visibleFrames) && visibleFrames.length >= 10 &&
     visibleFrames.length <= 512 && visibleFrames.every(frame =>
       Number.isSafeInteger(frame?.attempt) && frame.attempt >= 1 && frame.attempt <= 10 &&
@@ -67,12 +82,16 @@ export function validateMiniUxResult(envelope) {
       const neutralActivation = frame.captureReady === false &&
         frame.readinessReason === 'activating-warm-capture' && frame.statusText === '' &&
         !/\b(recording|starting|processing)\b/.test(frame.phase);
-      const admittedRecording = frame.captureReady === true &&
-        /\brecording\b/.test(frame.phase) && !/\b(starting|processing)\b/.test(frame.phase);
-      return (neutralActivation || admittedRecording) && ready?.runId === frame.runId &&
-        ready?.revision === frame.revision &&
-        attemptFrames.every(candidate => candidate.windowEpoch === frame.windowEpoch &&
-          candidate.runId === frame.runId && candidate.revision === frame.revision);
+      const attemptFramesValid = attemptFrames.every(candidate => {
+        const candidateNeutral = candidate.captureReady === false &&
+          candidate.readinessReason === 'activating-warm-capture' && candidate.statusText === '' &&
+          !/\b(recording|starting|processing)\b/.test(candidate.phase);
+        return (candidateNeutral || captureReadyRecording(candidate)) &&
+          candidate.windowEpoch === frame.windowEpoch &&
+          candidate.runId === frame.runId && candidate.revision === frame.revision;
+      });
+      return (neutralActivation || captureReadyRecording(frame)) && ready?.runId === frame.runId &&
+        ready?.revision === frame.revision && attemptFramesValid;
     }) && distinctAttemptIdentities && advancingWindowEpochs;
   if (report?.warmMode !== true || report.warmReopens !== 10 || report.idleAcceptedDelta !== 0 ||
        !Array.isArray(report.trace) || report.trace.length === 0 ||
@@ -102,7 +121,8 @@ export function validateMiniUxResult(envelope) {
       cases[1].successorStayedVisible !== true || report.errors?.length !== 0 ||
       final?.visible !== false || final?.status !== 'Idle' || final?.preparedCaptureTokenCount !== 0 ||
       final?.fixture?.activeCaptures !== 0 || final?.fixture?.activeProviders !== 0 ||
-      final?.fixture?.maxActiveProviders !== 1 || final?.fixture?.markerViolations?.length !== 0) {
+      final?.fixture?.maxActiveProviders !== 1 || final?.fixture?.markerViolations?.length !== 0 ||
+      !exactPcmEvidenceValid) {
     throw new Error('Incomplete mini UX window evidence');
   }
   return report;

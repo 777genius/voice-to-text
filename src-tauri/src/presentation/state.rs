@@ -2248,8 +2248,6 @@ impl AppState {
             self.transcription_service.effective_capture_device_source(),
             crate::infrastructure::audio::WarmDictationLease::device_name,
         ));
-        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
-        let input = super::native_e2e::observe_warm_capture(input);
         let mut capture = VadCaptureWrapper::new_with_microphone_sensitivity(
             input,
             vad,
@@ -2268,11 +2266,11 @@ impl AppState {
                 legacy_session_id,
             });
         }));
+        let capture: Box<dyn AudioCapture> = Box::new(capture);
+        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+        let capture = super::native_e2e::observe_warm_capture(capture);
         self.transcription_service
-            .replace_audio_capture_with_policy(
-                Box::new(capture),
-                CaptureRecoveryPolicy::OwnerManaged,
-            )
+            .replace_audio_capture_with_policy(capture, CaptureRecoveryPolicy::OwnerManaged)
             .await
             .map_err(|e| e.to_string())?;
         *self.active_audio_capture_device.write().await = Some(requested);

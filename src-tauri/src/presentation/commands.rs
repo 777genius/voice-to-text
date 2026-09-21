@@ -1395,6 +1395,11 @@ fn execute_recording_coordinator_effect(
                     }
                     let _audio_guard = state.audio_start_guard.lock().await;
                     check_recording_resource_cancellation(&cancelled)?;
+                    if live_startup_capture_cleanup_pending(state.inner()).await {
+                        return Err(
+                            "Previous microphone startup cleanup is still pending".to_string()
+                        );
+                    }
                     if state.microphone_test.read().await.is_testing {
                         return Err("Microphone test is active".to_string());
                     }

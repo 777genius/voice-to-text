@@ -114,6 +114,11 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
     attributeFilter: ['class', 'aria-label'], characterData: true });
   const text = () => document.querySelector('.mini-transcription-text-inner')?.textContent?.trim() ?? '';
   const trace = (label: string, native?: Snapshot) => {
+    if (activeWarmReopen && native?.visible && Number.isSafeInteger(native.windowEpoch)) {
+      // Native visibility is authoritative if the WebView receives the shown
+      // event after this polling sample.
+      activeWarmReopen.windowEpoch = native.windowEpoch;
+    }
     observeWarmVisibleFrame('sample');
     observeWarmFrame('sample');
     if (report.trace.length >= 1800) throw new Error('Mini UX evidence overflow');

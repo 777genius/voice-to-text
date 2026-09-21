@@ -41,6 +41,8 @@ interface NativeState {
     captureMarkers: Array<{ captureGeneration: number; firstSequence: number; lastSequence: number; count: number }>;
     providerMarkers: Array<{ providerSessionId: number; captureRunId: number; captureFenceGeneration: number;
       captureGeneration: number; firstSequence: number; lastSequence: number; count: number }>;
+    capturePcmLedgers: Array<{ captureGeneration: number; chunks: number; samples: number; hash: string }>;
+    providerPcmLedgers: Array<{ captureGeneration: number; chunks: number; samples: number; hash: string }>;
     captureRunAssociations: Array<{ captureRunId: number; captureFenceGeneration: number; captureGeneration: number }>;
     markerViolations: string[];
     autoPasteTargetCaptures: number; autoPastes: number; lastPastedText: string | null;
@@ -164,6 +166,16 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     };
     const latestCaptureGeneration = (snapshot: NativeState) =>
       snapshot.fixture.captureMarkers[snapshot.fixture.captureMarkers.length - 1]?.captureGeneration ?? 0;
+    const assertPcmDeliveryComplete = (snapshot: NativeState, captureGeneration: number) => {
+      const capture = snapshot.fixture.capturePcmLedgers.find((ledger) =>
+        ledger.captureGeneration === captureGeneration);
+      const provider = snapshot.fixture.providerPcmLedgers.find((ledger) =>
+        ledger.captureGeneration === captureGeneration);
+      check(capture && provider && capture.chunks > 0 && capture.samples > 0 &&
+        capture.chunks === provider.chunks && capture.samples === provider.samples &&
+        capture.hash === provider.hash,
+      `Capture ${captureGeneration} PCM ledger was not delivered exactly once: ${JSON.stringify({ capture, provider })}`);
+    };
 
     const domText = () => document.querySelector('.mini-transcription-text-inner')?.textContent?.trim() ||
       document.querySelector('.transcription-text')?.textContent?.trim() || '';
@@ -577,6 +589,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
       sealedProviderRanges[0].lastSequence === sealedCaptureRange.lastSequence &&
       sealedProviderRanges[0].count === sealedCaptureRange.count,
     'Released admitted hold did not deliver its buffered PCM exactly once');
+    assertPcmDeliveryComplete(afterPending, sealedGeneration);
     sealedPendingStarts += 1;
     assertMarkerEvidence(afterPending);
     await invoke('hide_recording_window_if_current', { windowEpoch: afterPending.windowEpoch });
@@ -681,6 +694,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
         captureGeneration: earlyRange.captureGeneration, earlyCount: earlyRange.count,
         deliveredCount: delivered.count, providerSessionId: replacementProviderSession });
       await stop(finalizeDelayMs + 8_000);
+      assertPcmDeliveryComplete(await state(), earlyRange.captureGeneration);
       report.scenarios.push(`queued-prebuffer-order-finalize-${finalizeDelayMs}ms`);
     }
     await configure({ stopDelayMs: 130, audioDelayMs: 450 });
