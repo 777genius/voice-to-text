@@ -31,6 +31,7 @@ const appConfigSeed = vi.hoisted(() => ({
   hideRecordingWindowOnHotkey: false,
   showMiniRecordingWindow: true,
   keepRecordingUntilManualStop: false,
+  keepMicrophoneReady: false,
   recordingHotkey: 'CmdOrCtrl+Shift+X',
   recordingMode: 'dictation' as 'dictation' | 'live_translation',
   startSync: vi.fn(),
@@ -326,6 +327,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     windowInnerSizeMock.width = 248;
     windowInnerSizeMock.height = 62;
     appConfigMock.playCompletionSound = false;
+    appConfigMock.keepMicrophoneReady = false;
     appConfigMock.recordingMode = 'dictation';
     appConfigMock.startSync.mockReset();
     appConfigMock.stopSync.mockReset();
@@ -1139,6 +1141,43 @@ describe('RecordingPopover mini auto-hide e2e', () => {
       wrapper.unmount();
     },
   );
+
+  it('does not flash Starting before warm readiness arrives, but exposes a cold fallback', async () => {
+    appConfigMock.keepMicrophoneReady = true;
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:start-requested', 1);
+    await waitForListenerCount('recording:intent-projection', 1);
+    await waitForListenerCount('recording:capture-readiness', 1);
+
+    await emitTauriEvent('recording:start-requested', {
+      source: 'hotkey',
+      warmStartExpected: false,
+    });
+    expectMiniCapturePhase('idle', '');
+
+    await emitTauriEvent('recording:intent-projection', {
+      runId: 101,
+      intentRevision: 8,
+      status: RecordingStatus.Starting,
+      desiredOn: true,
+      pendingStart: true,
+      processingJobs: 0,
+      shutdownRequested: false,
+    });
+    expectMiniCapturePhase('idle', '');
+
+    await emitTauriEvent('recording:capture-readiness', {
+      revision: 8,
+      runId: 101,
+      state: 'unavailable',
+      reason: 'starting-capture',
+      generation: 1,
+      captureReady: false,
+      transportReady: false,
+    });
+    expectMiniCapturePhase('starting', 'Starting');
+    wrapper.unmount();
+  });
 
   it.each([
     { order: 'intent before readiness', state: 'buffering' as const },

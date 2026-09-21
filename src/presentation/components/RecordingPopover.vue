@@ -136,11 +136,19 @@ const miniCaptureProjection = computed<MiniCaptureProjection>(() => {
   }
 
   const hasIndependentStartingCapture = store.incomingTranslationStatus === 'Starting';
-  // The store selects readiness for the current intent revision. Warm hardware
-  // alone is not capture admission, so keep this frame neutral until ready.
-  if (!hasIndependentStartingCapture && store.activeRecordingMode === 'dictation' &&
-      store.recordingDesiredOn && readiness?.state === 'unavailable' &&
-      readiness.reason === 'activating-warm-capture' &&
+  // A native hotkey publishes its UI start hint before the coordinator can
+  // publish readiness for the new intent. When warm input is enabled, keep that
+  // short admission gap neutral as well as the explicit activation frame. A
+  // cold fallback immediately publishes starting-capture and remains honest.
+  const isExplicitWarmActivation = store.recordingDesiredOn &&
+    readiness?.state === 'unavailable' &&
+    readiness.reason === 'activating-warm-capture';
+  const isWarmAdmissionGap = appConfigStore.keepMicrophoneReady &&
+    store.activeRecordingMode === 'dictation' &&
+    (store.recordingDesiredOn || store.isStarting) &&
+    (!readiness || (readiness.state === 'unavailable' &&
+      readiness.reason === 'idle'));
+  if (!hasIndependentStartingCapture && (isExplicitWarmActivation || isWarmAdmissionGap) &&
       store.incomingTranslationStatus !== 'Processing') {
     return { phase: 'idle', statusText: '', placeholderText: '' };
   }
