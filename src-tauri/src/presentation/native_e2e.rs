@@ -2408,11 +2408,24 @@ fn qualification_source(shared: &Fixture, config: AudioConfig) -> AudioResult<Qu
         .as_str()
         .unwrap_or("")
         .starts_with("warm-baseline-");
-    let gate = generation == 0 && (baseline || trial["continuation"] == true);
-    if config.sample_rate != 16000
-        || config.channels != 1
-        || generation >= if baseline { 1 } else { 2 }
-    {
+    let warm_provider_canary = trial["kind"] == "warm-provider-canary";
+    let ready_gate_from_index = trial["readyGateFromIndex"].as_u64();
+    let gate = if warm_provider_canary {
+        ready_gate_from_index.is_some_and(|index| generation >= index)
+    } else {
+        generation == 0 && (baseline || trial["continuation"] == true)
+    };
+    let maximum_captures = if warm_provider_canary {
+        trial["episodes"]
+            .as_array()
+            .map(|episodes| episodes.len() as u64)
+            .ok_or_else(|| AudioError::Capture("warm canary episodes missing".into()))?
+    } else if baseline {
+        1
+    } else {
+        2
+    };
+    if config.sample_rate != 16000 || config.channels != 1 || generation >= maximum_captures {
         return Err(AudioError::Capture(
             "unplanned qualification capture".into(),
         ));
@@ -3578,13 +3591,20 @@ pub async fn native_e2e_configure(
         }
         let shared = fixture();
         let mut counters = shared.counters.lock().unwrap();
-        if counters.capture_starts != 1 || counters.active_captures != 1 {
-            return Err("source gate requires initial active capture".into());
+        if counters.capture_starts == 0 || counters.active_captures != 1 {
+            return Err("source gate requires one active capture".into());
         }
         let row = counters
             .source_episodes
-            .first_mut()
-            .ok_or("missing gated source")?;
+            .iter_mut()
+            .rev()
+            .find(|row| {
+                row["sourceGateRequired"] == true
+                    && row["emittedFrames"] == 0
+                    && row["sourceGateReady"].is_null()
+                    && row["sourceGateError"].is_null()
+            })
+            .ok_or("missing pending gated source")?;
         if row["sourceGateRequired"] != true
             || row["emittedFrames"] != 0
             || !row["sourceGateReady"].is_null()

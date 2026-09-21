@@ -1,7 +1,7 @@
 import { runRestartCrash } from './helpers/nativeRestartCrash.mjs';
 import { closeOwnedDocument, ownedDocumentMatches } from './helpers/nativeOwnedDocument.mjs';
 import { isDeepStrictEqual, promisify } from 'node:util';
-import { verifyQualificationTerminals, verifyQualificationSources, verifyQualificationConnections, verifyQualificationRoute, maxProxyEvidenceEvents, liveTrials, readApprovedFixtures, validateHarnessConfig, exactInsertionEvidence } from './helpers/nativeContinuation.mjs';
+import { verifyQualificationTerminals, verifyQualificationSources, verifyQualificationConnections, verifyQualificationRoute, verifyWarmProviderCanary, maxProxyEvidenceEvents, liveTrials, readApprovedFixtures, validateHarnessConfig, exactInsertionEvidence } from './helpers/nativeContinuation.mjs';
 import { createWriteStream } from 'node:fs';
 import { spawn, execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -314,8 +314,11 @@ export function createQualificationCollector(trial, proxyEvents, readEnvelope, n
     catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return false; throw error; }
     const atMs = now();
     resultObservedMs ??= atMs;
+    const reportTrialId = trial.kind === 'warm-provider-canary'
+      ? pending.report?.trialId
+      : pending.report?.trial?.id;
     if (pending.marker !== marker || pending.passed !== true || pending.preTeardown?.normalStopReleased !== true ||
-        pending.preTeardown?.cleanupDeferredToRunner !== true || pending.report?.trial?.id !== trial.id)
+        pending.preTeardown?.cleanupDeferredToRunner !== true || reportTrialId !== trial.id)
       throw new Error('Missing successful pre-teardown native normal-Stop evidence');
     if (!isNativeAlive()) throw new Error('Native exited before normal-Stop closure collection');
     const boundary = { event: 'qualification_pre_teardown', atMs, clock: 'runner-performance-now', nativeProcessAlive: true };
@@ -1124,8 +1127,8 @@ export async function main(args = process.argv.slice(2)) {
   const proxyStarted = performance.now();
   const { startConfigDelayProxy } = trial ? await import('./helpers/nativeContinuationProxy.mjs') : {};
   const proxy = trial ? await startConfigDelayProxy(provenance.endpoint, trial.configDelayMs, (event, details) => {
-    // The longest approved source is 49.3 s. At the native 30 ms audio cadence it
-    // produces fewer than 1,650 binary events, leaving bounded room for controls.
+    // The canary includes bounded churn plus one complete 49.3 s source. Keep
+    // even the all-sources-complete worst case for ownership and cleanup proof.
     if (proxyEvents.length < maxProxyEvidenceEvents) proxyEvents.push({ event, ...details, atMs: performance.now() - proxyStarted });
     else if (proxyEvents.length === maxProxyEvidenceEvents) proxyEvents.push({ event: 'fault_proxy_evidence_overflow' });
   }) : null;
@@ -1146,7 +1149,13 @@ export async function main(args = process.argv.slice(2)) {
   try {
     if (interruption) throw interruption;
     // Event/preparation timeout: 30 seconds, then up to 5 seconds SIGTERM grace before SIGKILL.
-    await runOwned(binary, [], { cwd: directory, env }, options.miniUx ? 90_000 : options.readerPreparation || ['E04', 'E41', 'E42', 'after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle'].includes(options.continuationCase) ? 30_000 : 480_000, path.join(directory, `native-runtime-${randomUUID()}.log`), path.join(directory, 'native-progress.jsonl'), collectBeforeTeardown, path.join(directory, 'native-process-termination.json'));
+    const runtimeTimeoutMs = options.miniUx ? 90_000
+      : trial?.kind === 'warm-provider-canary' ? 900_000
+      : options.readerPreparation || ['E04', 'E41', 'E42', 'after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle'].includes(options.continuationCase) ? 30_000
+      : 480_000;
+    await runOwned(binary, [], { cwd: directory, env }, runtimeTimeoutMs,
+      path.join(directory, `native-runtime-${randomUUID()}.log`), path.join(directory, 'native-progress.jsonl'),
+      collectBeforeTeardown, path.join(directory, 'native-process-termination.json'));
   } catch (error) { runtimeFailure = error; }
   finally {
     if (proxy) {
@@ -1181,7 +1190,8 @@ export async function main(args = process.argv.slice(2)) {
     const verification = { passed: false, qualificationPassed: false, trialId: trial.id, actualPasteVerified: false };
     try {
       const report = envelope.report;
-      if (envelope.marker !== marker || envelope.passed !== true || report?.passed !== true || report.errors?.length || report.trial?.id !== trial.id) throw new Error('Native live qualification failed');
+      const reportTrialId = trial.kind === 'warm-provider-canary' ? report?.trialId : report?.trial?.id;
+      if (envelope.marker !== marker || envelope.passed !== true || report?.passed !== true || report.errors?.length || reportTrialId !== trial.id) throw new Error('Native live qualification failed');
       const target = path.join(directory, 'p4-textedit-a.txt');
       const script = `tell application "TextEdit"\nset matches to ${ownedDocumentMatches(target)}\nif (count matches) is not 1 then error "TEST document identity missing or ambiguous"\nreturn text of item 1 of matches\nend tell`;
       const readbackStartMs = performance.now() - proxyStarted;
@@ -1190,10 +1200,20 @@ export async function main(args = process.argv.slice(2)) {
       Object.assign(verification, exactInsertionEvidence(report.expectedInsertion, stdout.replace(/\n$/, ''), report.targetDocument));
       Object.assign(verification, verifyQualificationConnections(trial, proxyEvents));
       Object.assign(verification, verifyQualificationRoute(trial, proxyEvents));
-      verifyQualificationSources(trial, report.final?.fixture);
-      verifyQualificationTerminals(trial, report.episodes, report.terminals);
-      const accepted = proxyEvents.filter(e => e.event === 'backend_control' && e.type === 'continue_result' && e.decision === 'accepted' && e.eligible_now === true);
-      if (trial.continuation && accepted.length !== 1) throw new Error('Exactly one eligible Continue acceptance required');
+      if (trial.kind === 'warm-provider-canary') {
+        Object.assign(verification, verifyWarmProviderCanary(trial, report));
+        const accepted = proxyEvents.filter(e => e.event === 'backend_control' &&
+          e.type === 'continue_result' && e.decision === 'accepted' && e.eligible_now === true);
+        const expectedContinues = trial.cycles.length - trial.readyGateFromIndex;
+        if (accepted.length !== expectedContinues) {
+          throw new Error('Warm provider canary did not retain every expected continuation');
+        }
+      } else {
+        verifyQualificationSources(trial, report.final?.fixture);
+        verifyQualificationTerminals(trial, report.episodes, report.terminals);
+        const accepted = proxyEvents.filter(e => e.event === 'backend_control' && e.type === 'continue_result' && e.decision === 'accepted' && e.eligible_now === true);
+        if (trial.continuation && accepted.length !== 1) throw new Error('Exactly one eligible Continue acceptance required');
+      }
       verification.continueOutcomes = proxyEvents.filter(e => e.event === 'backend_control');
       // Upstream provider connect count must come from backend/native instrumentation, not socket inference.
       verification.limitations = ['Provider handshake/Continue eligibility and native insertion timing require parent instrumentation; this is pipeline evidence only.'];

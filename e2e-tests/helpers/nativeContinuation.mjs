@@ -9,7 +9,45 @@ export const approvedFixtures = Object.freeze({
   'stop-inside-word.pcm': [35200, '72603893abf7efe13a68100201b9d6c25a8e2d6002f635c41f0fd67dea30cf82'],
   'old-commit-new-tail.pcm': [214156, 'a2d00cd1f10fac3f19f5dd566779b869cb12f7325965ea3b8b76e1f16e1c2933'],
 });
-export const maxProxyEvidenceEvents = 4096;
+// Bounded above the worst case where every churn source reaches its final frame,
+// followed by the complete 49.3s proof at 20ms cadence.
+export const maxProxyEvidenceEvents = 32768;
+export const warmProviderCanaryJittersMs = Object.freeze([0, 25, 100, 250, 500]);
+export const warmProviderCanaryPhases = Object.freeze([
+  'before-ready',
+  'after-first-pcm',
+  'during-partial',
+  'after-final',
+]);
+const warmProviderCanaryEpisodeByPhase = Object.freeze({
+  'before-ready': 'episode-a.pcm',
+  'after-first-pcm': 'episode-b.pcm',
+  'during-partial': 'old-commit-new-tail.pcm',
+  'after-final': 'long-auto-commit.pcm',
+});
+export const warmProviderCanaryCycles = Object.freeze(Array.from({ length: 20 }, (_, index) => {
+  const stopPhase = warmProviderCanaryPhases[Math.floor(index / warmProviderCanaryJittersMs.length)];
+  return Object.freeze({
+    index,
+    jitterMs: warmProviderCanaryJittersMs[index % warmProviderCanaryJittersMs.length],
+    stopPhase,
+    episode: warmProviderCanaryEpisodeByPhase[stopPhase],
+  });
+}));
+export const warmProviderCanaryTrial = Object.freeze({
+  id: 'warm-provider-churn-20',
+  kind: 'warm-provider-canary',
+  continuation: true,
+  configDelayMs: 4000,
+  route: 'warm-provider-churn',
+  cycles: warmProviderCanaryCycles,
+  readyGateFromIndex: warmProviderCanaryJittersMs.length,
+  finalEpisodeIndex: warmProviderCanaryCycles.length,
+  episodes: Object.freeze([
+    ...warmProviderCanaryCycles.map(cycle => cycle.episode),
+    'long-auto-commit.pcm',
+  ]),
+});
 export function validatePcm(name, bytes) {
   const pin = Object.hasOwn(approvedFixtures, name) && approvedFixtures[name];
   if (!pin || bytes.length !== pin[0] || createHash('sha256').update(bytes).digest('hex') !== pin[1]) {
@@ -42,6 +80,7 @@ export const liveTrials = Object.freeze([
   { id: 'long', continuation: true, configDelayMs: 0, route: 'continued-audio', episodes: ['episode-a.pcm', 'long-auto-commit.pcm'] },
   { id: 'short-tail', continuation: true, configDelayMs: 0, route: 'cancel-unsent', episodes: ['episode-a.pcm', 'stop-inside-word.pcm'] },
   { id: 'old-tail', continuation: true, configDelayMs: 0, route: 'continued-audio', episodes: ['old-commit-new-tail.pcm', 'episode-b.pcm'] },
+  warmProviderCanaryTrial,
 ]);
 export function validateHarnessConfig(config) {
   if (config?.schema !== 'p4-test-backend-v1' || config.testOnly !== true ||
@@ -69,6 +108,13 @@ export function exactInsertionEvidence(expected, actual, identity) {
 
 export function qualificationExpectations(trial) {
   if (!liveTrials.some(row => JSON.stringify(row) === JSON.stringify(trial))) throw new Error('Unplanned qualification trial');
+  if (trial.kind === 'warm-provider-canary') {
+    const earlyStops = trial.cycles.filter(cycle => cycle.stopPhase === 'before-ready').length;
+    return { warmProviderCanary: true, captures: trial.cycles.length + 1,
+      minBackendConnections: 1, maxBackendConnections: earlyStops + 2,
+      providerHandshakes: { min: 1, max: earlyStops + 2 }, maxActiveUpstream: 1,
+      gateInitialSource: false, finalGateIndex: trial.finalEpisodeIndex, gapMs: null };
+  }
   const baseline = trial.id.startsWith('warm-baseline-');
   return { baseline, captures: baseline ? 1 : 2, backendConnections: baseline || trial.continuation ? 1 : 2,
     providerHandshakes: baseline || trial.continuation ? 1 : 2, maxActiveUpstream: 1,
@@ -83,7 +129,10 @@ export function verifyQualificationConnections(trial, events) {
         ['pause_accepted', 'pause_rejected', 'continue_result', 'pause_restore_result'].includes(event.type)) throw new Error('Unexpected continuation control in normal recording');
     if (['fault_proxy_overflow', 'fault_proxy_transport_error', 'fault_proxy_deadline', 'fault_proxy_evidence_overflow'].includes(event.event)) throw new Error('Fault proxy gate failed');
     if (event.event === 'qualification_pre_teardown') {
-      if (boundarySeen || active !== 0 || connections !== expected.backendConnections || event.nativeProcessAlive !== true || event.clock !== 'runner-performance-now' || !Number.isFinite(event.atMs)) throw new Error('Normal Stop not closed before teardown');
+      const connectionCountValid = expected.warmProviderCanary
+        ? connections >= expected.minBackendConnections && connections <= expected.maxBackendConnections
+        : connections === expected.backendConnections;
+      if (boundarySeen || active !== 0 || !connectionCountValid || event.nativeProcessAlive !== true || event.clock !== 'runner-performance-now' || !Number.isFinite(event.atMs)) throw new Error('Normal Stop not closed before teardown');
       boundarySeen = true;
     }
     // Only upstream closes establish release; a later proxy-client close is not credited.
@@ -97,8 +146,14 @@ export function verifyQualificationConnections(trial, events) {
       if (--active < 0) throw new Error('Unmatched upstream close');
     }
   }
-  if (!boundarySeen || connections !== expected.backendConnections || active !== 0) throw new Error('Mode-specific backend connection count/cleanup failed');
+  const connectionCountValid = expected.warmProviderCanary
+    ? connections >= expected.minBackendConnections && connections <= expected.maxBackendConnections
+    : connections === expected.backendConnections;
+  if (!boundarySeen || !connectionCountValid || active !== 0) throw new Error('Mode-specific backend connection count/cleanup failed');
   return { backendConnections: connections, expectedProviderHandshakes: expected.providerHandshakes,
+    ...(expected.warmProviderCanary ? {
+      allowedBackendConnectionRange: [expected.minBackendConnections, expected.maxBackendConnections],
+    } : {}),
     requiredMaxActiveUpstream: 1, normalStopConnectionReleaseVerified: true,
     preTeardownBoundary: events.find(event => event.event === 'qualification_pre_teardown'),
     providerHandshakeVerification: 'pending-parent-logs' };
@@ -113,13 +168,43 @@ export function verifyQualificationRoute(trial, events) {
     throw new Error('Invalid client audio frame evidence');
   }
   const connectionIds = new Set(connections.map(event => event.connectionId));
-  if (connectionIds.size !== expected.backendConnections || connections.some(event =>
+  const connectionCountValid = expected.warmProviderCanary
+    ? connectionIds.size >= expected.minBackendConnections && connectionIds.size <= expected.maxBackendConnections
+    : connectionIds.size === expected.backendConnections;
+  if (!connectionCountValid || connections.some(event =>
       !Number.isSafeInteger(event.connectionId) || event.connectionId <= 0) ||
       binary.some(event => !connectionIds.has(event.connectionId))) {
     throw new Error('Audio evidence does not belong to the expected connections');
   }
   for (const connectionId of connectionIds) {
-    if (!binary.some(event => event.connectionId === connectionId)) throw new Error('Expected connection has no client audio');
+    if (!expected.warmProviderCanary && !binary.some(event => event.connectionId === connectionId)) throw new Error('Expected connection has no client audio');
+  }
+  if (expected.warmProviderCanary) {
+    const lastConnectionId = connections.at(-1)?.connectionId;
+    if (!lastConnectionId || !binary.some(event => event.connectionId === lastConnectionId)) {
+      throw new Error('Final warm canary connection has no client audio');
+    }
+    const ready = events.filter(event => event.event === 'backend_control' && event.type === 'ready');
+    const rejected = events.filter(event => event.event === 'backend_control' &&
+      (event.type === 'pause_rejected' || (event.type === 'continue_result' && event.decision !== 'accepted')));
+    const pauses = events.filter(event => event.event === 'backend_control' &&
+      event.type === 'pause_accepted' && event.decision === 'accepted');
+    const continues = events.filter(event => event.event === 'backend_control' &&
+      event.type === 'continue_result' && event.decision === 'accepted' && event.eligible_now === true);
+    const retainedCycles = trial.cycles.length - trial.readyGateFromIndex;
+    const providerSessionId = ready[0]?.session_id;
+    const retainedConnectionId = ready[0]?.connectionId;
+    if (ready.length !== 1 || typeof providerSessionId !== 'string' || !providerSessionId ||
+        !connectionIds.has(retainedConnectionId) || retainedConnectionId !== lastConnectionId ||
+        rejected.length !== 0 || pauses.length !== retainedCycles + 1 || continues.length !== retainedCycles ||
+        [...pauses, ...continues].some(event => event.connectionId !== retainedConnectionId ||
+          event.provider_session_id !== providerSessionId)) {
+      throw new Error('Warm canary did not retain exactly one provider session across churn');
+    }
+    return { clientAudioFrames: binary.length, clientAudioConnections: connectionIds.size,
+      routeVerified: trial.route, maximumActiveConnections: 1, maximumActiveProviderSessions: 1,
+      retainedProviderSessionId: providerSessionId, acceptedPauses: pauses.length,
+      acceptedContinues: continues.length };
   }
   if (!trial.continuation) return { clientAudioFrames: binary.length, clientAudioConnections: connectionIds.size, routeVerified: trial.route };
 
@@ -180,4 +265,102 @@ export function verifyQualificationSources(trial, fixture) {
         row.nativeSourceStartMs - row.nativeGapStartMs < 120)))) throw new Error('Missing continuous baseline gap');
   }
   return expected;
+}
+
+export function verifyWarmProviderCanary(trial, report) {
+  const expected = qualificationExpectations(trial);
+  const cycles = report?.cycles;
+  const events = report?.events;
+  const fixture = report?.final?.fixture;
+  if (!expected.warmProviderCanary || report?.mode !== 'warm-provider-canary' ||
+      report?.passed !== true || report.trialId !== trial.id ||
+      !Array.isArray(report.errors) || report.errors.length ||
+      !Array.isArray(report.duplicateDeliveries) || report.duplicateDeliveries.length ||
+      !Array.isArray(cycles) || cycles.length !== trial.cycles.length ||
+      !Array.isArray(events) || events.length > 2048 || !fixture) {
+    throw new Error('Incomplete warm provider canary report');
+  }
+  const associations = new Map((fixture.captureRunAssociations ?? []).map(row =>
+    [row.captureGeneration, row]));
+  if (fixture.captureStarts !== expected.captures || fixture.captureStops !== expected.captures ||
+      fixture.activeCaptures !== 0 || fixture.maxActiveCaptures !== 1 ||
+      fixture.observationOverflow !== false || fixture.markerViolations?.length !== 0 ||
+      fixture.sourceEpisodes?.length !== expected.captures ||
+      fixture.capturePcmLedgers?.length !== expected.captures ||
+      new Set(fixture.capturePcmLedgers.map(row => row.captureGeneration)).size !== expected.captures) {
+    throw new Error('Warm provider canary capture lifecycle is incomplete');
+  }
+  for (const [index, cycle] of cycles.entries()) {
+    const plan = trial.cycles[index];
+    const source = fixture.sourceEpisodes[index];
+    const cycleEvents = events.slice(cycle.eventStart, cycle.eventEnd);
+    const gated = index >= trial.readyGateFromIndex;
+    if (cycle.index !== index || cycle.stopPhase !== plan.stopPhase || cycle.jitterMs !== plan.jitterMs ||
+        cycle.episode !== plan.episode || cycle.captureGeneration !== index + 1 ||
+        !Number.isFinite(cycle.startedAtMs) || !Number.isFinite(cycle.triggerAtMs) ||
+        !Number.isFinite(cycle.captureStoppedAtMs) || !Number.isFinite(cycle.idleAtMs) ||
+        cycle.triggerAtMs < cycle.startedAtMs || cycle.triggerAtMs - cycle.startedAtMs > 75_000 ||
+        cycle.captureStoppedAtMs < cycle.triggerAtMs || cycle.captureStoppedAtMs - cycle.triggerAtMs > 5_500 ||
+        cycle.idleAtMs < cycle.captureStoppedAtMs || cycle.idleAtMs - cycle.captureStoppedAtMs > 45_500 ||
+        cycle.activeCapturesAfterStop !== 0 || source?.name !== plan.episode ||
+        source.captureGeneration !== index + 1 || !Number.isSafeInteger(source.emittedFrames) ||
+        source.emittedFrames < 0 || source.emittedFrames > source.sourceFrames ||
+        source.sourceGateRequired !== gated ||
+        (gated && (source.sourceGateReady?.serverReady !== true || source.sourceGateReady.emittedFrames !== 0)) ||
+        (!gated && source.sourceGateReady != null) ||
+        !Number.isSafeInteger(cycle.eventStart) || !Number.isSafeInteger(cycle.eventEnd) ||
+        cycle.eventStart < 0 || cycle.eventEnd < cycle.eventStart || cycle.eventEnd > events.length ||
+        (index === 0 ? cycle.eventStart !== 0 : cycle.eventStart !== cycles[index - 1].eventEnd) ||
+        cycleEvents.some(event => event.cycleIndex !== index || !Number.isSafeInteger(event.sessionId) || event.sessionId <= 0)) {
+      throw new Error(`Warm provider canary cycle ${index} evidence is contradictory`);
+    }
+    if (plan.stopPhase === 'before-ready') {
+      if (cycle.trigger?.readyBeforeStop !== false ||
+          cycleEvents.some(event => ['transcription:partial', 'transcription:final'].includes(event.event)) ||
+          (cycle.association != null && (cycle.association.captureGeneration !== index + 1 ||
+            cycle.association.captureRunId !== cycle.logicalRunId))) {
+        throw new Error(`Cycle ${index} missed before-Ready proof`);
+      }
+    } else {
+      const association = associations.get(index + 1);
+      if (!association || cycle.association?.captureGeneration !== index + 1 ||
+          cycle.association.captureRunId !== cycle.logicalRunId ||
+          association.captureRunId !== cycle.logicalRunId || source.emittedFrames <= 0 ||
+          cycleEvents.some(event => ['transcription:partial', 'transcription:final'].includes(event.event) &&
+            event.sessionId !== cycle.logicalRunId)) {
+        throw new Error(`Cycle ${index} lost capture/provider ownership`);
+      }
+      const expectedEvent = plan.stopPhase === 'during-partial' ? 'transcription:partial' :
+        plan.stopPhase === 'after-final' ? 'transcription:final' : null;
+      if (expectedEvent && !cycleEvents.some(event => event.event === expectedEvent)) {
+        throw new Error(`Cycle ${index} missed ${expectedEvent} evidence`);
+      }
+    }
+  }
+  const finalIndex = trial.finalEpisodeIndex;
+  const finalSource = fixture.sourceEpisodes[finalIndex];
+  const finalAssociation = associations.get(finalIndex + 1);
+  const finalEvents = events.filter(event => event.cycleIndex === finalIndex);
+  if (finalSource?.name !== trial.episodes[finalIndex] ||
+      finalSource.captureGeneration !== finalIndex + 1 ||
+      finalSource.emittedFrames !== finalSource.sourceFrames ||
+      !Number.isFinite(finalSource.nativeSourceStartMs) || !Number.isFinite(finalSource.nativeSourceEndMs) ||
+      finalSource.nativeSourceEndMs < finalSource.nativeSourceStartMs ||
+      finalSource.sourceGateRequired !== true || finalSource.sourceGateReady?.serverReady !== true ||
+      finalSource.sourceGateReady.emittedFrames !== 0 || !finalAssociation ||
+      typeof report.expectedInsertion !== 'string' || !report.expectedInsertion.trim() ||
+      new Set(finalEvents.flatMap(event => event.markerIds)).size < 2 ||
+      finalEvents.some(event => ['transcription:partial', 'transcription:final'].includes(event.event) &&
+        event.sessionId !== finalAssociation.captureRunId) ||
+      events.some((event, eventIndex) => Number.isSafeInteger(event.cycleIndex) &&
+        event.cycleIndex >= 0 && event.cycleIndex < finalIndex &&
+        (eventIndex < cycles[event.cycleIndex].eventStart || eventIndex >= cycles[event.cycleIndex].eventEnd)) ||
+      !Array.isArray(report.terminalSessions) || report.terminalSessions.length < 1 ||
+      report.final.status !== 'Idle' || report.final.preparedCaptureTokenCount !== 0 ||
+      report.final.providerTransport?.connectionRetained !== false) {
+    throw new Error('Final warm provider proof is incomplete');
+  }
+  return { churnCycles: cycles.length, finalCaptureGeneration: finalIndex + 1,
+    stopPhases: [...new Set(cycles.map(cycle => cycle.stopPhase))],
+    jitterMs: [...new Set(cycles.map(cycle => cycle.jitterMs))] };
 }

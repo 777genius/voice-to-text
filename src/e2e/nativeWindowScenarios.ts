@@ -2,6 +2,7 @@ import { runNativeMiniUxScenario } from './nativeMiniUxScenario';
 import { runNativeReaderPreparation } from './nativeReaderPreparation';
 import { runNativeContinuationCase } from './nativeContinuationCases';
 import { runNativeContinuationLive } from './nativeContinuationLive';
+import { runNativeWarmProviderCanary } from './nativeWarmProviderCanary';
 import { runNativeContinuationScenarios } from './nativeContinuationScenarios';
 import { nativeMeterEvidence } from './nativeMeterEvidence';
 /** Real NSPanel/WKWebView/Vue/IPC scenarios; only native audio/STT adapters are fake. */
@@ -94,7 +95,9 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
   // A Vite flag alone never grants auth bypass or runs scenarios in a normal app.
   if ((await state()).miniUxMode) { await runNativeMiniUxScenario(pinia); return; }
   if ((await state()).readerPreparation) { await runNativeReaderPreparation(); return; }
-  if ((await state()).qualificationTrial) { await runNativeContinuationLive(pinia); return; }
+  const qualificationTrial = (await state()).qualificationTrial as { kind?: string } | undefined;
+  if (qualificationTrial?.kind === 'warm-provider-canary') { await runNativeWarmProviderCanary(pinia); return; }
+  if (qualificationTrial) { await runNativeContinuationLive(pinia); return; }
   const continuationCase = (await state()).continuationCase;
   if (continuationCase === 'E54') { await runRestartCrashScenario(pinia); return; }
   if (continuationCase) { await runNativeContinuationCase(pinia, continuationCase); return; }

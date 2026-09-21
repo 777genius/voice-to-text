@@ -45,7 +45,7 @@ export async function startConfigDelayProxy(upstreamUrl, delayMs, record) {
             for (const key of ['type', 'session_id', 'provider_session_id', 'request_id', 'pause_epoch', 'decision', 'current_phase', 'eligible_now', 'accepted_capabilities', 'code', 'reason']) {
               if (message[key] !== undefined) details[key] = message[key];
             }
-            record('backend_control', details);
+            record('backend_control', { connectionId, ...details });
           }
         } catch {}
       }

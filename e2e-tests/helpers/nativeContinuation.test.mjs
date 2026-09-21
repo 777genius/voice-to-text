@@ -1,16 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { approvedFixtures, maxProxyEvidenceEvents, validatePcm, readApprovedFixtures, liveTrials, validateHarnessConfig, exactInsertionEvidence } from './nativeContinuation.mjs';
+import { approvedFixtures, maxProxyEvidenceEvents, validatePcm, readApprovedFixtures, liveTrials,
+  warmProviderCanaryJittersMs, warmProviderCanaryPhases, warmProviderCanaryTrial,
+  validateHarnessConfig, exactInsertionEvidence } from './nativeContinuation.mjs';
 import { parseArguments, sanitizedEnvironment, validateResult } from '../run-native-window-e2e.mjs';
 test('qualification requires explicit opt in and inherits no feature flags', () => {
   assert.deepEqual(parseArguments(['--continuation-fake']), { continuationFake: true });
   assert.equal(sanitizedEnvironment('/tmp/example', { VOICETEXT_EL_PAUSE_CONTINUE_V1: 'true' }).VOICETEXT_EL_PAUSE_CONTINUE_V1, undefined);
 });
 test('fixed live budget includes all trials and full long clock', async () => {
-  assert.equal(liveTrials.length, 12);
+  assert.equal(liveTrials.length, 13);
   assert.equal(liveTrials.filter(x => x.id.startsWith('warm-baseline')).length, 3);
   assert.equal(liveTrials.filter(x => x.id.startsWith('warm-continue')).length, 3);
-  assert.equal(new Set(liveTrials.map(x => x.id)).size, 12);
+  assert.equal(new Set(liveTrials.map(x => x.id)).size, 13);
   assert.equal(approvedFixtures['long-auto-commit.pcm'][0] / 32, 49268);
   const longestTwoEpisodeBytes = approvedFixtures['long-auto-commit.pcm'][0] + approvedFixtures['episode-b.pcm'][0];
   assert.ok(Math.ceil(longestTwoEpisodeBytes / 640) + 128 < maxProxyEvidenceEvents);
@@ -68,9 +70,99 @@ test('cold capture source outlasts every Config fault at the original sample clo
   }
 });
 
-test('mode counts and initial-only Ready gate preserve the twelve prescribed trials', async () => {
+test('paid warm provider canary fixes 20 churn cycles, four stop phases, five jitters and one full proof', async () => {
+  const { qualificationExpectations, verifyQualificationConnections, verifyQualificationRoute,
+    verifyWarmProviderCanary } = await import('./nativeContinuation.mjs');
+  assert.equal(warmProviderCanaryTrial.cycles.length, 20);
+  assert.deepEqual([...new Set(warmProviderCanaryTrial.cycles.map(cycle => cycle.stopPhase))], warmProviderCanaryPhases);
+  assert.deepEqual([...new Set(warmProviderCanaryTrial.cycles.map(cycle => cycle.jitterMs))], warmProviderCanaryJittersMs);
+  assert.ok(new Set(warmProviderCanaryTrial.cycles.map(cycle => cycle.episode)).size >= 4);
+  const worstCaseFrames = warmProviderCanaryTrial.episodes.reduce((total, name) =>
+    total + Math.ceil(approvedFixtures[name][0] / 640), 0);
+  assert.ok(worstCaseFrames + 512 < maxProxyEvidenceEvents);
+  const expected = qualificationExpectations(warmProviderCanaryTrial);
+  assert.equal(expected.captures, 21);
+  assert.deepEqual([expected.minBackendConnections, expected.maxBackendConnections], [1, 7]);
+  const connected = { event: 'fault_proxy_connected', connectionId: 1 };
+  const audio = { event: 'client_binary', connectionId: 1, bytes: 640 };
+  const ready = { event: 'backend_control', type: 'ready', connectionId: 1, session_id: 'provider-1' };
+  const controls = Array.from({ length: 15 }, (_, index) => [
+    { event: 'backend_control', type: 'pause_accepted', connectionId: 1,
+      provider_session_id: 'provider-1', decision: 'accepted', request_id: `pause-${index}` },
+    { event: 'backend_control', type: 'continue_result', connectionId: 1,
+      provider_session_id: 'provider-1', decision: 'accepted', eligible_now: true,
+      request_id: `continue-${index}` },
+  ]).flat();
+  controls.push({ event: 'backend_control', type: 'pause_accepted', connectionId: 1,
+    provider_session_id: 'provider-1', decision: 'accepted', request_id: 'pause-final' });
+  const closed = { event: 'fault_proxy_close', direction: 'upstream', code: 1000 };
+  const boundary = { event: 'qualification_pre_teardown', atMs: 10,
+    clock: 'runner-performance-now', nativeProcessAlive: true };
+  assert.equal(verifyQualificationConnections(warmProviderCanaryTrial,
+    [connected, audio, closed, boundary]).backendConnections, 1);
+  assert.equal(verifyQualificationRoute(warmProviderCanaryTrial,
+    [connected, ready, ...controls, audio]).maximumActiveProviderSessions, 1);
+  assert.throws(() => verifyQualificationRoute(warmProviderCanaryTrial, [connected]));
+  assert.throws(() => verifyQualificationRoute(warmProviderCanaryTrial,
+    [connected, ready, ...controls.slice(1), audio]));
+
+  const events = [];
+  const cycles = warmProviderCanaryTrial.cycles.map((plan, index) => {
+    const eventStart = events.length;
+    if (plan.stopPhase === 'during-partial') events.push({ event: 'transcription:partial',
+      cycleIndex: index, sessionId: 100 + index, deliverySeq: index + 1, markerIds: [] });
+    if (plan.stopPhase === 'after-final') events.push({ event: 'transcription:final',
+      cycleIndex: index, sessionId: 100 + index, deliverySeq: index + 1, markerIds: [index % 2] });
+    return { ...plan, startedAtMs: index * 100, triggerAtMs: index * 100 + 20,
+      captureStoppedAtMs: index * 100 + 30, idleAtMs: index * 100 + 50,
+      captureGeneration: index + 1, logicalRunId: 100 + index,
+      association: plan.stopPhase === 'before-ready' ? null : {
+        captureGeneration: index + 1, captureRunId: 100 + index, captureFenceGeneration: index + 1 },
+      trigger: plan.stopPhase === 'before-ready' ? { readyBeforeStop: false } :
+        plan.stopPhase === 'during-partial' ? { event: 'transcription:partial' } :
+        plan.stopPhase === 'after-final' ? { event: 'transcription:final' } : { emittedFrames: 320 },
+      eventStart, eventEnd: events.length, activeCapturesAfterStop: 0 };
+  });
+  events.push({ event: 'transcription:final', cycleIndex: 20, sessionId: 999,
+    deliverySeq: 99, markerIds: [0, 1] });
+  const sources = warmProviderCanaryTrial.episodes.map((name, index) => {
+    const sourceFrames = approvedFixtures[name][0] / 2;
+    return { name, captureGeneration: index + 1, sourceFrames,
+      emittedFrames: index === 20 ? sourceFrames : warmProviderCanaryTrial.cycles[index].stopPhase === 'before-ready' ? 0 : 320,
+      nativeSourceStartMs: index === 20 ? 1000 : null, nativeSourceEndMs: index === 20 ? 2000 : null,
+      sourceGateRequired: index >= warmProviderCanaryTrial.readyGateFromIndex,
+      sourceGateReady: index >= warmProviderCanaryTrial.readyGateFromIndex ?
+        { serverReady: true, emittedFrames: 0 } : null };
+  });
+  const captureRunAssociations = cycles.flatMap((cycle, index) => cycle.association ? [cycle.association] : [])
+    .concat({ captureGeneration: 21, captureRunId: 999, captureFenceGeneration: 21 });
+  const fixture = { captureStarts: 21, captureStops: 21, activeCaptures: 0, maxActiveCaptures: 1,
+    observationOverflow: false, markerViolations: [], sourceEpisodes: sources,
+    captureRunAssociations, capturePcmLedgers: Array.from({ length: 21 }, (_, index) =>
+      ({ captureGeneration: index + 1, chunks: index === 20 ? 1 : 0, samples: index === 20 ? 320 : 0, hash: '0123456789abcdef' })) };
+  const report = { mode: 'warm-provider-canary', passed: true, trialId: warmProviderCanaryTrial.id,
+    errors: [], duplicateDeliveries: [], cycles, events, expectedInsertion: 'stable transcript',
+    terminalSessions: [999], final: { status: 'Idle', preparedCaptureTokenCount: 0,
+      providerTransport: { connectionRetained: false }, fixture } };
+  assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, report).churnCycles, 20);
+  for (const mutate of [
+    value => value.cycles.pop(),
+    value => { value.cycles[5].association.captureRunId = 9999; },
+    value => { value.events.find(event => event.event === 'transcription:partial').cycleIndex = 99; },
+    value => { value.final.fixture.sourceEpisodes[20].emittedFrames--; },
+    value => { value.final.fixture.capturePcmLedgers.pop(); },
+    value => value.duplicateDeliveries.push('1:1:final'),
+    value => value.events.push({ event: 'transcription:final', cycleIndex: 19,
+      sessionId: 119, deliverySeq: 1000, markerIds: [] }),
+  ]) {
+    const invalid = structuredClone(report); mutate(invalid);
+    assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, invalid));
+  }
+});
+
+test('mode counts and initial-only Ready gate preserve the legacy prescribed trials', async () => {
   const { qualificationExpectations } = await import('./nativeContinuation.mjs');
-  for (const trial of liveTrials) {
+  for (const trial of liveTrials.filter(row => row.kind !== 'warm-provider-canary')) {
     const expected = qualificationExpectations(trial);
     assert.equal(expected.captures, trial.id.startsWith('warm-baseline-') ? 1 : 2);
     assert.equal(expected.backendConnections, trial.id.startsWith('cold-') ? 2 : 1);
@@ -96,7 +188,7 @@ test('connection verifier rejects overlap, retry, missing closes and every retai
 });
 test('source verification requires native Ready, complete paced PCM and continuous baseline gap', async () => {
   const { verifyQualificationSources, qualificationExpectations } = await import('./nativeContinuation.mjs');
-  for (const trial of liveTrials) {
+  for (const trial of liveTrials.filter(row => row.kind !== 'warm-provider-canary')) {
     const expected = qualificationExpectations(trial);
     const sourceEpisodes = trial.episodes.map((name, index) => {
       const [bytes] = approvedFixtures[name];
@@ -167,7 +259,7 @@ test('normal baseline/cold reject continuation controls', async () => {
 
  test('terminal verifier rejects reviewer missing/duplicate/unexpected/incomplete terminals and collapsed cold owners', async () => {
   const { verifyQualificationTerminals, qualificationExpectations } = await import('./nativeContinuation.mjs');
-  for (const trial of liveTrials) {
+  for (const trial of liveTrials.filter(row => row.kind !== 'warm-provider-canary')) {
     const count = qualificationExpectations(trial).backendConnections;
     const episodes = [{ logicalRunId: 41 }, { logicalRunId: count === 1 ? 41 : 42 }];
     const terminals = [...new Set(episodes.map(e => e.logicalRunId))].map(sessionId => ({ sessionId, complete: true }));
