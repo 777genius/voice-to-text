@@ -431,16 +431,18 @@ export function verifyWarmProviderCanary(trial, report) {
   };
   const eventMatchesCapture = (event, episode, expectedEvent, cycleIndex, sessionId,
     providerStartSamples, providerSamples) => {
-    const eventStartSamples = event?.sourceStartSeconds * 16000;
-    const eventEndSamples = (event?.sourceStartSeconds + event?.sourceDurationSeconds) * 16000;
+    const eventStartSamples = Math.round(event?.sourceStartSeconds * 16000);
+    const eventDurationSamples = Math.round(event?.sourceDurationSeconds * 16000);
+    const eventEndSamples = eventStartSamples + eventDurationSamples;
     const fenceEndSamples = providerStartSamples + providerSamples;
     return eventMatchesEpisode(event, episode, expectedEvent) && event?.cycleIndex === cycleIndex &&
       event?.sessionId === sessionId && event?.timingKnown === true &&
       Number.isSafeInteger(providerStartSamples) && providerStartSamples >= 0 &&
       Number.isSafeInteger(providerSamples) && providerSamples > 0 &&
-      Number.isFinite(eventStartSamples) && Number.isFinite(eventEndSamples) &&
+      Number.isSafeInteger(eventStartSamples) && Number.isSafeInteger(eventDurationSamples) &&
+      eventDurationSamples > 0 &&
       eventStartSamples < fenceEndSamples && eventEndSamples > providerStartSamples &&
-      eventEndSamples <= fenceEndSamples + 1;
+      eventEndSamples <= fenceEndSamples;
   };
   const ledgerIsValid = row => Number.isSafeInteger(row?.captureGeneration) && row.captureGeneration > 0 &&
     Number.isSafeInteger(row.chunks) && row.chunks >= 0 && Number.isSafeInteger(row.samples) && row.samples >= 0 &&
@@ -603,20 +605,24 @@ export function verifyWarmProviderCanary(trial, report) {
   if (Number.isSafeInteger(ownership?.logicalRunId)) {
     expectedTerminalCycles.set(ownership.logicalRunId, finalIndex);
   }
-  const finalTranscriptMatchesCallbackGeneration = event =>
-    event.event === 'transcription:final' && event.cycleIndex === finalIndex &&
-    event.sessionId === ownership?.logicalRunId && Number.isSafeInteger(event.deliverySeq) &&
-    event.deliverySeq > 0 && typeof event.text === 'string' && event.text.trim().length > 0 &&
-    event.timingKnown === true && Number.isSafeInteger(report.finalTranscriptFence?.providerStartSamples) &&
-    report.finalTranscriptFence.providerStartSamples >= 0 &&
-    event.sourceStartSeconds * 16000 < report.finalTranscriptFence.providerStartSamples + finalProviderLedger?.samples &&
-    (event.sourceStartSeconds + event.sourceDurationSeconds) * 16000 >
-      report.finalTranscriptFence.providerStartSamples &&
-    (event.sourceStartSeconds + event.sourceDurationSeconds) * 16000 <=
-      report.finalTranscriptFence.providerStartSamples + finalProviderLedger?.samples + 1 &&
-    event.markerIds.length === 2 && event.markerIds.includes(0) && event.markerIds.includes(1) &&
-    (normalizedEventText(event).split('на столе').length - 1) === 1 &&
-    (normalizedEventText(event).split('за окном').length - 1) === 1;
+  const finalTranscriptMatchesCallbackGeneration = event => {
+    const eventStartSamples = Math.round(event?.sourceStartSeconds * 16000);
+    const eventDurationSamples = Math.round(event?.sourceDurationSeconds * 16000);
+    const eventEndSamples = eventStartSamples + eventDurationSamples;
+    return event.event === 'transcription:final' && event.cycleIndex === finalIndex &&
+      event.sessionId === ownership?.logicalRunId && Number.isSafeInteger(event.deliverySeq) &&
+      event.deliverySeq > 0 && typeof event.text === 'string' && event.text.trim().length > 0 &&
+      event.timingKnown === true && Number.isSafeInteger(report.finalTranscriptFence?.providerStartSamples) &&
+      report.finalTranscriptFence.providerStartSamples >= 0 &&
+      Number.isSafeInteger(eventStartSamples) && Number.isSafeInteger(eventDurationSamples) &&
+      eventDurationSamples > 0 &&
+      eventStartSamples < report.finalTranscriptFence.providerStartSamples + finalProviderLedger?.samples &&
+      eventEndSamples > report.finalTranscriptFence.providerStartSamples &&
+      eventEndSamples <= report.finalTranscriptFence.providerStartSamples + finalProviderLedger?.samples &&
+      event.markerIds.length === 2 && event.markerIds.includes(0) && event.markerIds.includes(1) &&
+      (normalizedEventText(event).split('на столе').length - 1) === 1 &&
+      (normalizedEventText(event).split('за окном').length - 1) === 1;
+  };
   const allFinalEvents = events.filter(event => event.event === 'transcription:final');
   if (finalSource?.name !== trial.episodes[finalIndex] ||
       finalSource.bytes !== finalBytes || finalSource.sourceFrames !== finalBytes / 2 ||

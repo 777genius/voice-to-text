@@ -85,4 +85,14 @@ describe('warm provider paid canary plan', () => {
     expect(warmCanaryEventMatchesCapture({ ...current, timingKnown: false },
       'episode-b.pcm', 'transcription:final', fence)).toBe(false);
   });
+
+  it('quantizes fractional provider timing before testing the capture boundary', () => {
+    const stale = { event: 'transcription:final', text: 'За окном растет береза', markerIds: [1],
+      sessionId: 9, cycleIndex: 16, deliverySeq: 89, atMs: 1001, timingKnown: true,
+      sourceStartSeconds: 0.1, sourceDurationSeconds: 0.14 };
+    const fence = { sessionId: 9, cycleIndex: 16, providerStartSamples: 3_840,
+      providerSamples: 320 };
+    expect(warmCanaryEventMatchesCapture(stale, 'episode-b.pcm',
+      'transcription:final', fence)).toBe(false);
+  });
 });

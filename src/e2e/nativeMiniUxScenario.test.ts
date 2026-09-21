@@ -19,7 +19,7 @@ describe('warm mini-window first-visible evidence', () => {
       { visible: true, windowEpoch: 18 })).toEqual([]);
   });
 
-  it('preserves a bad frame only when the native visible epoch is stable around it', async () => {
+  it('preserves the callback-time bad frame while delayed native reads prove its epoch', async () => {
     const reopen: WarmReopenEvidence = { attempt: 4, baselineWindowEpoch: 20,
       windowEpoch: null, closed: false };
     let statusText = 'Starting';
@@ -31,7 +31,7 @@ describe('warm mini-window first-visible evidence', () => {
       source: 'render', revision: 9, runId: 22, captureReady: statusText === 'Recording',
       readinessReason: statusText === 'Recording' ? 'recording' : 'activating-warm-capture',
       phase: `mini-status-dot ${statusText.toLowerCase()}`, statusText,
-    }));
+    }), 21);
     await Promise.resolve();
     statusText = 'Recording';
     resolveAfter({ visible: true, windowEpoch: 21 });
@@ -44,6 +44,14 @@ describe('warm mini-window first-visible evidence', () => {
     await expect(bindWarmVisibleFrameAfterNative(transitioning,
       async () => samples.shift()!, () => ({
         source: 'render', revision: 9, runId: 22, captureReady: false,
+        readinessReason: 'activating-warm-capture', phase: 'mini-status-dot starting',
+        statusText: 'Starting',
+      }), 21)).resolves.toEqual([]);
+
+    const unproven = { ...reopen, windowEpoch: null };
+    await expect(bindWarmVisibleFrameAfterNative(unproven,
+      async () => ({ visible: true, windowEpoch: 22 }), () => ({
+        source: 'render', revision: 10, runId: 23, captureReady: false,
         readinessReason: 'activating-warm-capture', phase: 'mini-status-dot starting',
         statusText: 'Starting',
       }))).resolves.toEqual([]);

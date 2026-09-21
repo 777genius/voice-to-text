@@ -34,6 +34,12 @@ type ProviderTerminal = { sessionId: number; cycleIndex: number | null; complete
 export type WarmCanaryCaptureFence = { sessionId: number; cycleIndex: number;
   providerStartSamples: number; providerSamples: number };
 
+const providerTimingSampleRange = (event: ProviderEvent) => {
+  const start = Math.round(event.sourceStartSeconds * 16_000);
+  const duration = Math.round(event.sourceDurationSeconds * 16_000);
+  return { start, duration, end: start + duration };
+};
+
 const state = (stopReadback = false) => invoke<NativeState>('native_e2e_state', { stopReadback });
 const wait = (durationMs: number) => invoke('native_e2e_delay', { durationMs });
 function check(condition: unknown, message: string): asserts condition {
@@ -88,15 +94,14 @@ export function warmCanaryEventMatchesCapture(
       fence.providerSamples <= 0 || !Number.isFinite(event.sourceStartSeconds) ||
       !Number.isFinite(event.sourceDurationSeconds) || event.sourceStartSeconds < 0 ||
       event.sourceDurationSeconds <= 0) return false;
-  const eventStartSamples = event.sourceStartSeconds * 16_000;
-  const eventEndSamples = (event.sourceStartSeconds + event.sourceDurationSeconds) * 16_000;
+  const timing = providerTimingSampleRange(event);
   const fenceEndSamples = fence.providerStartSamples + fence.providerSamples;
   // A delivery from the preceding capture can arrive with a fresh delivery
   // sequence after Continue. Its provider timing still ends at or before this
   // generation's first sample, so require causal overlap with current PCM.
-  return Number.isFinite(eventStartSamples) && Number.isFinite(eventEndSamples) &&
-    eventStartSamples < fenceEndSamples && eventEndSamples > fence.providerStartSamples &&
-    eventEndSamples <= fenceEndSamples + 1;
+  return Number.isSafeInteger(timing.start) && Number.isSafeInteger(timing.duration) &&
+    timing.duration > 0 && timing.start < fenceEndSamples &&
+    timing.end > fence.providerStartSamples && timing.end <= fenceEndSamples;
 }
 
 export async function runNativeWarmProviderCanary(pinia: Pinia) {
@@ -351,16 +356,17 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     const finalProviderStartSamples = providerStartSamples(delivered, complete.logicalProviderRunId);
     report.finalTranscriptFence = { eventStart: finalTranscriptEventStart,
       providerSamples: finalProviderLedger.samples, providerStartSamples: finalProviderStartSamples };
-    const belongsToFinalCallbackGeneration = (event: ProviderEvent) =>
-      event.event === 'transcription:final' && event.sessionId === complete.logicalProviderRunId &&
-      event.cycleIndex === trial.finalEpisodeIndex &&
-      event.timingKnown === true &&
-      event.sourceStartSeconds * 16_000 < finalProviderStartSamples + finalProviderLedger.samples &&
-      (event.sourceStartSeconds + event.sourceDurationSeconds) * 16_000 > finalProviderStartSamples &&
-      (event.sourceStartSeconds + event.sourceDurationSeconds) * 16_000 <=
-        finalProviderStartSamples + finalProviderLedger.samples + 1 &&
-      syntheticPhraseOccurrences(event.text ?? '').length === 2 &&
-      event.markerIds.length === 2 && event.markerIds.includes(0) && event.markerIds.includes(1);
+    const belongsToFinalCallbackGeneration = (event: ProviderEvent) => {
+      const timing = providerTimingSampleRange(event);
+      return event.event === 'transcription:final' && event.sessionId === complete.logicalProviderRunId &&
+        event.cycleIndex === trial.finalEpisodeIndex && event.timingKnown === true &&
+        Number.isSafeInteger(timing.start) && Number.isSafeInteger(timing.duration) && timing.duration > 0 &&
+        timing.start < finalProviderStartSamples + finalProviderLedger.samples &&
+        timing.end > finalProviderStartSamples &&
+        timing.end <= finalProviderStartSamples + finalProviderLedger.samples &&
+        syntheticPhraseOccurrences(event.text ?? '').length === 2 &&
+        event.markerIds.length === 2 && event.markerIds.includes(0) && event.markerIds.includes(1);
+    };
     await toggle();
     await poll(value => value.fixture.captureStops === beforeFinal.fixture.captureStops + 1 &&
       value.fixture.activeCaptures === 0 &&

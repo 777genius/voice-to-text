@@ -303,6 +303,12 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
         .find(row => row.event === 'transcription:final');
       event.sourceStartSeconds = Math.max(0, (cycle.providerStartSamples - 320) / 16000);
       event.sourceDurationSeconds = 0.02; },
+    value => { const cycle = value.cycles.find(row => row.stopPhase === 'after-final' &&
+        row.providerStartSamples === 3_840);
+      const event = value.events.slice(cycle.triggerEventStart, cycle.stopEventIndex)
+        .find(row => row.event === 'transcription:final');
+      event.sourceStartSeconds = 0.1;
+      event.sourceDurationSeconds = 0.14; },
     value => { value.cycles[1].previousSettleToStartMs = 5_000; },
     value => { delete value.events.find(event => event.event === 'transcription:final').deliverySeq; },
     value => { value.events.find(event => event.cycleIndex === 20 && event.event === 'transcription:final').event = 'transcription:partial'; },

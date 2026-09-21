@@ -50,15 +50,17 @@ export async function bindWarmVisibleFrameAfterNative(
   expectedWindowEpoch?: number,
   firstNative?: Pick<Snapshot, 'visible' | 'windowEpoch'>,
 ) {
-  // Bracket the DOM read with two native snapshots. Reading the DOM only
-  // after one IPC sample can lose a bad first-visible frame if it changes
-  // while that IPC is in flight. A monotonic epoch also makes an ABA
-  // hide/show transition fail the bracket instead of inheriting visibility.
-  const before = firstNative ?? await readNative();
+  // Capture the callback-time DOM synchronously. Waiting for the first IPC
+  // sample before reading it can erase a bad first-visible frame. Native
+  // samples taken around/after that captured frame only provide epoch
+  // provenance; they must never replace the captured UI evidence.
   const frame = readFrame();
+  if (!frame) return [];
+  const before = firstNative ?? await readNative();
   const after = await readNative();
-  if (!frame || before.visible !== true || after.visible !== true ||
-      before.windowEpoch !== after.windowEpoch) return [];
+  if (before.visible !== true || after.visible !== true || before.windowEpoch !== after.windowEpoch ||
+      (firstNative === undefined && expectedWindowEpoch === undefined &&
+        reopen.windowEpoch !== before.windowEpoch)) return [];
   return bindWarmVisibleFrameEvidence(reopen, frame, after, expectedWindowEpoch);
 }
 const state = () => invoke<Snapshot>('native_e2e_state');
