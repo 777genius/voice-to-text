@@ -29,8 +29,13 @@ export type WarmVisibleFrame = {
 };
 export type WarmReopenEvidence = {
   attempt: number; baselineWindowEpoch: number; windowEpoch: number | null; closed: boolean;
+  acceptingObservations?: boolean;
   pendingFrames?: Array<Omit<WarmVisibleFrame, 'attempt' | 'windowEpoch'>>;
 };
+
+export async function drainPendingWarmVisibleObservations(pending: Set<Promise<void>>) {
+  while (pending.size > 0) await Promise.all([...pending]);
+}
 export function bindWarmVisibleFrameEvidence(
   reopen: WarmReopenEvidence,
   frame: Omit<WarmVisibleFrame, 'attempt' | 'windowEpoch'>,
@@ -152,7 +157,7 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
   };
   const observeWarmVisibleFrame = (source: 'render' | 'shown' | 'sample',
     reopen = activeWarmReopen, native?: Snapshot, expectedWindowEpoch?: number) => {
-    if (!reopen) return;
+    if (!reopen || reopen.acceptingObservations === false) return;
     if (report.warmVisibleFrames.length + pendingVisibleObservations.size >= 512) {
       if (!report.errors.includes('Warm visible frame evidence overflow')) {
         report.errors.push('Warm visible frame evidence overflow');
@@ -177,7 +182,7 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
     pendingVisibleObservations.add(observation);
   };
   const flushWarmVisibleObservations = async () => {
-    await Promise.all([...pendingVisibleObservations]);
+    await drainPendingWarmVisibleObservations(pendingVisibleObservations);
   };
   const unlisten = await listen<{ windowEpoch: number }>('recording:window-shown', event => {
     shown += 1;
@@ -373,23 +378,17 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
         check(report.idleAcceptedDelta === 0, 'Idle native PCM escaped production gate');
         const visibleFrameStart = report.warmVisibleFrames.length;
         activeWarmReopen = { attempt: attempt + 1, baselineWindowEpoch: idle.windowEpoch,
-          windowEpoch: null, closed: false };
+          windowEpoch: null, closed: false, acceptingObservations: true };
         await toggle();
         const recording = await until(`warm reopen ${attempt + 1}`, s => s.visible && store.isCaptureReady &&
           (markerForRun(s, store.captureRunId)?.count ?? 0) >= 2);
+        // Seal admissions before draining. A completed proof can schedule another
+        // MutationObserver turn, so one pending-set snapshot is not a causal boundary.
+        observeWarmVisibleFrame('sample', activeWarmReopen, recording);
+        activeWarmReopen.acceptingObservations = false;
         await flushWarmVisibleObservations();
-        let visibleFrames = report.warmVisibleFrames.slice(visibleFrameStart)
+        const visibleFrames = report.warmVisibleFrames.slice(visibleFrameStart)
           .filter(frame => frame.attempt === attempt + 1 && frame.windowEpoch === recording.windowEpoch);
-        // A hidden WebView can coalesce the shown event and its first mutation
-        // callback even though the native polling observation already proves
-        // that this exact window epoch is visible. Preserve that first sampled
-        // frame instead of making the evidence gate depend on callback timing.
-        if (visibleFrames.length === 0) {
-          observeWarmVisibleFrame('sample', activeWarmReopen, recording);
-          await flushWarmVisibleObservations();
-          visibleFrames = report.warmVisibleFrames.slice(visibleFrameStart)
-            .filter(frame => frame.attempt === attempt + 1 && frame.windowEpoch === recording.windowEpoch);
-        }
         check((activeWarmReopen.pendingFrames?.length ?? 0) === 0,
           `Warm reopen ${attempt + 1} left unbound first-visible frame evidence`);
         check(visibleFrames.length > 0, `Warm reopen ${attempt + 1} produced no first-visible frame evidence`);

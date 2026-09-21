@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { bindWarmVisibleFrameAfterNative, bindWarmVisibleFrameEvidence, hasMatchingRecoveryPcm,
+import { bindWarmVisibleFrameAfterNative, bindWarmVisibleFrameEvidence,
+  drainPendingWarmVisibleObservations, hasMatchingRecoveryPcm,
   type WarmReopenEvidence } from './nativeMiniUxScenario';
 
 describe('warm mini-window first-visible evidence', () => {
@@ -123,6 +124,29 @@ describe('warm mini-window first-visible evidence', () => {
       expect.objectContaining({ statusText: 'Recording', windowEpoch: 22 }),
     ]);
     expect(reopen.pendingFrames).toEqual([]);
+  });
+
+  it('drains observations admitted while an earlier proof is settling', async () => {
+    const pending = new Set<Promise<void>>();
+    let resolveFirst!: () => void;
+    let resolveSecond!: () => void;
+    const second = new Promise<void>(resolve => { resolveSecond = resolve; })
+      .finally(() => pending.delete(second));
+    const first = new Promise<void>(resolve => { resolveFirst = resolve; })
+      .then(() => { pending.add(second); })
+      .finally(() => pending.delete(first));
+    pending.add(first);
+    const drained = drainPendingWarmVisibleObservations(pending);
+    resolveFirst();
+    await Promise.resolve();
+    expect(pending.has(second)).toBe(true);
+    let finished = false;
+    void drained.then(() => { finished = true; });
+    await Promise.resolve();
+    expect(finished).toBe(false);
+    resolveSecond();
+    await drained;
+    expect(pending.size).toBe(0);
   });
 
   it('requires positive matching capture and provider PCM for recovery', () => {
