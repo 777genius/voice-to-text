@@ -1688,6 +1688,11 @@ impl SttProvider for BackendProvider {
                                             }
                                         };
                                         if swapped {
+                                            #[cfg(all(
+                                                debug_assertions,
+                                                feature = "native-window-e2e"
+                                            ))]
+                                            crate::presentation::native_e2e::record_live_provider_callback_swap();
                                             log::debug!("Callbacks switched after first ACK (new recording session)");
                                         }
                                     }

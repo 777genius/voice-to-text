@@ -129,11 +129,12 @@ node e2e-tests/run-native-window-e2e.mjs \
 The gate fails on overlapping backend connections, capture/provider ownership
 drift, duplicate delivery identities, late or incomplete terminal evidence,
 missing PCM generations, leaked capture resources, an unbalanced lifecycle, or
-a final source that does not produce both pinned phrase markers inside its
-generation-specific provider audio range. The canary deliberately disables
-external paste; exact TextEdit insertion remains covered by the existing live
-continuation qualifications. Deterministic fixture tests remain mandatory for
-fault paths; this paid canary is additional evidence and cannot replace them.
+a final source that does not produce both pinned phrase markers after its
+production ACK has switched callbacks to the final capture generation. The
+canary deliberately disables external paste; exact TextEdit insertion remains
+covered by the existing live continuation qualifications. Deterministic fixture
+tests remain mandatory for fault paths; this paid canary is additional evidence
+and cannot replace them.
 
 These tests use real local audio devices and OpenAI APIs. They are ignored by
 default and must be run manually.

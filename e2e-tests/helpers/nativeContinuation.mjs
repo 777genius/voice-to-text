@@ -296,6 +296,7 @@ export function verifyWarmProviderCanary(trial, report) {
   const cycles = report?.cycles;
   const events = report?.events;
   const fixture = report?.final?.fixture;
+  const finalIndex = trial.finalEpisodeIndex;
   if (!expected.warmProviderCanary || report?.mode !== 'warm-provider-canary' ||
       report?.passed !== true || report.trialId !== trial.id ||
       !Array.isArray(report.errors) || report.errors.length ||
@@ -308,6 +309,11 @@ export function verifyWarmProviderCanary(trial, report) {
     [row.captureGeneration, row]));
   const captureLedgers = fixture.capturePcmLedgers ?? [];
   const providerLedgers = fixture.providerPcmLedgers ?? [];
+  const callbackGenerations = fixture.providerCallbackGenerations ?? [];
+  const expectedCallbackGenerations = Array.from(
+    { length: finalIndex - trial.readyGateFromIndex },
+    (_, index) => trial.readyGateFromIndex + index + 2,
+  );
   const ledgerIsValid = row => Number.isSafeInteger(row?.captureGeneration) && row.captureGeneration > 0 &&
     Number.isSafeInteger(row.chunks) && row.chunks >= 0 && Number.isSafeInteger(row.samples) && row.samples >= 0 &&
     typeof row.hash === 'string' && /^[a-f0-9]{16}$/.test(row.hash);
@@ -318,7 +324,9 @@ export function verifyWarmProviderCanary(trial, report) {
       captureLedgers.length !== expected.captures || captureLedgers.some(row => !ledgerIsValid(row)) ||
       new Set(captureLedgers.map(row => row.captureGeneration)).size !== expected.captures ||
       providerLedgers.some(row => !ledgerIsValid(row)) ||
-      new Set(providerLedgers.map(row => row.captureGeneration)).size !== providerLedgers.length) {
+      new Set(providerLedgers.map(row => row.captureGeneration)).size !== providerLedgers.length ||
+      !Array.isArray(callbackGenerations) || callbackGenerations.length !== expectedCallbackGenerations.length ||
+      callbackGenerations.some((generation, index) => generation !== expectedCallbackGenerations[index])) {
     throw new Error('Warm provider canary capture lifecycle is incomplete');
   }
   for (const [index, source] of fixture.sourceEpisodes.entries()) {
@@ -361,6 +369,11 @@ export function verifyWarmProviderCanary(trial, report) {
   }
   if (providerLedgers.length !== captureLedgers.filter(row => row.samples > 0).length) {
     throw new Error('Warm provider canary contains an unexpected provider PCM generation');
+  }
+  for (const generation of callbackGenerations) {
+    if (!associations.has(generation) || !providerByGeneration.has(generation)) {
+      throw new Error(`Provider callback generation ${generation} lacks capture/provider evidence`);
+    }
   }
   for (const [index, cycle] of cycles.entries()) {
     const plan = trial.cycles[index];
@@ -419,32 +432,20 @@ export function verifyWarmProviderCanary(trial, report) {
       }
     }
   }
-  const finalIndex = trial.finalEpisodeIndex;
   const finalSource = fixture.sourceEpisodes[finalIndex];
   const finalAssociation = associations.get(finalIndex + 1);
   const finalEvents = events.filter(event => event.cycleIndex === finalIndex);
   const terminalEvents = events.filter(event => event.event === 'transcription:terminal');
   const terminals = report.terminals;
   const ownership = report.finalOwnership;
+  const callbackFence = report.finalCallbackFence;
   const finalBytes = approvedFixtures[trial.episodes[finalIndex]][0];
   const finalProviderLedger = providerByGeneration.get(finalIndex + 1);
-  const earlierProviderSamples = providerLedgers
-    .filter(row => row.captureGeneration < finalIndex + 1)
-    .reduce((sum, row) => sum + row.samples, 0);
-  const finalProviderAudioRange = finalProviderLedger ? {
-    start: earlierProviderSamples / 16_000,
-    end: (earlierProviderSamples + finalProviderLedger.samples) / 16_000,
-  } : null;
-  const range = report.finalProviderAudioRangeSeconds;
-  const finalTranscriptMatchesAudio = event => {
-    const eventEnd = event.sourceStartSeconds + event.sourceDurationSeconds;
-    return event.event === 'transcription:final' && event.sessionId === ownership?.logicalRunId &&
-      typeof event.text === 'string' && event.text.trim().length > 0 && event.markerIds.length >= 2 &&
-      event.timingKnown === true && Number.isFinite(event.sourceStartSeconds) &&
-      Number.isFinite(event.sourceDurationSeconds) && event.sourceStartSeconds >= 0 &&
-      event.sourceDurationSeconds > 0 && finalProviderAudioRange !== null &&
-      event.sourceStartSeconds < finalProviderAudioRange.end && eventEnd > finalProviderAudioRange.start;
-  };
+  const finalTranscriptMatchesCallbackGeneration = event =>
+    event.event === 'transcription:final' && event.cycleIndex === finalIndex &&
+    event.sessionId === ownership?.logicalRunId && Number.isSafeInteger(event.deliverySeq) &&
+    event.deliverySeq > 0 && typeof event.text === 'string' && event.text.trim().length > 0 &&
+    event.markerIds.length >= 2;
   if (finalSource?.name !== trial.episodes[finalIndex] ||
       finalSource.bytes !== finalBytes || finalSource.sourceFrames !== finalBytes / 2 ||
       finalSource.sourceDurationMs !== finalBytes / 32 || finalSource.cadenceMs !== 20 ||
@@ -461,13 +462,18 @@ export function verifyWarmProviderCanary(trial, report) {
       ownership.captureRunId !== finalAssociation.captureRunId ||
       ownership.captureFenceGeneration !== finalAssociation.captureFenceGeneration ||
       !Number.isSafeInteger(ownership.logicalRunId) || ownership.logicalRunId <= 0 ||
-      !range || !finalProviderAudioRange || range.start !== finalProviderAudioRange.start ||
-      range.end !== finalProviderAudioRange.end || range.start < 0 || range.end <= range.start ||
+      !finalProviderLedger || finalProviderLedger.samples <= 0 ||
+      callbackFence?.captureGeneration !== finalIndex + 1 ||
+      !Number.isSafeInteger(callbackFence?.eventStart) || callbackFence.eventStart < cycles.at(-1).eventEnd ||
+      callbackFence.eventStart > events.length ||
+      events.slice(cycles.at(-1).eventEnd, callbackFence.eventStart)
+        .some(event => event.cycleIndex !== null) ||
+      events.slice(callbackFence.eventStart).some(event => event.cycleIndex !== finalIndex) ||
       typeof report.finalTextBeforeProof !== 'string' ||
       typeof report.expectedInsertion !== 'string' || !report.expectedInsertion.trim() ||
       report.expectedInsertion === report.finalTextBeforeProof ||
       new Set(finalEvents.flatMap(event => event.markerIds)).size < 2 ||
-      !finalEvents.some(finalTranscriptMatchesAudio) ||
+      !events.slice(callbackFence.eventStart).some(finalTranscriptMatchesCallbackGeneration) ||
       finalEvents.some(event => ['transcription:partial', 'transcription:final'].includes(event.event) &&
         event.sessionId !== ownership.logicalRunId) ||
       events.some((event, eventIndex) => Number.isSafeInteger(event.cycleIndex) &&

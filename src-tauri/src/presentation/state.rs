@@ -2308,15 +2308,24 @@ impl AppState {
         let _creation = self.warm_owner_creation_guard.lock().await;
         let previous = self.warm_dictation_input.lock().unwrap().clone();
         if let Some((key, owner)) = previous.as_ref() {
-            if *key == requested {
+            if *key == requested && !owner.shutdown_requested() {
                 return Ok(owner.clone());
             }
         }
-        // Clear the cache before retiring the old route. If shutdown or the
-        // replacement open fails, a later retry must not reuse a dead owner.
-        let previous = self.warm_dictation_input.lock().unwrap().take();
-        if let Some((_, owner)) = previous {
+        if let Some((_, owner)) = previous.as_ref() {
+            // Keep the retiring owner cached until its physical close is
+            // acknowledged. A timeout is an ownership uncertainty barrier: a
+            // retry may wait again, but must not open a second native input.
             owner.shutdown().await.map_err(|e| e.to_string())?;
+            let mut slot = self.warm_dictation_input.lock().unwrap();
+            if slot
+                .as_ref()
+                .is_some_and(|(_, cached)| Arc::ptr_eq(cached, owner))
+            {
+                *slot = None;
+            } else {
+                return Err("Warm input owner changed during retirement".into());
+            }
         }
         let owner = create(requested.clone())?;
         *self.warm_dictation_input.lock().unwrap() = Some((requested, owner.clone()));

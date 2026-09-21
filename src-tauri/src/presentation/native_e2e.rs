@@ -1458,6 +1458,7 @@ struct Counters {
     capture_pcm_ledgers: Vec<PcmLedger>,
     provider_pcm_ledgers: Vec<PcmLedger>,
     capture_run_associations: Vec<CaptureRunAssociation>,
+    provider_callback_generations: Vec<u64>,
     marker_violations: Vec<String>,
     finals: u64,
     last_transcript: Option<String>,
@@ -2261,6 +2262,56 @@ pub(crate) fn record_live_provider_pcm(
         capture_generation,
         chunk,
     );
+}
+
+fn record_provider_callback_swap(counters: &mut Counters) {
+    let Some(capture_generation) = counters
+        .capture_run_associations
+        .last()
+        .map(|association| association.capture_generation)
+    else {
+        record_marker_violation(
+            counters,
+            "provider callback swap has no capture association",
+        );
+        return;
+    };
+    if capture_generation == 0 {
+        record_marker_violation(
+            counters,
+            "provider callback swap has an invalid capture generation",
+        );
+        return;
+    }
+    if let Some(previous) = counters.provider_callback_generations.last().copied() {
+        if capture_generation <= previous {
+            record_marker_violation(
+                counters,
+                format!(
+                    "provider callback generation {capture_generation} does not advance past {previous}"
+                ),
+            );
+            return;
+        }
+    }
+    if counters.provider_callback_generations.len() >= MAX_RECORDED_GENERATIONS {
+        record_marker_violation(counters, "provider callback generation evidence overflow");
+        return;
+    }
+    counters
+        .provider_callback_generations
+        .push(capture_generation);
+}
+
+/// Observe the production ACK boundary that activates callbacks for a resumed
+/// recording. The latest capture association is installed before its first PCM
+/// write, so it remains stable even when the ACK races the provider PCM ledger.
+pub(crate) fn record_live_provider_callback_swap() {
+    if !qualification_live() {
+        return;
+    }
+    let fixture = fixture();
+    record_provider_callback_swap(&mut fixture.counters.lock().unwrap());
 }
 
 pub(super) fn record_auto_paste_target_capture() {
@@ -4792,6 +4843,34 @@ mod tests {
             Some(2)
         );
         assert_eq!(live_provider_capture_generation(&associations, 41, 8), None);
+    }
+
+    #[test]
+    fn provider_callback_swaps_follow_capture_generations_exactly_once() {
+        let mut counters = Counters::default();
+        counters
+            .capture_run_associations
+            .push(CaptureRunAssociation {
+                capture_run_id: 41,
+                capture_fence_generation: 7,
+                capture_generation: 6,
+            });
+        record_provider_callback_swap(&mut counters);
+        assert_eq!(counters.provider_callback_generations, vec![6]);
+
+        record_provider_callback_swap(&mut counters);
+        assert_eq!(counters.provider_callback_generations, vec![6]);
+        assert_eq!(counters.marker_violations.len(), 1);
+
+        counters
+            .capture_run_associations
+            .push(CaptureRunAssociation {
+                capture_run_id: 42,
+                capture_fence_generation: 8,
+                capture_generation: 7,
+            });
+        record_provider_callback_swap(&mut counters);
+        assert_eq!(counters.provider_callback_generations, vec![6, 7]);
     }
 
     fn callbacks() -> (

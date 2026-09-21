@@ -22,7 +22,8 @@ type NativeState = { status: string; logicalProviderRunId: number; preparedCaptu
     sourceEpisodes: SourceEpisode[];
     captureRunAssociations: Array<{ captureRunId: number; captureFenceGeneration: number; captureGeneration: number }>;
     capturePcmLedgers: Array<{ captureGeneration: number; chunks: number; samples: number; hash: string }>;
-    providerPcmLedgers: Array<{ captureGeneration: number; chunks: number; samples: number; hash: string }> } };
+    providerPcmLedgers: Array<{ captureGeneration: number; chunks: number; samples: number; hash: string }>;
+    providerCallbackGenerations: number[] } };
 type ProviderEvent = { event: string; atMs: number; cycleIndex: number | null; sessionId: number;
   deliverySeq: number | null; text: string | null; markerIds: number[]; timingKnown: boolean;
   sourceStartSeconds: number; sourceDurationSeconds: number };
@@ -45,7 +46,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
   const subscriptions: Array<() => void> = [];
   const report = { mode: 'warm-provider-canary', passed: false, trialId: '', targetDocument: '',
     expectedInsertion: '', finalTextBeforeProof: '', actualPasteVerified: false,
-    finalProviderAudioRangeSeconds: null as { start: number; end: number } | null,
+    finalCallbackFence: null as { captureGeneration: number; eventStart: number } | null,
     cycles: [] as Array<Record<string, unknown>>,
     finalOwnership: null as { logicalRunId: number; captureRunId: number; captureFenceGeneration: number } | null,
     events: [] as ProviderEvent[], terminals: [] as ProviderTerminal[], duplicateDeliveries: [] as string[],
@@ -163,9 +164,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       await wait(cycle.jitterMs);
     }
 
-    activeCycle = trial.finalEpisodeIndex;
-    const finalEventStart = report.events.length;
-    report.finalTextBeforeProof = store.finalText;
+    activeCycle = null;
     const beforeFinal = await state();
     await toggle();
     const ready = await poll(value =>
@@ -176,6 +175,14 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     check(ready.fixture.sourceEpisodes[trial.finalEpisodeIndex].emittedFrames === 0,
       'Final source escaped the real provider Ready gate');
     await invoke('native_e2e_configure', { config: { sourceGateReady: true } });
+    const finalGeneration = trial.finalEpisodeIndex + 1;
+    await poll(value => (value.fixture.sourceEpisodes[trial.finalEpisodeIndex]?.emittedFrames ?? 0) > 0 &&
+      value.fixture.providerCallbackGenerations[value.fixture.providerCallbackGenerations.length - 1] === finalGeneration,
+    'final provider callback ACK fence', 30_000);
+    const finalEventStart = report.events.length;
+    activeCycle = trial.finalEpisodeIndex;
+    report.finalCallbackFence = { captureGeneration: finalGeneration, eventStart: finalEventStart };
+    report.finalTextBeforeProof = store.finalText;
     const complete = await poll(value => {
       const source = value.fixture.sourceEpisodes[trial.finalEpisodeIndex];
       return source?.emittedFrames === source?.sourceFrames && typeof source.nativeSourceEndMs === 'number';
@@ -189,34 +196,21 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     report.finalOwnership = { logicalRunId: complete.logicalProviderRunId,
       captureRunId: complete.captureEpisode.runId,
       captureFenceGeneration: complete.captureEpisode.generation };
-    const finalGeneration = trial.finalEpisodeIndex + 1;
     const finalProviderLedger = complete.fixture.providerPcmLedgers.find(row =>
       row.captureGeneration === finalGeneration);
     check(finalProviderLedger && finalProviderLedger.samples > 0,
       'Final proof has no provider PCM ledger');
-    const earlierProviderSamples = complete.fixture.providerPcmLedgers
-      .filter(row => row.captureGeneration < finalGeneration)
-      .reduce((sum, row) => sum + row.samples, 0);
-    report.finalProviderAudioRangeSeconds = {
-      start: earlierProviderSamples / 16_000,
-      end: (earlierProviderSamples + finalProviderLedger.samples) / 16_000,
-    };
-    const belongsToFinalProviderAudio = (event: ProviderEvent) => {
-      const range = report.finalProviderAudioRangeSeconds;
-      const eventEnd = event.sourceStartSeconds + event.sourceDurationSeconds;
-      return range !== null && event.event === 'transcription:final' &&
-        event.sessionId === complete.logicalProviderRunId && event.markerIds.length >= 2 &&
-        event.timingKnown && Number.isFinite(event.sourceStartSeconds) &&
-        Number.isFinite(event.sourceDurationSeconds) && event.sourceStartSeconds >= 0 &&
-        event.sourceDurationSeconds > 0 && event.sourceStartSeconds < range.end && eventEnd > range.start;
-    };
+    const belongsToFinalCallbackGeneration = (event: ProviderEvent) =>
+      event.event === 'transcription:final' && event.sessionId === complete.logicalProviderRunId &&
+      event.cycleIndex === trial.finalEpisodeIndex && event.markerIds.length >= 2 &&
+      typeof event.text === 'string' && event.text.trim().length > 0;
     await toggle();
     await poll(value => value.fixture.captureStops === beforeFinal.fixture.captureStops + 1 &&
       value.fixture.activeCaptures === 0 &&
       value.pausedContinuation?.logicalRunId === complete.logicalProviderRunId &&
       value.providerTransport?.connectionRetained === true, 'final full proof pause', 45_000);
     await poll(() => store.finalText !== report.finalTextBeforeProof &&
-      report.events.slice(finalEventStart).some(belongsToFinalProviderAudio),
+      report.events.slice(finalEventStart).some(belongsToFinalCallbackGeneration),
     'final stable transcript proof', 30_000);
     report.expectedInsertion = store.finalText;
     const finalMarkers = new Set(report.events.filter(event => event.cycleIndex === trial.finalEpisodeIndex)

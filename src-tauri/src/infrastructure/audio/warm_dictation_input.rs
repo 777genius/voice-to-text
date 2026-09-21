@@ -408,6 +408,9 @@ impl WarmDictationInput {
             .lock()
             .map_err(|_| capture_error("Input control poisoned"))?;
         if control.shutdown {
+            if shutdown && !desired {
+                return Ok(control.revision);
+            }
             return Err(capture_error("Input owner shut down"));
         }
         if desired && !control.allowed {
@@ -451,6 +454,14 @@ impl WarmDictationInput {
             .map_err(|_| capture_error("Input owner unavailable"))?;
         self.shared.changed.notify_waiters();
         Ok(revision)
+    }
+
+    pub(crate) fn shutdown_requested(&self) -> bool {
+        self.shared
+            .control
+            .lock()
+            .map(|control| control.shutdown)
+            .unwrap_or(true)
     }
 
     pub async fn prewarm(&self) -> AudioResult<()> {
@@ -1176,6 +1187,28 @@ mod tests {
         assert_eq!(source.opens.load(Ordering::SeqCst), 1);
         owner.close().await.unwrap();
         assert_eq!(source.closes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn uncertain_shutdown_is_idempotent_until_physical_close_is_acknowledged() {
+        let (source, owner) = setup();
+        owner.prewarm().await.unwrap();
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        *source.route_barrier.lock().unwrap() = Some((entered_tx, release_rx));
+        tokio::task::spawn_blocking(move || entered_rx.recv().unwrap())
+            .await
+            .unwrap();
+
+        let error = owner.shutdown().await.unwrap_err();
+        assert!(error.to_string().contains("replacement forbidden"));
+        assert!(owner.shutdown_requested());
+        assert_eq!(source.closes.load(Ordering::SeqCst), 0);
+
+        release_tx.send(()).unwrap();
+        owner.shutdown().await.unwrap();
+        assert_eq!(source.closes.load(Ordering::SeqCst), 1);
+        assert!(owner.prewarm().await.is_err());
     }
 
     #[tokio::test]
