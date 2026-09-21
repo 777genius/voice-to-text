@@ -48,6 +48,28 @@ async function toggle() {
   await invoke('native_e2e_hotkey', { action: 'release' });
 }
 
+export async function releaseWarmCanarySourceBeforeAck(
+  releaseSource: () => Promise<unknown>,
+  waitForAck: (() => Promise<unknown>) | null,
+) {
+  await releaseSource();
+  if (waitForAck) await waitForAck();
+}
+
+export function warmCanaryEventMatchesEpisode(
+  event: Pick<ProviderEvent, 'event' | 'text' | 'markerIds'>,
+  episode: string,
+  expectedEvent: 'transcription:partial' | 'transcription:final',
+) {
+  const markerId = episode === 'episode-a.pcm' ? 0 : episode === 'episode-b.pcm' ? 1 : -1;
+  const prefix = markerId === 0 ? 'на столе' : markerId === 1 ? 'за окном' : '';
+  const normalized = typeof event.text === 'string'
+    ? event.text.toLocaleLowerCase('ru').replace(/ё/g, 'е').replace(/[.,!?]/g, '').replace(/\s+/g, ' ')
+    : '';
+  return event.event === expectedEvent && prefix !== '' && normalized.includes(prefix) &&
+    (expectedEvent !== 'transcription:final' || event.markerIds.includes(markerId));
+}
+
 export async function runNativeWarmProviderCanary(pinia: Pinia) {
   const started = performance.now();
   const now = () => performance.now() - started;
@@ -146,14 +168,17 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         `cycle ${cycle.index} actual provider Ready`, 30_000);
         check(ready.fixture.sourceEpisodes[cycle.index].sourceGateRequired === true,
           `cycle ${cycle.index} source was not held behind provider Ready`);
-        if (generation > readyGateFromIndex + 1) {
-          await poll(value =>
+        const requiresCallbackFence = generation > readyGateFromIndex + 1;
+        await releaseWarmCanarySourceBeforeAck(
+          () => invoke('native_e2e_configure', { config: { sourceGateReady: true } }),
+          requiresCallbackFence ? () => poll(value =>
             value.fixture.providerCallbackGenerations[value.fixture.providerCallbackGenerations.length - 1] === generation,
-          `cycle ${cycle.index} provider callback ACK fence`, 30_000);
+          `cycle ${cycle.index} provider callback ACK fence`, 30_000) : null,
+        );
+        if (requiresCallbackFence) {
           callbackFenceGeneration = generation;
           triggerEventStart = report.events.length;
         }
-        await invoke('native_e2e_configure', { config: { sourceGateReady: true } });
       }
       if (cycle.stopPhase === 'after-first-pcm') {
         const observed = await poll(value =>
@@ -173,10 +198,13 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         triggerEventStart = report.events.length;
         const deadline = performance.now() + 70_000;
         while (performance.now() < deadline &&
-          !report.events.slice(triggerEventStart).some(event => event.event === wanted)) await wait(20);
-        check(report.events.slice(triggerEventStart).some(event => event.event === wanted),
+          !report.events.slice(triggerEventStart).some(event =>
+            warmCanaryEventMatchesEpisode(event, cycle.episode, wanted))) await wait(20);
+        const triggerEvent = report.events.slice(triggerEventStart).find(event =>
+          warmCanaryEventMatchesEpisode(event, cycle.episode, wanted));
+        check(triggerEvent,
           `cycle ${cycle.index} never observed ${wanted}`);
-        trigger = { event: wanted };
+        trigger = { event: wanted, episode: cycle.episode, deliverySeq: triggerEvent.deliverySeq };
       }
       const beforeStop = await state();
       if (beforeStop.logicalProviderRunId > 0) sessionCycles.set(beforeStop.logicalProviderRunId, cycle.index);
@@ -291,7 +319,20 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       terminal.sessionId === report.finalOwnership?.logicalRunId);
     const finalTerminalEvents = terminalEvents.filter(event =>
       event.sessionId === report.finalOwnership?.logicalRunId);
-    check(report.terminals.every(terminal => terminal.complete) &&
+    const expectedTerminalCycles = new Map(report.cycles.map(cycle =>
+      [Number(cycle.logicalRunId), Number(cycle.index)]));
+    if (report.finalOwnership) {
+      expectedTerminalCycles.set(report.finalOwnership.logicalRunId, trial.finalEpisodeIndex);
+    }
+    check(report.terminals.length === expectedTerminalCycles.size &&
+      terminalEvents.length === expectedTerminalCycles.size &&
+      report.terminals.every(terminal => terminal.complete &&
+        expectedTerminalCycles.get(terminal.sessionId) === terminal.cycleIndex &&
+        terminalEvents.filter(event => event.sessionId === terminal.sessionId &&
+          event.cycleIndex === terminal.cycleIndex).length === 1) &&
+      [...expectedTerminalCycles].every(([sessionId, cycleIndex]) =>
+        report.terminals.filter(terminal => terminal.sessionId === sessionId &&
+          terminal.cycleIndex === cycleIndex).length === 1) &&
       finalTerminals.length === 1 && finalTerminals[0].cycleIndex === trial.finalEpisodeIndex &&
       finalTerminalEvents.length === 1 && finalTerminalEvents[0].cycleIndex === trial.finalEpisodeIndex,
     'Warm provider canary terminal ownership is incomplete or duplicated');

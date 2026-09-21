@@ -20,6 +20,29 @@ interface Snapshot {
   };
 }
 type PhysicalCounts = { open: number; close: number };
+export type WarmVisibleFrame = {
+  attempt: number; source: 'render' | 'shown' | 'sample'; windowEpoch: number;
+  revision: number | null; runId: number | null; captureReady: boolean;
+  readinessReason: string | undefined; phase: string; statusText: string;
+};
+type PendingWarmVisibleFrame = Omit<WarmVisibleFrame, 'windowEpoch'>;
+export type WarmReopenEvidence = {
+  attempt: number; windowEpoch: number | null; pendingFrames: PendingWarmVisibleFrame[];
+};
+export function bindWarmVisibleFrameEvidence(
+  reopen: WarmReopenEvidence,
+  frame: Omit<WarmVisibleFrame, 'attempt' | 'windowEpoch'>,
+): WarmVisibleFrame[] {
+  const pending = { attempt: reopen.attempt, ...frame };
+  if (reopen.windowEpoch === null) {
+    reopen.pendingFrames.push(pending);
+    return [];
+  }
+  const frames = reopen.pendingFrames.map(value => ({ ...value, windowEpoch: reopen.windowEpoch! }));
+  reopen.pendingFrames = [];
+  frames.push({ ...pending, windowEpoch: reopen.windowEpoch });
+  return frames;
+}
 const state = () => invoke<Snapshot>('native_e2e_state');
 const physicalCounts = (snapshot: Snapshot): PhysicalCounts => ({
   open: snapshot.fixture.physicalOpenCount,
@@ -54,15 +77,11 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
   }>, warmActivationFrames: [] as Array<{
     source: 'render' | 'shown' | 'sample'; revision: number | null; runId: number | null;
     captureReady: boolean; phase: string; statusText: string;
-  }>, warmVisibleFrames: [] as Array<{
-    attempt: number; source: 'render' | 'shown' | 'sample'; windowEpoch: number;
-    revision: number | null; runId: number | null; captureReady: boolean;
-    readinessReason: string | undefined; phase: string; statusText: string;
-  }>, trace: [] as unknown[], final: null as Snapshot | null };
+  }>, warmVisibleFrames: [] as WarmVisibleFrame[], trace: [] as unknown[], final: null as Snapshot | null };
   const listeners: Array<() => void> = [];
   let lastGestureAt = 0;
   let shown = 0;
-  let activeWarmReopen: { attempt: number; windowEpoch: number | null } | null = null;
+  let activeWarmReopen: WarmReopenEvidence | null = null;
   const observeWarmFrame = (source: 'render' | 'shown' | 'sample') => {
     const readiness = store.captureReadiness;
     if (!store.recordingDesiredOn || readiness?.reason !== 'activating-warm-capture' ||
@@ -84,20 +103,20 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
   };
   const observeWarmVisibleFrame = (source: 'render' | 'shown' | 'sample',
     reopen = activeWarmReopen) => {
-    if (!reopen || reopen.windowEpoch === null) return;
+    if (!reopen) return;
     const dot = document.querySelector('.mini-status-dot');
     if (!dot) return;
-    if (report.warmVisibleFrames.length >= 512) {
+    if (report.warmVisibleFrames.length + reopen.pendingFrames.length >= 512) {
       if (!report.errors.includes('Warm visible frame evidence overflow')) {
         report.errors.push('Warm visible frame evidence overflow');
       }
       return;
     }
-    report.warmVisibleFrames.push({ attempt: reopen.attempt, source,
-      windowEpoch: reopen.windowEpoch, revision: store.recordingIntentRevision,
+    report.warmVisibleFrames.push(...bindWarmVisibleFrameEvidence(reopen, { source,
+      revision: store.recordingIntentRevision,
       runId: store.captureRunId, captureReady: store.isCaptureReady,
       readinessReason: store.captureReadiness?.reason, phase: dot.className,
-      statusText: dot.getAttribute('aria-label') ?? '' });
+      statusText: dot.getAttribute('aria-label') ?? '' }));
   };
   const unlisten = await listen<{ windowEpoch: number }>('recording:window-shown', event => {
     shown += 1;
@@ -296,7 +315,7 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
         report.idleAcceptedDelta += later.fixture.audioChunks - idle.fixture.audioChunks;
         check(report.idleAcceptedDelta === 0, 'Idle native PCM escaped production gate');
         const visibleFrameStart = report.warmVisibleFrames.length;
-        activeWarmReopen = { attempt: attempt + 1, windowEpoch: null };
+        activeWarmReopen = { attempt: attempt + 1, windowEpoch: null, pendingFrames: [] };
         await toggle();
         const recording = await until(`warm reopen ${attempt + 1}`, s => s.visible && store.isCaptureReady &&
           (markerForRun(s, store.captureRunId)?.count ?? 0) >= 2);

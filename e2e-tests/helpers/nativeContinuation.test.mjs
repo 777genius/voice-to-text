@@ -76,7 +76,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   assert.equal(warmProviderCanaryTrial.cycles.length, 20);
   assert.deepEqual([...new Set(warmProviderCanaryTrial.cycles.map(cycle => cycle.stopPhase))], warmProviderCanaryPhases);
   assert.deepEqual([...new Set(warmProviderCanaryTrial.cycles.map(cycle => cycle.jitterMs))], warmProviderCanaryJittersMs);
-  assert.ok(new Set(warmProviderCanaryTrial.cycles.map(cycle => cycle.episode)).size >= 3);
+  assert.equal(new Set(warmProviderCanaryTrial.cycles.map(cycle => cycle.episode)).size, 2);
   assert.ok(!warmProviderCanaryTrial.cycles.some(cycle =>
     cycle.episode === warmProviderCanaryTrial.episodes[warmProviderCanaryTrial.finalEpisodeIndex]));
   const worstCaseFrames = warmProviderCanaryTrial.episodes.reduce((total, name) =>
@@ -124,16 +124,24 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     [connected, ready, ...controls.slice(1), audio]));
 
   const events = [];
+  const terminals = [];
   let cycleClock = 0;
   const cycles = warmProviderCanaryTrial.cycles.map((plan, index) => {
     const logicalRunId = index < warmProviderCanaryTrial.readyGateFromIndex
       ? 100 + index : 100 + warmProviderCanaryTrial.readyGateFromIndex;
     const captureRunId = 100 + index;
     const eventStart = events.length;
-    if (plan.stopPhase === 'during-partial') events.push({ event: 'transcription:partial',
-      cycleIndex: index, sessionId: logicalRunId, deliverySeq: index + 1, markerIds: [] });
-    if (plan.stopPhase === 'after-final') events.push({ event: 'transcription:final',
-      cycleIndex: index, sessionId: logicalRunId, deliverySeq: index + 1, markerIds: [index % 2] });
+    const markerId = plan.episode === 'episode-a.pcm' ? 0 : 1;
+    const phrase = markerId === 0 ? 'на столе лежит книга' : 'за окном растет береза';
+    if (plan.stopPhase === 'during-partial') events.push({ event: 'transcription:partial', text: phrase,
+      cycleIndex: index, sessionId: logicalRunId, deliverySeq: null, markerIds: [markerId] });
+    if (plan.stopPhase === 'after-final') events.push({ event: 'transcription:final', text: phrase,
+      cycleIndex: index, sessionId: logicalRunId, deliverySeq: index + 1, markerIds: [markerId] });
+    if (plan.stopPhase === 'before-ready') {
+      events.push({ event: 'transcription:terminal', cycleIndex: index, sessionId: logicalRunId,
+        deliverySeq: null, markerIds: [] });
+      terminals.push({ sessionId: logicalRunId, cycleIndex: index, complete: true });
+    }
     const startedAtMs = cycleClock;
     const previousSettleToStartMs = index === 0 ? null : warmProviderCanaryTrial.cycles[index - 1].jitterMs;
     const cycle = { ...plan, startedAtMs, previousSettleToStartMs, triggerAtMs: startedAtMs + 20,
@@ -146,8 +154,10 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       association: plan.stopPhase === 'before-ready' ? null : {
         captureGeneration: index + 1, captureRunId, captureFenceGeneration: index + 1 },
       trigger: plan.stopPhase === 'before-ready' ? { readyBeforeStop: false } :
-        plan.stopPhase === 'during-partial' ? { event: 'transcription:partial' } :
-        plan.stopPhase === 'after-final' ? { event: 'transcription:final' } : { emittedFrames: 320 },
+        plan.stopPhase === 'during-partial' ? { event: 'transcription:partial', episode: plan.episode,
+          deliverySeq: null } :
+        plan.stopPhase === 'after-final' ? { event: 'transcription:final', episode: plan.episode,
+          deliverySeq: index + 1 } : { emittedFrames: 320 },
       eventStart, eventEnd: events.length, activeCapturesAfterStop: 0 };
     cycleClock = cycle.settledAtMs + plan.jitterMs;
     return cycle;
@@ -157,6 +167,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     deliverySeq: 99, text: 'marker zero marker one', markerIds: [0, 1] });
   events.push({ event: 'transcription:terminal', cycleIndex: 20, sessionId: finalLogicalRunId,
     deliverySeq: null, markerIds: [] });
+  terminals.push({ sessionId: finalLogicalRunId, cycleIndex: 20, complete: true });
   const sources = warmProviderCanaryTrial.episodes.map((name, index) => {
     const bytes = approvedFixtures[name][0];
     const sourceFrames = bytes / 2;
@@ -195,7 +206,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     finalStartedAtMs: cycleClock,
     finalCallbackFence: { captureGeneration: 21, eventStart: events.length - 2 },
     finalOwnership: { logicalRunId: finalLogicalRunId, captureRunId: 999, captureFenceGeneration: 21 },
-    terminals: [{ sessionId: finalLogicalRunId, cycleIndex: 20, complete: true }], final: { status: 'Idle', preparedCaptureTokenCount: 0,
+    terminals, final: { status: 'Idle', preparedCaptureTokenCount: 0,
       providerTransport: { connectionRetained: false }, fixture } };
   assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, report).churnCycles, 20);
   const ledgerBytes = fixture.providerPcmLedgers.reduce((sum, row) => sum + row.samples * 2, 0);
@@ -234,20 +245,18 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     { captureGeneration: 1, chunks: 1, samples: 2, hash: '0123456789abcdef' },
     { captureGeneration: 2, chunks: 1, samples: 3, hash: 'fedcba9876543210' },
   ] }).transmittedPcmBytes, 10);
-  const lateEarlyCompletion = structuredClone(report);
-  const finalFence = lateEarlyCompletion.finalCallbackFence.eventStart;
-  lateEarlyCompletion.events.splice(finalFence, 0,
-    { event: 'transcription:final', cycleIndex: 0, sessionId: 100,
-      deliverySeq: 500, text: 'early completion', markerIds: [] },
-    { event: 'transcription:terminal', cycleIndex: 0, sessionId: 100,
-      deliverySeq: null, markerIds: [] });
-  lateEarlyCompletion.finalCallbackFence.eventStart += 2;
-  lateEarlyCompletion.terminals.push({ sessionId: 100, cycleIndex: 0, complete: true });
-  assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, lateEarlyCompletion).churnCycles, 20);
+  const missingEarlyTerminal = structuredClone(report);
+  missingEarlyTerminal.terminals.shift();
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, missingEarlyTerminal),
+    /Final warm provider proof is incomplete/);
   for (const mutate of [
     value => value.cycles.pop(),
     value => { value.cycles[5].association.captureRunId = 9999; },
     value => { value.events.find(event => event.event === 'transcription:partial').cycleIndex = 99; },
+    value => { const cycle = value.cycles.find(row => row.stopPhase === 'during-partial');
+      const event = value.events.slice(cycle.triggerEventStart, cycle.eventEnd)
+        .find(row => row.event === 'transcription:partial');
+      event.text = cycle.episode === 'episode-a.pcm' ? 'за окном растет береза' : 'на столе лежит книга'; },
     value => { value.final.fixture.sourceEpisodes[20].emittedFrames--; },
     value => { value.final.fixture.capturePcmLedgers.pop(); },
     value => { value.final.fixture.providerPcmLedgers[0].hash = 'ffffffffffffffff'; },

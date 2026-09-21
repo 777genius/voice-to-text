@@ -19,19 +19,14 @@ export const warmProviderCanaryPhases = Object.freeze([
   'during-partial',
   'after-final',
 ]);
-const warmProviderCanaryEpisodeByPhase = Object.freeze({
-  'before-ready': 'episode-a.pcm',
-  'after-first-pcm': 'episode-b.pcm',
-  'during-partial': 'stop-inside-word.pcm',
-  'after-final': 'episode-a.pcm',
-});
+const warmProviderCanaryPhrases = Object.freeze(['episode-a.pcm', 'episode-b.pcm']);
 export const warmProviderCanaryCycles = Object.freeze(Array.from({ length: 20 }, (_, index) => {
   const stopPhase = warmProviderCanaryPhases[Math.floor(index / warmProviderCanaryJittersMs.length)];
   return Object.freeze({
     index,
     jitterMs: warmProviderCanaryJittersMs[index % warmProviderCanaryJittersMs.length],
     stopPhase,
-    episode: warmProviderCanaryEpisodeByPhase[stopPhase],
+    episode: warmProviderCanaryPhrases[index % warmProviderCanaryPhrases.length],
   });
 }));
 export const warmProviderCanaryTrial = Object.freeze({
@@ -417,6 +412,16 @@ export function verifyWarmProviderCanary(trial, report) {
     { length: finalIndex - trial.readyGateFromIndex },
     (_, index) => trial.readyGateFromIndex + index + 2,
   );
+  const normalizedEventText = event => typeof event?.text === 'string'
+    ? event.text.toLocaleLowerCase('ru').replace(/ё/g, 'е').replace(/[.,!?]/g, '').replace(/\s+/g, ' ')
+    : '';
+  const eventMatchesEpisode = (event, episode, expectedEvent) => {
+    const markerId = episode === 'episode-a.pcm' ? 0 : episode === 'episode-b.pcm' ? 1 : -1;
+    const prefix = markerId === 0 ? 'на столе' : markerId === 1 ? 'за окном' : '';
+    return event?.event === expectedEvent && prefix !== '' && normalizedEventText(event).includes(prefix) &&
+      (expectedEvent !== 'transcription:final' ||
+        Array.isArray(event.markerIds) && event.markerIds.includes(markerId));
+  };
   const ledgerIsValid = row => Number.isSafeInteger(row?.captureGeneration) && row.captureGeneration > 0 &&
     Number.isSafeInteger(row.chunks) && row.chunks >= 0 && Number.isSafeInteger(row.samples) && row.samples >= 0 &&
     typeof row.hash === 'string' && /^[a-f0-9]{16}$/.test(row.hash);
@@ -547,7 +552,9 @@ export function verifyWarmProviderCanary(trial, report) {
         plan.stopPhase === 'after-final' ? 'transcription:final' : null;
       const triggerEvents = events.slice(cycle.triggerEventStart, cycle.eventEnd);
       if (expectedEvent && !triggerEvents.some(event =>
-        event.event === expectedEvent && event.cycleIndex === index && event.sessionId === cycle.logicalRunId)) {
+        event.cycleIndex === index && event.sessionId === cycle.logicalRunId &&
+        eventMatchesEpisode(event, plan.episode, expectedEvent) &&
+        cycle.trigger?.episode === plan.episode && cycle.trigger?.deliverySeq === event.deliverySeq)) {
         throw new Error(`Cycle ${index} missed ${expectedEvent} evidence`);
       }
     }
@@ -561,6 +568,10 @@ export function verifyWarmProviderCanary(trial, report) {
   const callbackFence = report.finalCallbackFence;
   const finalBytes = approvedFixtures[trial.episodes[finalIndex]][0];
   const finalProviderLedger = providerByGeneration.get(finalIndex + 1);
+  const expectedTerminalCycles = new Map(cycles.map(cycle => [cycle.logicalRunId, cycle.index]));
+  if (Number.isSafeInteger(ownership?.logicalRunId)) {
+    expectedTerminalCycles.set(ownership.logicalRunId, finalIndex);
+  }
   const finalTranscriptMatchesCallbackGeneration = event =>
     event.event === 'transcription:final' && event.cycleIndex === finalIndex &&
     event.sessionId === ownership?.logicalRunId && Number.isSafeInteger(event.deliverySeq) &&
@@ -600,11 +611,18 @@ export function verifyWarmProviderCanary(trial, report) {
       finalEvents.some(event => ['transcription:partial', 'transcription:final'].includes(event.event) &&
         event.sessionId !== ownership.logicalRunId) ||
       !Array.isArray(terminals) || terminals.length !== terminalEvents.length ||
+      terminals.length !== expectedTerminalCycles.size ||
       terminals.some(terminal => terminal.complete !== true ||
-        terminalEvents.filter(event => event.sessionId === terminal.sessionId).length !== 1) ||
+        expectedTerminalCycles.get(terminal.sessionId) !== terminal.cycleIndex ||
+        terminalEvents.filter(event => event.sessionId === terminal.sessionId &&
+          event.cycleIndex === terminal.cycleIndex).length !== 1) ||
+      [...expectedTerminalCycles].some(([sessionId, cycleIndex]) =>
+        terminals.filter(terminal => terminal.sessionId === sessionId &&
+          terminal.cycleIndex === cycleIndex).length !== 1) ||
       terminalEvents.some(terminal => {
         const sessionEvents = events.filter(event => event.sessionId === terminal.sessionId);
-        return sessionEvents.at(-1) !== terminal ||
+        return expectedTerminalCycles.get(terminal.sessionId) !== terminal.cycleIndex ||
+          sessionEvents.at(-1) !== terminal ||
           terminals.filter(row => row.sessionId === terminal.sessionId).length !== 1;
       }) ||
       terminals.filter(terminal => terminal.sessionId === ownership.logicalRunId &&

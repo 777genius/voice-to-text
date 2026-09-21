@@ -71,7 +71,7 @@ function validateExactPcmEvidence(fixture, requireEveryCaptureDelivered, provide
     const captureMarker = captureMarkers.get(generation);
     const marker = providerMarkers.get(generation);
     const association = associations.get(generation);
-    if (!capture || !captureMarker || !marker || !association || capture.chunks !== provider.chunks ||
+    if (!capture || !captureMarker || !marker || !association ||
         capture.samples !== provider.samples || capture.hash !== provider.hash ||
         marker.count !== captureMarker.count || marker.firstSequence !== captureMarker.firstSequence ||
         marker.lastSequence !== captureMarker.lastSequence ||

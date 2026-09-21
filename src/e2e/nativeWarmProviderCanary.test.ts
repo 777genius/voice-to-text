@@ -1,20 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { validateWarmProviderCanaryPlan } from './nativeWarmProviderCanaryPlan';
-import { requireWarmProviderCanaryReader } from './nativeWarmProviderCanary';
+import { releaseWarmCanarySourceBeforeAck, requireWarmProviderCanaryReader,
+  warmCanaryEventMatchesEpisode } from './nativeWarmProviderCanary';
 
 const phases = ['before-ready', 'after-first-pcm', 'during-partial', 'after-final'] as const;
 const jitters = [0, 25, 100, 250, 500] as const;
-const episodeByPhase = {
-  'before-ready': 'episode-a.pcm',
-  'after-first-pcm': 'episode-b.pcm',
-  'during-partial': 'stop-inside-word.pcm',
-  'after-final': 'episode-a.pcm',
-} as const;
 
 function plan() {
   const cycles = Array.from({ length: 20 }, (_, index) => {
     const stopPhase = phases[Math.floor(index / jitters.length)];
-    return { index, stopPhase, jitterMs: jitters[index % jitters.length], episode: episodeByPhase[stopPhase] };
+    return { index, stopPhase, jitterMs: jitters[index % jitters.length],
+      episode: index % 2 === 0 ? 'episode-a.pcm' : 'episode-b.pcm' };
   });
   return { id: 'warm-provider-churn-20', kind: 'warm-provider-canary' as const,
     cycles, episodes: [...cycles.map(cycle => cycle.episode), 'long-auto-commit.pcm'],
@@ -49,5 +45,24 @@ describe('warm provider paid canary plan', () => {
       valid: false, error: 'reader stopped' } })).toThrow(/reader stopped/);
     expect(() => requireWarmProviderCanaryReader({ nativeReadback: { ...ready.nativeReadback,
       records: [{ text: 'stale transcript' }] } })).toThrow(/initial text not empty/);
+  });
+
+  it('releases gated PCM before waiting for its provider ACK', async () => {
+    const order: string[] = [];
+    await releaseWarmCanarySourceBeforeAck(
+      async () => { order.push('release'); },
+      async () => { order.push('ack'); },
+    );
+    expect(order).toEqual(['release', 'ack']);
+  });
+
+  it('accepts only the current episode phrase as partial/final trigger evidence', () => {
+    const partial = { event: 'transcription:partial', text: 'На столе уже', markerIds: [] };
+    const final = { event: 'transcription:final', text: 'За окном растет береза', markerIds: [1] };
+    expect(warmCanaryEventMatchesEpisode(partial, 'episode-a.pcm', 'transcription:partial')).toBe(true);
+    expect(warmCanaryEventMatchesEpisode(partial, 'episode-b.pcm', 'transcription:partial')).toBe(false);
+    expect(warmCanaryEventMatchesEpisode(final, 'episode-b.pcm', 'transcription:final')).toBe(true);
+    expect(warmCanaryEventMatchesEpisode({ ...final, markerIds: [] },
+      'episode-b.pcm', 'transcription:final')).toBe(false);
   });
 });

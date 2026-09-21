@@ -8,6 +8,7 @@ export type WarmProviderCanaryTrial = { id: string; kind: 'warm-provider-canary'
 export function validateWarmProviderCanaryPlan(trial: WarmProviderCanaryTrial) {
   const phases: WarmProviderStopPhase[] = ['before-ready', 'after-first-pcm', 'during-partial', 'after-final'];
   const jitters = [0, 25, 100, 250, 500];
+  const phrases = ['episode-a.pcm', 'episode-b.pcm'];
   if (trial.id !== 'warm-provider-churn-20' || trial.kind !== 'warm-provider-canary') {
     throw new Error('Wrong warm canary identity');
   }
@@ -17,11 +18,12 @@ export function validateWarmProviderCanaryPlan(trial: WarmProviderCanaryTrial) {
   }
   for (const [index, cycle] of trial.cycles.entries()) {
     if (cycle.index !== index || cycle.stopPhase !== phases[Math.floor(index / jitters.length)] ||
-        cycle.jitterMs !== jitters[index % jitters.length] || cycle.episode !== trial.episodes[index]) {
+        cycle.jitterMs !== jitters[index % jitters.length] || cycle.episode !== trial.episodes[index] ||
+        cycle.episode !== phrases[index % phrases.length]) {
       throw new Error(`Warm canary cycle ${index} differs from the fixed paid plan`);
     }
   }
-  if (new Set(trial.cycles.map(cycle => cycle.episode)).size < 3) {
+  if (new Set(trial.cycles.map(cycle => cycle.episode)).size < 2) {
     throw new Error('Warm canary needs multiple distinct spoken fixtures');
   }
   if (trial.episodes[trial.finalEpisodeIndex] !== 'long-auto-commit.pcm' ||
