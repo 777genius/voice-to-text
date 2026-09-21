@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { validateWarmProviderCanaryPlan } from './nativeWarmProviderCanaryPlan';
+import { requireWarmProviderCanaryReader } from './nativeWarmProviderCanary';
 
 const phases = ['before-ready', 'after-first-pcm', 'during-partial', 'after-final'] as const;
 const jitters = [0, 25, 100, 250, 500] as const;
@@ -37,5 +38,16 @@ describe('warm provider paid canary plan', () => {
       mutate(invalid);
       expect(() => validateWarmProviderCanaryPlan(invalid)).toThrow();
     }
+  });
+
+  it('refuses capture when the owned OS reader is not ready after preparation', () => {
+    const ready = { nativeReadback: { armed: true, valid: true, error: null, records: [{ text: '' }] } };
+    expect(() => requireWarmProviderCanaryReader(ready)).not.toThrow();
+    expect(() => requireWarmProviderCanaryReader({ nativeReadback: { ...ready.nativeReadback,
+      armed: false, error: 'reader did not arm' } })).toThrow(/not armed/);
+    expect(() => requireWarmProviderCanaryReader({ nativeReadback: { ...ready.nativeReadback,
+      valid: false, error: 'reader stopped' } })).toThrow(/reader stopped/);
+    expect(() => requireWarmProviderCanaryReader({ nativeReadback: { ...ready.nativeReadback,
+      records: [{ text: 'stale transcript' }] } })).toThrow(/initial text not empty/);
   });
 });

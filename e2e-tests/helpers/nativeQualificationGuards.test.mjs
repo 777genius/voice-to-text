@@ -11,15 +11,18 @@ assert.ok(source.startsWith('export function createQualificationCollector('));
 const createQualificationCollector = new Function('verifyQualificationConnections', 'marker',
   `${source.replace('export function', 'function')}; return createQualificationCollector;`)(
   verifyQualificationConnections, 'VOICETEXT_NATIVE_WINDOW_E2E_V1');
-const close = code => ({ event: 'fault_proxy_close', direction: 'upstream', code });
+const close = (code, connectionId = 1) => ({ event: 'fault_proxy_close', connectionId,
+  direction: 'upstream', code });
 const eventsFor = trial => Array.from({ length: trial.id.startsWith('cold-') ? 2 : 1 },
-  () => [{ event: 'fault_proxy_connected' }, close(1000)]).flat();
+  (_, index) => [{ event: 'fault_proxy_connected', connectionId: index + 1 },
+    close(1000, index + 1)]).flat();
 const boundary = () => ({ event: 'qualification_pre_teardown', atMs: 10, clock: 'runner-performance-now', nativeProcessAlive: true });
 
 test('all planned modes reject every retained backend error and unclean upstream closure', () => {
   for (const trial of liveTrials) {
     verifyQualificationConnections(trial, [...eventsFor(trial), boundary()]);
-    const emptyCloseEvents = eventsFor(trial).map(event => event.event === 'fault_proxy_close' ? close(1005) : event);
+    const emptyCloseEvents = eventsFor(trial).map(event => event.event === 'fault_proxy_close'
+      ? close(1005, event.connectionId) : event);
     verifyQualificationConnections(trial, [...emptyCloseEvents, boundary()]);
     for (const code of [undefined, '1000', 1001, 1006, 1011]) {
       const events = eventsFor(trial); events[1] = close(code);

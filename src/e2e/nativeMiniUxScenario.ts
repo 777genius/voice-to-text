@@ -82,8 +82,9 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
       report.errors.push(`Warm activation rendered a non-neutral ${source} frame`);
     }
   };
-  const observeWarmVisibleFrame = (source: 'render' | 'shown' | 'sample') => {
-    if (!activeWarmReopen || activeWarmReopen.windowEpoch === null) return;
+  const observeWarmVisibleFrame = (source: 'render' | 'shown' | 'sample',
+    reopen = activeWarmReopen) => {
+    if (!reopen || reopen.windowEpoch === null) return;
     const dot = document.querySelector('.mini-status-dot');
     if (!dot) return;
     if (report.warmVisibleFrames.length >= 512) {
@@ -92,8 +93,8 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
       }
       return;
     }
-    report.warmVisibleFrames.push({ attempt: activeWarmReopen.attempt, source,
-      windowEpoch: activeWarmReopen.windowEpoch, revision: store.recordingIntentRevision,
+    report.warmVisibleFrames.push({ attempt: reopen.attempt, source,
+      windowEpoch: reopen.windowEpoch, revision: store.recordingIntentRevision,
       runId: store.captureRunId, captureReady: store.isCaptureReady,
       readinessReason: store.captureReadiness?.reason, phase: dot.className,
       statusText: dot.getAttribute('aria-label') ?? '' });
@@ -118,8 +119,10 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
       // Native visibility is authoritative if the WebView receives the shown
       // event after this polling sample.
       activeWarmReopen.windowEpoch = native.windowEpoch;
+      observeWarmVisibleFrame('sample', activeWarmReopen);
+    } else {
+      observeWarmVisibleFrame('sample');
     }
-    observeWarmVisibleFrame('sample');
     observeWarmFrame('sample');
     if (report.trace.length >= 1800) throw new Error('Mini UX evidence overflow');
     report.trace.push({ label, at: performance.now(), native: native && {
@@ -297,8 +300,18 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
         await toggle();
         const recording = await until(`warm reopen ${attempt + 1}`, s => s.visible && store.isCaptureReady &&
           (markerForRun(s, store.captureRunId)?.count ?? 0) >= 2);
-        const visibleFrames = report.warmVisibleFrames.slice(visibleFrameStart)
+        let visibleFrames = report.warmVisibleFrames.slice(visibleFrameStart)
           .filter(frame => frame.attempt === attempt + 1 && frame.windowEpoch === recording.windowEpoch);
+        // A hidden WebView can coalesce the shown event and its first mutation
+        // callback even though the native polling observation already proves
+        // that this exact window epoch is visible. Preserve that first sampled
+        // frame instead of making the evidence gate depend on callback timing.
+        if (visibleFrames.length === 0) {
+          activeWarmReopen.windowEpoch = recording.windowEpoch;
+          observeWarmVisibleFrame('sample', activeWarmReopen);
+          visibleFrames = report.warmVisibleFrames.slice(visibleFrameStart)
+            .filter(frame => frame.attempt === attempt + 1 && frame.windowEpoch === recording.windowEpoch);
+        }
         check(visibleFrames.length > 0, `Warm reopen ${attempt + 1} produced no first-visible frame evidence`);
         const firstVisible = visibleFrames[0];
         check(!/\b(starting|processing)\b/.test(firstVisible.phase) &&

@@ -106,6 +106,16 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     [connected, audio, { ...closed, connectionId: 999 }, boundary]), /Unmatched upstream close/);
   assert.equal(verifyQualificationRoute(warmProviderCanaryTrial,
     [connected, ready, ...controls.slice(0, -1), audio, controls.at(-1)]).maximumActiveProviderSessions, 1);
+  const earlyConnected = { event: 'fault_proxy_connected', connectionId: 41 };
+  const earlyReady = { event: 'backend_control', type: 'ready', connectionId: 41, session_id: 'early-provider' };
+  const retainedConnected = { event: 'fault_proxy_connected', connectionId: 42 };
+  const retainedReady = { ...ready, connectionId: 42 };
+  const retainedControls = controls.map(event => ({ ...event, connectionId: 42 }));
+  assert.equal(verifyQualificationRoute(warmProviderCanaryTrial,
+    [earlyConnected, { ...audio, connectionId: 41 }, earlyReady,
+      retainedConnected, retainedReady, ...retainedControls.slice(0, -1),
+      { ...audio, connectionId: 42 }, retainedControls.at(-1)]).retainedProviderSessionId,
+  'provider-1');
   const audioWhilePaused = [connected, ready, controls[0], audio, ...controls.slice(1)];
   assert.throws(() => verifyQualificationRoute(warmProviderCanaryTrial, audioWhilePaused),
     /audio while provider session was paused/);
@@ -130,6 +140,9 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       captureStoppedAtMs: startedAtMs + 30, settledAtMs: startedAtMs + 50,
       captureGeneration: index + 1, logicalRunId, captureRunId,
       captureFenceGeneration: index + 1,
+      triggerEventStart: eventStart,
+      callbackFenceGeneration: index > warmProviderCanaryTrial.readyGateFromIndex ? index + 1 : null,
+      triggerProviderSamples: plan.stopPhase === 'before-ready' ? null : 320,
       association: plan.stopPhase === 'before-ready' ? null : {
         captureGeneration: index + 1, captureRunId, captureFenceGeneration: index + 1 },
       trigger: plan.stopPhase === 'before-ready' ? { readyBeforeStop: false } :
@@ -186,10 +199,51 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       providerTransport: { connectionRetained: false }, fixture } };
   assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, report).churnCycles, 20);
   const ledgerBytes = fixture.providerPcmLedgers.reduce((sum, row) => sum + row.samples * 2, 0);
-  assert.equal(verifyWarmProviderTransport([{ event: 'client_binary', bytes: ledgerBytes }], fixture)
+  const transportEvents = [{ event: 'fault_proxy_connected', connectionId: 1 },
+    { event: 'backend_control', type: 'ready', connectionId: 1 }];
+  fixture.providerPcmLedgers.forEach((ledger, index) => {
+    if (index > 0) transportEvents.push({ event: 'backend_control', type: 'continue_result',
+      decision: 'accepted', eligible_now: true, connectionId: 1 });
+    transportEvents.push({ event: 'client_binary', connectionId: 1, bytes: ledger.samples * 2 });
+    transportEvents.push({ event: 'backend_control', type: 'pause_accepted',
+      decision: 'accepted', connectionId: 1 });
+  });
+  transportEvents.push({ event: 'fault_proxy_close', connectionId: 1, direction: 'upstream', code: 1000 });
+  assert.equal(verifyWarmProviderTransport(transportEvents, fixture)
     .transmittedPcmBytes, ledgerBytes);
-  assert.throws(() => verifyWarmProviderTransport([{ event: 'client_binary', bytes: ledgerBytes - 2 }], fixture),
-    /does not match/);
+  const wrongBytes = structuredClone(transportEvents);
+  wrongBytes.find(event => event.event === 'client_binary').bytes -= 2;
+  assert.throws(() => verifyWarmProviderTransport(wrongBytes, fixture), /does not match/);
+  const wrongConnection = structuredClone(transportEvents);
+  wrongConnection.find(event => event.event === 'client_binary').connectionId = 2;
+  assert.throws(() => verifyWarmProviderTransport(wrongConnection, fixture), /open connection/);
+  const wrongInterval = structuredClone(transportEvents);
+  const firstPause = wrongInterval.findIndex(event => event.type === 'pause_accepted');
+  wrongInterval.splice(firstPause + 1, 0, { event: 'client_binary', connectionId: 1, bytes: 2 });
+  assert.throws(() => verifyWarmProviderTransport(wrongInterval, fixture), /paused interval/);
+  assert.equal(verifyWarmProviderTransport([
+    { event: 'fault_proxy_connected', connectionId: 1 },
+    { event: 'client_binary', connectionId: 1, bytes: 4 },
+    { event: 'fault_proxy_close', connectionId: 1, direction: 'upstream', code: 1000 },
+    { event: 'fault_proxy_connected', connectionId: 2 },
+    { event: 'backend_control', type: 'ready', connectionId: 2 },
+    { event: 'client_binary', connectionId: 2, bytes: 6 },
+    { event: 'backend_control', type: 'pause_accepted', decision: 'accepted', connectionId: 2 },
+    { event: 'fault_proxy_close', connectionId: 2, direction: 'upstream', code: 1000 },
+  ], { providerPcmLedgers: [
+    { captureGeneration: 1, chunks: 1, samples: 2, hash: '0123456789abcdef' },
+    { captureGeneration: 2, chunks: 1, samples: 3, hash: 'fedcba9876543210' },
+  ] }).transmittedPcmBytes, 10);
+  const lateEarlyCompletion = structuredClone(report);
+  const finalFence = lateEarlyCompletion.finalCallbackFence.eventStart;
+  lateEarlyCompletion.events.splice(finalFence, 0,
+    { event: 'transcription:final', cycleIndex: 0, sessionId: 100,
+      deliverySeq: 500, text: 'early completion', markerIds: [] },
+    { event: 'transcription:terminal', cycleIndex: 0, sessionId: 100,
+      deliverySeq: null, markerIds: [] });
+  lateEarlyCompletion.finalCallbackFence.eventStart += 2;
+  lateEarlyCompletion.terminals.push({ sessionId: 100, cycleIndex: 0, complete: true });
+  assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, lateEarlyCompletion).churnCycles, 20);
   for (const mutate of [
     value => value.cycles.pop(),
     value => { value.cycles[5].association.captureRunId = 9999; },
@@ -208,6 +262,10 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     value => { value.final.fixture.providerCallbackGenerations.pop(); },
     value => { value.finalCallbackFence.captureGeneration = 20; },
     value => { value.finalCallbackFence.eventStart = value.events.length; },
+    value => { const cycle = value.cycles.find(row => row.stopPhase === 'after-final');
+      cycle.triggerEventStart += 1; },
+    value => { value.cycles[1].previousSettleToStartMs = 5_000; },
+    value => { delete value.events.find(event => event.event === 'transcription:final').deliverySeq; },
     value => { value.events.find(event => event.cycleIndex === 20 && event.event === 'transcription:final').event = 'transcription:partial'; },
     value => { value.finalOwnership.logicalRunId = value.finalOwnership.captureRunId; },
     value => value.terminals.push({ sessionId: finalLogicalRunId, cycleIndex: 20, complete: true }),

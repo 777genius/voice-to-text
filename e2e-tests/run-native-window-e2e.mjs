@@ -1047,7 +1047,7 @@ export function validateResult(envelope) {
     cycles.some(row => {
       const capture = fixture.capturePcmLedgers.find(ledger => ledger.captureGeneration === row.captureGeneration);
       const provider = fixture.providerPcmLedgers.find(ledger => ledger.captureGeneration === row.captureGeneration);
-      return !capture || capture.samples <= 0 || !provider || provider.chunks !== capture.chunks ||
+      return !capture || capture.samples <= 0 || !provider || provider.chunks <= 0 ||
         provider.samples !== capture.samples || provider.hash !== capture.hash;
     }) || requiredScenarios.some(name => !report.scenarios.includes(name))) {
     throw new Error(`Native result cycle evidence is incomplete: ${JSON.stringify(envelope)}`);
@@ -1058,6 +1058,19 @@ export function validateResult(envelope) {
       !Number.isSafeInteger(idle.baselineCaptureStarts) ||
       idle.baselineCaptureStarts !== idle.baselineCaptureStops ||
       idle.baselineActiveCaptures !== 0 || idle.baselineActiveProviders !== 0 ||
+      !Number.isSafeInteger(idle.baselineCaptureGeneration) || idle.baselineCaptureGeneration < 0 ||
+      !Number.isSafeInteger(idle.wakeCaptureGeneration) ||
+      idle.wakeCaptureGeneration <= idle.baselineCaptureGeneration ||
+      idle.wakeCaptureGeneration <= cycles[49].captureGeneration ||
+      !Number.isSafeInteger(idle.wakeSessionId) || idle.wakeSessionId <= cycles[49].sessionId ||
+      !Number.isSafeInteger(idle.wakeWindowEpoch) || idle.wakeWindowEpoch <= cycles[49].windowEpoch ||
+      typeof idle.wakeTranscript !== 'string' || !idle.wakeTranscript.trim() ||
+      !fixture.capturePcmLedgers.some(capture => {
+        const provider = fixture.providerPcmLedgers.find(ledger =>
+          ledger.captureGeneration === idle.wakeCaptureGeneration);
+        return capture.captureGeneration === idle.wakeCaptureGeneration && capture.samples > 0 &&
+          provider?.chunks > 0 && provider.samples === capture.samples && provider.hash === capture.hash;
+      }) ||
       !Number.isFinite(idle.firstVisibleMs) || idle.firstVisibleMs < 0 ||
       !Number.isSafeInteger(idle.wakeSampleCount) || idle.wakeSampleCount < 2 ||
       !Number.isFinite(idle.lastVisibleElapsedMs) ||

@@ -1562,11 +1562,15 @@ fn record_pcm_ledger(ledgers: &mut Vec<PcmLedger>, generation: u64, chunk: &Audi
         return;
     };
     let ledger = &mut ledgers[index];
+    if ledger.chunks == 0 {
+        // Describe the PCM format once per generation. Chunk lengths are not
+        // part of the canonical stream identity because lossless batching may
+        // change packet boundaries between capture and provider admission.
+        fnv1a_update(&mut ledger.hash, &chunk.sample_rate.to_le_bytes());
+        fnv1a_update(&mut ledger.hash, &chunk.channels.to_le_bytes());
+    }
     ledger.chunks += 1;
     ledger.samples += chunk.data.len() as u64;
-    fnv1a_update(&mut ledger.hash, &chunk.sample_rate.to_le_bytes());
-    fnv1a_update(&mut ledger.hash, &chunk.channels.to_le_bytes());
-    fnv1a_update(&mut ledger.hash, &(chunk.data.len() as u64).to_le_bytes());
     for sample in &chunk.data {
         fnv1a_update(&mut ledger.hash, &sample.to_le_bytes());
     }
@@ -1593,7 +1597,6 @@ fn ensure_pcm_ledger(ledgers: &mut Vec<PcmLedger>, generation: u64) -> Option<us
 
 fn pcm_ledgers_match(capture: &PcmLedger, provider: &PcmLedger) -> bool {
     capture.capture_generation == provider.capture_generation
-        && capture.chunks == provider.chunks
         && capture.samples == provider.samples
         && capture.hash == provider.hash
 }
@@ -1791,6 +1794,21 @@ fn exact_pcm_ledger_rejects_changed_or_dropped_markerless_audio() {
     );
     assert!(!pcm_ledgers_match(&capture[0], &changed[0]));
     assert!(!pcm_ledgers_match(&capture[0], &dropped[0]));
+
+    let combined = AudioChunk::new(
+        marked
+            .data
+            .iter()
+            .chain(&markerless.data)
+            .copied()
+            .collect(),
+        16000,
+        1,
+    );
+    let mut rebatched = Vec::new();
+    record_pcm_ledger(&mut rebatched, generation, &combined);
+    assert_ne!(capture[0].chunks, rebatched[0].chunks);
+    assert!(pcm_ledgers_match(&capture[0], &rebatched[0]));
 }
 
 #[cfg(test)]
