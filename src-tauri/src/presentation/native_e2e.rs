@@ -2215,6 +2215,34 @@ pub(super) fn record_capture_run(capture_run_id: u64, capture_fence_generation: 
         });
 }
 
+/// Observe PCM accepted by the production provider boundary during the paid
+/// live qualification. Fake providers own their own ledger, so this hook stays
+/// inactive outside the live qualification mode.
+pub(crate) fn record_live_provider_pcm(logical_run_id: u64, chunk: &AudioChunk) {
+    if !qualification_live() || chunk.data.is_empty() {
+        return;
+    }
+    let fixture = fixture();
+    let mut counters = fixture.counters.lock().unwrap();
+    let Some(capture_generation) = counters
+        .capture_run_associations
+        .iter()
+        .find(|association| association.capture_run_id == logical_run_id)
+        .map(|association| association.capture_generation)
+    else {
+        record_marker_violation(
+            &mut counters,
+            format!("provider PCM for logical run {logical_run_id} has no capture association"),
+        );
+        return;
+    };
+    record_pcm_ledger(
+        &mut counters.provider_pcm_ledgers,
+        capture_generation,
+        chunk,
+    );
+}
+
 pub(super) fn record_auto_paste_target_capture() {
     fixture()
         .counters
@@ -2437,7 +2465,7 @@ fn qualification_source(shared: &Fixture, config: AudioConfig) -> AudioResult<Qu
     };
     let mut episodes = Vec::new();
     let mut rows = Vec::new();
-    for index in indices {
+    for (source_index, index) in indices.into_iter().enumerate() {
         let name = trial["episodes"][index].as_str().unwrap_or("");
         let expected = match name {
             "episode-a.pcm" => 42288,
@@ -2460,7 +2488,7 @@ fn qualification_source(shared: &Fixture, config: AudioConfig) -> AudioResult<Qu
             "sourceDurationMs": bytes.len() as f64 / 32.0, "cadenceMs": 20,
             "continuousCapture": baseline,
             "gapBeforeMs": if baseline && index == 1 { 120 } else { 0 },
-            "sourceGateRequired": gate && index == 0, "sourceGateTimeoutMs": 30000,
+            "sourceGateRequired": gate && source_index == 0, "sourceGateTimeoutMs": 30000,
             "sourceGateReady": null, "nativeSourceStartMs": null, "nativeSourceEndMs": null}),
         );
         episodes.push(

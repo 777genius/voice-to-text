@@ -201,6 +201,30 @@ export function verifyQualificationRoute(trial, events) {
           event.provider_session_id !== providerSessionId)) {
       throw new Error('Warm canary did not retain exactly one provider session across churn');
     }
+    const readyIndex = events.indexOf(ready[0]);
+    let active = true;
+    let orderedPauses = 0;
+    let orderedContinues = 0;
+    for (const event of events.slice(readyIndex + 1)) {
+      if (event.event === 'client_binary' && event.connectionId === retainedConnectionId) {
+        if (!active) throw new Error('Warm canary sent audio while provider session was paused');
+        continue;
+      }
+      if (event.event !== 'backend_control' || event.connectionId !== retainedConnectionId ||
+          event.provider_session_id !== providerSessionId) continue;
+      if (event.type === 'pause_accepted' && event.decision === 'accepted') {
+        if (!active) throw new Error('Warm canary Pause acceptance is out of order');
+        active = false;
+        orderedPauses += 1;
+      } else if (event.type === 'continue_result' && event.decision === 'accepted' && event.eligible_now === true) {
+        if (active) throw new Error('Warm canary Continue acceptance is out of order');
+        active = true;
+        orderedContinues += 1;
+      }
+    }
+    if (active || orderedPauses !== retainedCycles + 1 || orderedContinues !== retainedCycles) {
+      throw new Error('Warm canary retained session did not end in an ordered paused state');
+    }
     return { clientAudioFrames: binary.length, clientAudioConnections: connectionIds.size,
       routeVerified: trial.route, maximumActiveConnections: 1, maximumActiveProviderSessions: 1,
       retainedProviderSessionId: providerSessionId, acceptedPauses: pauses.length,

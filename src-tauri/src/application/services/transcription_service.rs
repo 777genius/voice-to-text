@@ -2752,6 +2752,14 @@ impl TranscriptionService {
                 )
                 .await;
 
+                #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+                if send_result.is_ok() {
+                    crate::presentation::native_e2e::record_live_provider_pcm(
+                        logical_run_id,
+                        &amplified_chunk,
+                    );
+                }
+
                 if matches!(send_result, Err(SttError::ContinuationAudioNotStarted)) {
                     send_lease.not_started();
                     // The terminal observer seals this exact capture. Preserve

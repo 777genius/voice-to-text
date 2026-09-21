@@ -101,7 +101,10 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   assert.equal(verifyQualificationConnections(warmProviderCanaryTrial,
     [connected, audio, closed, boundary]).backendConnections, 1);
   assert.equal(verifyQualificationRoute(warmProviderCanaryTrial,
-    [connected, ready, ...controls, audio]).maximumActiveProviderSessions, 1);
+    [connected, ready, ...controls.slice(0, -1), audio, controls.at(-1)]).maximumActiveProviderSessions, 1);
+  const audioWhilePaused = [connected, ready, controls[0], audio, ...controls.slice(1)];
+  assert.throws(() => verifyQualificationRoute(warmProviderCanaryTrial, audioWhilePaused),
+    /audio while provider session was paused/);
   assert.throws(() => verifyQualificationRoute(warmProviderCanaryTrial, [connected]));
   assert.throws(() => verifyQualificationRoute(warmProviderCanaryTrial,
     [connected, ready, ...controls.slice(1), audio]));
