@@ -321,6 +321,14 @@ export function verifyWarmProviderCanary(trial, report) {
       new Set(providerLedgers.map(row => row.captureGeneration)).size !== providerLedgers.length) {
     throw new Error('Warm provider canary capture lifecycle is incomplete');
   }
+  for (const [index, source] of fixture.sourceEpisodes.entries()) {
+    const [bytes] = approvedFixtures[trial.episodes[index]] ?? [];
+    if (!Number.isSafeInteger(bytes) || source?.name !== trial.episodes[index] ||
+        source.bytes !== bytes || source.sourceFrames !== bytes / 2 ||
+        source.sourceDurationMs !== bytes / 32 || source.cadenceMs !== 20) {
+      throw new Error(`Warm provider canary source ${index} is not an approved PCM identity`);
+    }
+  }
   const providerByGeneration = new Map(providerLedgers.map(row => [row.captureGeneration, row]));
   for (const [index, capture] of captureLedgers.entries()) {
     const source = fixture.sourceEpisodes[index];
@@ -345,15 +353,22 @@ export function verifyWarmProviderCanary(trial, report) {
     if (cycle.index !== index || cycle.stopPhase !== plan.stopPhase || cycle.jitterMs !== plan.jitterMs ||
         cycle.episode !== plan.episode || cycle.captureGeneration !== index + 1 ||
         !Number.isFinite(cycle.startedAtMs) || !Number.isFinite(cycle.triggerAtMs) ||
-        !Number.isFinite(cycle.captureStoppedAtMs) || !Number.isFinite(cycle.idleAtMs) ||
+        !Number.isFinite(cycle.captureStoppedAtMs) || !Number.isFinite(cycle.settledAtMs) ||
         cycle.triggerAtMs < cycle.startedAtMs || cycle.triggerAtMs - cycle.startedAtMs > 75_000 ||
         cycle.captureStoppedAtMs < cycle.triggerAtMs || cycle.captureStoppedAtMs - cycle.triggerAtMs > 5_500 ||
-        cycle.idleAtMs < cycle.captureStoppedAtMs || cycle.idleAtMs - cycle.captureStoppedAtMs > 45_500 ||
+        cycle.settledAtMs < cycle.captureStoppedAtMs || cycle.settledAtMs - cycle.captureStoppedAtMs > 45_500 ||
+        !Number.isSafeInteger(cycle.logicalRunId) || cycle.logicalRunId <= 0 ||
+        !Number.isSafeInteger(cycle.captureRunId) || cycle.captureRunId <= 0 ||
+        !Number.isSafeInteger(cycle.captureFenceGeneration) || cycle.captureFenceGeneration <= 0 ||
         cycle.activeCapturesAfterStop !== 0 || source?.name !== plan.episode ||
         source.captureGeneration !== index + 1 || !Number.isSafeInteger(source.emittedFrames) ||
         source.emittedFrames < 0 || source.emittedFrames > source.sourceFrames ||
         source.sourceGateRequired !== gated ||
-        (gated && (source.sourceGateReady?.serverReady !== true || source.sourceGateReady.emittedFrames !== 0)) ||
+        (gated && (source.sourceGateReady?.serverReady !== true || source.sourceGateReady.emittedFrames !== 0 ||
+          !['Starting', 'Recording', 'Processing'].includes(source.sourceGateReady.status) ||
+          !Number.isFinite(source.sourceGateReady.nativeReadyMs) ||
+          (Number.isFinite(source.nativeSourceStartMs) &&
+            source.sourceGateReady.nativeReadyMs > source.nativeSourceStartMs))) ||
         (!gated && source.sourceGateReady != null) ||
         !Number.isSafeInteger(cycle.eventStart) || !Number.isSafeInteger(cycle.eventEnd) ||
         cycle.eventStart < 0 || cycle.eventEnd < cycle.eventStart || cycle.eventEnd > events.length ||
@@ -365,14 +380,17 @@ export function verifyWarmProviderCanary(trial, report) {
       if (cycle.trigger?.readyBeforeStop !== false ||
           cycleEvents.some(event => ['transcription:partial', 'transcription:final'].includes(event.event)) ||
           (cycle.association != null && (cycle.association.captureGeneration !== index + 1 ||
-            cycle.association.captureRunId !== cycle.logicalRunId))) {
+            cycle.association.captureRunId !== cycle.captureRunId ||
+            cycle.association.captureFenceGeneration !== cycle.captureFenceGeneration))) {
         throw new Error(`Cycle ${index} missed before-Ready proof`);
       }
     } else {
       const association = associations.get(index + 1);
       if (!association || cycle.association?.captureGeneration !== index + 1 ||
-          cycle.association.captureRunId !== cycle.logicalRunId ||
-          association.captureRunId !== cycle.logicalRunId || source.emittedFrames <= 0 ||
+          cycle.association.captureRunId !== cycle.captureRunId ||
+          cycle.association.captureFenceGeneration !== cycle.captureFenceGeneration ||
+          association.captureRunId !== cycle.captureRunId ||
+          association.captureFenceGeneration !== cycle.captureFenceGeneration || source.emittedFrames <= 0 ||
           cycleEvents.some(event => ['transcription:partial', 'transcription:final'].includes(event.event) &&
             event.sessionId !== cycle.logicalRunId)) {
         throw new Error(`Cycle ${index} lost capture/provider ownership`);
@@ -390,23 +408,34 @@ export function verifyWarmProviderCanary(trial, report) {
   const finalEvents = events.filter(event => event.cycleIndex === finalIndex);
   const terminalEvents = events.filter(event => event.event === 'transcription:terminal');
   const terminals = report.terminals;
+  const ownership = report.finalOwnership;
+  const finalBytes = approvedFixtures[trial.episodes[finalIndex]][0];
   if (finalSource?.name !== trial.episodes[finalIndex] ||
+      finalSource.bytes !== finalBytes || finalSource.sourceFrames !== finalBytes / 2 ||
+      finalSource.sourceDurationMs !== finalBytes / 32 || finalSource.cadenceMs !== 20 ||
       finalSource.captureGeneration !== finalIndex + 1 ||
       finalSource.emittedFrames !== finalSource.sourceFrames ||
       !Number.isFinite(finalSource.nativeSourceStartMs) || !Number.isFinite(finalSource.nativeSourceEndMs) ||
-      finalSource.nativeSourceEndMs < finalSource.nativeSourceStartMs ||
+      finalSource.nativeSourceEndMs - finalSource.nativeSourceStartMs < finalBytes / 32 ||
       finalSource.sourceGateRequired !== true || finalSource.sourceGateReady?.serverReady !== true ||
-      finalSource.sourceGateReady.emittedFrames !== 0 || !finalAssociation ||
+      finalSource.sourceGateReady.emittedFrames !== 0 ||
+      !['Starting', 'Recording', 'Processing'].includes(finalSource.sourceGateReady.status) ||
+      !Number.isFinite(finalSource.sourceGateReady.nativeReadyMs) ||
+      finalSource.sourceGateReady.nativeReadyMs > finalSource.nativeSourceStartMs ||
+      !finalAssociation || !ownership ||
+      ownership.captureRunId !== finalAssociation.captureRunId ||
+      ownership.captureFenceGeneration !== finalAssociation.captureFenceGeneration ||
+      !Number.isSafeInteger(ownership.logicalRunId) || ownership.logicalRunId <= 0 ||
       typeof report.expectedInsertion !== 'string' || !report.expectedInsertion.trim() ||
       new Set(finalEvents.flatMap(event => event.markerIds)).size < 2 ||
       finalEvents.some(event => ['transcription:partial', 'transcription:final'].includes(event.event) &&
-        event.sessionId !== finalAssociation.captureRunId) ||
+        event.sessionId !== ownership.logicalRunId) ||
       events.some((event, eventIndex) => Number.isSafeInteger(event.cycleIndex) &&
         event.cycleIndex >= 0 && event.cycleIndex < finalIndex &&
         (eventIndex < cycles[event.cycleIndex].eventStart || eventIndex >= cycles[event.cycleIndex].eventEnd)) ||
       !Array.isArray(terminals) || terminals.length !== 1 || terminals[0]?.complete !== true ||
-      terminals[0].sessionId !== finalAssociation.captureRunId || terminals[0].cycleIndex !== finalIndex ||
-      terminalEvents.length !== 1 || terminalEvents[0].sessionId !== finalAssociation.captureRunId ||
+      terminals[0].sessionId !== ownership.logicalRunId || terminals[0].cycleIndex !== finalIndex ||
+      terminalEvents.length !== 1 || terminalEvents[0].sessionId !== ownership.logicalRunId ||
       terminalEvents[0].cycleIndex !== finalIndex ||
       report.final.status !== 'Idle' || report.final.preparedCaptureTokenCount !== 0 ||
       report.final.providerTransport?.connectionRetained !== false) {

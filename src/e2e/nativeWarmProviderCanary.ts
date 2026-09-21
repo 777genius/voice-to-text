@@ -5,10 +5,12 @@ import { nativeLivePreflight } from './nativeContinuationLive';
 import { validateWarmProviderCanaryPlan,
   type WarmProviderCanaryTrial as Trial } from './nativeWarmProviderCanaryPlan';
 
-type SourceEpisode = { name: string; captureGeneration: number; sourceFrames: number;
+type SourceEpisode = { name: string; bytes: number; captureGeneration: number; sourceFrames: number;
   emittedFrames: number; nativeSourceStartMs: number | null; nativeSourceEndMs: number | null;
+  sourceDurationMs: number; cadenceMs: number;
   sourceGateRequired: boolean; sourceGateReady: { serverReady: boolean; emittedFrames: number } | null };
 type NativeState = { status: string; logicalProviderRunId: number; preparedCaptureTokenCount: number;
+  captureEpisode: { runId: number; generation: number } | null; pausedContinuation: number | null;
   qualificationTrial: Trial; qualificationEndpoint: string;
   providerTransport: { serverReady: boolean; connectionRetained: boolean } | null;
   fixture: { captureStarts: number; captureStops: number; activeCaptures: number; maxActiveCaptures: number;
@@ -38,6 +40,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
   const subscriptions: Array<() => void> = [];
   const report = { mode: 'warm-provider-canary', passed: false, trialId: '', targetDocument: '',
     expectedInsertion: '', actualPasteVerified: false, cycles: [] as Array<Record<string, unknown>>,
+    finalOwnership: null as { logicalRunId: number; captureRunId: number; captureFenceGeneration: number } | null,
     events: [] as ProviderEvent[], terminals: [] as ProviderTerminal[], duplicateDeliveries: [] as string[],
     errors: [] as string[], final: null as NativeState | null, elapsedMs: 0 };
   const poll = async (accept: (value: NativeState) => boolean, label: string, timeoutMs: number) => {
@@ -97,8 +100,9 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
           `cycle ${cycle.index} reached provider Ready before early stop`);
         trigger = { readyBeforeStop: false };
       } else {
-        const ready = await poll(value => value.status === 'Recording' &&
+        const ready = await poll(value =>
           value.providerTransport?.serverReady === true && value.providerTransport.connectionRetained === true &&
+          value.logicalProviderRunId > 0 && value.captureEpisode !== null &&
           value.fixture.sourceEpisodes[cycle.index]?.emittedFrames === 0,
         `cycle ${cycle.index} actual provider Ready`, 30_000);
         check(ready.fixture.sourceEpisodes[cycle.index].sourceGateRequired === true,
@@ -120,7 +124,9 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       const beforeStop = await state();
       const association = beforeStop.fixture.captureRunAssociations.find(row => row.captureGeneration === generation) ?? null;
       if (cycle.stopPhase !== 'before-ready') {
-        check(association?.captureRunId === beforeStop.logicalProviderRunId && association.captureFenceGeneration > 0,
+        check(beforeStop.captureEpisode !== null &&
+          association?.captureRunId === beforeStop.captureEpisode.runId &&
+          association.captureFenceGeneration === beforeStop.captureEpisode.generation,
           `cycle ${cycle.index} lost capture generation to logical run ownership`);
       }
       const triggerAtMs = now();
@@ -128,14 +134,19 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       const stopped = await poll(value => value.fixture.activeCaptures === 0 &&
         value.fixture.captureStops === before.fixture.captureStops + 1, `cycle ${cycle.index} capture stop`, 5_000);
       const captureStoppedAtMs = now();
-      await poll(value => value.status === 'Idle', `cycle ${cycle.index} terminal drain`, 45_000);
-      const idleAtMs = now();
+      await poll(value => cycle.stopPhase === 'before-ready'
+        ? value.status === 'Idle'
+        : value.pausedContinuation === beforeStop.logicalProviderRunId &&
+          value.providerTransport?.connectionRetained === true,
+      `cycle ${cycle.index} stop settlement`, 45_000);
+      const settledAtMs = now();
       const sourceAtStop = await source();
       check(sourceAtStop?.name === cycle.episode && sourceAtStop.captureGeneration === generation,
         `cycle ${cycle.index} source identity mismatch`);
       report.cycles.push({ ...cycle, startedAtMs, triggerAtMs,
-        captureStoppedAtMs,
-        idleAtMs, captureGeneration: generation,
+        captureStoppedAtMs, settledAtMs, captureGeneration: generation,
+        captureRunId: beforeStop.captureEpisode?.runId ?? null,
+        captureFenceGeneration: beforeStop.captureEpisode?.generation ?? null,
         logicalRunId: beforeStop.logicalProviderRunId, association, trigger, source: sourceAtStop,
         eventStart, eventEnd: report.events.length, activeCapturesAfterStop: stopped.fixture.activeCaptures });
       await invoke('native_e2e_progress', { report: { scenario: 'warm-provider-churn',
@@ -146,8 +157,9 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     activeCycle = trial.finalEpisodeIndex;
     const beforeFinal = await state();
     await toggle();
-    const ready = await poll(value => value.status === 'Recording' &&
+    const ready = await poll(value =>
       value.providerTransport?.serverReady === true && value.providerTransport.connectionRetained === true &&
+      value.logicalProviderRunId > 0 && value.captureEpisode !== null &&
       value.fixture.sourceEpisodes.length === trial.finalEpisodeIndex + 1,
     'final full proof provider Ready', 30_000);
     check(ready.fixture.sourceEpisodes[trial.finalEpisodeIndex].emittedFrames === 0,
@@ -159,11 +171,16 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     }, 'final full PCM proof', 90_000);
     const finalAssociation = complete.fixture.captureRunAssociations.find(row =>
       row.captureGeneration === trial.finalEpisodeIndex + 1);
-    check(finalAssociation?.captureRunId === complete.logicalProviderRunId,
+    check(complete.captureEpisode !== null &&
+      finalAssociation?.captureRunId === complete.captureEpisode.runId &&
+      finalAssociation.captureFenceGeneration === complete.captureEpisode.generation,
       'Final proof generation does not belong to the live provider run');
+    report.finalOwnership = { logicalRunId: complete.logicalProviderRunId,
+      captureRunId: complete.captureEpisode.runId,
+      captureFenceGeneration: complete.captureEpisode.generation };
     await toggle();
     await poll(value => value.fixture.captureStops === beforeFinal.fixture.captureStops + 1 &&
-      value.fixture.activeCaptures === 0 && value.status === 'Idle' &&
+      value.fixture.activeCaptures === 0 && value.pausedContinuation === complete.logicalProviderRunId &&
       value.providerTransport?.connectionRetained === true, 'final full proof pause', 45_000);
     await wait(2_000);
     report.expectedInsertion = store.finalText;
@@ -187,9 +204,9 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     'Warm provider canary retained invalid or duplicate evidence');
     const terminalEvents = report.events.filter(event => event.event === 'transcription:terminal');
     check(report.terminals.length === 1 && report.terminals[0].complete === true &&
-      report.terminals[0].sessionId === finalAssociation.captureRunId &&
+      report.terminals[0].sessionId === report.finalOwnership.logicalRunId &&
       report.terminals[0].cycleIndex === trial.finalEpisodeIndex && terminalEvents.length === 1 &&
-      terminalEvents[0].sessionId === finalAssociation.captureRunId &&
+      terminalEvents[0].sessionId === report.finalOwnership.logicalRunId &&
       terminalEvents[0].cycleIndex === trial.finalEpisodeIndex,
     'Warm provider canary terminal ownership is incomplete or duplicated');
     const generations = report.final.fixture.capturePcmLedgers.map(row => row.captureGeneration);

@@ -329,6 +329,10 @@ export function createQualificationCollector(trial, proxyEvents, readEnvelope, n
   };
 }
 
+export function assertOwnedProcessGroupGone(groupGone) {
+  if (groupGone !== true) throw new Error('Owned native process group did not terminate');
+}
+
 export async function runOwned(command, args, options, timeoutMs, logPath, progressPath, collectBeforeTeardown, terminationPath, crashAfterCheckpoint = false) {
   if (crashAfterCheckpoint && (!terminationPath || !collectBeforeTeardown)) throw new Error('Crash requires owned group and checkpoint collector');
   const output = createWriteStream(logPath, { flags: 'wx' });
@@ -438,7 +442,7 @@ export async function runOwned(command, args, options, timeoutMs, logPath, progr
       await writeFile(terminationPath, JSON.stringify({ pid: child.pid,
         signal: child.signalCode, checkpointCollected: collected, failure: primaryFailure ? String(primaryFailure) : null,
         exited: child.exitCode !== null || child.signalCode !== null, groupGone }), { flag: 'wx' });
-      assertOwnedProcessGroupGone(groupGone);
+      if (groupGone !== true) throw new Error('Owned native process group did not terminate');
     }
     } catch (error) {
       if (primaryFailure) throw new AggregateError([primaryFailure, error], `${primaryFailure.message}; process cleanup: ${error.message}`, { cause: primaryFailure });
@@ -448,10 +452,6 @@ export async function runOwned(command, args, options, timeoutMs, logPath, progr
       await new Promise((resolve) => output.end(resolve));
     }
   }
-}
-
-export function assertOwnedProcessGroupGone(groupGone) {
-  if (groupGone !== true) throw new Error('Owned native process group did not terminate');
 }
 
 export async function snapshotDigest(directory) {

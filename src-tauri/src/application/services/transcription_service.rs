@@ -1381,7 +1381,16 @@ impl TranscriptionService {
             write
         };
         match write {
-            Ok(crate::domain::ContinuationFirstWrite::Written) => send_lease.submitted(),
+            Ok(crate::domain::ContinuationFirstWrite::Written) => {
+                #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+                crate::presentation::native_e2e::record_live_provider_pcm(
+                    paused.logical_run_id,
+                    token.run_id,
+                    token.generation,
+                    &first,
+                );
+                send_lease.submitted();
+            }
             Ok(crate::domain::ContinuationFirstWrite::NotStarted) => {
                 send_lease.not_started();
                 prepared.accounting.restore_read(raw_first.data.len() * 2);
@@ -2756,6 +2765,8 @@ impl TranscriptionService {
                 if send_result.is_ok() {
                     crate::presentation::native_e2e::record_live_provider_pcm(
                         logical_run_id,
+                        token.run_id,
+                        token.generation,
                         &amplified_chunk,
                     );
                 }

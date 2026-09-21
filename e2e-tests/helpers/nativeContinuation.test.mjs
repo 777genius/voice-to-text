@@ -111,33 +111,41 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
 
   const events = [];
   const cycles = warmProviderCanaryTrial.cycles.map((plan, index) => {
+    const logicalRunId = index < warmProviderCanaryTrial.readyGateFromIndex
+      ? 100 + index : 100 + warmProviderCanaryTrial.readyGateFromIndex;
+    const captureRunId = 100 + index;
     const eventStart = events.length;
     if (plan.stopPhase === 'during-partial') events.push({ event: 'transcription:partial',
-      cycleIndex: index, sessionId: 100 + index, deliverySeq: index + 1, markerIds: [] });
+      cycleIndex: index, sessionId: logicalRunId, deliverySeq: index + 1, markerIds: [] });
     if (plan.stopPhase === 'after-final') events.push({ event: 'transcription:final',
-      cycleIndex: index, sessionId: 100 + index, deliverySeq: index + 1, markerIds: [index % 2] });
+      cycleIndex: index, sessionId: logicalRunId, deliverySeq: index + 1, markerIds: [index % 2] });
     return { ...plan, startedAtMs: index * 100, triggerAtMs: index * 100 + 20,
-      captureStoppedAtMs: index * 100 + 30, idleAtMs: index * 100 + 50,
-      captureGeneration: index + 1, logicalRunId: 100 + index,
+      captureStoppedAtMs: index * 100 + 30, settledAtMs: index * 100 + 50,
+      captureGeneration: index + 1, logicalRunId, captureRunId,
+      captureFenceGeneration: index + 1,
       association: plan.stopPhase === 'before-ready' ? null : {
-        captureGeneration: index + 1, captureRunId: 100 + index, captureFenceGeneration: index + 1 },
+        captureGeneration: index + 1, captureRunId, captureFenceGeneration: index + 1 },
       trigger: plan.stopPhase === 'before-ready' ? { readyBeforeStop: false } :
         plan.stopPhase === 'during-partial' ? { event: 'transcription:partial' } :
         plan.stopPhase === 'after-final' ? { event: 'transcription:final' } : { emittedFrames: 320 },
       eventStart, eventEnd: events.length, activeCapturesAfterStop: 0 };
   });
-  events.push({ event: 'transcription:final', cycleIndex: 20, sessionId: 999,
+  const finalLogicalRunId = 100 + warmProviderCanaryTrial.readyGateFromIndex;
+  events.push({ event: 'transcription:final', cycleIndex: 20, sessionId: finalLogicalRunId,
     deliverySeq: 99, markerIds: [0, 1] });
-  events.push({ event: 'transcription:terminal', cycleIndex: 20, sessionId: 999,
+  events.push({ event: 'transcription:terminal', cycleIndex: 20, sessionId: finalLogicalRunId,
     deliverySeq: null, markerIds: [] });
   const sources = warmProviderCanaryTrial.episodes.map((name, index) => {
-    const sourceFrames = approvedFixtures[name][0] / 2;
-    return { name, captureGeneration: index + 1, sourceFrames,
+    const bytes = approvedFixtures[name][0];
+    const sourceFrames = bytes / 2;
+    const sourceDurationMs = bytes / 32;
+    return { name, bytes, captureGeneration: index + 1, sourceFrames, sourceDurationMs, cadenceMs: 20,
       emittedFrames: index === 20 ? sourceFrames : warmProviderCanaryTrial.cycles[index].stopPhase === 'before-ready' ? 0 : 320,
-      nativeSourceStartMs: index === 20 ? 1000 : null, nativeSourceEndMs: index === 20 ? 2000 : null,
+      nativeSourceStartMs: index === 20 ? 1000 : null,
+      nativeSourceEndMs: index === 20 ? 1000 + sourceDurationMs : null,
       sourceGateRequired: index >= warmProviderCanaryTrial.readyGateFromIndex,
       sourceGateReady: index >= warmProviderCanaryTrial.readyGateFromIndex ?
-        { serverReady: true, emittedFrames: 0 } : null };
+        { serverReady: true, status: 'Processing', nativeReadyMs: 900, emittedFrames: 0 } : null };
   });
   const captureRunAssociations = cycles.flatMap((cycle, index) => cycle.association ? [cycle.association] : [])
     .concat({ captureGeneration: 21, captureRunId: 999, captureFenceGeneration: 21 });
@@ -153,7 +161,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     providerPcmLedgers: capturePcmLedgers.filter(row => row.samples > 0).map(row => ({ ...row })) };
   const report = { mode: 'warm-provider-canary', passed: true, trialId: warmProviderCanaryTrial.id,
     errors: [], duplicateDeliveries: [], cycles, events, expectedInsertion: 'stable transcript',
-    terminals: [{ sessionId: 999, cycleIndex: 20, complete: true }], final: { status: 'Idle', preparedCaptureTokenCount: 0,
+    finalOwnership: { logicalRunId: finalLogicalRunId, captureRunId: 999, captureFenceGeneration: 21 },
+    terminals: [{ sessionId: finalLogicalRunId, cycleIndex: 20, complete: true }], final: { status: 'Idle', preparedCaptureTokenCount: 0,
       providerTransport: { connectionRetained: false }, fixture } };
   assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, report).churnCycles, 20);
   for (const mutate of [
@@ -165,7 +174,11 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     value => { value.final.fixture.providerPcmLedgers[0].hash = 'ffffffffffffffff'; },
     value => { value.final.fixture.capturePcmLedgers.forEach(row => { row.chunks = 0; row.samples = 0; row.hash = 'cbf29ce484222325'; });
       value.final.fixture.providerPcmLedgers = []; },
-    value => value.terminals.push({ sessionId: 999, cycleIndex: 20, complete: true }),
+    value => { const source = value.final.fixture.sourceEpisodes[20];
+      source.bytes = 640; source.sourceFrames = 320; source.emittedFrames = 320;
+      source.sourceDurationMs = 20; source.nativeSourceEndMs = source.nativeSourceStartMs; },
+    value => { value.finalOwnership.logicalRunId = value.finalOwnership.captureRunId; },
+    value => value.terminals.push({ sessionId: finalLogicalRunId, cycleIndex: 20, complete: true }),
     value => { value.terminals[0].sessionId = 123; },
     value => value.duplicateDeliveries.push('1:1:final'),
     value => value.events.push({ event: 'transcription:final', cycleIndex: 19,

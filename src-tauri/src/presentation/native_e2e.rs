@@ -2218,21 +2218,41 @@ pub(super) fn record_capture_run(capture_run_id: u64, capture_fence_generation: 
 /// Observe PCM accepted by the production provider boundary during the paid
 /// live qualification. Fake providers own their own ledger, so this hook stays
 /// inactive outside the live qualification mode.
-pub(crate) fn record_live_provider_pcm(logical_run_id: u64, chunk: &AudioChunk) {
+fn live_provider_capture_generation(
+    associations: &[CaptureRunAssociation],
+    capture_run_id: u64,
+    capture_fence_generation: u64,
+) -> Option<u64> {
+    associations
+        .iter()
+        .find(|association| {
+            association.capture_run_id == capture_run_id
+                && association.capture_fence_generation == capture_fence_generation
+        })
+        .map(|association| association.capture_generation)
+}
+
+pub(crate) fn record_live_provider_pcm(
+    logical_run_id: u64,
+    capture_run_id: u64,
+    capture_fence_generation: u64,
+    chunk: &AudioChunk,
+) {
     if !qualification_live() || chunk.data.is_empty() {
         return;
     }
     let fixture = fixture();
     let mut counters = fixture.counters.lock().unwrap();
-    let Some(capture_generation) = counters
-        .capture_run_associations
-        .iter()
-        .find(|association| association.capture_run_id == logical_run_id)
-        .map(|association| association.capture_generation)
-    else {
+    let Some(capture_generation) = live_provider_capture_generation(
+        &counters.capture_run_associations,
+        capture_run_id,
+        capture_fence_generation,
+    ) else {
         record_marker_violation(
             &mut counters,
-            format!("provider PCM for logical run {logical_run_id} has no capture association"),
+            format!(
+                "provider PCM for logical run {logical_run_id} capture run {capture_run_id} fence {capture_fence_generation} has no capture association"
+            ),
         );
         return;
     };
@@ -3602,10 +3622,13 @@ pub async fn native_e2e_configure(
         {
             return Err("source gate release requires isolated qualification-only request".into());
         }
-        if state.transcription_service.get_status().await != RecordingStatus::Recording
-            || state.transcription_service.logical_provider_run_id() == 0
+        let service_status = state.transcription_service.get_status().await;
+        if !matches!(
+            service_status,
+            RecordingStatus::Starting | RecordingStatus::Recording | RecordingStatus::Processing
+        ) || state.transcription_service.logical_provider_run_id() == 0
         {
-            return Err("source gate requires real service Recording".into());
+            return Err("source gate requires an active real provider episode".into());
         }
         // Recording can precede ServerMessage::Ready. This is the last async
         // observation before release, including current receiver/error/closed guards.
@@ -3640,7 +3663,7 @@ pub async fn native_e2e_configure(
         {
             return Err("source gate is not pending".into());
         }
-        row["sourceGateReady"] = json!({"status": "Recording", "serverReady": true, "logicalRunId": state.transcription_service.logical_provider_run_id(), "nativeReadyMs": observation::now_ms(), "clock": "native-process-monotonic-observation", "emittedFrames": 0});
+        row["sourceGateReady"] = json!({"status": format!("{service_status:?}"), "serverReady": true, "logicalRunId": state.transcription_service.logical_provider_run_id(), "nativeReadyMs": observation::now_ms(), "clock": "native-process-monotonic-observation", "emittedFrames": 0});
         shared.qualification_source_ready.notify_one();
         return Ok(());
     }
@@ -4745,6 +4768,32 @@ mod marker_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_provider_pcm_uses_capture_identity_not_retained_logical_owner() {
+        let associations = vec![
+            CaptureRunAssociation {
+                capture_run_id: 41,
+                capture_fence_generation: 7,
+                capture_generation: 1,
+            },
+            CaptureRunAssociation {
+                capture_run_id: 42,
+                capture_fence_generation: 8,
+                capture_generation: 2,
+            },
+        ];
+        assert_eq!(
+            live_provider_capture_generation(&associations, 41, 7),
+            Some(1)
+        );
+        assert_eq!(
+            live_provider_capture_generation(&associations, 42, 8),
+            Some(2)
+        );
+        assert_eq!(live_provider_capture_generation(&associations, 41, 8), None);
+    }
+
     fn callbacks() -> (
         TranscriptionCallback,
         ErrorCallback,
