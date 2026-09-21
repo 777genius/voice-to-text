@@ -1447,9 +1447,11 @@ struct Counters {
     provider_starts: u64,
     provider_resumes: u64,
     provider_failures: u64,
+    provider_failure_capture_generations: Vec<u64>,
     active_providers: u64,
     max_active_providers: u64,
     provider_stops: u64,
+    provider_no_audio_stops: u64,
     provider_audio_chunks: u64,
     capture_markers: Vec<MarkerRange>,
     provider_markers: Vec<ProviderMarkerRange>,
@@ -1555,20 +1557,7 @@ fn fnv1a_update(hash: &mut u64, bytes: &[u8]) {
 }
 
 fn record_pcm_ledger(ledgers: &mut Vec<PcmLedger>, generation: u64, chunk: &AudioChunk) {
-    let index = if let Some(index) = ledgers
-        .iter()
-        .position(|ledger| ledger.capture_generation == generation)
-    {
-        index
-    } else if ledgers.len() < MAX_RECORDED_GENERATIONS {
-        ledgers.push(PcmLedger {
-            capture_generation: generation,
-            chunks: 0,
-            samples: 0,
-            hash: FNV1A_OFFSET_BASIS,
-        });
-        ledgers.len() - 1
-    } else {
+    let Some(index) = ensure_pcm_ledger(ledgers, generation) else {
         return;
     };
     let ledger = &mut ledgers[index];
@@ -1579,6 +1568,25 @@ fn record_pcm_ledger(ledgers: &mut Vec<PcmLedger>, generation: u64, chunk: &Audi
     fnv1a_update(&mut ledger.hash, &(chunk.data.len() as u64).to_le_bytes());
     for sample in &chunk.data {
         fnv1a_update(&mut ledger.hash, &sample.to_le_bytes());
+    }
+}
+
+fn ensure_pcm_ledger(ledgers: &mut Vec<PcmLedger>, generation: u64) -> Option<usize> {
+    if let Some(index) = ledgers
+        .iter()
+        .position(|ledger| ledger.capture_generation == generation)
+    {
+        Some(index)
+    } else if ledgers.len() < MAX_RECORDED_GENERATIONS {
+        ledgers.push(PcmLedger {
+            capture_generation: generation,
+            chunks: 0,
+            samples: 0,
+            hash: FNV1A_OFFSET_BASIS,
+        });
+        Some(ledgers.len() - 1)
+    } else {
+        None
     }
 }
 
@@ -2158,6 +2166,7 @@ impl AudioCapture for ObservedWarmCapture {
             .await?;
         self.generation = Some(generation);
         let mut counters = shared.counters.lock().unwrap();
+        ensure_pcm_ledger(&mut counters.capture_pcm_ledgers, generation);
         counters.capture_starts += 1;
         counters.active_captures += 1;
         counters.max_active_captures = counters.max_active_captures.max(counters.active_captures);
@@ -2650,6 +2659,7 @@ impl AudioCapture for FixtureCapture {
             + 1;
         {
             let mut counters = self.shared.counters.lock().unwrap();
+            ensure_pcm_ledger(&mut counters.capture_pcm_ledgers, capture_generation);
             counters.capture_starts += 1;
             counters.active_captures += 1;
             counters.max_active_captures =
@@ -2897,7 +2907,17 @@ impl FixtureProvider {
         };
         tokio::time::sleep(Duration::from_millis(delay)).await;
         if fail {
-            self.shared.counters.lock().unwrap().provider_failures += 1;
+            let mut counters = self.shared.counters.lock().unwrap();
+            counters.provider_failures += 1;
+            if let Some(generation) = counters
+                .capture_pcm_ledgers
+                .last()
+                .map(|ledger| ledger.capture_generation)
+            {
+                counters
+                    .provider_failure_capture_generations
+                    .push(generation);
+            }
             return Err(SttError::Connection(SttConnectionError::simple(
                 "WebSocket connection timeout: Native fixture failed start",
             )));
@@ -2970,7 +2990,11 @@ impl FixtureProvider {
             stable_snapshot: text,
             error: None,
         });
-        self.shared.counters.lock().unwrap().provider_stops += 1;
+        let mut counters = self.shared.counters.lock().unwrap();
+        counters.provider_stops += 1;
+        if !self.received_audio {
+            counters.provider_no_audio_stops += 1;
+        }
         drop(terminal);
         self.lifecycle.notify_one();
     }
@@ -3411,7 +3435,11 @@ impl SttProvider for FixtureProvider {
                     stable_snapshot: String::new(),
                     error: None,
                 });
-                self.shared.counters.lock().unwrap().provider_stops += 1;
+                let mut counters = self.shared.counters.lock().unwrap();
+                counters.provider_stops += 1;
+                if !self.received_audio {
+                    counters.provider_no_audio_stops += 1;
+                }
                 self.lifecycle.notify_one();
             }
         }
@@ -4929,6 +4957,10 @@ mod tests {
         assert_eq!(counters.active_providers, 0);
         assert_eq!(counters.capture_starts, counters.capture_stops);
         assert_eq!(counters.provider_failures, 1);
+        assert_eq!(counters.provider_failure_capture_generations.len(), 1);
+        assert!(counters.capture_pcm_ledgers.iter().any(|ledger| {
+            ledger.capture_generation == counters.provider_failure_capture_generations[0]
+        }));
     }
 
     #[test]
@@ -5007,6 +5039,15 @@ mod tests {
         }
         let counters = shared.counters.lock().unwrap();
         assert_eq!(counters.capture_starts, counters.capture_stops);
+        assert_eq!(counters.capture_pcm_ledgers.len(), 5);
+        assert_eq!(
+            counters
+                .capture_pcm_ledgers
+                .iter()
+                .map(|ledger| ledger.capture_generation)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
         assert!(counters.audio_chunks > 0);
         assert_eq!(counters.capture_start_latencies_ms.len(), 5);
         assert!(counters
@@ -5019,7 +5060,7 @@ mod tests {
 #[cfg(test)]
 mod drain_tests {
     use super::*;
-    async fn provider() -> (FixtureProvider, Arc<Mutex<Vec<String>>>) {
+    async fn provider_without_audio() -> (FixtureProvider, Arc<Mutex<Vec<String>>>) {
         let shared = Arc::new(Fixture::default());
         shared.counters.lock().unwrap().active_providers = 1;
         let mut provider = FixtureProvider {
@@ -5049,6 +5090,10 @@ mod drain_tests {
             )
             .await
             .unwrap();
+        (provider, results)
+    }
+    async fn provider() -> (FixtureProvider, Arc<Mutex<Vec<String>>>) {
+        let (mut provider, results) = provider_without_audio().await;
         provider.send_audio(&audio(1)).await.unwrap();
         (provider, results)
     }
@@ -5078,6 +5123,17 @@ mod drain_tests {
     async fn wait_deadline(at: std::time::Instant) {
         tokio::time::sleep_until(tokio::time::Instant::from_std(at) + Duration::from_millis(10))
             .await;
+    }
+    #[tokio::test]
+    async fn no_audio_stop_is_counted_separately_from_pcm_delivery() {
+        let (mut provider, results) = provider_without_audio().await;
+        provider.stop_stream().await.unwrap();
+        let counters = provider.shared.counters.lock().unwrap();
+        assert_eq!(counters.provider_starts, 1);
+        assert_eq!(counters.provider_stops, 1);
+        assert_eq!(counters.provider_no_audio_stops, 1);
+        assert!(counters.provider_pcm_ledgers.is_empty());
+        assert!(results.lock().unwrap().is_empty());
     }
     #[tokio::test]
     async fn pause_observer_publishes_one_final_before_released_and_notifies() {

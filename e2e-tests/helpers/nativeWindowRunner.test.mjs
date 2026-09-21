@@ -109,12 +109,18 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
   const association = { captureGeneration: 1, captureRunId: 1, captureFenceGeneration: 1 };
   const captureMarker = { captureGeneration: 1, count: 1, firstSequence: 1, lastSequence: 1 };
   const fixture = { captureStarts: 35, captureStops: 35, providerStarts: 1, providerStops: 1,
-    providerResumes: 0, activeCaptures: 0, activeProviders: 0, maxActiveCaptures: 1,
+    providerFailures: 0, providerFailureCaptureGenerations: [],
+    providerResumes: 0, providerNoAudioStops: 0, warmTerminalCount: 0,
+    activeCaptures: 0, activeProviders: 0, maxActiveCaptures: 1,
     maxActiveProviders: 1, observationOverflow: false, markerViolations: [],
     captureRunAssociations: [association], captureMarkers: [captureMarker],
     providerMarkers: [{ ...captureMarker, ...association, providerSessionId: 1 }],
-    capturePcmLedgers: [{ captureGeneration: 1, chunks: 2, samples: 800, hash: '0123456789abcdef' }],
+    capturePcmLedgers: [{ captureGeneration: 1, chunks: 2, samples: 800, hash: '0123456789abcdef' },
+      ...Array.from({ length: 34 }, (_, index) => ({ captureGeneration: index + 2, chunks: 0,
+        samples: 0, hash: 'cbf29ce484222325' }))],
     providerPcmLedgers: [{ captureGeneration: 1, chunks: 2, samples: 800, hash: '0123456789abcdef' }] };
+  fixture.captureRunAssociations.push(...Array.from({ length: 34 }, (_, index) => ({
+    captureGeneration: index + 2, captureRunId: index + 2, captureFenceGeneration: index + 2 })));
   const valid = { marker, passed: true, fixture, report: { passed: true, completedCycles: 50,
     hiddenIdleMs: 180000, elapsedMs: 220000,
     scenarios: Array.from({ length: 12 }, (_, i) => `scenario-${i}`) } };
@@ -124,6 +130,12 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
     v => { v.report.completedCycles = 49; }, v => { v.fixture.captureStops--; },
     v => { v.fixture.activeCaptures = 1; }, v => { v.fixture.activeProviders = 1; },
     v => { v.fixture.markerViolations.push('gap'); },
+    v => { v.fixture.providerStops = -1; }, v => { v.fixture.providerStops = '1'; },
+    v => { v.fixture.providerFailures = 1; },
+    v => { v.fixture.providerNoAudioStops = 1; },
+    v => { v.fixture.captureMarkers[0].lastSequence = 2; },
+    v => { v.fixture.capturePcmLedgers.pop(); v.fixture.captureRunAssociations.pop(); },
+    v => { v.fixture.providerPcmLedgers = []; v.fixture.providerMarkers = []; },
     v => { v.fixture.providerPcmLedgers[0].hash = 'fedcba9876543210'; },
     v => { v.report.scenarios[1] = v.report.scenarios[0]; }]) {
     const invalid = structuredClone(valid); edit(invalid); assert.throws(() => validateResult(invalid), /incomplete/);
@@ -199,7 +211,9 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
       successorStayedVisible: true, markerDeliveryComplete: true, backgroundStartingBeforeHide: true })),
     final: { status: 'Idle', visible: false, preparedCaptureTokenCount: 0,
       fixture: { captureStarts: 1, captureStops: 1, providerStarts: 1, providerStops: 1,
-        providerResumes: 0, activeCaptures: 0, activeProviders: 0, maxActiveCaptures: 1,
+        providerFailures: 0, providerFailureCaptureGenerations: [],
+        providerResumes: 0, providerNoAudioStops: 0, warmTerminalCount: 0,
+        activeCaptures: 0, activeProviders: 0, maxActiveCaptures: 1,
         maxActiveProviders: 1, observationOverflow: false, markerViolations: [],
         captureRunAssociations: [{ captureGeneration: 1, captureRunId: 1, captureFenceGeneration: 1 }],
         captureMarkers: [{ captureGeneration: 1, count: 1, firstSequence: 1, lastSequence: 1 }],
@@ -290,6 +304,11 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
     e => { e.fixture.activeProviders = 1; },
     e => { e.fixture.markerViolations.push('gap'); },
     e => { e.fixture.captureStops = 0; },
+    e => { e.fixture.providerStops = 0; },
+    e => { e.fixture.providerStops = '1'; },
+    e => { e.fixture.captureMarkers[0].firstSequence = 100; },
+    e => { e.fixture.capturePcmLedgers = []; e.fixture.captureMarkers = []; },
+    e => { e.fixture.capturePcmLedgers[0].hash = 'fedcba9876543210'; },
     e => { e.report.final.fixture.providerPcmLedgers[0].hash = 'fedcba9876543210'; },
     e => { e.fixture.capturePcmLedgers[0].hash = 'fedcba9876543210'; },
     e => {

@@ -14,6 +14,8 @@ const source = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const marker = 'VOICETEXT_NATIVE_WINDOW_E2E_V1';
 
 const positiveSafeInteger = value => Number.isSafeInteger(value) && value > 0;
+const nonnegativeSafeInteger = value => Number.isSafeInteger(value) && value >= 0;
+const emptyPcmHash = 'cbf29ce484222325';
 
 function generationMap(rows, validate) {
   if (!Array.isArray(rows) || rows.length === 0) return null;
@@ -27,9 +29,12 @@ function generationMap(rows, validate) {
 }
 
 function validateExactPcmEvidence(fixture, requireEveryCaptureDelivered) {
-  const validLedger = ledger => positiveSafeInteger(ledger.chunks) &&
-    positiveSafeInteger(ledger.samples) && typeof ledger.hash === 'string' &&
-    /^[0-9a-f]{16}$/.test(ledger.hash);
+  const validLedger = ledger => nonnegativeSafeInteger(ledger.chunks) &&
+    nonnegativeSafeInteger(ledger.samples) && typeof ledger.hash === 'string' &&
+    /^[0-9a-f]{16}$/.test(ledger.hash) &&
+    (ledger.chunks === 0
+      ? ledger.samples === 0 && ledger.hash === emptyPcmHash
+      : ledger.samples > 0 && ledger.hash !== emptyPcmHash);
   const validCaptureMarker = row => positiveSafeInteger(row.count) &&
     positiveSafeInteger(row.firstSequence) && positiveSafeInteger(row.lastSequence) &&
     row.firstSequence <= row.lastSequence;
@@ -43,23 +48,37 @@ function validateExactPcmEvidence(fixture, requireEveryCaptureDelivered) {
   const captureMarkers = generationMap(fixture?.captureMarkers, validCaptureMarker);
   const providerMarkers = generationMap(fixture?.providerMarkers, validProviderMarker);
   const associations = generationMap(fixture?.captureRunAssociations, validAssociation);
+  const failureGenerations = fixture?.providerFailureCaptureGenerations;
   if (!captures || !providers || !captureMarkers || !providerMarkers || !associations ||
-      captures.size !== captureMarkers.size || providers.size !== providerMarkers.size ||
-      (requireEveryCaptureDelivered && captures.size !== providers.size)) return false;
+      captures.size !== associations.size || captures.size !== fixture.captureStarts ||
+      providers.size !== providerMarkers.size ||
+      !Array.isArray(failureGenerations) ||
+      failureGenerations.length !== fixture.providerFailures ||
+      failureGenerations.some(generation => !positiveSafeInteger(generation) || !captures.has(generation)) ||
+      providers.size + fixture.providerNoAudioStops !== fixture.providerStops) return false;
   const sameGenerations = (left, right) =>
     left.size === right.size && [...left.keys()].every(generation => right.has(generation));
-  if (!sameGenerations(captures, captureMarkers) ||
+  const capturesWithPcm = new Map([...captures].filter(([, ledger]) => ledger.chunks > 0));
+  const failed = new Set(failureGenerations);
+  const undelivered = [...capturesWithPcm.keys()].filter(generation => !providers.has(generation));
+  if (requireEveryCaptureDelivered ? undelivered.length !== 0 :
+    undelivered.some(generation => !failed.has(generation))) return false;
+  if (!sameGenerations(captures, associations) ||
+      !sameGenerations(capturesWithPcm, captureMarkers) ||
       !sameGenerations(providers, providerMarkers)) return false;
   for (const [generation, provider] of providers) {
     const capture = captures.get(generation);
+    const captureMarker = captureMarkers.get(generation);
     const marker = providerMarkers.get(generation);
     const association = associations.get(generation);
-    if (!capture || !marker || !association || capture.chunks !== provider.chunks ||
+    if (!capture || !captureMarker || !marker || !association || capture.chunks !== provider.chunks ||
         capture.samples !== provider.samples || capture.hash !== provider.hash ||
+        marker.count !== captureMarker.count || marker.firstSequence !== captureMarker.firstSequence ||
+        marker.lastSequence !== captureMarker.lastSequence ||
         marker.captureRunId !== association.captureRunId ||
         marker.captureFenceGeneration !== association.captureFenceGeneration) return false;
   }
-  return [...captureMarkers.keys()].every(generation => associations.has(generation));
+  return true;
 }
 
 function validateTerminalFixture(fixture, requireEveryCaptureDelivered) {
@@ -67,8 +86,26 @@ function validateTerminalFixture(fixture, requireEveryCaptureDelivered) {
     fixture.captureStarts === fixture.captureStops && fixture.activeCaptures === 0 &&
     fixture.activeProviders === 0 && fixture.maxActiveCaptures === 1 &&
     fixture.maxActiveProviders === 1 && fixture.observationOverflow === false &&
+    positiveSafeInteger(fixture.providerStarts) &&
+    nonnegativeSafeInteger(fixture.providerResumes) &&
+    nonnegativeSafeInteger(fixture.providerFailures) &&
+    nonnegativeSafeInteger(fixture.providerStops) &&
+    nonnegativeSafeInteger(fixture.providerNoAudioStops) &&
+    nonnegativeSafeInteger(fixture.warmTerminalCount) &&
+    fixture.providerStops + fixture.warmTerminalCount ===
+      fixture.providerStarts + fixture.providerResumes &&
     Array.isArray(fixture.markerViolations) && fixture.markerViolations.length === 0 &&
     validateExactPcmEvidence(fixture, requireEveryCaptureDelivered);
+}
+
+function terminalEvidenceSignature(fixture) {
+  const keys = ['captureStarts', 'captureStops', 'providerStarts', 'providerResumes',
+    'providerFailures', 'providerFailureCaptureGenerations',
+    'providerStops', 'providerNoAudioStops', 'warmTerminalCount', 'activeCaptures',
+    'activeProviders', 'maxActiveCaptures', 'maxActiveProviders', 'observationOverflow',
+    'markerViolations', 'captureRunAssociations', 'captureMarkers', 'providerMarkers',
+    'capturePcmLedgers', 'providerPcmLedgers'];
+  return JSON.stringify(Object.fromEntries(keys.map(key => [key, fixture?.[key]])));
 }
 
 export function validateMiniUxResult(envelope) {
@@ -99,7 +136,8 @@ export function validateMiniUxResult(envelope) {
   const visibleFrames = report?.warmVisibleFrames;
   const readyFrames = report?.warmReadyFrames;
   const exactPcmEvidenceValid = validateTerminalFixture(final?.fixture, true) &&
-    validateTerminalFixture(envelope.fixture, true);
+    validateTerminalFixture(envelope.fixture, true) &&
+    terminalEvidenceSignature(final?.fixture) === terminalEvidenceSignature(envelope.fixture);
   const firstVisibleFrames = Array.from({ length: 10 }, (_, index) =>
     Array.isArray(visibleFrames)
       ? visibleFrames.find(frame => frame?.attempt === index + 1)
@@ -963,8 +1001,7 @@ export function validateResult(envelope) {
       fixture.activeCaptures !== 0 || fixture.activeProviders !== 0 || fixture.captureStarts !== fixture.captureStops ||
       fixture.maxActiveCaptures !== 1 || fixture.maxActiveProviders !== 1 ||
       fixture.observationOverflow !== false || !Array.isArray(fixture.markerViolations) ||
-      fixture.markerViolations.length !== 0 || !validateExactPcmEvidence(fixture, false) ||
-      fixture.providerStops !== fixture.providerStarts + fixture.providerResumes ||
+      fixture.markerViolations.length !== 0 || !validateTerminalFixture(fixture, false) ||
       !Array.isArray(report.scenarios) || new Set(report.scenarios).size !== report.scenarios.length ||
       report.scenarios.some((name) => typeof name !== 'string' || !name) || report.scenarios.length < 12 ||
       report.passed !== true || report.completedCycles !== 50 ||
