@@ -418,7 +418,11 @@ export function verifyWarmProviderCanary(trial, report) {
   const eventMatchesEpisode = (event, episode, expectedEvent) => {
     const markerId = episode === 'episode-a.pcm' ? 0 : episode === 'episode-b.pcm' ? 1 : -1;
     const prefix = markerId === 0 ? 'на столе' : markerId === 1 ? 'за окном' : '';
-    return event?.event === expectedEvent && prefix !== '' && normalizedEventText(event).includes(prefix) &&
+    const oppositePrefix = markerId === 0 ? 'за окном' : markerId === 1 ? 'на столе' : '';
+    const normalized = normalizedEventText(event);
+    const expectedCount = prefix === '' ? 0 : normalized.split(prefix).length - 1;
+    const oppositeCount = oppositePrefix === '' ? 0 : normalized.split(oppositePrefix).length - 1;
+    return event?.event === expectedEvent && expectedCount === 1 && oppositeCount === 0 &&
       (expectedEvent !== 'transcription:final' ||
         Array.isArray(event.markerIds) && event.markerIds.includes(markerId));
   };
@@ -559,7 +563,7 @@ export function verifyWarmProviderCanary(trial, report) {
         cycle.trigger?.episode === plan.episode && cycle.trigger?.deliverySeq === event.deliverySeq)) {
         throw new Error(`Cycle ${index} missed ${expectedEvent} evidence`);
       }
-      const transcriptBeforeStop = triggerEvents.filter(event =>
+      const transcriptBeforeStop = events.slice(cycle.eventStart, cycle.stopEventIndex).filter(event =>
         event.cycleIndex === index && event.sessionId === cycle.logicalRunId &&
         ['transcription:partial', 'transcription:final'].includes(event.event));
       if ((plan.stopPhase === 'after-first-pcm' && transcriptBeforeStop.length !== 0) ||
@@ -586,7 +590,9 @@ export function verifyWarmProviderCanary(trial, report) {
     event.event === 'transcription:final' && event.cycleIndex === finalIndex &&
     event.sessionId === ownership?.logicalRunId && Number.isSafeInteger(event.deliverySeq) &&
     event.deliverySeq > 0 && typeof event.text === 'string' && event.text.trim().length > 0 &&
-    event.markerIds.length >= 2;
+    event.markerIds.length === 2 && event.markerIds.includes(0) && event.markerIds.includes(1) &&
+    (normalizedEventText(event).split('на столе').length - 1) === 1 &&
+    (normalizedEventText(event).split('за окном').length - 1) === 1;
   const allFinalEvents = events.filter(event => event.event === 'transcription:final');
   if (finalSource?.name !== trial.episodes[finalIndex] ||
       finalSource.bytes !== finalBytes || finalSource.sourceFrames !== finalBytes / 2 ||
@@ -606,6 +612,10 @@ export function verifyWarmProviderCanary(trial, report) {
       !Number.isSafeInteger(ownership.logicalRunId) || ownership.logicalRunId <= 0 ||
       !finalProviderLedger || finalProviderLedger.samples <= 0 ||
       callbackFence?.captureGeneration !== finalIndex + 1 ||
+      !Number.isSafeInteger(report.finalTranscriptFence?.eventStart) ||
+      report.finalTranscriptFence.eventStart < callbackFence.eventStart ||
+      report.finalTranscriptFence.eventStart > events.length ||
+      report.finalTranscriptFence.providerSamples !== finalSource.sourceFrames ||
       !Number.isFinite(report.finalStartedAtMs) ||
       report.finalStartedAtMs - cycles.at(-1).settledAtMs < cycles.at(-1).jitterMs ||
       report.finalStartedAtMs - cycles.at(-1).settledAtMs > cycles.at(-1).jitterMs + 500 ||
@@ -618,7 +628,7 @@ export function verifyWarmProviderCanary(trial, report) {
       typeof report.expectedInsertion !== 'string' || !report.expectedInsertion.trim() ||
       report.expectedInsertion === report.finalTextBeforeProof ||
       new Set(finalEvents.flatMap(event => event.markerIds)).size < 2 ||
-      !events.slice(callbackFence.eventStart).some(finalTranscriptMatchesCallbackGeneration) ||
+      !events.slice(report.finalTranscriptFence.eventStart).some(finalTranscriptMatchesCallbackGeneration) ||
       finalEvents.some(event => ['transcription:partial', 'transcription:final'].includes(event.event) &&
         event.sessionId !== ownership.logicalRunId) ||
       !Array.isArray(terminals) || terminals.length !== terminalEvents.length ||

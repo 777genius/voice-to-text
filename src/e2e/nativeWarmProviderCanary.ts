@@ -63,10 +63,13 @@ export function warmCanaryEventMatchesEpisode(
 ) {
   const markerId = episode === 'episode-a.pcm' ? 0 : episode === 'episode-b.pcm' ? 1 : -1;
   const prefix = markerId === 0 ? 'на столе' : markerId === 1 ? 'за окном' : '';
+  const oppositePrefix = markerId === 0 ? 'за окном' : markerId === 1 ? 'на столе' : '';
   const normalized = typeof event.text === 'string'
     ? event.text.toLocaleLowerCase('ru').replace(/ё/g, 'е').replace(/[.,!?]/g, '').replace(/\s+/g, ' ')
     : '';
-  return event.event === expectedEvent && prefix !== '' && normalized.includes(prefix) &&
+  const expectedCount = prefix === '' ? 0 : normalized.split(prefix).length - 1;
+  const oppositeCount = oppositePrefix === '' ? 0 : normalized.split(oppositePrefix).length - 1;
+  return event.event === expectedEvent && expectedCount === 1 && oppositeCount === 0 &&
     (expectedEvent !== 'transcription:final' || event.markerIds.includes(markerId));
 }
 
@@ -80,6 +83,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
   const report = { mode: 'warm-provider-canary', passed: false, trialId: '', targetDocument: '',
     expectedInsertion: '', finalTextBeforeProof: '', actualPasteVerified: false,
     finalCallbackFence: null as { captureGeneration: number; eventStart: number } | null,
+    finalTranscriptFence: null as { eventStart: number; providerSamples: number } | null,
     finalStartedAtMs: null as number | null,
     cycles: [] as Array<Record<string, unknown>>,
     finalOwnership: null as { logicalRunId: number; captureRunId: number; captureFenceGeneration: number } | null,
@@ -216,7 +220,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
           `cycle ${cycle.index} lost capture generation to logical run ownership`);
       }
       const stopEventIndex = report.events.length;
-      const eventsBeforeStop = report.events.slice(triggerEventStart, stopEventIndex)
+      const eventsBeforeStop = report.events.slice(eventStart, stopEventIndex)
         .filter(event => event.sessionId === beforeStop.logicalProviderRunId && event.cycleIndex === cycle.index);
       if (cycle.stopPhase === 'after-first-pcm') {
         check(!eventsBeforeStop.some(event =>
@@ -289,21 +293,27 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     report.finalOwnership = { logicalRunId: complete.logicalProviderRunId,
       captureRunId: complete.captureEpisode.runId,
       captureFenceGeneration: complete.captureEpisode.generation };
-    const finalProviderLedger = complete.fixture.providerPcmLedgers.find(row =>
-      row.captureGeneration === finalGeneration);
-    check(finalProviderLedger && finalProviderLedger.samples > 0,
-      'Final proof has no provider PCM ledger');
+    const delivered = await poll(value => value.fixture.providerPcmLedgers.some(row =>
+      row.captureGeneration === finalGeneration &&
+      row.samples === value.fixture.sourceEpisodes[trial.finalEpisodeIndex]?.sourceFrames),
+    'final provider full PCM drain', 30_000);
+    const finalProviderLedger = delivered.fixture.providerPcmLedgers.find(row =>
+      row.captureGeneration === finalGeneration)!;
+    const finalTranscriptEventStart = report.events.length;
+    report.finalTranscriptFence = { eventStart: finalTranscriptEventStart,
+      providerSamples: finalProviderLedger.samples };
     const belongsToFinalCallbackGeneration = (event: ProviderEvent) =>
       event.event === 'transcription:final' && event.sessionId === complete.logicalProviderRunId &&
-      event.cycleIndex === trial.finalEpisodeIndex && event.markerIds.length >= 2 &&
-      typeof event.text === 'string' && event.text.trim().length > 0;
+      event.cycleIndex === trial.finalEpisodeIndex &&
+      syntheticPhraseOccurrences(event.text ?? '').length === 2 &&
+      event.markerIds.length === 2 && event.markerIds.includes(0) && event.markerIds.includes(1);
     await toggle();
     await poll(value => value.fixture.captureStops === beforeFinal.fixture.captureStops + 1 &&
       value.fixture.activeCaptures === 0 &&
       value.pausedContinuation?.logicalRunId === complete.logicalProviderRunId &&
       value.providerTransport?.connectionRetained === true, 'final full proof pause', 45_000);
     await poll(() => store.finalText !== report.finalTextBeforeProof &&
-      report.events.slice(finalEventStart).some(belongsToFinalCallbackGeneration),
+      report.events.slice(finalTranscriptEventStart).some(belongsToFinalCallbackGeneration),
     'final stable transcript proof', 30_000);
     report.expectedInsertion = store.finalText;
     const finalMarkers = new Set(report.events.filter(event => event.cycleIndex === trial.finalEpisodeIndex)

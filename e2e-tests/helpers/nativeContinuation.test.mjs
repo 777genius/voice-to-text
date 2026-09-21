@@ -166,7 +166,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   });
   const finalLogicalRunId = 100 + warmProviderCanaryTrial.readyGateFromIndex;
   events.push({ event: 'transcription:final', cycleIndex: 20, sessionId: finalLogicalRunId,
-    deliverySeq: 99, text: 'marker zero marker one', markerIds: [0, 1] });
+    deliverySeq: 99, text: 'на столе лежит книга за окном растет береза', markerIds: [0, 1] });
   events.push({ event: 'transcription:terminal', cycleIndex: 20, sessionId: finalLogicalRunId,
     deliverySeq: null, markerIds: [] });
   terminals.push({ sessionId: finalLogicalRunId, cycleIndex: 20, complete: true });
@@ -207,6 +207,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     expectedInsertion: 'stable transcript',
     finalStartedAtMs: cycleClock,
     finalCallbackFence: { captureGeneration: 21, eventStart: events.length - 2 },
+    finalTranscriptFence: { eventStart: events.length - 2,
+      providerSamples: sources[20].sourceFrames },
     finalOwnership: { logicalRunId: finalLogicalRunId, captureRunId: 999, captureFenceGeneration: 21 },
     terminals, final: { status: 'Idle', preparedCaptureTokenCount: 0,
       providerTransport: { connectionRetained: false }, fixture } };
@@ -273,6 +275,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     value => { value.final.fixture.providerCallbackGenerations.pop(); },
     value => { value.finalCallbackFence.captureGeneration = 20; },
     value => { value.finalCallbackFence.eventStart = value.events.length; },
+    value => { value.finalTranscriptFence.eventStart = value.events.length - 1; },
     value => { const cycle = value.cycles.find(row => row.stopPhase === 'after-final');
       cycle.triggerEventStart += 1; },
     value => { const cycle = value.cycles.find(row => row.stopPhase === 'after-final');
@@ -308,6 +311,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       }
     }
     value.finalCallbackFence.eventStart += 1;
+    value.finalTranscriptFence.eventStart += 1;
   };
   const collapsedPartial = structuredClone(report);
   const partialCycle = collapsedPartial.cycles.find(row => row.stopPhase === 'during-partial');
@@ -317,6 +321,16 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     markerIds: [partialCycle.episode === 'episode-a.pcm' ? 0 : 1] });
   assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, collapsedPartial),
     /stop phase collapsed/);
+  const collapsedFirstPcm = structuredClone(report);
+  const firstPcmCycle = collapsedFirstPcm.cycles.find(row => row.stopPhase === 'after-first-pcm' &&
+    row.index > warmProviderCanaryTrial.readyGateFromIndex);
+  insertBeforeStop(collapsedFirstPcm, firstPcmCycle, { event: 'transcription:partial',
+    cycleIndex: firstPcmCycle.index, sessionId: firstPcmCycle.logicalRunId, deliverySeq: null,
+    text: firstPcmCycle.episode === 'episode-a.pcm' ? 'на столе' : 'за окном',
+    markerIds: [firstPcmCycle.episode === 'episode-a.pcm' ? 0 : 1] });
+  firstPcmCycle.triggerEventStart += 1;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, collapsedFirstPcm),
+    /stop phase collapsed/);
   const duplicateFinal = structuredClone(report);
   const finalCycle = duplicateFinal.cycles.find(row => row.stopPhase === 'after-final');
   const firstFinal = duplicateFinal.events.slice(finalCycle.triggerEventStart, finalCycle.stopEventIndex)
@@ -324,6 +338,19 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   insertBeforeStop(duplicateFinal, finalCycle, { ...firstFinal, deliverySeq: 701 });
   assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, duplicateFinal),
     /Final warm provider proof is incomplete/);
+  for (const text of [
+    'на столе лежит книга за окном растет береза',
+    'на столе лежит книга на столе лежит книга',
+  ]) {
+    const contaminated = structuredClone(report);
+    const cycle = contaminated.cycles.find(row => row.stopPhase === 'after-final' &&
+      row.episode === 'episode-a.pcm');
+    const event = contaminated.events.slice(cycle.triggerEventStart, cycle.stopEventIndex)
+      .find(row => row.event === 'transcription:final');
+    event.text = text;
+    event.markerIds = text.includes('за окном') ? [0, 1] : [0];
+    assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, contaminated));
+  }
 });
 
 test('mode counts and initial-only Ready gate preserve the legacy prescribed trials', async () => {

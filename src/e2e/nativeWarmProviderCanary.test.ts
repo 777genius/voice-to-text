@@ -64,5 +64,11 @@ describe('warm provider paid canary plan', () => {
     expect(warmCanaryEventMatchesEpisode(final, 'episode-b.pcm', 'transcription:final')).toBe(true);
     expect(warmCanaryEventMatchesEpisode({ ...final, markerIds: [] },
       'episode-b.pcm', 'transcription:final')).toBe(false);
+    expect(warmCanaryEventMatchesEpisode({ ...final,
+      text: 'За окном растет береза. На столе лежит книга', markerIds: [0, 1] },
+    'episode-b.pcm', 'transcription:final')).toBe(false);
+    expect(warmCanaryEventMatchesEpisode({ ...final,
+      text: 'За окном растет береза. За окном растет береза' },
+    'episode-b.pcm', 'transcription:final')).toBe(false);
   });
 });
