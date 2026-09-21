@@ -4102,20 +4102,23 @@ pub async fn native_e2e_state(
     let session = state
         .active_transcription_session_id
         .load(std::sync::atomic::Ordering::SeqCst);
-    native_diagnostic::mark(D::EpochBefore, diagnostic_id);
-    let epoch = state.recording_window_lifecycle.current();
-    native_diagnostic::mark(D::EpochAfter, diagnostic_id);
+    let lifecycle = state.recording_window_lifecycle.clone();
     let (tx, rx) = tokio::sync::oneshot::channel();
     native_diagnostic::mark(D::UiEnqueue, diagnostic_id);
     app.run_on_main_thread(move || {
         native_diagnostic::mark(D::UiClosure, diagnostic_id);
         let result = (|| -> Result<Value, String> {
-            native_diagnostic::mark(D::VisibleBefore, diagnostic_id);
-            let visible = window.is_visible().map_err(|e| e.to_string())?;
-            native_diagnostic::mark(D::VisibleAfter, diagnostic_id);
-            native_diagnostic::mark(D::PositionBefore, diagnostic_id);
-            let position = window.outer_position().map_err(|e| e.to_string())?;
-            native_diagnostic::mark(D::PositionAfter, diagnostic_id);
+            native_diagnostic::mark(D::EpochBefore, diagnostic_id);
+            let (epoch, (visible, position)) = lifecycle.snapshot(|| {
+                native_diagnostic::mark(D::VisibleBefore, diagnostic_id);
+                let visible = window.is_visible().map_err(|e| e.to_string())?;
+                native_diagnostic::mark(D::VisibleAfter, diagnostic_id);
+                native_diagnostic::mark(D::PositionBefore, diagnostic_id);
+                let position = window.outer_position().map_err(|e| e.to_string())?;
+                native_diagnostic::mark(D::PositionAfter, diagnostic_id);
+                Ok::<_, String>((visible, position))
+            })?;
+            native_diagnostic::mark(D::EpochAfter, diagnostic_id);
             #[cfg(target_os = "macos")]
             let number: i64 = unsafe {
                 use objc::{msg_send, sel, sel_impl};
@@ -4129,7 +4132,7 @@ pub async fn native_e2e_state(
             };
             #[cfg(not(target_os = "macos"))]
             let number: i64 = 0;
-            Ok(json!({"visible":visible,"windowNumber":number,"position":{"x":position.x,"y":position.y}}))
+            Ok(json!({"visible":visible,"windowEpoch":epoch,"windowNumber":number,"position":{"x":position.x,"y":position.y}}))
         })();
         native_diagnostic::mark(if tx.send(result).is_ok() { D::SendOk } else { D::SendError }, diagnostic_id);
     }).map_err(|e| e.to_string())?;
@@ -4225,7 +4228,6 @@ pub async fn native_e2e_state(
     native_diagnostic::mark(D::ServiceBefore, diagnostic_id);
     if after_write_case() { result["afterWriteService"] = after_write_service(&state).await; }
     native_diagnostic::mark(D::ServiceAfter, diagnostic_id);
-    result["windowEpoch"] = json!(epoch);
     native_diagnostic::mark(D::TokensBefore, diagnostic_id);
     result["preparedCaptureTokenCount"] = json!(state
         .prepared_capture_tokens

@@ -57,6 +57,15 @@ impl RecordingWindowLifecycle {
         *self.epoch.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Reads native window state and its lifecycle epoch as one coherent
+    /// observation. Visibility mutations use the same lock, so callers cannot
+    /// pair a pre-show epoch with post-show native state.
+    pub fn snapshot<E, T>(&self, observe: impl FnOnce() -> Result<T, E>) -> Result<(u64, T), E> {
+        let epoch = self.epoch.lock().unwrap_or_else(|e| e.into_inner());
+        let observed = observe()?;
+        Ok((*epoch, observed))
+    }
+
     pub fn start_intent(&self) -> u64 {
         let mut epoch = self.epoch.lock().unwrap_or_else(|e| e.into_inner());
         *epoch = epoch
@@ -168,6 +177,15 @@ mod tests {
                 || -> Result<(), ()> { panic!("old paste must not suppress successor") }
             )
             .unwrap());
+    }
+
+    #[test]
+    fn snapshot_returns_observation_with_the_locked_epoch() {
+        let lifecycle = RecordingWindowLifecycle::default();
+        let shown = lifecycle.show(|| Ok::<_, ()>(())).unwrap();
+        let (observed_epoch, visible) = lifecycle.snapshot(|| Ok::<_, ()>(true)).unwrap();
+        assert_eq!(observed_epoch, shown);
+        assert!(visible);
     }
 
     #[test]
