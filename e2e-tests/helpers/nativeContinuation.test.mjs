@@ -131,8 +131,11 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       eventStart, eventEnd: events.length, activeCapturesAfterStop: 0 };
   });
   const finalLogicalRunId = 100 + warmProviderCanaryTrial.readyGateFromIndex;
+  const earlierProviderSamples = 15 * 320;
   events.push({ event: 'transcription:final', cycleIndex: 20, sessionId: finalLogicalRunId,
-    deliverySeq: 99, text: 'marker zero marker one', markerIds: [0, 1] });
+    deliverySeq: 99, text: 'marker zero marker one', markerIds: [0, 1], timingKnown: true,
+    sourceStartSeconds: earlierProviderSamples / 16_000,
+    sourceDurationSeconds: approvedFixtures['long-auto-commit.pcm'][0] / 32_000 });
   events.push({ event: 'transcription:terminal', cycleIndex: 20, sessionId: finalLogicalRunId,
     deliverySeq: null, markerIds: [] });
   const sources = warmProviderCanaryTrial.episodes.map((name, index) => {
@@ -169,6 +172,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   const report = { mode: 'warm-provider-canary', passed: true, trialId: warmProviderCanaryTrial.id,
     errors: [], duplicateDeliveries: [], cycles, events, finalTextBeforeProof: 'stale transcript',
     expectedInsertion: 'stable transcript',
+    finalProviderAudioRangeSeconds: { start: earlierProviderSamples / 16_000,
+      end: (earlierProviderSamples + approvedFixtures['long-auto-commit.pcm'][0] / 2) / 16_000 },
     finalOwnership: { logicalRunId: finalLogicalRunId, captureRunId: 999, captureFenceGeneration: 21 },
     terminals: [{ sessionId: finalLogicalRunId, cycleIndex: 20, complete: true }], final: { status: 'Idle', preparedCaptureTokenCount: 0,
       providerTransport: { connectionRetained: false }, fixture } };
@@ -188,6 +193,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     value => { value.final.fixture.sourceEpisodes[20].pacingIntervalsChecked = 0; },
     value => { value.final.fixture.sourceEpisodes[20].lastSourceFrameElapsedMs = 0; },
     value => { value.finalTextBeforeProof = value.expectedInsertion; },
+    value => { const event = value.events.find(event => event.cycleIndex === 20 && event.event === 'transcription:final');
+      event.sourceStartSeconds = 0; event.sourceDurationSeconds = 0.1; },
     value => { value.events.find(event => event.cycleIndex === 20 && event.event === 'transcription:final').event = 'transcription:partial'; },
     value => { value.finalOwnership.logicalRunId = value.finalOwnership.captureRunId; },
     value => value.terminals.push({ sessionId: finalLogicalRunId, cycleIndex: 20, complete: true }),

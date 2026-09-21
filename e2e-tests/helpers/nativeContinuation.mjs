@@ -427,6 +427,24 @@ export function verifyWarmProviderCanary(trial, report) {
   const terminals = report.terminals;
   const ownership = report.finalOwnership;
   const finalBytes = approvedFixtures[trial.episodes[finalIndex]][0];
+  const finalProviderLedger = providerByGeneration.get(finalIndex + 1);
+  const earlierProviderSamples = providerLedgers
+    .filter(row => row.captureGeneration < finalIndex + 1)
+    .reduce((sum, row) => sum + row.samples, 0);
+  const finalProviderAudioRange = finalProviderLedger ? {
+    start: earlierProviderSamples / 16_000,
+    end: (earlierProviderSamples + finalProviderLedger.samples) / 16_000,
+  } : null;
+  const range = report.finalProviderAudioRangeSeconds;
+  const finalTranscriptMatchesAudio = event => {
+    const eventEnd = event.sourceStartSeconds + event.sourceDurationSeconds;
+    return event.event === 'transcription:final' && event.sessionId === ownership?.logicalRunId &&
+      typeof event.text === 'string' && event.text.trim().length > 0 && event.markerIds.length >= 2 &&
+      event.timingKnown === true && Number.isFinite(event.sourceStartSeconds) &&
+      Number.isFinite(event.sourceDurationSeconds) && event.sourceStartSeconds >= 0 &&
+      event.sourceDurationSeconds > 0 && finalProviderAudioRange !== null &&
+      event.sourceStartSeconds < finalProviderAudioRange.end && eventEnd > finalProviderAudioRange.start;
+  };
   if (finalSource?.name !== trial.episodes[finalIndex] ||
       finalSource.bytes !== finalBytes || finalSource.sourceFrames !== finalBytes / 2 ||
       finalSource.sourceDurationMs !== finalBytes / 32 || finalSource.cadenceMs !== 20 ||
@@ -443,13 +461,13 @@ export function verifyWarmProviderCanary(trial, report) {
       ownership.captureRunId !== finalAssociation.captureRunId ||
       ownership.captureFenceGeneration !== finalAssociation.captureFenceGeneration ||
       !Number.isSafeInteger(ownership.logicalRunId) || ownership.logicalRunId <= 0 ||
+      !range || !finalProviderAudioRange || range.start !== finalProviderAudioRange.start ||
+      range.end !== finalProviderAudioRange.end || range.start < 0 || range.end <= range.start ||
       typeof report.finalTextBeforeProof !== 'string' ||
       typeof report.expectedInsertion !== 'string' || !report.expectedInsertion.trim() ||
       report.expectedInsertion === report.finalTextBeforeProof ||
       new Set(finalEvents.flatMap(event => event.markerIds)).size < 2 ||
-      !finalEvents.some(event => event.event === 'transcription:final' &&
-        event.sessionId === ownership.logicalRunId && typeof event.text === 'string' &&
-        event.text.trim().length > 0 && event.markerIds.length >= 2) ||
+      !finalEvents.some(finalTranscriptMatchesAudio) ||
       finalEvents.some(event => ['transcription:partial', 'transcription:final'].includes(event.event) &&
         event.sessionId !== ownership.logicalRunId) ||
       events.some((event, eventIndex) => Number.isSafeInteger(event.cycleIndex) &&

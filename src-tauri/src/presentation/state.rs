@@ -2282,6 +2282,29 @@ impl AppState {
         &self,
         requested: Option<String>,
     ) -> Result<Arc<crate::infrastructure::audio::WarmDictationInput>, String> {
+        self.warm_owner_for_with(requested, |requested| {
+            #[cfg(not(all(debug_assertions, feature = "native-window-e2e")))]
+            let owner = crate::infrastructure::audio::WarmDictationInput::new_cpal(requested)
+                .map_err(|e| e.to_string())?;
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            let owner = {
+                let _ = requested;
+                super::native_e2e::warm_input_owner().map_err(|e| e.to_string())?
+            };
+            Ok(owner)
+        })
+        .await
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn warm_owner_for_with(
+        &self,
+        requested: Option<String>,
+        create: impl FnOnce(
+            Option<String>,
+        )
+            -> Result<Arc<crate::infrastructure::audio::WarmDictationInput>, String>,
+    ) -> Result<Arc<crate::infrastructure::audio::WarmDictationInput>, String> {
         let _creation = self.warm_owner_creation_guard.lock().await;
         let previous = self.warm_dictation_input.lock().unwrap().clone();
         if let Some((key, owner)) = previous.as_ref() {
@@ -2289,14 +2312,13 @@ impl AppState {
                 return Ok(owner.clone());
             }
         }
+        // Clear the cache before retiring the old route. If shutdown or the
+        // replacement open fails, a later retry must not reuse a dead owner.
+        let previous = self.warm_dictation_input.lock().unwrap().take();
         if let Some((_, owner)) = previous {
             owner.shutdown().await.map_err(|e| e.to_string())?;
         }
-        #[cfg(not(all(debug_assertions, feature = "native-window-e2e")))]
-        let owner = crate::infrastructure::audio::WarmDictationInput::new_cpal(requested.clone())
-            .map_err(|e| e.to_string())?;
-        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
-        let owner = super::native_e2e::warm_input_owner().map_err(|e| e.to_string())?;
+        let owner = create(requested.clone())?;
         *self.warm_dictation_input.lock().unwrap() = Some((requested, owner.clone()));
         if self.warm_input_suspended.load(Ordering::Acquire) != 0 {
             owner.suspend_now().map_err(|e| e.to_string())?;
@@ -2439,6 +2461,39 @@ impl Default for AppState {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(target_os = "macos", feature = "native-window-e2e"))]
+    #[tokio::test]
+    async fn failed_warm_route_replacement_does_not_cache_the_retired_owner() {
+        use super::AppState;
+        let service = std::sync::Arc::new(crate::application::TranscriptionService::new(
+            Box::new(crate::infrastructure::audio::MockAudioCapture::new()),
+            std::sync::Arc::new(crate::infrastructure::DefaultSttProviderFactory::new()),
+        ));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = AppState::from_recording_ports(
+            service,
+            crate::domain::AppConfig::default(),
+            tx,
+            rx,
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        );
+        let retired = crate::presentation::native_e2e::warm_input_owner().unwrap();
+        *state.warm_dictation_input.lock().unwrap() = Some((Some("old route".into()), retired));
+
+        let error = match state
+            .warm_owner_for_with(Some("new route".into()), |_| {
+                Err("replacement open failed".into())
+            })
+            .await
+        {
+            Ok(_) => panic!("replacement unexpectedly succeeded"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error, "replacement open failed");
+        assert!(state.warm_dictation_input.lock().unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn warm_lifecycle_auth_cannot_clear_sleep_and_stale_wake_cannot_clear_new_sleep() {
         use super::{AppState, WarmInputSuspension};
