@@ -257,8 +257,13 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
   assert.throws(() => validateResult(evidence), /physical warm input evidence/);
   const warm = structuredClone(evidence);
   Object.assign(warm.report, { warmMode: true, warmReopens: 10, idleAcceptedDelta: 0 });
-  warm.report.trace = [{ label: 'warm reopen', captureReady: true }];
+  warm.report.trace = Array.from({ length: 10 }, (_, i) => ({ label: `warm reopen ${i + 1}`,
+    native: { visible: true, windowEpoch: i + 1 }, captureReady: true,
+    captureRunId: i + 1, intentRevision: i + 1 }));
   warm.report.warmReadyFrames = Array.from({ length: 10 }, (_, i) => ({ runId: i + 1, revision: i + 1, phase: 'mini-status-dot recording' }));
+  warm.report.warmWindowEpochs = Array.from({ length: 10 }, (_, i) => ({
+    attempt: i + 1, windowEpoch: i + 1, runId: i + 1, revision: i + 1,
+  }));
   warm.report.warmVisibleFrames = Array.from({ length: 10 }, (_, i) => ({
     attempt: i + 1, source: 'shown', windowEpoch: i + 1, revision: i + 1, runId: i + 1,
     captureReady: false, readinessReason: 'activating-warm-capture', phase: 'mini-status-dot', statusText: '',
@@ -325,6 +330,8 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
       e.report.warmReadyFrames[1].revision = e.report.warmReadyFrames[0].revision;
     },
     e => { e.report.warmVisibleFrames[1].windowEpoch = e.report.warmVisibleFrames[0].windowEpoch - 1; },
+    e => { e.report.warmVisibleFrames[0].windowEpoch = 1001; },
+    e => { e.report.warmWindowEpochs[0].windowEpoch = 1001; },
   ]) {
     const broken = structuredClone(warm);
     mutate(broken);

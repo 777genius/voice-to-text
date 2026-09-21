@@ -16,6 +16,8 @@ interface Snapshot {
     captureStarts: number; activeCaptures: number; providerStarts: number; activeProviders: number;
     maxActiveProviders: number; markerViolations: string[]; captureMarkers: Marker[];
     captureRunAssociations: Array<{ captureGeneration: number; captureRunId: number }>;
+    capturePcmLedgers: Array<{ captureGeneration: number; samples: number; hash: string }>;
+    providerPcmLedgers: Array<{ captureGeneration: number; samples: number; hash: string }>;
     providerMarkers: Marker[]; finals: number;
   };
 }
@@ -25,23 +27,21 @@ export type WarmVisibleFrame = {
   revision: number | null; runId: number | null; captureReady: boolean;
   readinessReason: string | undefined; phase: string; statusText: string;
 };
-type PendingWarmVisibleFrame = Omit<WarmVisibleFrame, 'windowEpoch'>;
 export type WarmReopenEvidence = {
-  attempt: number; windowEpoch: number | null; pendingFrames: PendingWarmVisibleFrame[];
+  attempt: number; baselineWindowEpoch: number; windowEpoch: number | null; closed: boolean;
 };
 export function bindWarmVisibleFrameEvidence(
   reopen: WarmReopenEvidence,
   frame: Omit<WarmVisibleFrame, 'attempt' | 'windowEpoch'>,
+  native: Pick<Snapshot, 'visible' | 'windowEpoch'>,
+  expectedWindowEpoch?: number,
 ): WarmVisibleFrame[] {
-  const pending = { attempt: reopen.attempt, ...frame };
-  if (reopen.windowEpoch === null) {
-    reopen.pendingFrames.push(pending);
-    return [];
-  }
-  const frames = reopen.pendingFrames.map(value => ({ ...value, windowEpoch: reopen.windowEpoch! }));
-  reopen.pendingFrames = [];
-  frames.push({ ...pending, windowEpoch: reopen.windowEpoch });
-  return frames;
+  if (reopen.closed || native.visible !== true || !Number.isSafeInteger(native.windowEpoch) ||
+      native.windowEpoch <= reopen.baselineWindowEpoch ||
+      (expectedWindowEpoch !== undefined && native.windowEpoch !== expectedWindowEpoch) ||
+      (reopen.windowEpoch !== null && reopen.windowEpoch !== native.windowEpoch)) return [];
+  reopen.windowEpoch = native.windowEpoch;
+  return [{ attempt: reopen.attempt, ...frame, windowEpoch: native.windowEpoch }];
 }
 const state = () => invoke<Snapshot>('native_e2e_state');
 const physicalCounts = (snapshot: Snapshot): PhysicalCounts => ({
@@ -52,6 +52,15 @@ const markerForRun = (snapshot: Snapshot, runId: number | null) => {
   const association = snapshot.fixture.captureRunAssociations.find(a => a.captureRunId === runId);
   return snapshot.fixture.captureMarkers.find(m => m.captureGeneration === association?.captureGeneration);
 };
+export const hasMatchingRecoveryPcm = (snapshot: Snapshot, runId: number | null) => {
+  const association = snapshot.fixture.captureRunAssociations.find(row => row.captureRunId === runId);
+  const capture = snapshot.fixture.capturePcmLedgers.find(row =>
+    row.captureGeneration === association?.captureGeneration);
+  const provider = snapshot.fixture.providerPcmLedgers.find(row =>
+    row.captureGeneration === association?.captureGeneration);
+  return Boolean(capture && provider && capture.samples > 0 && provider.samples === capture.samples &&
+    provider.hash === capture.hash);
+};
 // Native delay also resumes a hidden WebView; JS background timers are not our test clock.
 const delay = (durationMs: number) => invoke('native_e2e_delay', { durationMs: Math.ceil(Math.max(0, durationMs)) });
 function check(ok: unknown, message: string): asserts ok { if (!ok) throw new Error(message); }
@@ -61,6 +70,8 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
   const config = useAppConfigStore(pinia);
   const report = { mode: 'mini-ux', warmMode: false, warmReopens: 0, idleAcceptedDelta: 0,
     warmReadyFrames: [] as Array<{ runId: number | null; revision: number | null; phase: string }>,
+    warmWindowEpochs: [] as Array<{ attempt: number; windowEpoch: number;
+      runId: number | null; revision: number | null }>,
     warmReuseOpenCount: 0, lifecycle: null as null | {
       sleepClosed: boolean; wakeOpenedOnce: boolean; terminalCount: number; recoveryOpenedOnce: boolean;
       physical: {
@@ -82,6 +93,7 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
   let lastGestureAt = 0;
   let shown = 0;
   let activeWarmReopen: WarmReopenEvidence | null = null;
+  const pendingVisibleObservations = new Set<Promise<void>>();
   const observeWarmFrame = (source: 'render' | 'shown' | 'sample') => {
     const readiness = store.captureReadiness;
     if (!store.recordingDesiredOn || readiness?.reason !== 'activating-warm-capture' ||
@@ -102,27 +114,41 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
     }
   };
   const observeWarmVisibleFrame = (source: 'render' | 'shown' | 'sample',
-    reopen = activeWarmReopen) => {
+    reopen = activeWarmReopen, native?: Snapshot, expectedWindowEpoch?: number) => {
     if (!reopen) return;
     const dot = document.querySelector('.mini-status-dot');
     if (!dot) return;
-    if (report.warmVisibleFrames.length + reopen.pendingFrames.length >= 512) {
+    if (report.warmVisibleFrames.length + pendingVisibleObservations.size >= 512) {
       if (!report.errors.includes('Warm visible frame evidence overflow')) {
         report.errors.push('Warm visible frame evidence overflow');
       }
       return;
     }
-    report.warmVisibleFrames.push(...bindWarmVisibleFrameEvidence(reopen, { source,
+    const frame = { source,
       revision: store.recordingIntentRevision,
       runId: store.captureRunId, captureReady: store.isCaptureReady,
       readinessReason: store.captureReadiness?.reason, phase: dot.className,
-      statusText: dot.getAttribute('aria-label') ?? '' }));
+      statusText: dot.getAttribute('aria-label') ?? '' };
+    const record = (snapshot: Snapshot) => {
+      report.warmVisibleFrames.push(
+        ...bindWarmVisibleFrameEvidence(reopen, frame, snapshot, expectedWindowEpoch));
+    };
+    if (native) {
+      record(native);
+      return;
+    }
+    const observation = state().then(record).catch(error => {
+      report.errors.push(`Warm visible native observation failed: ${String(error)}`);
+    }).finally(() => pendingVisibleObservations.delete(observation));
+    pendingVisibleObservations.add(observation);
+  };
+  const flushWarmVisibleObservations = async () => {
+    await Promise.all([...pendingVisibleObservations]);
   };
   const unlisten = await listen<{ windowEpoch: number }>('recording:window-shown', event => {
     shown += 1;
     if (activeWarmReopen && Number.isSafeInteger(event.payload?.windowEpoch)) {
-      activeWarmReopen.windowEpoch = event.payload.windowEpoch;
-      observeWarmVisibleFrame('shown');
+      observeWarmVisibleFrame('shown', activeWarmReopen, undefined, event.payload.windowEpoch);
     }
     observeWarmFrame('shown');
   });
@@ -135,10 +161,7 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
   const text = () => document.querySelector('.mini-transcription-text-inner')?.textContent?.trim() ?? '';
   const trace = (label: string, native?: Snapshot) => {
     if (activeWarmReopen && native?.visible && Number.isSafeInteger(native.windowEpoch)) {
-      // Native visibility is authoritative if the WebView receives the shown
-      // event after this polling sample.
-      activeWarmReopen.windowEpoch = native.windowEpoch;
-      observeWarmVisibleFrame('sample', activeWarmReopen);
+      observeWarmVisibleFrame('sample', activeWarmReopen, native);
     } else {
       observeWarmVisibleFrame('sample');
     }
@@ -315,10 +338,12 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
         report.idleAcceptedDelta += later.fixture.audioChunks - idle.fixture.audioChunks;
         check(report.idleAcceptedDelta === 0, 'Idle native PCM escaped production gate');
         const visibleFrameStart = report.warmVisibleFrames.length;
-        activeWarmReopen = { attempt: attempt + 1, windowEpoch: null, pendingFrames: [] };
+        activeWarmReopen = { attempt: attempt + 1, baselineWindowEpoch: idle.windowEpoch,
+          windowEpoch: null, closed: false };
         await toggle();
         const recording = await until(`warm reopen ${attempt + 1}`, s => s.visible && store.isCaptureReady &&
           (markerForRun(s, store.captureRunId)?.count ?? 0) >= 2);
+        await flushWarmVisibleObservations();
         let visibleFrames = report.warmVisibleFrames.slice(visibleFrameStart)
           .filter(frame => frame.attempt === attempt + 1 && frame.windowEpoch === recording.windowEpoch);
         // A hidden WebView can coalesce the shown event and its first mutation
@@ -326,8 +351,7 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
         // that this exact window epoch is visible. Preserve that first sampled
         // frame instead of making the evidence gate depend on callback timing.
         if (visibleFrames.length === 0) {
-          activeWarmReopen.windowEpoch = recording.windowEpoch;
-          observeWarmVisibleFrame('sample', activeWarmReopen);
+          observeWarmVisibleFrame('sample', activeWarmReopen, recording);
           visibleFrames = report.warmVisibleFrames.slice(visibleFrameStart)
             .filter(frame => frame.attempt === attempt + 1 && frame.windowEpoch === recording.windowEpoch);
         }
@@ -348,9 +372,12 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
         check(/\brecording\b/.test(phase) && !/\b(starting|processing)\b/.test(phase),
           'Admitted warm input failed to render ready recording phase');
         report.warmReadyFrames.push({ runId: store.captureRunId, revision: store.recordingIntentRevision, phase });
+        report.warmWindowEpochs.push({ attempt: attempt + 1, windowEpoch: recording.windowEpoch,
+          runId: store.captureRunId, revision: store.recordingIntentRevision });
         check(!generations.has(generation), 'Warm reopen reused logical lease identity');
         generations.add(generation);
         check(recording.fixture.physicalOpenCount === 1, 'Warm reopen physically reopened input');
+        activeWarmReopen.closed = true;
         activeWarmReopen = null;
         await toggle();
         await until('warm stop idle', s => !s.visible && s.status === 'Idle' && s.fixture.activeCaptures === 0);
@@ -399,7 +426,8 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
       check((await state()).fixture.physicalOpenCount === awake.fixture.physicalOpenCount,
         'Device loss reopened without new intent');
       await toggle();
-      const recovered = await until('explicit cold recovery after confirmed close', s => s.visible && store.isCaptureReady);
+      const recovered = await until('explicit cold recovery after confirmed close', s =>
+        s.visible && store.isCaptureReady && hasMatchingRecoveryPcm(s, store.captureRunId));
       check(recovered.fixture.physicalOpenCount === lost.fixture.physicalOpenCount + 1,
         'Recovery did not open exactly one replacement input');
       await toggle();

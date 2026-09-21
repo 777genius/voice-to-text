@@ -215,6 +215,17 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
           association.captureFenceGeneration === beforeStop.captureEpisode.generation,
           `cycle ${cycle.index} lost capture generation to logical run ownership`);
       }
+      const stopEventIndex = report.events.length;
+      const eventsBeforeStop = report.events.slice(triggerEventStart, stopEventIndex)
+        .filter(event => event.sessionId === beforeStop.logicalProviderRunId && event.cycleIndex === cycle.index);
+      if (cycle.stopPhase === 'after-first-pcm') {
+        check(!eventsBeforeStop.some(event =>
+          event.event === 'transcription:partial' || event.event === 'transcription:final'),
+        `cycle ${cycle.index} reached transcript evidence before the first-PCM stop`);
+      } else if (cycle.stopPhase === 'during-partial') {
+        check(!eventsBeforeStop.some(event => event.event === 'transcription:final'),
+          `cycle ${cycle.index} reached final before the partial stop`);
+      }
       const triggerAtMs = now();
       await toggle();
       const stopped = await poll(value => value.fixture.activeCaptures === 0 &&
@@ -235,7 +246,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         captureRunId: beforeStop.captureEpisode?.runId ?? null,
         captureFenceGeneration: beforeStop.captureEpisode?.generation ?? null,
         logicalRunId: beforeStop.logicalProviderRunId, association, trigger, source: sourceAtStop,
-        eventStart, triggerEventStart, callbackFenceGeneration, triggerProviderSamples,
+        eventStart, triggerEventStart, stopEventIndex, callbackFenceGeneration, triggerProviderSamples,
         eventEnd: report.events.length, activeCapturesAfterStop: stopped.fixture.activeCaptures });
       lastSettledAtMs = settledAtMs;
       await invoke('native_e2e_progress', { report: { scenario: 'warm-provider-churn',
@@ -336,6 +347,23 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       finalTerminals.length === 1 && finalTerminals[0].cycleIndex === trial.finalEpisodeIndex &&
       finalTerminalEvents.length === 1 && finalTerminalEvents[0].cycleIndex === trial.finalEpisodeIndex,
     'Warm provider canary terminal ownership is incomplete or duplicated');
+    const finalEvents = report.events.filter(event => event.event === 'transcription:final');
+    check(finalEvents.every(event => {
+      const cycleIndex = event.cycleIndex;
+      if (typeof cycleIndex !== 'number' || !Number.isSafeInteger(cycleIndex) ||
+          cycleIndex < 0 || cycleIndex > trial.finalEpisodeIndex) return false;
+      if (cycleIndex === trial.finalEpisodeIndex) {
+        return event.sessionId === report.finalOwnership?.logicalRunId && event.markerIds.length >= 2 &&
+          typeof event.text === 'string' && event.text.trim().length > 0;
+      }
+      const cycle = trial.cycles[cycleIndex];
+      return cycle != null && event.sessionId === Number(report.cycles[cycleIndex]?.logicalRunId) &&
+        warmCanaryEventMatchesEpisode(event, cycle.episode, 'transcription:final');
+    }) && finalEvents.every(event => finalEvents.filter(candidate =>
+      candidate.sessionId === event.sessionId && candidate.cycleIndex === event.cycleIndex).length === 1) &&
+      finalEvents.filter(event => event.sessionId === report.finalOwnership?.logicalRunId &&
+        event.cycleIndex === trial.finalEpisodeIndex).length === 1,
+    'Warm provider canary retained a late, duplicate, stale, or misowned final');
     const generations = report.final.fixture.capturePcmLedgers.map(row => row.captureGeneration);
     check(generations.length === 21 && new Set(generations).size === 21 &&
       generations.every((generation, index) => generation === index + 1),

@@ -517,8 +517,10 @@ export function verifyWarmProviderCanary(trial, report) {
         (!gated && source.sourceGateReady != null) ||
         !Number.isSafeInteger(cycle.eventStart) || !Number.isSafeInteger(cycle.eventEnd) ||
         !Number.isSafeInteger(cycle.triggerEventStart) ||
+        !Number.isSafeInteger(cycle.stopEventIndex) ||
         cycle.eventStart < 0 || cycle.eventEnd < cycle.eventStart || cycle.eventEnd > events.length ||
         cycle.triggerEventStart < cycle.eventStart || cycle.triggerEventStart > cycle.eventEnd ||
+        cycle.stopEventIndex < cycle.triggerEventStart || cycle.stopEventIndex > cycle.eventEnd ||
         (index === 0 ? cycle.eventStart !== 0 : cycle.eventStart !== cycles[index - 1].eventEnd) ||
         cycleWindowEvents.some(event => !Number.isSafeInteger(event.cycleIndex) || event.cycleIndex > index) ||
         cycleEvents.some(event => !Number.isSafeInteger(event.sessionId) || event.sessionId <= 0 ||
@@ -550,12 +552,20 @@ export function verifyWarmProviderCanary(trial, report) {
       }
       const expectedEvent = plan.stopPhase === 'during-partial' ? 'transcription:partial' :
         plan.stopPhase === 'after-final' ? 'transcription:final' : null;
-      const triggerEvents = events.slice(cycle.triggerEventStart, cycle.eventEnd);
+      const triggerEvents = events.slice(cycle.triggerEventStart, cycle.stopEventIndex);
       if (expectedEvent && !triggerEvents.some(event =>
         event.cycleIndex === index && event.sessionId === cycle.logicalRunId &&
         eventMatchesEpisode(event, plan.episode, expectedEvent) &&
         cycle.trigger?.episode === plan.episode && cycle.trigger?.deliverySeq === event.deliverySeq)) {
         throw new Error(`Cycle ${index} missed ${expectedEvent} evidence`);
+      }
+      const transcriptBeforeStop = triggerEvents.filter(event =>
+        event.cycleIndex === index && event.sessionId === cycle.logicalRunId &&
+        ['transcription:partial', 'transcription:final'].includes(event.event));
+      if ((plan.stopPhase === 'after-first-pcm' && transcriptBeforeStop.length !== 0) ||
+          (plan.stopPhase === 'during-partial' &&
+            transcriptBeforeStop.some(event => event.event === 'transcription:final'))) {
+        throw new Error(`Cycle ${index} stop phase collapsed after later transcript evidence`);
       }
     }
   }
@@ -577,6 +587,7 @@ export function verifyWarmProviderCanary(trial, report) {
     event.sessionId === ownership?.logicalRunId && Number.isSafeInteger(event.deliverySeq) &&
     event.deliverySeq > 0 && typeof event.text === 'string' && event.text.trim().length > 0 &&
     event.markerIds.length >= 2;
+  const allFinalEvents = events.filter(event => event.event === 'transcription:final');
   if (finalSource?.name !== trial.episodes[finalIndex] ||
       finalSource.bytes !== finalBytes || finalSource.sourceFrames !== finalBytes / 2 ||
       finalSource.sourceDurationMs !== finalBytes / 32 || finalSource.cadenceMs !== 20 ||
@@ -628,6 +639,19 @@ export function verifyWarmProviderCanary(trial, report) {
       terminals.filter(terminal => terminal.sessionId === ownership.logicalRunId &&
         terminal.cycleIndex === finalIndex).length !== 1 ||
       terminalEvents.filter(event => event.sessionId === ownership.logicalRunId &&
+        event.cycleIndex === finalIndex).length !== 1 ||
+      allFinalEvents.some(event => {
+        const cycleIndex = event.cycleIndex;
+        if (!Number.isSafeInteger(cycleIndex) || cycleIndex < 0 || cycleIndex > finalIndex) return true;
+        if (cycleIndex === finalIndex) return !finalTranscriptMatchesCallbackGeneration(event);
+        const cycle = cycles[cycleIndex];
+        const episode = trial.cycles[cycleIndex]?.episode;
+        return cycle == null || event.sessionId !== cycle.logicalRunId || episode == null ||
+          !eventMatchesEpisode(event, episode, 'transcription:final');
+      }) ||
+      allFinalEvents.some(event => allFinalEvents.filter(candidate =>
+        candidate.sessionId === event.sessionId && candidate.cycleIndex === event.cycleIndex).length !== 1) ||
+      allFinalEvents.filter(event => event.sessionId === ownership.logicalRunId &&
         event.cycleIndex === finalIndex).length !== 1 ||
       report.final.status !== 'Idle' || report.final.preparedCaptureTokenCount !== 0 ||
       report.final.providerTransport?.connectionRetained !== false) {

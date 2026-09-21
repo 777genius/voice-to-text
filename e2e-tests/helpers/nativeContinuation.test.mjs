@@ -137,6 +137,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       cycleIndex: index, sessionId: logicalRunId, deliverySeq: null, markerIds: [markerId] });
     if (plan.stopPhase === 'after-final') events.push({ event: 'transcription:final', text: phrase,
       cycleIndex: index, sessionId: logicalRunId, deliverySeq: index + 1, markerIds: [markerId] });
+    const stopEventIndex = events.length;
     if (plan.stopPhase === 'before-ready') {
       events.push({ event: 'transcription:terminal', cycleIndex: index, sessionId: logicalRunId,
         deliverySeq: null, markerIds: [] });
@@ -149,6 +150,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       captureGeneration: index + 1, logicalRunId, captureRunId,
       captureFenceGeneration: index + 1,
       triggerEventStart: eventStart,
+      stopEventIndex,
       callbackFenceGeneration: index > warmProviderCanaryTrial.readyGateFromIndex ? index + 1 : null,
       triggerProviderSamples: plan.stopPhase === 'before-ready' ? null : 320,
       association: plan.stopPhase === 'before-ready' ? null : {
@@ -273,6 +275,11 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     value => { value.finalCallbackFence.eventStart = value.events.length; },
     value => { const cycle = value.cycles.find(row => row.stopPhase === 'after-final');
       cycle.triggerEventStart += 1; },
+    value => { const cycle = value.cycles.find(row => row.stopPhase === 'after-final');
+      const event = value.events.slice(cycle.triggerEventStart, cycle.stopEventIndex)
+        .find(row => row.event === 'transcription:final');
+      event.text = cycle.episode === 'episode-a.pcm' ? 'за окном растет береза' : 'на столе лежит книга';
+      event.markerIds = [cycle.episode === 'episode-a.pcm' ? 1 : 0]; },
     value => { value.cycles[1].previousSettleToStartMs = 5_000; },
     value => { delete value.events.find(event => event.event === 'transcription:final').deliverySeq; },
     value => { value.events.find(event => event.cycleIndex === 20 && event.event === 'transcription:final').event = 'transcription:partial'; },
@@ -286,6 +293,37 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     const invalid = structuredClone(report); mutate(invalid);
     assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, invalid));
   }
+  const insertBeforeStop = (value, cycle, event) => {
+    const at = cycle.stopEventIndex;
+    value.events.splice(at, 0, event);
+    for (const row of value.cycles) {
+      if (row.index === cycle.index) {
+        row.stopEventIndex += 1;
+        row.eventEnd += 1;
+      } else if (row.index > cycle.index) {
+        row.eventStart += 1;
+        row.triggerEventStart += 1;
+        row.stopEventIndex += 1;
+        row.eventEnd += 1;
+      }
+    }
+    value.finalCallbackFence.eventStart += 1;
+  };
+  const collapsedPartial = structuredClone(report);
+  const partialCycle = collapsedPartial.cycles.find(row => row.stopPhase === 'during-partial');
+  insertBeforeStop(collapsedPartial, partialCycle, { event: 'transcription:final',
+    cycleIndex: partialCycle.index, sessionId: partialCycle.logicalRunId, deliverySeq: 700,
+    text: partialCycle.episode === 'episode-a.pcm' ? 'на столе лежит книга' : 'за окном растет береза',
+    markerIds: [partialCycle.episode === 'episode-a.pcm' ? 0 : 1] });
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, collapsedPartial),
+    /stop phase collapsed/);
+  const duplicateFinal = structuredClone(report);
+  const finalCycle = duplicateFinal.cycles.find(row => row.stopPhase === 'after-final');
+  const firstFinal = duplicateFinal.events.slice(finalCycle.triggerEventStart, finalCycle.stopEventIndex)
+    .find(row => row.event === 'transcription:final');
+  insertBeforeStop(duplicateFinal, finalCycle, { ...firstFinal, deliverySeq: 701 });
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, duplicateFinal),
+    /Final warm provider proof is incomplete/);
 });
 
 test('mode counts and initial-only Ready gate preserve the legacy prescribed trials', async () => {

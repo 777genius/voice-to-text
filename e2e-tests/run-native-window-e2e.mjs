@@ -135,6 +135,7 @@ export function validateMiniUxResult(envelope) {
   const warmFrames = report?.warmActivationFrames;
   const visibleFrames = report?.warmVisibleFrames;
   const readyFrames = report?.warmReadyFrames;
+  const nativeWindowEpochs = report?.warmWindowEpochs;
   const exactPcmEvidenceValid = validateTerminalFixture(final?.fixture, true) &&
     validateTerminalFixture(envelope.fixture, true) &&
     terminalEvidenceSignature(final?.fixture) === terminalEvidenceSignature(envelope.fixture);
@@ -149,6 +150,15 @@ export function validateMiniUxResult(envelope) {
   const advancingWindowEpochs = firstVisibleFrames.every((frame, index) =>
     Boolean(frame) && (index === 0 || Boolean(firstVisibleFrames[index - 1]) &&
       frame.windowEpoch > firstVisibleFrames[index - 1].windowEpoch));
+  const nativeWindowEvidenceValid = Array.isArray(nativeWindowEpochs) &&
+    nativeWindowEpochs.length === 10 && nativeWindowEpochs.every((row, index) => {
+      const frame = firstVisibleFrames[index];
+      return row?.attempt === index + 1 && Number.isSafeInteger(row.windowEpoch) && row.windowEpoch > 0 &&
+        frame?.windowEpoch === row.windowEpoch && frame?.runId === row.runId && frame?.revision === row.revision &&
+        report.trace.some(sample => sample?.native?.visible === true &&
+          sample.native.windowEpoch === row.windowEpoch && sample.captureRunId === row.runId &&
+          sample.intentRevision === row.revision);
+    });
   const captureReadyRecording = frame => frame.captureReady === true &&
     ['finalizing-previous', 'connecting-provider', 'recording'].includes(frame.readinessReason) &&
     /\brecording\b/.test(frame.phase) && !/\b(starting|processing)\b/.test(frame.phase);
@@ -178,7 +188,7 @@ export function validateMiniUxResult(envelope) {
       });
       return (neutralActivation || captureReadyRecording(frame)) && ready?.runId === frame.runId &&
         ready?.revision === frame.revision && attemptFramesValid;
-    }) && distinctAttemptIdentities && advancingWindowEpochs;
+    }) && distinctAttemptIdentities && advancingWindowEpochs && nativeWindowEvidenceValid;
   if (report?.warmMode !== true || report.warmReopens !== 10 || report.idleAcceptedDelta !== 0 ||
        !Array.isArray(report.trace) || report.trace.length === 0 ||
        !Array.isArray(readyFrames) || readyFrames.length !== 10 ||
