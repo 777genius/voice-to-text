@@ -92,16 +92,6 @@ fn same_config(left: &SupportedStreamConfig, right: &SupportedStreamConfig) -> b
         && left.sample_format() == right.sample_format()
 }
 
-fn same_default_route(left: &Device, right: &Device) -> bool {
-    same_device(left, right)
-        || (left.name().ok() == right.name().ok()
-            && left
-                .default_input_config()
-                .ok()
-                .zip(right.default_input_config().ok())
-                .is_some_and(|(left, right)| same_config(&left, &right)))
-}
-
 impl WarmDictationInput {
     /// Runtime candidate check only. This does not replace measured hardware
     /// acceptance; external transports remain on cold capture. An explicit
@@ -149,15 +139,28 @@ impl WarmNativeFactory for CpalFactory {
                 "Warm input route became unqualified; use cold capture".into(),
             ));
         }
-        let (device, config) =
-            SystemAudioCapture::select_device_and_config(&host, self.requested.as_deref())
-                .or_else(|error| {
-                    if self.requested.is_some() {
-                        SystemAudioCapture::select_device_and_config(&host, None)
-                    } else {
-                        Err(error)
-                    }
-                })?;
+        // A named warm route is deliberately opened through CoreAudio's current
+        // default handle. CPAL marks default and enumerated handles differently,
+        // so comparing those wrappers is not a stable identity check; falling
+        // back to name/config equality could instead admit a same-named external
+        // device. Resolve the requested name only as an assertion about the
+        // current default, then retain that exact default handle.
+        let device = host
+            .default_input_device()
+            .ok_or_else(|| AudioError::DeviceNotFound("No default input device".into()))?;
+        if self.requested.as_ref().is_some_and(|requested| {
+            !device
+                .name()
+                .ok()
+                .is_some_and(|name| SystemAudioCapture::device_name_matches(requested, &name))
+        }) {
+            return Err(AudioError::Configuration(
+                "Named warm microphone no longer resolves to the default built-in input".into(),
+            ));
+        }
+        let config = device
+            .default_input_config()
+            .map_err(|error| AudioError::Configuration(error.to_string()))?;
         let format = WarmInputFormat {
             sample_rate: config.sample_rate().0,
             channels: config.channels(),
@@ -165,16 +168,7 @@ impl WarmNativeFactory for CpalFactory {
                 .name()
                 .map_err(|e| AudioError::Capture(e.to_string()))?,
         };
-        let default_device_id = host
-            .default_input_device()
-            .filter(|default| same_default_route(default, &device))
-            .map(|_| default_before);
-        if self.requested.is_some() && default_device_id.is_none() {
-            return Err(AudioError::Configuration(
-                "Named warm microphone no longer resolves to the default built-in input".into(),
-            ));
-        }
-        if default_device_id.is_some() && default_input_id()? != default_before {
+        if default_input_id()? != default_before {
             return Err(AudioError::Capture(
                 "Default microphone changed while opening".into(),
             ));
@@ -217,7 +211,7 @@ impl WarmNativeFactory for CpalFactory {
             config,
             requested: self.requested.clone(),
             format,
-            default_device_id,
+            default_device_id: Some(default_before),
         }))
     }
 }

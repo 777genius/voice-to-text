@@ -282,13 +282,36 @@ export function verifyWarmProviderCanary(trial, report) {
   }
   const associations = new Map((fixture.captureRunAssociations ?? []).map(row =>
     [row.captureGeneration, row]));
+  const captureLedgers = fixture.capturePcmLedgers ?? [];
+  const providerLedgers = fixture.providerPcmLedgers ?? [];
+  const ledgerIsValid = row => Number.isSafeInteger(row?.captureGeneration) && row.captureGeneration > 0 &&
+    Number.isSafeInteger(row.chunks) && row.chunks >= 0 && Number.isSafeInteger(row.samples) && row.samples >= 0 &&
+    typeof row.hash === 'string' && /^[a-f0-9]{16}$/.test(row.hash);
   if (fixture.captureStarts !== expected.captures || fixture.captureStops !== expected.captures ||
       fixture.activeCaptures !== 0 || fixture.maxActiveCaptures !== 1 ||
       fixture.observationOverflow !== false || fixture.markerViolations?.length !== 0 ||
       fixture.sourceEpisodes?.length !== expected.captures ||
-      fixture.capturePcmLedgers?.length !== expected.captures ||
-      new Set(fixture.capturePcmLedgers.map(row => row.captureGeneration)).size !== expected.captures) {
+      captureLedgers.length !== expected.captures || captureLedgers.some(row => !ledgerIsValid(row)) ||
+      new Set(captureLedgers.map(row => row.captureGeneration)).size !== expected.captures ||
+      providerLedgers.some(row => !ledgerIsValid(row)) ||
+      new Set(providerLedgers.map(row => row.captureGeneration)).size !== providerLedgers.length) {
     throw new Error('Warm provider canary capture lifecycle is incomplete');
+  }
+  const providerByGeneration = new Map(providerLedgers.map(row => [row.captureGeneration, row]));
+  for (const [index, capture] of captureLedgers.entries()) {
+    const source = fixture.sourceEpisodes[index];
+    const provider = providerByGeneration.get(capture.captureGeneration);
+    const expectedChunks = Math.ceil(source.emittedFrames / 320);
+    if (capture.captureGeneration !== index + 1 || capture.samples !== source.emittedFrames ||
+        capture.chunks !== expectedChunks ||
+        (capture.samples === 0 && (capture.hash !== 'cbf29ce484222325' || provider != null)) ||
+        (capture.samples > 0 && (!provider || provider.chunks !== capture.chunks ||
+          provider.samples !== capture.samples || provider.hash !== capture.hash))) {
+      throw new Error(`Warm provider canary PCM generation ${index + 1} is incomplete`);
+    }
+  }
+  if (providerLedgers.length !== captureLedgers.filter(row => row.samples > 0).length) {
+    throw new Error('Warm provider canary contains an unexpected provider PCM generation');
   }
   for (const [index, cycle] of cycles.entries()) {
     const plan = trial.cycles[index];
@@ -341,6 +364,8 @@ export function verifyWarmProviderCanary(trial, report) {
   const finalSource = fixture.sourceEpisodes[finalIndex];
   const finalAssociation = associations.get(finalIndex + 1);
   const finalEvents = events.filter(event => event.cycleIndex === finalIndex);
+  const terminalEvents = events.filter(event => event.event === 'transcription:terminal');
+  const terminals = report.terminals;
   if (finalSource?.name !== trial.episodes[finalIndex] ||
       finalSource.captureGeneration !== finalIndex + 1 ||
       finalSource.emittedFrames !== finalSource.sourceFrames ||
@@ -355,7 +380,10 @@ export function verifyWarmProviderCanary(trial, report) {
       events.some((event, eventIndex) => Number.isSafeInteger(event.cycleIndex) &&
         event.cycleIndex >= 0 && event.cycleIndex < finalIndex &&
         (eventIndex < cycles[event.cycleIndex].eventStart || eventIndex >= cycles[event.cycleIndex].eventEnd)) ||
-      !Array.isArray(report.terminalSessions) || report.terminalSessions.length < 1 ||
+      !Array.isArray(terminals) || terminals.length !== 1 || terminals[0]?.complete !== true ||
+      terminals[0].sessionId !== finalAssociation.captureRunId || terminals[0].cycleIndex !== finalIndex ||
+      terminalEvents.length !== 1 || terminalEvents[0].sessionId !== finalAssociation.captureRunId ||
+      terminalEvents[0].cycleIndex !== finalIndex ||
       report.final.status !== 'Idle' || report.final.preparedCaptureTokenCount !== 0 ||
       report.final.providerTransport?.connectionRetained !== false) {
     throw new Error('Final warm provider proof is incomplete');

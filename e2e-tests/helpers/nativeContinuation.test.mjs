@@ -125,6 +125,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   });
   events.push({ event: 'transcription:final', cycleIndex: 20, sessionId: 999,
     deliverySeq: 99, markerIds: [0, 1] });
+  events.push({ event: 'transcription:terminal', cycleIndex: 20, sessionId: 999,
+    deliverySeq: null, markerIds: [] });
   const sources = warmProviderCanaryTrial.episodes.map((name, index) => {
     const sourceFrames = approvedFixtures[name][0] / 2;
     return { name, captureGeneration: index + 1, sourceFrames,
@@ -136,13 +138,19 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   });
   const captureRunAssociations = cycles.flatMap((cycle, index) => cycle.association ? [cycle.association] : [])
     .concat({ captureGeneration: 21, captureRunId: 999, captureFenceGeneration: 21 });
+  const capturePcmLedgers = sources.map((source, index) => ({
+    captureGeneration: index + 1,
+    chunks: Math.ceil(source.emittedFrames / 320),
+    samples: source.emittedFrames,
+    hash: source.emittedFrames > 0 ? '0123456789abcdef' : 'cbf29ce484222325',
+  }));
   const fixture = { captureStarts: 21, captureStops: 21, activeCaptures: 0, maxActiveCaptures: 1,
     observationOverflow: false, markerViolations: [], sourceEpisodes: sources,
-    captureRunAssociations, capturePcmLedgers: Array.from({ length: 21 }, (_, index) =>
-      ({ captureGeneration: index + 1, chunks: index === 20 ? 1 : 0, samples: index === 20 ? 320 : 0, hash: '0123456789abcdef' })) };
+    captureRunAssociations, capturePcmLedgers,
+    providerPcmLedgers: capturePcmLedgers.filter(row => row.samples > 0).map(row => ({ ...row })) };
   const report = { mode: 'warm-provider-canary', passed: true, trialId: warmProviderCanaryTrial.id,
     errors: [], duplicateDeliveries: [], cycles, events, expectedInsertion: 'stable transcript',
-    terminalSessions: [999], final: { status: 'Idle', preparedCaptureTokenCount: 0,
+    terminals: [{ sessionId: 999, cycleIndex: 20, complete: true }], final: { status: 'Idle', preparedCaptureTokenCount: 0,
       providerTransport: { connectionRetained: false }, fixture } };
   assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, report).churnCycles, 20);
   for (const mutate of [
@@ -151,6 +159,11 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     value => { value.events.find(event => event.event === 'transcription:partial').cycleIndex = 99; },
     value => { value.final.fixture.sourceEpisodes[20].emittedFrames--; },
     value => { value.final.fixture.capturePcmLedgers.pop(); },
+    value => { value.final.fixture.providerPcmLedgers[0].hash = 'ffffffffffffffff'; },
+    value => { value.final.fixture.capturePcmLedgers.forEach(row => { row.chunks = 0; row.samples = 0; row.hash = 'cbf29ce484222325'; });
+      value.final.fixture.providerPcmLedgers = []; },
+    value => value.terminals.push({ sessionId: 999, cycleIndex: 20, complete: true }),
+    value => { value.terminals[0].sessionId = 123; },
     value => value.duplicateDeliveries.push('1:1:final'),
     value => value.events.push({ event: 'transcription:final', cycleIndex: 19,
       sessionId: 119, deliverySeq: 1000, markerIds: [] }),

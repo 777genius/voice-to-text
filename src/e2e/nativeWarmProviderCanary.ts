@@ -1,6 +1,5 @@
 import type { Pinia } from 'pinia';
 import { invoke } from '@tauri-apps/api/core';
-import { useAppConfigStore } from '@/stores/appConfig';
 import { boundedSyntheticText, syntheticPhraseOccurrences } from './nativeContinuationMetrics';
 import { nativeLivePreflight } from './nativeContinuationLive';
 import { validateWarmProviderCanaryPlan,
@@ -16,9 +15,11 @@ type NativeState = { status: string; logicalProviderRunId: number; preparedCaptu
     observationOverflow: boolean; markerViolations: string[];
     sourceEpisodes: SourceEpisode[];
     captureRunAssociations: Array<{ captureRunId: number; captureFenceGeneration: number; captureGeneration: number }>;
-    capturePcmLedgers: Array<{ captureGeneration: number; chunks: number; samples: number; hash: string }> } };
+    capturePcmLedgers: Array<{ captureGeneration: number; chunks: number; samples: number; hash: string }>;
+    providerPcmLedgers: Array<{ captureGeneration: number; chunks: number; samples: number; hash: string }> } };
 type ProviderEvent = { event: string; atMs: number; cycleIndex: number | null; sessionId: number;
   deliverySeq: number | null; text: string | null; markerIds: number[] };
+type ProviderTerminal = { sessionId: number; cycleIndex: number | null; complete: boolean };
 
 const state = (stopReadback = false) => invoke<NativeState>('native_e2e_state', { stopReadback });
 const wait = (durationMs: number) => invoke('native_e2e_delay', { durationMs });
@@ -37,7 +38,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
   const subscriptions: Array<() => void> = [];
   const report = { mode: 'warm-provider-canary', passed: false, trialId: '', targetDocument: '',
     expectedInsertion: '', actualPasteVerified: false, cycles: [] as Array<Record<string, unknown>>,
-    events: [] as ProviderEvent[], terminalSessions: [] as number[], duplicateDeliveries: [] as string[],
+    events: [] as ProviderEvent[], terminals: [] as ProviderTerminal[], duplicateDeliveries: [] as string[],
     errors: [] as string[], final: null as NativeState | null, elapsedMs: 0 };
   const poll = async (accept: (value: NativeState) => boolean, label: string, timeoutMs: number) => {
     const deadline = performance.now() + timeoutMs;
@@ -70,8 +71,9 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         report.events.push({ event: name, atMs: now(), cycleIndex: activeCycle, sessionId,
           deliverySeq, text: bounded.rawSyntheticText, markerIds });
         if (name === 'transcription:terminal') {
-          if (payload.delivery_complete !== true || payload.error) report.errors.push('Incomplete provider terminal');
-          report.terminalSessions.push(sessionId);
+          const complete = payload.delivery_complete === true && !payload.error;
+          if (!complete) report.errors.push('Incomplete provider terminal');
+          report.terminals.push({ sessionId, cycleIndex: activeCycle, complete });
         }
         if (name === 'transcription:error') report.errors.push(JSON.stringify(payload));
       }, { keepAlive: true, autoPasteText: false });
@@ -142,9 +144,6 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     }
 
     activeCycle = trial.finalEpisodeIndex;
-    const config = useAppConfigStore(pinia);
-    await invoke('update_app_config', { autoPasteText: true });
-    await config.refresh();
     const beforeFinal = await state();
     await toggle();
     const ready = await poll(value => value.status === 'Recording' &&
@@ -186,10 +185,35 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     check(report.final.fixture.observationOverflow === false && report.final.fixture.markerViolations.length === 0 &&
       report.duplicateDeliveries.length === 0 && report.errors.length === 0,
     'Warm provider canary retained invalid or duplicate evidence');
+    const terminalEvents = report.events.filter(event => event.event === 'transcription:terminal');
+    check(report.terminals.length === 1 && report.terminals[0].complete === true &&
+      report.terminals[0].sessionId === finalAssociation.captureRunId &&
+      report.terminals[0].cycleIndex === trial.finalEpisodeIndex && terminalEvents.length === 1 &&
+      terminalEvents[0].sessionId === finalAssociation.captureRunId &&
+      terminalEvents[0].cycleIndex === trial.finalEpisodeIndex,
+    'Warm provider canary terminal ownership is incomplete or duplicated');
     const generations = report.final.fixture.capturePcmLedgers.map(row => row.captureGeneration);
     check(generations.length === 21 && new Set(generations).size === 21 &&
       generations.every((generation, index) => generation === index + 1),
     'Warm provider canary PCM generations are incomplete');
+    const providers = new Map(report.final.fixture.providerPcmLedgers.map(row =>
+      [row.captureGeneration, row]));
+    for (const [index, capture] of report.final.fixture.capturePcmLedgers.entries()) {
+      const emittedFrames = report.final.fixture.sourceEpisodes[index]?.emittedFrames;
+      const provider = providers.get(capture.captureGeneration);
+      check(capture.samples === emittedFrames && capture.chunks === Math.ceil(emittedFrames / 320),
+        `Capture PCM ledger ${capture.captureGeneration} disagrees with its source`);
+      if (capture.samples === 0) {
+        check(capture.hash === 'cbf29ce484222325' && provider == null,
+          `Empty PCM generation ${capture.captureGeneration} reached the provider`);
+      } else {
+        check(provider?.chunks === capture.chunks && provider.samples === capture.samples &&
+          provider.hash === capture.hash,
+        `Provider PCM ledger ${capture.captureGeneration} is incomplete`);
+      }
+    }
+    check(providers.size === report.final.fixture.capturePcmLedgers.filter(row => row.samples > 0).length,
+      'Warm provider canary retained an unexpected PCM generation');
     report.passed = true;
   } catch (error) {
     report.errors.push(String(error));

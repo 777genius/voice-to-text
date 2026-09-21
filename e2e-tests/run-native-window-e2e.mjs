@@ -1197,10 +1197,13 @@ export async function main(args = process.argv.slice(2)) {
       const readbackStartMs = performance.now() - proxyStarted;
       const { stdout } = await promisify(execFile)('/usr/bin/osascript', ['-e', script], { timeout: 5000, maxBuffer: 1024 * 1024 });
       verification.readback = { clock: 'runner-performance-now', startMs: readbackStartMs, endMs: performance.now() - proxyStarted };
-      Object.assign(verification, exactInsertionEvidence(report.expectedInsertion, stdout.replace(/\n$/, ''), report.targetDocument));
       Object.assign(verification, verifyQualificationConnections(trial, proxyEvents));
       Object.assign(verification, verifyQualificationRoute(trial, proxyEvents));
       if (trial.kind === 'warm-provider-canary') {
+        if (stdout.replace(/\n$/, '') !== '') {
+          throw new Error('Warm provider canary changed immutable delivery policy or pasted unexpectedly');
+        }
+        verification.noUnexpectedPaste = true;
         Object.assign(verification, verifyWarmProviderCanary(trial, report));
         const accepted = proxyEvents.filter(e => e.event === 'backend_control' &&
           e.type === 'continue_result' && e.decision === 'accepted' && e.eligible_now === true);
@@ -1209,6 +1212,7 @@ export async function main(args = process.argv.slice(2)) {
           throw new Error('Warm provider canary did not retain every expected continuation');
         }
       } else {
+        Object.assign(verification, exactInsertionEvidence(report.expectedInsertion, stdout.replace(/\n$/, ''), report.targetDocument));
         verifyQualificationSources(trial, report.final?.fixture);
         verifyQualificationTerminals(trial, report.episodes, report.terminals);
         const accepted = proxyEvents.filter(e => e.event === 'backend_control' && e.type === 'continue_result' && e.decision === 'accepted' && e.eligible_now === true);
