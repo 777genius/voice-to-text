@@ -5,7 +5,8 @@ import { liveTrials, verifyQualificationConnections } from './nativeContinuation
 
 // Evaluate the exact collector source without importing the runner's optional jsdom dependency.
 const runner = await readFile(new URL('../run-native-window-e2e.mjs', import.meta.url), 'utf8');
-const source = runner.slice(runner.indexOf('export function createQualificationCollector('), runner.indexOf('export async function runOwned('));
+const source = runner.slice(runner.indexOf('export function createQualificationCollector('),
+  runner.indexOf('export function assertOwnedProcessGroupGone('));
 assert.ok(source.startsWith('export function createQualificationCollector('));
 const createQualificationCollector = new Function('verifyQualificationConnections', 'marker',
   `${source.replace('export function', 'function')}; return createQualificationCollector;`)(

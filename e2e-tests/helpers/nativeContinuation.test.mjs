@@ -132,17 +132,24 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   });
   const finalLogicalRunId = 100 + warmProviderCanaryTrial.readyGateFromIndex;
   events.push({ event: 'transcription:final', cycleIndex: 20, sessionId: finalLogicalRunId,
-    deliverySeq: 99, markerIds: [0, 1] });
+    deliverySeq: 99, text: 'marker zero marker one', markerIds: [0, 1] });
   events.push({ event: 'transcription:terminal', cycleIndex: 20, sessionId: finalLogicalRunId,
     deliverySeq: null, markerIds: [] });
   const sources = warmProviderCanaryTrial.episodes.map((name, index) => {
     const bytes = approvedFixtures[name][0];
     const sourceFrames = bytes / 2;
     const sourceDurationMs = bytes / 32;
+    const emittedFrames = index === 20 ? sourceFrames :
+      warmProviderCanaryTrial.cycles[index].stopPhase === 'before-ready' ? 0 : 320;
+    const chunks = Math.ceil(emittedFrames / 320);
+    const nativeSourceStartMs = emittedFrames > 0 ? 1000 + index * 100_000 : null;
+    const lastSourceFrameElapsedMs = emittedFrames > 0 ? (chunks - 1) * 20 : null;
     return { name, bytes, captureGeneration: index + 1, sourceFrames, sourceDurationMs, cadenceMs: 20,
-      emittedFrames: index === 20 ? sourceFrames : warmProviderCanaryTrial.cycles[index].stopPhase === 'before-ready' ? 0 : 320,
-      nativeSourceStartMs: index === 20 ? 1000 : null,
-      nativeSourceEndMs: index === 20 ? 1000 + sourceDurationMs : null,
+      emittedFrames, nativeSourceStartMs,
+      nativeLastSourceFrameMs: emittedFrames > 0 ? nativeSourceStartMs + lastSourceFrameElapsedMs : null,
+      lastSourceFrameElapsedMs, pacingIntervalsChecked: emittedFrames > 0 ? chunks - 1 : undefined,
+      pacingViolations: emittedFrames > 0 ? 0 : undefined,
+      nativeSourceEndMs: index === 20 ? nativeSourceStartMs + sourceDurationMs : null,
       sourceGateRequired: index >= warmProviderCanaryTrial.readyGateFromIndex,
       sourceGateReady: index >= warmProviderCanaryTrial.readyGateFromIndex ?
         { serverReady: true, status: 'Processing', nativeReadyMs: 900, emittedFrames: 0 } : null };
@@ -160,7 +167,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     captureRunAssociations, capturePcmLedgers,
     providerPcmLedgers: capturePcmLedgers.filter(row => row.samples > 0).map(row => ({ ...row })) };
   const report = { mode: 'warm-provider-canary', passed: true, trialId: warmProviderCanaryTrial.id,
-    errors: [], duplicateDeliveries: [], cycles, events, expectedInsertion: 'stable transcript',
+    errors: [], duplicateDeliveries: [], cycles, events, finalTextBeforeProof: 'stale transcript',
+    expectedInsertion: 'stable transcript',
     finalOwnership: { logicalRunId: finalLogicalRunId, captureRunId: 999, captureFenceGeneration: 21 },
     terminals: [{ sessionId: finalLogicalRunId, cycleIndex: 20, complete: true }], final: { status: 'Idle', preparedCaptureTokenCount: 0,
       providerTransport: { connectionRetained: false }, fixture } };
@@ -177,6 +185,10 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     value => { const source = value.final.fixture.sourceEpisodes[20];
       source.bytes = 640; source.sourceFrames = 320; source.emittedFrames = 320;
       source.sourceDurationMs = 20; source.nativeSourceEndMs = source.nativeSourceStartMs; },
+    value => { value.final.fixture.sourceEpisodes[20].pacingIntervalsChecked = 0; },
+    value => { value.final.fixture.sourceEpisodes[20].lastSourceFrameElapsedMs = 0; },
+    value => { value.finalTextBeforeProof = value.expectedInsertion; },
+    value => { value.events.find(event => event.cycleIndex === 20 && event.event === 'transcription:final').event = 'transcription:partial'; },
     value => { value.finalOwnership.logicalRunId = value.finalOwnership.captureRunId; },
     value => value.terminals.push({ sessionId: finalLogicalRunId, cycleIndex: 20, complete: true }),
     value => { value.terminals[0].sessionId = 123; },
@@ -268,7 +280,8 @@ test('seal-close TEST command invokes the product native close Stop path with is
   const cases = await readFile(new URL('../../src/e2e/nativeContinuationCases.ts', import.meta.url), 'utf8');
   const command = native.slice(native.indexOf('pub fn native_e2e_close_recording'), native.indexOf('pub struct FixtureConfig'));
   assert.match(command, /RESULT_PATH.get\(\).is_none\(\)/);
-  assert.match(command, /!continuation_mode\(\)/);
+  assert.match(command, /mini_ux_mode\(\)/);
+  assert.match(command, /continuation_mode\(\)/);
   assert.match(command, /Some\("seal-close"\)/);
   assert.match(command, /super::commands::stop_recording_on_native_close\(&app_handle\)/);
   assert.match(lib, /#\[cfg\(all\(debug_assertions, feature = "native-window-e2e"\)\)\]\s*presentation::native_e2e::native_e2e_close_recording/);
@@ -904,7 +917,7 @@ test('E63 native submission precedes teardown and runner keeps the original inde
   assert.match(finish, /"preFinish":true/);
   assert.match(finish, /diagnostic::healthy\(\)/);
   const runner = await readFile(new URL('../run-native-window-e2e.mjs', import.meta.url), 'utf8');
-  assert.match(runner, /'after-write-toggle'\]\.includes\(options.continuationCase\) \? 30_000 : 480_000/);
+  assert.match(runner, /options\.readerPreparation \|\| \['E04', 'E41', 'E42', 'after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle'\]\.includes\(options\.continuationCase\) \? 30_000\s*: 480_000/);
   assert.ok(runner.indexOf('E63 native diagnostic failed') < runner.lastIndexOf('validateResult(envelope)'));
   const envelope = afterWriteEnvelope('after-write-stop');
   envelope.afterWriteServiceAfter.pausedContinuation = 9;

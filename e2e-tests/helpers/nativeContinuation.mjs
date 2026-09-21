@@ -328,6 +328,23 @@ export function verifyWarmProviderCanary(trial, report) {
         source.sourceDurationMs !== bytes / 32 || source.cadenceMs !== 20) {
       throw new Error(`Warm provider canary source ${index} is not an approved PCM identity`);
     }
+    if (source.emittedFrames > 0) {
+      const chunks = Math.ceil(source.emittedFrames / 320);
+      const lastMinimumMs = (chunks - 1) * 20;
+      const lastPartialMs = (source.emittedFrames - (chunks - 1) * 320) / 16;
+      if (!Number.isFinite(source.nativeSourceStartMs) ||
+          !Number.isFinite(source.nativeLastSourceFrameMs) ||
+          !Number.isFinite(source.lastSourceFrameElapsedMs) ||
+          source.nativeLastSourceFrameMs - source.nativeSourceStartMs < lastMinimumMs ||
+          source.lastSourceFrameElapsedMs < lastMinimumMs ||
+          source.pacingIntervalsChecked !== chunks - 1 || source.pacingViolations !== 0 ||
+          (source.emittedFrames === source.sourceFrames &&
+            (!Number.isFinite(source.nativeSourceEndMs) ||
+              source.nativeLastSourceFrameMs + lastPartialMs > source.nativeSourceEndMs ||
+              source.lastSourceFrameElapsedMs > source.nativeSourceEndMs - source.nativeSourceStartMs))) {
+        throw new Error(`Warm provider canary source ${index} lacks measured PCM pacing evidence`);
+      }
+    }
   }
   const providerByGeneration = new Map(providerLedgers.map(row => [row.captureGeneration, row]));
   for (const [index, capture] of captureLedgers.entries()) {
@@ -426,8 +443,13 @@ export function verifyWarmProviderCanary(trial, report) {
       ownership.captureRunId !== finalAssociation.captureRunId ||
       ownership.captureFenceGeneration !== finalAssociation.captureFenceGeneration ||
       !Number.isSafeInteger(ownership.logicalRunId) || ownership.logicalRunId <= 0 ||
+      typeof report.finalTextBeforeProof !== 'string' ||
       typeof report.expectedInsertion !== 'string' || !report.expectedInsertion.trim() ||
+      report.expectedInsertion === report.finalTextBeforeProof ||
       new Set(finalEvents.flatMap(event => event.markerIds)).size < 2 ||
+      !finalEvents.some(event => event.event === 'transcription:final' &&
+        event.sessionId === ownership.logicalRunId && typeof event.text === 'string' &&
+        event.text.trim().length > 0 && event.markerIds.length >= 2) ||
       finalEvents.some(event => ['transcription:partial', 'transcription:final'].includes(event.event) &&
         event.sessionId !== ownership.logicalRunId) ||
       events.some((event, eventIndex) => Number.isSafeInteger(event.cycleIndex) &&

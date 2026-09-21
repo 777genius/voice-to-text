@@ -7,10 +7,14 @@ import { validateWarmProviderCanaryPlan,
 
 type SourceEpisode = { name: string; bytes: number; captureGeneration: number; sourceFrames: number;
   emittedFrames: number; nativeSourceStartMs: number | null; nativeSourceEndMs: number | null;
+  nativeLastSourceFrameMs?: number | null; lastSourceFrameElapsedMs?: number | null;
+  pacingIntervalsChecked?: number; pacingViolations?: number;
   sourceDurationMs: number; cadenceMs: number;
   sourceGateRequired: boolean; sourceGateReady: { serverReady: boolean; emittedFrames: number } | null };
 type NativeState = { status: string; logicalProviderRunId: number; preparedCaptureTokenCount: number;
-  captureEpisode: { runId: number; generation: number } | null; pausedContinuation: number | null;
+  captureEpisode: { runId: number; generation: number } | null;
+  pausedContinuation: { logicalRunId: number; pauseEpoch: number; connectionGeneration: number;
+    providerSessionId: string | null } | null;
   qualificationTrial: Trial; qualificationEndpoint: string;
   providerTransport: { serverReady: boolean; connectionRetained: boolean } | null;
   fixture: { captureStarts: number; captureStops: number; activeCaptures: number; maxActiveCaptures: number;
@@ -39,7 +43,8 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
   let activeCycle: number | null = null;
   const subscriptions: Array<() => void> = [];
   const report = { mode: 'warm-provider-canary', passed: false, trialId: '', targetDocument: '',
-    expectedInsertion: '', actualPasteVerified: false, cycles: [] as Array<Record<string, unknown>>,
+    expectedInsertion: '', finalTextBeforeProof: '', actualPasteVerified: false,
+    cycles: [] as Array<Record<string, unknown>>,
     finalOwnership: null as { logicalRunId: number; captureRunId: number; captureFenceGeneration: number } | null,
     events: [] as ProviderEvent[], terminals: [] as ProviderTerminal[], duplicateDeliveries: [] as string[],
     errors: [] as string[], final: null as NativeState | null, elapsedMs: 0 };
@@ -136,7 +141,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       const captureStoppedAtMs = now();
       await poll(value => cycle.stopPhase === 'before-ready'
         ? value.status === 'Idle'
-        : value.pausedContinuation === beforeStop.logicalProviderRunId &&
+        : value.pausedContinuation?.logicalRunId === beforeStop.logicalProviderRunId &&
           value.providerTransport?.connectionRetained === true,
       `cycle ${cycle.index} stop settlement`, 45_000);
       const settledAtMs = now();
@@ -155,6 +160,8 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     }
 
     activeCycle = trial.finalEpisodeIndex;
+    const finalEventStart = report.events.length;
+    report.finalTextBeforeProof = store.finalText;
     const beforeFinal = await state();
     await toggle();
     const ready = await poll(value =>
@@ -180,9 +187,13 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       captureFenceGeneration: complete.captureEpisode.generation };
     await toggle();
     await poll(value => value.fixture.captureStops === beforeFinal.fixture.captureStops + 1 &&
-      value.fixture.activeCaptures === 0 && value.pausedContinuation === complete.logicalProviderRunId &&
+      value.fixture.activeCaptures === 0 &&
+      value.pausedContinuation?.logicalRunId === complete.logicalProviderRunId &&
       value.providerTransport?.connectionRetained === true, 'final full proof pause', 45_000);
-    await wait(2_000);
+    await poll(() => store.finalText !== report.finalTextBeforeProof &&
+      report.events.slice(finalEventStart).some(event => event.event === 'transcription:final' &&
+        event.sessionId === complete.logicalProviderRunId && event.markerIds.length >= 2),
+    'final stable transcript proof', 30_000);
     report.expectedInsertion = store.finalText;
     const finalMarkers = new Set(report.events.filter(event => event.cycleIndex === trial.finalEpisodeIndex)
       .flatMap(event => event.markerIds));
