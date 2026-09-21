@@ -43,10 +43,13 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
   const started = performance.now();
   const now = () => performance.now() - started;
   let activeCycle: number | null = null;
+  let terminalSeen = false;
+  let lastSettledAtMs: number | null = null;
   const subscriptions: Array<() => void> = [];
   const report = { mode: 'warm-provider-canary', passed: false, trialId: '', targetDocument: '',
     expectedInsertion: '', finalTextBeforeProof: '', actualPasteVerified: false,
     finalCallbackFence: null as { captureGeneration: number; eventStart: number } | null,
+    finalStartedAtMs: null as number | null,
     cycles: [] as Array<Record<string, unknown>>,
     finalOwnership: null as { logicalRunId: number; captureRunId: number; captureFenceGeneration: number } | null,
     events: [] as ProviderEvent[], terminals: [] as ProviderTerminal[], duplicateDeliveries: [] as string[],
@@ -69,6 +72,8 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     const seenDeliveries = new Set<string>();
     const store = await nativeLivePreflight(pinia, initial.qualificationEndpoint, subscriptions,
       (name, payload) => {
+        if (terminalSeen) report.errors.push(`Provider event after terminal: ${name}`);
+        if (name === 'transcription:terminal') terminalSeen = true;
         if (report.events.length >= 2048) { report.errors.push('Provider event evidence overflow'); return; }
         const sessionId = Number(payload.session_id);
         const deliverySeq = typeof payload.delivery_seq === 'number' ? payload.delivery_seq : null;
@@ -89,7 +94,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
           report.terminals.push({ sessionId, cycleIndex: activeCycle, complete });
         }
         if (name === 'transcription:error') report.errors.push(JSON.stringify(payload));
-      }, { keepAlive: true, autoPasteText: false });
+      }, { keepAlive: true, autoPasteText: false, autoCopyToClipboard: true });
     report.targetDocument = await invoke<string>('native_e2e_prepare_live_target');
     await wait(500);
 
@@ -98,6 +103,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       const eventStart = report.events.length;
       const before = await state();
       const startedAtMs = now();
+      const previousSettleToStartMs = lastSettledAtMs === null ? null : startedAtMs - lastSettledAtMs;
       await toggle();
       const active = await poll(value => value.fixture.captureStarts === before.fixture.captureStarts + 1 &&
         value.fixture.activeCaptures === 1 && value.fixture.sourceEpisodes.length === cycle.index + 1,
@@ -154,11 +160,13 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       check(sourceAtStop?.name === cycle.episode && sourceAtStop.captureGeneration === generation,
         `cycle ${cycle.index} source identity mismatch`);
       report.cycles.push({ ...cycle, startedAtMs, triggerAtMs,
+        previousSettleToStartMs,
         captureStoppedAtMs, settledAtMs, captureGeneration: generation,
         captureRunId: beforeStop.captureEpisode?.runId ?? null,
         captureFenceGeneration: beforeStop.captureEpisode?.generation ?? null,
         logicalRunId: beforeStop.logicalProviderRunId, association, trigger, source: sourceAtStop,
         eventStart, eventEnd: report.events.length, activeCapturesAfterStop: stopped.fixture.activeCaptures });
+      lastSettledAtMs = settledAtMs;
       await invoke('native_e2e_progress', { report: { scenario: 'warm-provider-churn',
         completedCycles: cycle.index + 1, stopPhase: cycle.stopPhase } });
       await wait(cycle.jitterMs);
@@ -166,6 +174,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
 
     activeCycle = null;
     const beforeFinal = await state();
+    report.finalStartedAtMs = now();
     await toggle();
     const ready = await poll(value =>
       value.providerTransport?.serverReady === true && value.providerTransport.connectionRetained === true &&
@@ -223,6 +232,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       backendStreamingProvider: 'elevenlabs' });
     await poll(value => value.status === 'Idle' &&
       value.providerTransport?.connectionRetained === false, 'final provider release', 15_000);
+    await wait(250);
     report.final = await state(true);
     check(report.final.fixture.captureStarts === 21 && report.final.fixture.captureStops === 21 &&
       report.final.fixture.activeCaptures === 0 && report.final.fixture.maxActiveCaptures === 1 &&

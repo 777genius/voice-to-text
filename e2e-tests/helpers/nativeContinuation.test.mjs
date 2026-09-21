@@ -72,11 +72,13 @@ test('cold capture source outlasts every Config fault at the original sample clo
 
 test('paid warm provider canary fixes 20 churn cycles, four stop phases, five jitters and one full proof', async () => {
   const { qualificationExpectations, verifyQualificationConnections, verifyQualificationRoute,
-    verifyWarmProviderCanary } = await import('./nativeContinuation.mjs');
+    verifyWarmProviderCanary, verifyWarmProviderTransport } = await import('./nativeContinuation.mjs');
   assert.equal(warmProviderCanaryTrial.cycles.length, 20);
   assert.deepEqual([...new Set(warmProviderCanaryTrial.cycles.map(cycle => cycle.stopPhase))], warmProviderCanaryPhases);
   assert.deepEqual([...new Set(warmProviderCanaryTrial.cycles.map(cycle => cycle.jitterMs))], warmProviderCanaryJittersMs);
-  assert.ok(new Set(warmProviderCanaryTrial.cycles.map(cycle => cycle.episode)).size >= 4);
+  assert.ok(new Set(warmProviderCanaryTrial.cycles.map(cycle => cycle.episode)).size >= 3);
+  assert.ok(!warmProviderCanaryTrial.cycles.some(cycle =>
+    cycle.episode === warmProviderCanaryTrial.episodes[warmProviderCanaryTrial.finalEpisodeIndex]));
   const worstCaseFrames = warmProviderCanaryTrial.episodes.reduce((total, name) =>
     total + Math.ceil(approvedFixtures[name][0] / 640), 0);
   assert.ok(worstCaseFrames + 512 < maxProxyEvidenceEvents);
@@ -95,11 +97,13 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   ]).flat();
   controls.push({ event: 'backend_control', type: 'pause_accepted', connectionId: 1,
     provider_session_id: 'provider-1', decision: 'accepted', request_id: 'pause-final' });
-  const closed = { event: 'fault_proxy_close', direction: 'upstream', code: 1000 };
+  const closed = { event: 'fault_proxy_close', connectionId: 1, direction: 'upstream', code: 1000 };
   const boundary = { event: 'qualification_pre_teardown', atMs: 10,
     clock: 'runner-performance-now', nativeProcessAlive: true };
   assert.equal(verifyQualificationConnections(warmProviderCanaryTrial,
     [connected, audio, closed, boundary]).backendConnections, 1);
+  assert.throws(() => verifyQualificationConnections(warmProviderCanaryTrial,
+    [connected, audio, { ...closed, connectionId: 999 }, boundary]), /Unmatched upstream close/);
   assert.equal(verifyQualificationRoute(warmProviderCanaryTrial,
     [connected, ready, ...controls.slice(0, -1), audio, controls.at(-1)]).maximumActiveProviderSessions, 1);
   const audioWhilePaused = [connected, ready, controls[0], audio, ...controls.slice(1)];
@@ -110,6 +114,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     [connected, ready, ...controls.slice(1), audio]));
 
   const events = [];
+  let cycleClock = 0;
   const cycles = warmProviderCanaryTrial.cycles.map((plan, index) => {
     const logicalRunId = index < warmProviderCanaryTrial.readyGateFromIndex
       ? 100 + index : 100 + warmProviderCanaryTrial.readyGateFromIndex;
@@ -119,8 +124,10 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       cycleIndex: index, sessionId: logicalRunId, deliverySeq: index + 1, markerIds: [] });
     if (plan.stopPhase === 'after-final') events.push({ event: 'transcription:final',
       cycleIndex: index, sessionId: logicalRunId, deliverySeq: index + 1, markerIds: [index % 2] });
-    return { ...plan, startedAtMs: index * 100, triggerAtMs: index * 100 + 20,
-      captureStoppedAtMs: index * 100 + 30, settledAtMs: index * 100 + 50,
+    const startedAtMs = cycleClock;
+    const previousSettleToStartMs = index === 0 ? null : warmProviderCanaryTrial.cycles[index - 1].jitterMs;
+    const cycle = { ...plan, startedAtMs, previousSettleToStartMs, triggerAtMs: startedAtMs + 20,
+      captureStoppedAtMs: startedAtMs + 30, settledAtMs: startedAtMs + 50,
       captureGeneration: index + 1, logicalRunId, captureRunId,
       captureFenceGeneration: index + 1,
       association: plan.stopPhase === 'before-ready' ? null : {
@@ -129,6 +136,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
         plan.stopPhase === 'during-partial' ? { event: 'transcription:partial' } :
         plan.stopPhase === 'after-final' ? { event: 'transcription:final' } : { emittedFrames: 320 },
       eventStart, eventEnd: events.length, activeCapturesAfterStop: 0 };
+    cycleClock = cycle.settledAtMs + plan.jitterMs;
+    return cycle;
   });
   const finalLogicalRunId = 100 + warmProviderCanaryTrial.readyGateFromIndex;
   events.push({ event: 'transcription:final', cycleIndex: 20, sessionId: finalLogicalRunId,
@@ -170,11 +179,17 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   const report = { mode: 'warm-provider-canary', passed: true, trialId: warmProviderCanaryTrial.id,
     errors: [], duplicateDeliveries: [], cycles, events, finalTextBeforeProof: 'stale transcript',
     expectedInsertion: 'stable transcript',
+    finalStartedAtMs: cycleClock,
     finalCallbackFence: { captureGeneration: 21, eventStart: events.length - 2 },
     finalOwnership: { logicalRunId: finalLogicalRunId, captureRunId: 999, captureFenceGeneration: 21 },
     terminals: [{ sessionId: finalLogicalRunId, cycleIndex: 20, complete: true }], final: { status: 'Idle', preparedCaptureTokenCount: 0,
       providerTransport: { connectionRetained: false }, fixture } };
   assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, report).churnCycles, 20);
+  const ledgerBytes = fixture.providerPcmLedgers.reduce((sum, row) => sum + row.samples * 2, 0);
+  assert.equal(verifyWarmProviderTransport([{ event: 'client_binary', bytes: ledgerBytes }], fixture)
+    .transmittedPcmBytes, ledgerBytes);
+  assert.throws(() => verifyWarmProviderTransport([{ event: 'client_binary', bytes: ledgerBytes - 2 }], fixture),
+    /does not match/);
   for (const mutate of [
     value => value.cycles.pop(),
     value => { value.cycles[5].association.captureRunId = 9999; },
@@ -219,18 +234,19 @@ test('mode counts and initial-only Ready gate preserve the legacy prescribed tri
 });
 test('connection verifier rejects overlap, retry, missing closes and every retained proxy failure', async () => {
   const { verifyQualificationConnections } = await import('./nativeContinuation.mjs');
-  const opened = { event: 'fault_proxy_connected' };
-  const closed = { event: 'fault_proxy_close', direction: 'upstream', code: 1000 };
+  const opened = connectionId => ({ event: 'fault_proxy_connected', connectionId });
+  const closed = connectionId => ({ event: 'fault_proxy_close', connectionId, direction: 'upstream', code: 1000 });
   const boundary = { event: 'qualification_pre_teardown', atMs: 10, clock: 'runner-performance-now', nativeProcessAlive: true };
   for (const trial of liveTrials) {
-    const events = trial.id.startsWith('cold-') ? [opened, closed, opened, closed] : [opened, closed];
+    const events = trial.id.startsWith('cold-') ? [opened(1), closed(1), opened(2), closed(2)] : [opened(1), closed(1)];
     assert.equal(verifyQualificationConnections(trial, [...events, boundary]).providerHandshakeVerification, 'pending-parent-logs');
-    assert.throws(() => verifyQualificationConnections(trial, [...events, opened, closed]));
+    assert.throws(() => verifyQualificationConnections(trial, [...events, opened(3), closed(3)]));
     assert.throws(() => verifyQualificationConnections(trial, events.slice(0, -1)));
     for (const event of ['fault_proxy_overflow', 'fault_proxy_transport_error', 'fault_proxy_deadline', 'fault_proxy_evidence_overflow'])
       assert.throws(() => verifyQualificationConnections(trial, [...events, { event }]));
   }
-  assert.throws(() => verifyQualificationConnections(liveTrials.find(t => t.id === 'cold-0'), [opened, opened, closed, closed]));
+  assert.throws(() => verifyQualificationConnections(liveTrials.find(t => t.id === 'cold-0'),
+    [opened(1), opened(2), closed(1), closed(2)]));
 });
 test('source verification requires native Ready, complete paced PCM and continuous baseline gap', async () => {
   const { verifyQualificationSources, qualificationExpectations } = await import('./nativeContinuation.mjs');
@@ -319,8 +335,8 @@ test('normal baseline/cold reject continuation controls', async () => {
 test('normal Stop closure must precede explicit live-process collector boundary, never finish/exit cleanup', async () => {
   const { verifyQualificationConnections } = await import('./nativeContinuation.mjs');
   const trial = liveTrials.find(t => t.id === 'warm-baseline-1');
-  const open = { event: 'fault_proxy_connected' };
-  const close = { event: 'fault_proxy_close', direction: 'upstream', code: 1000 };
+  const open = { event: 'fault_proxy_connected', connectionId: 1 };
+  const close = { event: 'fault_proxy_close', connectionId: 1, direction: 'upstream', code: 1000 };
   const boundary = { event: 'qualification_pre_teardown', atMs: 10, clock: 'runner-performance-now', nativeProcessAlive: true };
   verifyQualificationConnections(trial, [open, close, boundary]);
   assert.throws(() => verifyQualificationConnections(trial, [open, boundary, close]));

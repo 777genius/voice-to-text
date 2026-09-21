@@ -6,8 +6,8 @@ const jitters = [0, 25, 100, 250, 500] as const;
 const episodeByPhase = {
   'before-ready': 'episode-a.pcm',
   'after-first-pcm': 'episode-b.pcm',
-  'during-partial': 'old-commit-new-tail.pcm',
-  'after-final': 'long-auto-commit.pcm',
+  'during-partial': 'stop-inside-word.pcm',
+  'after-final': 'episode-a.pcm',
 } as const;
 
 function plan() {
@@ -30,6 +30,7 @@ describe('warm provider paid canary plan', () => {
       (value: ReturnType<typeof plan>) => { value.cycles[9].episode = 'episode-a.pcm'; },
       (value: ReturnType<typeof plan>) => { value.readyGateFromIndex = 4; },
       (value: ReturnType<typeof plan>) => { value.finalEpisodeIndex = 19; },
+      (value: ReturnType<typeof plan>) => { value.episodes[20] = 'episode-a.pcm'; },
     ];
     for (const mutate of mutations) {
       const invalid = structuredClone(plan());

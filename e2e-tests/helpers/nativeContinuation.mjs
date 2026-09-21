@@ -22,8 +22,8 @@ export const warmProviderCanaryPhases = Object.freeze([
 const warmProviderCanaryEpisodeByPhase = Object.freeze({
   'before-ready': 'episode-a.pcm',
   'after-first-pcm': 'episode-b.pcm',
-  'during-partial': 'old-commit-new-tail.pcm',
-  'after-final': 'long-auto-commit.pcm',
+  'during-partial': 'stop-inside-word.pcm',
+  'after-final': 'episode-a.pcm',
 });
 export const warmProviderCanaryCycles = Object.freeze(Array.from({ length: 20 }, (_, index) => {
   const stopPhase = warmProviderCanaryPhases[Math.floor(index / warmProviderCanaryJittersMs.length)];
@@ -45,6 +45,8 @@ export const warmProviderCanaryTrial = Object.freeze({
   finalEpisodeIndex: warmProviderCanaryCycles.length,
   episodes: Object.freeze([
     ...warmProviderCanaryCycles.map(cycle => cycle.episode),
+    // Reserve the only complete two-phrase source for the final proof. A late
+    // result from a churn cycle can no longer satisfy its marker predicate.
     'long-auto-commit.pcm',
   ]),
 });
@@ -122,7 +124,8 @@ export function qualificationExpectations(trial) {
 }
 export function verifyQualificationConnections(trial, events) {
   const expected = qualificationExpectations(trial);
-  let active = 0; let connections = 0; let boundarySeen = false;
+  const active = new Set(); const opened = new Set(); const closedUpstream = new Set();
+  let connections = 0; let boundarySeen = false;
   for (const event of events) {
     if (event.event === 'backend_control' && event.type === 'error') throw new Error('Retained backend error fails qualification');
     if (!trial.continuation && event.event === 'backend_control' &&
@@ -132,24 +135,31 @@ export function verifyQualificationConnections(trial, events) {
       const connectionCountValid = expected.warmProviderCanary
         ? connections >= expected.minBackendConnections && connections <= expected.maxBackendConnections
         : connections === expected.backendConnections;
-      if (boundarySeen || active !== 0 || !connectionCountValid || event.nativeProcessAlive !== true || event.clock !== 'runner-performance-now' || !Number.isFinite(event.atMs)) throw new Error('Normal Stop not closed before teardown');
+      if (boundarySeen || active.size !== 0 || !connectionCountValid || event.nativeProcessAlive !== true || event.clock !== 'runner-performance-now' || !Number.isFinite(event.atMs)) throw new Error('Normal Stop not closed before teardown');
       boundarySeen = true;
     }
     // Only upstream closes establish release; a later proxy-client close is not credited.
     if (boundarySeen && (event.event === 'fault_proxy_connected' || (event.event === 'fault_proxy_close' && event.direction === 'upstream'))) throw new Error('Connection activity after teardown boundary');
     if (event.event === 'fault_proxy_connected') {
-      connections++; active++;
-      if (active > 1) throw new Error('Overlapping backend connections');
+      if (!Number.isSafeInteger(event.connectionId) || event.connectionId <= 0 || opened.has(event.connectionId)) {
+        throw new Error('Invalid or duplicate backend connection identity');
+      }
+      connections++;
+      opened.add(event.connectionId); active.add(event.connectionId);
+      if (active.size > 1) throw new Error('Overlapping backend connections');
     }
     if (event.event === 'fault_proxy_close' && event.direction === 'upstream') {
       if (event.code !== 1000 && event.code !== 1005) throw new Error('Unclean upstream close fails qualification');
-      if (--active < 0) throw new Error('Unmatched upstream close');
+      if (!active.delete(event.connectionId) || closedUpstream.has(event.connectionId)) {
+        throw new Error('Unmatched upstream close');
+      }
+      closedUpstream.add(event.connectionId);
     }
   }
   const connectionCountValid = expected.warmProviderCanary
     ? connections >= expected.minBackendConnections && connections <= expected.maxBackendConnections
     : connections === expected.backendConnections;
-  if (!boundarySeen || !connectionCountValid || active !== 0) throw new Error('Mode-specific backend connection count/cleanup failed');
+  if (!boundarySeen || !connectionCountValid || active.size !== 0 || closedUpstream.size !== opened.size) throw new Error('Mode-specific backend connection count/cleanup failed');
   return { backendConnections: connections, expectedProviderHandshakes: expected.providerHandshakes,
     ...(expected.warmProviderCanary ? {
       allowedBackendConnectionRange: [expected.minBackendConnections, expected.maxBackendConnections],
@@ -225,12 +235,16 @@ export function verifyQualificationRoute(trial, events) {
     if (active || orderedPauses !== retainedCycles + 1 || orderedContinues !== retainedCycles) {
       throw new Error('Warm canary retained session did not end in an ordered paused state');
     }
-    return { clientAudioFrames: binary.length, clientAudioConnections: connectionIds.size,
+    return { clientAudioFrames: binary.length,
+      clientAudioBytes: binary.reduce((sum, event) => sum + event.bytes, 0),
+      clientAudioConnections: connectionIds.size,
       routeVerified: trial.route, maximumActiveConnections: 1, maximumActiveProviderSessions: 1,
       retainedProviderSessionId: providerSessionId, acceptedPauses: pauses.length,
       acceptedContinues: continues.length };
   }
-  if (!trial.continuation) return { clientAudioFrames: binary.length, clientAudioConnections: connectionIds.size, routeVerified: trial.route };
+  if (!trial.continuation) return { clientAudioFrames: binary.length,
+    clientAudioBytes: binary.reduce((sum, event) => sum + event.bytes, 0),
+    clientAudioConnections: connectionIds.size, routeVerified: trial.route };
 
   const pause = events.findIndex(event => event.event === 'backend_control' && event.type === 'pause_accepted' && event.decision === 'accepted');
   const continued = events.findIndex(event => event.event === 'backend_control' && event.type === 'continue_result' &&
@@ -246,8 +260,27 @@ export function verifyQualificationRoute(trial, events) {
   } else if (trial.route === 'continued-audio') {
     if (restores.length !== 0 || postContinueAudio.length === 0) throw new Error('Continued route requires a B write after acceptance and no Restore');
   } else throw new Error('Unknown continuation route contract');
-  return { clientAudioFrames: binary.length, clientAudioConnections: connectionIds.size,
+  return { clientAudioFrames: binary.length,
+    clientAudioBytes: binary.reduce((sum, event) => sum + event.bytes, 0),
+    clientAudioConnections: connectionIds.size,
     postContinueAudioFrames: postContinueAudio.length, routeVerified: trial.route };
+}
+
+export function verifyWarmProviderTransport(events, fixture) {
+  const frames = events.filter(event => event.event === 'client_binary');
+  const ledgers = fixture?.providerPcmLedgers;
+  if (!Array.isArray(ledgers) || !frames.length || frames.some(event =>
+    !Number.isSafeInteger(event.bytes) || event.bytes <= 0 || event.bytes % 2 !== 0)) {
+    throw new Error('Warm provider transport evidence is malformed');
+  }
+  const transmittedBytes = frames.reduce((sum, event) => sum + event.bytes, 0);
+  const providerLedgerBytes = ledgers.reduce((sum, ledger) =>
+    sum + (Number.isSafeInteger(ledger.samples) && ledger.samples > 0 ? ledger.samples * 2 : 0), 0);
+  if (!Number.isSafeInteger(transmittedBytes) || transmittedBytes <= 0 ||
+      transmittedBytes !== providerLedgerBytes) {
+    throw new Error('Warm provider PCM ledger does not match proxy-observed transport bytes');
+  }
+  return { transmittedPcmBytes: transmittedBytes };
 }
 
 export function verifyQualificationTerminals(trial, episodes, terminals) {
@@ -304,6 +337,13 @@ export function verifyWarmProviderCanary(trial, report) {
       !Array.isArray(cycles) || cycles.length !== trial.cycles.length ||
       !Array.isArray(events) || events.length > 2048 || !fixture) {
     throw new Error('Incomplete warm provider canary report');
+  }
+  const deliveryKeys = events.flatMap(event => Number.isSafeInteger(event.deliverySeq) && event.deliverySeq > 0
+    ? [`${event.sessionId}:${event.deliverySeq}:${event.event}`] : []);
+  const terminalIndex = events.findIndex(event => event.event === 'transcription:terminal');
+  if (new Set(deliveryKeys).size !== deliveryKeys.length || terminalIndex < 0 || terminalIndex !== events.length - 1 ||
+      trial.cycles.some(cycle => cycle.episode === trial.episodes[finalIndex])) {
+    throw new Error('Warm provider event order, identity, or final source exclusivity is invalid');
   }
   const associations = new Map((fixture.captureRunAssociations ?? []).map(row =>
     [row.captureGeneration, row]));
@@ -385,6 +425,10 @@ export function verifyWarmProviderCanary(trial, report) {
         !Number.isFinite(cycle.startedAtMs) || !Number.isFinite(cycle.triggerAtMs) ||
         !Number.isFinite(cycle.captureStoppedAtMs) || !Number.isFinite(cycle.settledAtMs) ||
         cycle.triggerAtMs < cycle.startedAtMs || cycle.triggerAtMs - cycle.startedAtMs > 75_000 ||
+        (index === 0 ? cycle.previousSettleToStartMs !== null :
+          !Number.isFinite(cycle.previousSettleToStartMs) ||
+          cycle.previousSettleToStartMs < trial.cycles[index - 1].jitterMs ||
+          cycle.previousSettleToStartMs > trial.cycles[index - 1].jitterMs + 5_000) ||
         cycle.captureStoppedAtMs < cycle.triggerAtMs || cycle.captureStoppedAtMs - cycle.triggerAtMs > 5_500 ||
         cycle.settledAtMs < cycle.captureStoppedAtMs || cycle.settledAtMs - cycle.captureStoppedAtMs > 45_500 ||
         !Number.isSafeInteger(cycle.logicalRunId) || cycle.logicalRunId <= 0 ||
@@ -464,6 +508,9 @@ export function verifyWarmProviderCanary(trial, report) {
       !Number.isSafeInteger(ownership.logicalRunId) || ownership.logicalRunId <= 0 ||
       !finalProviderLedger || finalProviderLedger.samples <= 0 ||
       callbackFence?.captureGeneration !== finalIndex + 1 ||
+      !Number.isFinite(report.finalStartedAtMs) ||
+      report.finalStartedAtMs - cycles.at(-1).settledAtMs < cycles.at(-1).jitterMs ||
+      report.finalStartedAtMs - cycles.at(-1).settledAtMs > cycles.at(-1).jitterMs + 5_000 ||
       !Number.isSafeInteger(callbackFence?.eventStart) || callbackFence.eventStart < cycles.at(-1).eventEnd ||
       callbackFence.eventStart > events.length ||
       events.slice(cycles.at(-1).eventEnd, callbackFence.eventStart)

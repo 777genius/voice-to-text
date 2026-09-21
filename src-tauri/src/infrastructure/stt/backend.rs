@@ -235,6 +235,9 @@ struct CallbackState {
     // Защита от "поздних" ACK старой записи:
     // активируем pending только когда получили ACK с seq БОЛЬШЕ последнего отправленного seq на момент resume_stream.
     swap_after_seq: u64,
+    // Negotiated Pause/Continue retains its callbacks. Observe the next capture
+    // generation at the first ACK for audio issued after Continue instead.
+    generation_fence_after_seq: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -1089,6 +1092,10 @@ impl SttProvider for BackendProvider {
             }
             _ => ContinuationAudioGate::Paused,
         };
+        if matches!(gate, ContinuationAudioGate::First { .. }) {
+            self.callbacks.lock().await.generation_fence_after_seq =
+                Some(self.sent_chunks_count as u64);
+        }
         self.continuation.lock().unwrap().audio_gate = gate;
         if result.is_err() {
             // The retained session remains observable after local transport death.
@@ -1483,6 +1490,7 @@ impl SttProvider for BackendProvider {
             state.pending = None;
             state.swap_on_next_ack = false;
             state.swap_after_seq = 0;
+            state.generation_fence_after_seq = None;
         }
 
         // Отправляем Config message
@@ -1673,8 +1681,14 @@ impl SttProvider for BackendProvider {
                                         }
                                         // Если есть pending callbacks (новая UI-сессия) — активируем их на первом ACK.
                                         // Это даёт чёткую границу между "старыми" и "новыми" результатами.
-                                        let swapped = {
+                                        let (swapped, generation_fenced) = {
                                             let mut state = callbacks_state.lock().await;
+                                            let generation_fenced = state
+                                                .generation_fence_after_seq
+                                                .is_some_and(|after| seq > after);
+                                            if generation_fenced {
+                                                state.generation_fence_after_seq = None;
+                                            }
                                             if state.swap_on_next_ack && seq > state.swap_after_seq
                                             {
                                                 state.swap_on_next_ack = false;
@@ -1682,18 +1696,20 @@ impl SttProvider for BackendProvider {
                                                 if state.pending.is_some() {
                                                     state.active = state.pending.take();
                                                 }
-                                                true
+                                                (true, generation_fenced)
                                             } else {
-                                                false
+                                                (false, generation_fenced)
                                             }
                                         };
-                                        if swapped {
+                                        if swapped || generation_fenced {
                                             #[cfg(all(
                                                 debug_assertions,
                                                 feature = "native-window-e2e"
                                             ))]
                                             crate::presentation::native_e2e::record_live_provider_callback_swap();
-                                            log::debug!("Callbacks switched after first ACK (new recording session)");
+                                            log::debug!(
+                                                "Provider generation fenced after first ACK (callbacks_swapped={swapped})"
+                                            );
                                         }
                                     }
 
@@ -2497,6 +2513,7 @@ impl SttProvider for BackendProvider {
             state.pending = None;
             state.swap_on_next_ack = false;
             state.swap_after_seq = 0;
+            state.generation_fence_after_seq = None;
         }
 
         log::info!(
@@ -2541,6 +2558,7 @@ impl SttProvider for BackendProvider {
             state.pending = None;
             state.swap_on_next_ack = false;
             state.swap_after_seq = 0;
+            state.generation_fence_after_seq = None;
         }
 
         Ok(())
@@ -2623,6 +2641,7 @@ impl SttProvider for BackendProvider {
             });
             state.swap_on_next_ack = true;
             state.swap_after_seq = self.sent_chunks_count as u64;
+            state.generation_fence_after_seq = None;
         }
 
         self.is_paused = false;
@@ -4429,6 +4448,7 @@ mod tests {
             pending: Some(callback_set(marker.clone(), 2)),
             swap_on_next_ack: true,
             swap_after_seq: 10,
+            generation_fence_after_seq: None,
         };
 
         let cb = state.error_callback().expect("error callback");

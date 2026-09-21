@@ -33,7 +33,7 @@ export function verifyLiveTerminals(continuation: boolean, baseline: boolean,
 // Shared TEST preflight; diagnostic uses the active Pinia and a refusing fixture transport.
 export async function nativeLivePreflight(pinia: Pinia | undefined, endpoint: string,
   subscriptions: Array<() => void>, observe: (name: string, payload: Record<string, unknown>) => void,
-  options: { keepAlive?: boolean; autoPasteText?: boolean } = {}) {
+  options: { keepAlive?: boolean; autoPasteText?: boolean; autoCopyToClipboard?: boolean } = {}) {
   for (const name of ['transcription:partial', 'transcription:final', 'transcription:terminal', 'transcription:error']) {
     subscriptions.push(await listen(name, event => observe(name, event.payload as Record<string, unknown>)));
   }
@@ -42,7 +42,8 @@ export async function nativeLivePreflight(pinia: Pinia | undefined, endpoint: st
   await config.startSync();
   await invoke('update_app_config', { showMiniRecordingWindow: true, holdToRecord: false,
     hideRecordingWindowOnHotkey: true, playCompletionSound: false,
-    autoCopyToClipboard: false, autoPasteText: options.autoPasteText ?? true });
+    autoCopyToClipboard: options.autoCopyToClipboard ?? false,
+    autoPasteText: options.autoPasteText ?? true });
   await config.refresh();
   await invoke('native_e2e_configure', { config: { qualificationEndpoint: endpoint,
     keepAlive: options.keepAlive ?? false, audioDelayMs: 0, stopDelayMs: 0 } });

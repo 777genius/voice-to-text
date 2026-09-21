@@ -2194,7 +2194,23 @@ impl AppState {
                 .as_ref()
                 .map(|(_, owner)| owner.clone());
             if let Some(owner) = owner {
-                owner.close().await.map_err(|e| e.to_string())?;
+                if owner.shutdown_requested() {
+                    // A timed-out retirement remains authoritative: wait for its
+                    // physical close instead of issuing an invalid non-shutdown
+                    // request against the retired owner. Only release the cache
+                    // after the close acknowledgement so a cold fallback cannot
+                    // open a second native input concurrently.
+                    owner.shutdown().await.map_err(|e| e.to_string())?;
+                    let mut slot = self.warm_dictation_input.lock().unwrap();
+                    if slot
+                        .as_ref()
+                        .is_some_and(|(_, cached)| Arc::ptr_eq(cached, &owner))
+                    {
+                        *slot = None;
+                    }
+                } else {
+                    owner.close().await.map_err(|e| e.to_string())?;
+                }
             }
         }
         Ok(())
@@ -2500,6 +2516,31 @@ mod tests {
         };
 
         assert_eq!(error, "replacement open failed");
+        assert!(state.warm_dictation_input.lock().unwrap().is_none());
+    }
+
+    #[cfg(all(target_os = "macos", feature = "native-window-e2e"))]
+    #[tokio::test]
+    async fn cold_close_awaits_and_releases_an_already_retired_owner() {
+        use super::AppState;
+        let service = std::sync::Arc::new(crate::application::TranscriptionService::new(
+            Box::new(crate::infrastructure::audio::MockAudioCapture::new()),
+            std::sync::Arc::new(crate::infrastructure::DefaultSttProviderFactory::new()),
+        ));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = AppState::from_recording_ports(
+            service,
+            crate::domain::AppConfig::default(),
+            tx,
+            rx,
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        );
+        let retired = crate::presentation::native_e2e::warm_input_owner().unwrap();
+        retired.shutdown().await.unwrap();
+        *state.warm_dictation_input.lock().unwrap() = Some((Some("retired route".into()), retired));
+
+        state.close_warm_input().await.unwrap();
+
         assert!(state.warm_dictation_input.lock().unwrap().is_none());
     }
 

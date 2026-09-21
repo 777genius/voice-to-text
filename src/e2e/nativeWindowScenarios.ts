@@ -106,7 +106,16 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
   if ((await state()).terminalMode) { await runNativeTerminalScenario(pinia); return; }
   const runStarted = Date.now();
   let confirmed = false;
-  const report = { lastProgress: null as unknown, failureContext: null as unknown, elapsedMs: 0, passed: false, completedCycles: 0, hiddenIdleMs: 0, scenarios: [] as string[], observations: [] as unknown[], error: '' };
+  const report = { lastProgress: null as unknown, failureContext: null as unknown, elapsedMs: 0,
+    passed: false, completedCycles: 0, hiddenIdleMs: 0,
+    cycleEvidence: [] as Array<{ index: number; captureStartsBefore: number; captureStartsAfter: number;
+      captureStopsBefore: number; captureStopsAfter: number; sessionId: number; windowEpoch: number;
+      captureGeneration: number }>,
+    hiddenIdleEvidence: null as null | { nativeHiddenIdleMs: number; webviewElapsedMs: number;
+      baselineCaptureStarts: number; baselineCaptureStops: number; baselineActiveCaptures: number;
+      baselineActiveProviders: number; firstVisibleMs: number; wakeSampleCount: number;
+      lastVisibleElapsedMs: number; visibilityTransitionCount: number },
+    scenarios: [] as string[], observations: [] as unknown[], error: '' };
   try {
     await until(async () => {
       try { return await state(); } catch { return null; }
@@ -404,9 +413,24 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     await progress('recording-cycles-starting');
     for (let cycle = 0; cycle < 50; cycle += 1) {
       if (cycle === 25) await configure({ keepAlive: true });
+      const cycleBefore = await state();
       current = await start();
+      const association = current.fixture.captureRunAssociations[
+        current.fixture.captureRunAssociations.length - 1];
+      check(current.fixture.captureStarts === cycleBefore.fixture.captureStarts + 1 && association,
+        `Rapid cycle ${cycle} did not create exactly one owned capture generation`);
       await observe(90, async () => {}, current.expected);
       await stop();
+      const cycleAfter = await state();
+      check(cycleAfter.fixture.captureStops === cycleBefore.fixture.captureStops + 1,
+        `Rapid cycle ${cycle} did not close exactly one capture generation`);
+      report.cycleEvidence.push({ index: cycle,
+        captureStartsBefore: cycleBefore.fixture.captureStarts,
+        captureStartsAfter: current.fixture.captureStarts,
+        captureStopsBefore: cycleBefore.fixture.captureStops,
+        captureStopsAfter: cycleAfter.fixture.captureStops,
+        sessionId: current.sessionId, windowEpoch: current.windowEpoch,
+        captureGeneration: association.captureGeneration });
       report.completedCycles += 1;
       if (cycle % 5 === 0) await progress(`recording-cycle-${cycle + 1}`);
     }
@@ -867,6 +891,16 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
         visibleSamples[visibleSamples.length - 1].elapsedMs - idleResult.firstVisibleMs >= 1200,
         'Native wake did not remain visible throughout the full initial 1200ms');
       report.hiddenIdleMs = idleResult.hiddenIdleMs;
+      report.hiddenIdleEvidence = { nativeHiddenIdleMs: idleResult.hiddenIdleMs,
+        webviewElapsedMs: Date.now() - idleBegin,
+        baselineCaptureStarts: idleResult.before.fixture.captureStarts,
+        baselineCaptureStops: idleResult.before.fixture.captureStops,
+        baselineActiveCaptures: idleResult.before.fixture.activeCaptures,
+        baselineActiveProviders: idleResult.before.fixture.activeProviders,
+        firstVisibleMs: idleResult.firstVisibleMs,
+        wakeSampleCount: idleResult.wakeSamples.length,
+        lastVisibleElapsedMs: visibleSamples[visibleSamples.length - 1].elapsedMs,
+        visibilityTransitionCount: idleResult.visibilityTransitions.length };
       report.observations.push({ nativeHiddenIdleMs: idleResult.hiddenIdleMs, webviewElapsedMs: Date.now() - idleBegin,
         beforeNativeWake: idleResult.before, firstVisibleMs: idleResult.firstVisibleMs,
         positiveWakeSamples: visibleSamples.length, wakeSamples: idleResult.wakeSamples, visibilityTransitions: idleResult.visibilityTransitions });

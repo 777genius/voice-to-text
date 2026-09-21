@@ -21,7 +21,11 @@ export function validateWarmProviderCanaryPlan(trial: WarmProviderCanaryTrial) {
       throw new Error(`Warm canary cycle ${index} differs from the fixed paid plan`);
     }
   }
-  if (new Set(trial.cycles.map(cycle => cycle.episode)).size < 4) {
+  if (new Set(trial.cycles.map(cycle => cycle.episode)).size < 3) {
     throw new Error('Warm canary needs multiple distinct spoken fixtures');
+  }
+  if (trial.episodes[trial.finalEpisodeIndex] !== 'long-auto-commit.pcm' ||
+      trial.cycles.some(cycle => cycle.episode === trial.episodes[trial.finalEpisodeIndex])) {
+    throw new Error('Warm canary final proof source must be exclusive to its generation');
   }
 }

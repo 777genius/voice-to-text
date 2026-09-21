@@ -97,8 +97,10 @@ jobs:
           archive="gitleaks_${version}_linux_x64.tar.gz"
           checksums="gitleaks_${version}_checksums.txt"
           base_url="https://github.com/gitleaks/gitleaks/releases/download/v${version}"
-          curl --fail --location --silent --show-error --remote-name "${base_url}/${archive}"
-          curl --fail --location --silent --show-error --remote-name "${base_url}/${checksums}"
+          curl --fail --location --silent --show-error --retry 5 --retry-all-errors --retry-delay 2 \
+            --remote-name "${base_url}/${archive}"
+          curl --fail --location --silent --show-error --retry 5 --retry-all-errors --retry-delay 2 \
+            --remote-name "${base_url}/${checksums}"
           grep " ${archive}$" "$checksums" | sha256sum --check --strict
           tar -xzf "$archive" gitleaks
           ./gitleaks git --redact --verbose

@@ -1,7 +1,7 @@
 import { runRestartCrash } from './helpers/nativeRestartCrash.mjs';
 import { closeOwnedDocument, ownedDocumentMatches } from './helpers/nativeOwnedDocument.mjs';
 import { isDeepStrictEqual, promisify } from 'node:util';
-import { verifyQualificationTerminals, verifyQualificationSources, verifyQualificationConnections, verifyQualificationRoute, verifyWarmProviderCanary, maxProxyEvidenceEvents, liveTrials, readApprovedFixtures, validateHarnessConfig, exactInsertionEvidence } from './helpers/nativeContinuation.mjs';
+import { verifyQualificationTerminals, verifyQualificationSources, verifyQualificationConnections, verifyQualificationRoute, verifyWarmProviderCanary, verifyWarmProviderTransport, maxProxyEvidenceEvents, liveTrials, readApprovedFixtures, validateHarnessConfig, exactInsertionEvidence } from './helpers/nativeContinuation.mjs';
 import { createWriteStream } from 'node:fs';
 import { spawn, execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -28,7 +28,7 @@ function generationMap(rows, validate) {
   return generations;
 }
 
-function validateExactPcmEvidence(fixture, requireEveryCaptureDelivered) {
+function validateExactPcmEvidence(fixture, requireEveryCaptureDelivered, providerStopPerGeneration = true) {
   const validLedger = ledger => nonnegativeSafeInteger(ledger.chunks) &&
     nonnegativeSafeInteger(ledger.samples) && typeof ledger.hash === 'string' &&
     /^[0-9a-f]{16}$/.test(ledger.hash) &&
@@ -55,7 +55,7 @@ function validateExactPcmEvidence(fixture, requireEveryCaptureDelivered) {
       !Array.isArray(failureGenerations) ||
       failureGenerations.length !== fixture.providerFailures ||
       failureGenerations.some(generation => !positiveSafeInteger(generation) || !captures.has(generation)) ||
-      providers.size + fixture.providerNoAudioStops !== fixture.providerStops) return false;
+      (providerStopPerGeneration && providers.size + fixture.providerNoAudioStops !== fixture.providerStops)) return false;
   const sameGenerations = (left, right) =>
     left.size === right.size && [...left.keys()].every(generation => right.has(generation));
   const capturesWithPcm = new Map([...captures].filter(([, ledger]) => ledger.chunks > 0));
@@ -966,9 +966,27 @@ export function validateResult(envelope) {
     return report;
   }
   if (report?.mode === 'continuation-fake') {
+    const cycles = report.cycles;
+    const latencies = fixture?.firstPcmLatenciesMs;
+    const validCycles = Array.isArray(cycles) && cycles.length === 50 && cycles.every((cycle, index) =>
+      cycle?.cycle === index && cycle.captureGeneration === index + 2 &&
+      Number.isSafeInteger(cycle.windowEpoch) && cycle.windowEpoch > 0 &&
+      (index === 0 || cycle.windowEpoch > cycles[index - 1].windowEpoch) &&
+      cycle.providerStarts === 1 && cycle.micOffOnStop === true &&
+      Array.isArray(cycle.controls) && cycle.controls.length === 2 &&
+      cycle.controls[0]?.operation === 'pause' && cycle.controls[1]?.operation === 'continue' &&
+      cycle.controls[0].logicalRunId === cycle.controls[1].logicalRunId &&
+      Number.isSafeInteger(cycle.controls[0].logicalRunId) && cycle.controls[0].logicalRunId > 0 &&
+      cycle.controls[0].result?.decision === 'accepted' && cycle.controls[1].result?.decision === 'accepted' &&
+      cycle.controls[0].result.pause_epoch === cycle.controls[1].result.pause_epoch &&
+      Number.isSafeInteger(cycle.controls[0].result.pause_epoch) && cycle.controls[0].result.pause_epoch > 0);
+    const validLatencies = Array.isArray(latencies) && latencies.length >= 51 &&
+      latencies.slice(0, 51).every((row, index) => row?.captureGeneration === index + 1 &&
+        Number.isFinite(row.elapsedMs) && row.elapsedMs >= 0 && row.elapsedMs <= 250);
     if (envelope.marker !== marker || envelope.passed !== true || report.passed !== true ||
         report.terminalCount !== 1 || report.stableDeliveries?.length !== 1 || report.final?.historyEntryCount !== 1 ||
-        report.completedCycles !== 50 || report.cycles?.length !== 50 ||
+        report.completedCycles !== 50 || !validCycles || !validLatencies ||
+        !validateExactPcmEvidence(fixture, true, false) || fixture?.observationOverflow !== false ||
         !Array.isArray(report.errors) || report.errors.length ||
         !Number.isFinite(report.p95FirstPcmMs) || report.p95FirstPcmMs < 0 || report.p95FirstPcmMs > 250 ||
         fixture?.activeCaptures !== 0 || fixture?.activeProviders !== 0 || fixture?.maxActiveProviders !== 1 ||
@@ -1010,6 +1028,42 @@ export function validateResult(envelope) {
       report.passed !== true || report.completedCycles !== 50 ||
       !Number.isFinite(report.hiddenIdleMs) || report.hiddenIdleMs < 180_000 || report.skipped) {
     throw new Error(`Native result is incomplete: ${JSON.stringify(envelope)}`);
+  }
+  const cycles = report.cycleEvidence;
+  const requiredScenarios = ['50-audio-transcript-stop-hide-reopen-cycles',
+    'real-hidden-idle-180s-and-fresh-audio'];
+  if (!Array.isArray(cycles) || cycles.length !== 50 || cycles.some((row, index) =>
+    row?.index !== index || !Number.isSafeInteger(row.captureStartsBefore) ||
+    row.captureStartsAfter !== row.captureStartsBefore + 1 ||
+    !Number.isSafeInteger(row.captureStopsBefore) || row.captureStopsAfter !== row.captureStopsBefore + 1 ||
+    !Number.isSafeInteger(row.sessionId) || row.sessionId <= 0 ||
+    !Number.isSafeInteger(row.windowEpoch) || row.windowEpoch <= 0 ||
+    !Number.isSafeInteger(row.captureGeneration) || row.captureGeneration <= 0 ||
+    (index > 0 && (row.captureStartsBefore !== cycles[index - 1].captureStartsAfter ||
+      row.captureStopsBefore !== cycles[index - 1].captureStopsAfter ||
+      row.sessionId <= cycles[index - 1].sessionId || row.windowEpoch <= cycles[index - 1].windowEpoch ||
+      row.captureGeneration <= cycles[index - 1].captureGeneration))) ||
+    cycles[49].captureStartsAfter > fixture.captureStarts || cycles[49].captureStopsAfter > fixture.captureStops ||
+    cycles.some(row => {
+      const capture = fixture.capturePcmLedgers.find(ledger => ledger.captureGeneration === row.captureGeneration);
+      const provider = fixture.providerPcmLedgers.find(ledger => ledger.captureGeneration === row.captureGeneration);
+      return !capture || capture.samples <= 0 || !provider || provider.chunks !== capture.chunks ||
+        provider.samples !== capture.samples || provider.hash !== capture.hash;
+    }) || requiredScenarios.some(name => !report.scenarios.includes(name))) {
+    throw new Error(`Native result cycle evidence is incomplete: ${JSON.stringify(envelope)}`);
+  }
+  const idle = report.hiddenIdleEvidence;
+  if (!idle || idle.nativeHiddenIdleMs !== report.hiddenIdleMs ||
+      !Number.isFinite(idle.webviewElapsedMs) || idle.webviewElapsedMs < 180_000 ||
+      !Number.isSafeInteger(idle.baselineCaptureStarts) ||
+      idle.baselineCaptureStarts !== idle.baselineCaptureStops ||
+      idle.baselineActiveCaptures !== 0 || idle.baselineActiveProviders !== 0 ||
+      !Number.isFinite(idle.firstVisibleMs) || idle.firstVisibleMs < 0 ||
+      !Number.isSafeInteger(idle.wakeSampleCount) || idle.wakeSampleCount < 2 ||
+      !Number.isFinite(idle.lastVisibleElapsedMs) ||
+      idle.lastVisibleElapsedMs - idle.firstVisibleMs < 1200 ||
+      !Number.isSafeInteger(idle.visibilityTransitionCount) || idle.visibilityTransitionCount < 1) {
+    throw new Error(`Native result hidden-idle evidence is incomplete: ${JSON.stringify(envelope)}`);
   }
   return report;
 }
@@ -1205,6 +1259,10 @@ export async function main(args = process.argv.slice(2)) {
         }
         verification.noUnexpectedPaste = true;
         Object.assign(verification, verifyWarmProviderCanary(trial, report));
+        Object.assign(verification, verifyWarmProviderTransport(proxyEvents, report.final.fixture));
+        if (verification.clientAudioBytes !== verification.transmittedPcmBytes) {
+          throw new Error('Warm provider route and transport byte evidence disagree');
+        }
         const accepted = proxyEvents.filter(e => e.event === 'backend_control' &&
           e.type === 'continue_result' && e.decision === 'accepted' && e.eligible_now === true);
         const expectedContinues = trial.cycles.length - trial.readyGateFromIndex;

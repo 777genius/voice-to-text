@@ -121,9 +121,32 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
     providerPcmLedgers: [{ captureGeneration: 1, chunks: 2, samples: 800, hash: '0123456789abcdef' }] };
   fixture.captureRunAssociations.push(...Array.from({ length: 34 }, (_, index) => ({
     captureGeneration: index + 2, captureRunId: index + 2, captureFenceGeneration: index + 2 })));
+  const cycleEvidence = Array.from({ length: 50 }, (_, index) => ({ index,
+    captureStartsBefore: index, captureStartsAfter: index + 1,
+    captureStopsBefore: index, captureStopsAfter: index + 1,
+    sessionId: index + 1, windowEpoch: index + 1, captureGeneration: index + 1 }));
+  fixture.captureStarts = 50; fixture.captureStops = 50;
+  fixture.captureRunAssociations.push(...Array.from({ length: 15 }, (_, index) => ({
+    captureGeneration: index + 36, captureRunId: index + 36, captureFenceGeneration: index + 36 })));
+  fixture.capturePcmLedgers.push(...Array.from({ length: 15 }, (_, index) => ({
+    captureGeneration: index + 36, chunks: 0, samples: 0, hash: 'cbf29ce484222325' })));
+  fixture.capturePcmLedgers = fixture.capturePcmLedgers.map(row => ({ ...row,
+    chunks: 1, samples: 320, hash: '0123456789abcdef' }));
+  fixture.captureMarkers = Array.from({ length: 50 }, (_, index) => ({
+    captureGeneration: index + 1, count: 1, firstSequence: 1, lastSequence: 1 }));
+  fixture.providerPcmLedgers = fixture.capturePcmLedgers.map(row => ({ ...row }));
+  fixture.providerStops = 50;
+  fixture.providerResumes = 49;
+  fixture.providerMarkers = fixture.captureRunAssociations.map((association, index) => ({
+    ...association, providerSessionId: index + 1, count: 1, firstSequence: 1, lastSequence: 1 }));
   const valid = { marker, passed: true, fixture, report: { passed: true, completedCycles: 50,
-    hiddenIdleMs: 180000, elapsedMs: 220000,
-    scenarios: Array.from({ length: 12 }, (_, i) => `scenario-${i}`) } };
+    hiddenIdleMs: 180000, elapsedMs: 220000, cycleEvidence,
+    hiddenIdleEvidence: { nativeHiddenIdleMs: 180000, webviewElapsedMs: 180001,
+      baselineCaptureStarts: 50, baselineCaptureStops: 50, baselineActiveCaptures: 0,
+      baselineActiveProviders: 0, firstVisibleMs: 10, wakeSampleCount: 3,
+      lastVisibleElapsedMs: 1210, visibilityTransitionCount: 1 },
+    scenarios: ['50-audio-transcript-stop-hide-reopen-cycles', 'real-hidden-idle-180s-and-fresh-audio',
+      ...Array.from({ length: 10 }, (_, i) => `scenario-${i}`)] } };
   assert.equal(validateResult(valid), valid.report);
   for (const edit of [v => { v.marker = 'normal'; }, v => { v.report.skipped = true; },
     v => { v.report.hiddenIdleMs = 179999; }, v => { v.report.elapsedMs = Infinity; },
@@ -137,6 +160,9 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
     v => { v.fixture.capturePcmLedgers.pop(); v.fixture.captureRunAssociations.pop(); },
     v => { v.fixture.providerPcmLedgers = []; v.fixture.providerMarkers = []; },
     v => { v.fixture.providerPcmLedgers[0].hash = 'fedcba9876543210'; },
+    v => { v.report.cycleEvidence.pop(); },
+    v => { v.report.cycleEvidence[12].captureGeneration = v.report.cycleEvidence[11].captureGeneration; },
+    v => { v.report.hiddenIdleEvidence.webviewElapsedMs = 179999; },
     v => { v.report.scenarios[1] = v.report.scenarios[0]; }]) {
     const invalid = structuredClone(valid); edit(invalid); assert.throws(() => validateResult(invalid), /incomplete/);
   }
