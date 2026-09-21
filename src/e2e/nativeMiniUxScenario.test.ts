@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bindWarmVisibleFrameEvidence, hasMatchingRecoveryPcm,
+import { bindWarmVisibleFrameAfterNative, bindWarmVisibleFrameEvidence, hasMatchingRecoveryPcm,
   type WarmReopenEvidence } from './nativeMiniUxScenario';
 
 describe('warm mini-window first-visible evidence', () => {
@@ -17,6 +17,24 @@ describe('warm mini-window first-visible evidence', () => {
     expect(frames[0]).toMatchObject({ attempt: 3, source: 'shown', windowEpoch: 17, captureReady: true });
     expect(bindWarmVisibleFrameEvidence(reopen, stale,
       { visible: true, windowEpoch: 18 })).toEqual([]);
+  });
+
+  it('samples the DOM only after native visibility resolves', async () => {
+    const reopen: WarmReopenEvidence = { attempt: 4, baselineWindowEpoch: 20,
+      windowEpoch: null, closed: false };
+    let resolveNative!: (value: { visible: boolean; windowEpoch: number }) => void;
+    const native = new Promise<{ visible: boolean; windowEpoch: number }>(resolve => { resolveNative = resolve; });
+    let statusText = 'Starting';
+    const result = bindWarmVisibleFrameAfterNative(reopen, () => native, () => ({
+      source: 'render', revision: 9, runId: 22, captureReady: statusText === 'Recording',
+      readinessReason: statusText === 'Recording' ? 'recording' : 'activating-warm-capture',
+      phase: `mini-status-dot ${statusText.toLowerCase()}`, statusText,
+    }));
+    statusText = 'Recording';
+    resolveNative({ visible: true, windowEpoch: 21 });
+    await expect(result).resolves.toEqual([expect.objectContaining({
+      attempt: 4, windowEpoch: 21, statusText: 'Recording', captureReady: true,
+    })]);
   });
 
   it('requires positive matching capture and provider PCM for recovery', () => {

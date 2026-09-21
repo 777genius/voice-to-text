@@ -43,6 +43,16 @@ export function bindWarmVisibleFrameEvidence(
   reopen.windowEpoch = native.windowEpoch;
   return [{ attempt: reopen.attempt, ...frame, windowEpoch: native.windowEpoch }];
 }
+export async function bindWarmVisibleFrameAfterNative(
+  reopen: WarmReopenEvidence,
+  readNative: () => Promise<Pick<Snapshot, 'visible' | 'windowEpoch'>>,
+  readFrame: () => Omit<WarmVisibleFrame, 'attempt' | 'windowEpoch'> | null,
+  expectedWindowEpoch?: number,
+) {
+  const native = await readNative();
+  const frame = readFrame();
+  return frame ? bindWarmVisibleFrameEvidence(reopen, frame, native, expectedWindowEpoch) : [];
+}
 const state = () => invoke<Snapshot>('native_e2e_state');
 const physicalCounts = (snapshot: Snapshot): PhysicalCounts => ({
   open: snapshot.fixture.physicalOpenCount,
@@ -116,28 +126,35 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
   const observeWarmVisibleFrame = (source: 'render' | 'shown' | 'sample',
     reopen = activeWarmReopen, native?: Snapshot, expectedWindowEpoch?: number) => {
     if (!reopen) return;
-    const dot = document.querySelector('.mini-status-dot');
-    if (!dot) return;
     if (report.warmVisibleFrames.length + pendingVisibleObservations.size >= 512) {
       if (!report.errors.includes('Warm visible frame evidence overflow')) {
         report.errors.push('Warm visible frame evidence overflow');
       }
       return;
     }
-    const frame = { source,
-      revision: store.recordingIntentRevision,
-      runId: store.captureRunId, captureReady: store.isCaptureReady,
-      readinessReason: store.captureReadiness?.reason, phase: dot.className,
-      statusText: dot.getAttribute('aria-label') ?? '' };
+    const readFrame = () => {
+      // Read DOM and store state only after the native visibility sample. A
+      // frame captured while hidden must never inherit an epoch that becomes
+      // visible while the IPC request is in flight.
+      const dot = document.querySelector('.mini-status-dot');
+      if (!dot) return null;
+      return { source,
+        revision: store.recordingIntentRevision,
+        runId: store.captureRunId, captureReady: store.isCaptureReady,
+        readinessReason: store.captureReadiness?.reason, phase: dot.className,
+        statusText: dot.getAttribute('aria-label') ?? '' };
+    };
     const record = (snapshot: Snapshot) => {
-      report.warmVisibleFrames.push(
+      const frame = readFrame();
+      if (frame) report.warmVisibleFrames.push(
         ...bindWarmVisibleFrameEvidence(reopen, frame, snapshot, expectedWindowEpoch));
     };
     if (native) {
       record(native);
       return;
     }
-    const observation = state().then(record).catch(error => {
+    const observation = bindWarmVisibleFrameAfterNative(reopen, state, readFrame, expectedWindowEpoch)
+      .then(frames => { report.warmVisibleFrames.push(...frames); }).catch(error => {
       report.errors.push(`Warm visible native observation failed: ${String(error)}`);
     }).finally(() => pendingVisibleObservations.delete(observation));
     pendingVisibleObservations.add(observation);
