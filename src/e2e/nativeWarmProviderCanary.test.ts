@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { validateWarmProviderCanaryPlan } from './nativeWarmProviderCanaryPlan';
 import { releaseWarmCanarySourceBeforeAck, requireWarmProviderCanaryReader,
-  warmCanaryEventMatchesEpisode } from './nativeWarmProviderCanary';
+  warmCanaryEventMatchesCapture, warmCanaryEventMatchesEpisode } from './nativeWarmProviderCanary';
 
 const phases = ['before-ready', 'after-first-pcm', 'during-partial', 'after-final'] as const;
 const jitters = [0, 25, 100, 250, 500] as const;
@@ -70,5 +70,19 @@ describe('warm provider paid canary plan', () => {
     expect(warmCanaryEventMatchesEpisode({ ...final,
       text: 'За окном растет береза. За окном растет береза' },
     'episode-b.pcm', 'transcription:final')).toBe(false);
+  });
+
+  it('rejects a late same-session final even with a fresh delivery sequence and repeated phrase', () => {
+    const current = { event: 'transcription:final', text: 'За окном растет береза', markerIds: [1],
+      sessionId: 9, cycleIndex: 16, deliverySeq: 88, atMs: 1000, timingKnown: true,
+      sourceStartSeconds: 2, sourceDurationSeconds: 0.5 };
+    const fence = { sessionId: 9, cycleIndex: 16, providerStartSamples: 32_000,
+      providerSamples: 8_000 };
+    expect(warmCanaryEventMatchesCapture(current, 'episode-b.pcm',
+      'transcription:final', fence)).toBe(true);
+    expect(warmCanaryEventMatchesCapture({ ...current, sourceStartSeconds: 1.5 },
+      'episode-b.pcm', 'transcription:final', fence)).toBe(false);
+    expect(warmCanaryEventMatchesCapture({ ...current, timingKnown: false },
+      'episode-b.pcm', 'transcription:final', fence)).toBe(false);
   });
 });

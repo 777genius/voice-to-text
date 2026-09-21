@@ -133,10 +133,14 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     const eventStart = events.length;
     const markerId = plan.episode === 'episode-a.pcm' ? 0 : 1;
     const phrase = markerId === 0 ? 'на столе лежит книга' : 'за окном растет береза';
+    const providerStartSamples = index < warmProviderCanaryTrial.readyGateFromIndex
+      ? null : (index - warmProviderCanaryTrial.readyGateFromIndex) * 320;
     if (plan.stopPhase === 'during-partial') events.push({ event: 'transcription:partial', text: phrase,
-      cycleIndex: index, sessionId: logicalRunId, deliverySeq: null, markerIds: [markerId] });
+      cycleIndex: index, sessionId: logicalRunId, deliverySeq: null, markerIds: [markerId],
+      timingKnown: true, sourceStartSeconds: providerStartSamples / 16000, sourceDurationSeconds: 0.02 });
     if (plan.stopPhase === 'after-final') events.push({ event: 'transcription:final', text: phrase,
-      cycleIndex: index, sessionId: logicalRunId, deliverySeq: index + 1, markerIds: [markerId] });
+      cycleIndex: index, sessionId: logicalRunId, deliverySeq: index + 1, markerIds: [markerId],
+      timingKnown: true, sourceStartSeconds: providerStartSamples / 16000, sourceDurationSeconds: 0.02 });
     const stopEventIndex = events.length;
     if (plan.stopPhase === 'before-ready') {
       events.push({ event: 'transcription:terminal', cycleIndex: index, sessionId: logicalRunId,
@@ -153,6 +157,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       stopEventIndex,
       callbackFenceGeneration: index > warmProviderCanaryTrial.readyGateFromIndex ? index + 1 : null,
       triggerProviderSamples: plan.stopPhase === 'before-ready' ? null : 320,
+      providerStartSamples,
       association: plan.stopPhase === 'before-ready' ? null : {
         captureGeneration: index + 1, captureRunId, captureFenceGeneration: index + 1 },
       trigger: plan.stopPhase === 'before-ready' ? { readyBeforeStop: false } :
@@ -165,8 +170,13 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     return cycle;
   });
   const finalLogicalRunId = 100 + warmProviderCanaryTrial.readyGateFromIndex;
+  const finalProviderStartSamples =
+    (warmProviderCanaryTrial.cycles.length - warmProviderCanaryTrial.readyGateFromIndex) * 320;
+  const finalSourceFrames = approvedFixtures['long-auto-commit.pcm'][0] / 2;
   events.push({ event: 'transcription:final', cycleIndex: 20, sessionId: finalLogicalRunId,
-    deliverySeq: 99, text: 'на столе лежит книга за окном растет береза', markerIds: [0, 1] });
+    deliverySeq: 99, text: 'на столе лежит книга за окном растет береза', markerIds: [0, 1],
+    timingKnown: true, sourceStartSeconds: finalProviderStartSamples / 16000,
+    sourceDurationSeconds: finalSourceFrames / 16000 });
   events.push({ event: 'transcription:terminal', cycleIndex: 20, sessionId: finalLogicalRunId,
     deliverySeq: null, markerIds: [] });
   terminals.push({ sessionId: finalLogicalRunId, cycleIndex: 20, complete: true });
@@ -208,7 +218,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     finalStartedAtMs: cycleClock,
     finalCallbackFence: { captureGeneration: 21, eventStart: events.length - 2 },
     finalTranscriptFence: { eventStart: events.length - 2,
-      providerSamples: sources[20].sourceFrames },
+      providerSamples: sources[20].sourceFrames, providerStartSamples: finalProviderStartSamples },
     finalOwnership: { logicalRunId: finalLogicalRunId, captureRunId: 999, captureFenceGeneration: 21 },
     terminals, final: { status: 'Idle', preparedCaptureTokenCount: 0,
       providerTransport: { connectionRetained: false }, fixture } };
@@ -219,7 +229,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   fixture.providerPcmLedgers.forEach((ledger, index) => {
     if (index > 0) transportEvents.push({ event: 'backend_control', type: 'continue_result',
       decision: 'accepted', eligible_now: true, connectionId: 1 });
-    transportEvents.push({ event: 'client_binary', connectionId: 1, bytes: ledger.samples * 2 });
+    transportEvents.push({ event: 'client_binary', connectionId: 1,
+      bytes: ledger.samples * 2, pcmHash: ledger.hash });
     transportEvents.push({ event: 'backend_control', type: 'pause_accepted',
       decision: 'accepted', connectionId: 1 });
   });
@@ -234,15 +245,19 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   assert.throws(() => verifyWarmProviderTransport(wrongConnection, fixture), /open connection/);
   const wrongInterval = structuredClone(transportEvents);
   const firstPause = wrongInterval.findIndex(event => event.type === 'pause_accepted');
-  wrongInterval.splice(firstPause + 1, 0, { event: 'client_binary', connectionId: 1, bytes: 2 });
+  wrongInterval.splice(firstPause + 1, 0, { event: 'client_binary', connectionId: 1,
+    bytes: 2, pcmHash: '0123456789abcdef' });
+  const wrongHash = structuredClone(transportEvents);
+  wrongHash.find(event => event.event === 'client_binary').pcmHash = 'ffffffffffffffff';
+  assert.throws(() => verifyWarmProviderTransport(wrongHash, fixture), /does not match/);
   assert.throws(() => verifyWarmProviderTransport(wrongInterval, fixture), /paused interval/);
   assert.equal(verifyWarmProviderTransport([
     { event: 'fault_proxy_connected', connectionId: 1 },
-    { event: 'client_binary', connectionId: 1, bytes: 4 },
+    { event: 'client_binary', connectionId: 1, bytes: 4, pcmHash: '0123456789abcdef' },
     { event: 'fault_proxy_close', connectionId: 1, direction: 'upstream', code: 1000 },
     { event: 'fault_proxy_connected', connectionId: 2 },
     { event: 'backend_control', type: 'ready', connectionId: 2 },
-    { event: 'client_binary', connectionId: 2, bytes: 6 },
+    { event: 'client_binary', connectionId: 2, bytes: 6, pcmHash: 'fedcba9876543210' },
     { event: 'backend_control', type: 'pause_accepted', decision: 'accepted', connectionId: 2 },
     { event: 'fault_proxy_close', connectionId: 2, direction: 'upstream', code: 1000 },
   ], { providerPcmLedgers: [
@@ -283,6 +298,11 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
         .find(row => row.event === 'transcription:final');
       event.text = cycle.episode === 'episode-a.pcm' ? 'за окном растет береза' : 'на столе лежит книга';
       event.markerIds = [cycle.episode === 'episode-a.pcm' ? 1 : 0]; },
+    value => { const cycle = value.cycles.find(row => row.stopPhase === 'after-final');
+      const event = value.events.slice(cycle.triggerEventStart, cycle.stopEventIndex)
+        .find(row => row.event === 'transcription:final');
+      event.sourceStartSeconds = Math.max(0, (cycle.providerStartSamples - 320) / 16000);
+      event.sourceDurationSeconds = 0.02; },
     value => { value.cycles[1].previousSettleToStartMs = 5_000; },
     value => { delete value.events.find(event => event.event === 'transcription:final').deliverySeq; },
     value => { value.events.find(event => event.cycleIndex === 20 && event.event === 'transcription:final').event = 'transcription:partial'; },

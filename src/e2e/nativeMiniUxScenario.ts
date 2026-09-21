@@ -48,10 +48,18 @@ export async function bindWarmVisibleFrameAfterNative(
   readNative: () => Promise<Pick<Snapshot, 'visible' | 'windowEpoch'>>,
   readFrame: () => Omit<WarmVisibleFrame, 'attempt' | 'windowEpoch'> | null,
   expectedWindowEpoch?: number,
+  firstNative?: Pick<Snapshot, 'visible' | 'windowEpoch'>,
 ) {
-  const native = await readNative();
+  // Bracket the DOM read with two native snapshots. Reading the DOM only
+  // after one IPC sample can lose a bad first-visible frame if it changes
+  // while that IPC is in flight. A monotonic epoch also makes an ABA
+  // hide/show transition fail the bracket instead of inheriting visibility.
+  const before = firstNative ?? await readNative();
   const frame = readFrame();
-  return frame ? bindWarmVisibleFrameEvidence(reopen, frame, native, expectedWindowEpoch) : [];
+  const after = await readNative();
+  if (!frame || before.visible !== true || after.visible !== true ||
+      before.windowEpoch !== after.windowEpoch) return [];
+  return bindWarmVisibleFrameEvidence(reopen, frame, after, expectedWindowEpoch);
 }
 const state = () => invoke<Snapshot>('native_e2e_state');
 const physicalCounts = (snapshot: Snapshot): PhysicalCounts => ({
@@ -133,9 +141,7 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
       return;
     }
     const readFrame = () => {
-      // Read DOM and store state only after the native visibility sample. A
-      // frame captured while hidden must never inherit an epoch that becomes
-      // visible while the IPC request is in flight.
+      // The helper brackets this read with two native visibility snapshots.
       const dot = document.querySelector('.mini-status-dot');
       if (!dot) return null;
       return { source,
@@ -144,16 +150,8 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
         readinessReason: store.captureReadiness?.reason, phase: dot.className,
         statusText: dot.getAttribute('aria-label') ?? '' };
     };
-    const record = (snapshot: Snapshot) => {
-      const frame = readFrame();
-      if (frame) report.warmVisibleFrames.push(
-        ...bindWarmVisibleFrameEvidence(reopen, frame, snapshot, expectedWindowEpoch));
-    };
-    if (native) {
-      record(native);
-      return;
-    }
-    const observation = bindWarmVisibleFrameAfterNative(reopen, state, readFrame, expectedWindowEpoch)
+    const observation = bindWarmVisibleFrameAfterNative(
+      reopen, state, readFrame, expectedWindowEpoch, native)
       .then(frames => { report.warmVisibleFrames.push(...frames); }).catch(error => {
       report.errors.push(`Warm visible native observation failed: ${String(error)}`);
     }).finally(() => pendingVisibleObservations.delete(observation));

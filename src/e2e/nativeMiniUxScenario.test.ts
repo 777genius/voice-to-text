@@ -19,22 +19,34 @@ describe('warm mini-window first-visible evidence', () => {
       { visible: true, windowEpoch: 18 })).toEqual([]);
   });
 
-  it('samples the DOM only after native visibility resolves', async () => {
+  it('preserves a bad frame only when the native visible epoch is stable around it', async () => {
     const reopen: WarmReopenEvidence = { attempt: 4, baselineWindowEpoch: 20,
       windowEpoch: null, closed: false };
-    let resolveNative!: (value: { visible: boolean; windowEpoch: number }) => void;
-    const native = new Promise<{ visible: boolean; windowEpoch: number }>(resolve => { resolveNative = resolve; });
     let statusText = 'Starting';
-    const result = bindWarmVisibleFrameAfterNative(reopen, () => native, () => ({
+    let resolveAfter!: (value: { visible: boolean; windowEpoch: number }) => void;
+    const after = new Promise<{ visible: boolean; windowEpoch: number }>(resolve => { resolveAfter = resolve; });
+    let reads = 0;
+    const stable = bindWarmVisibleFrameAfterNative(reopen,
+      () => ++reads === 1 ? Promise.resolve({ visible: true, windowEpoch: 21 }) : after, () => ({
       source: 'render', revision: 9, runId: 22, captureReady: statusText === 'Recording',
       readinessReason: statusText === 'Recording' ? 'recording' : 'activating-warm-capture',
       phase: `mini-status-dot ${statusText.toLowerCase()}`, statusText,
     }));
+    await Promise.resolve();
     statusText = 'Recording';
-    resolveNative({ visible: true, windowEpoch: 21 });
-    await expect(result).resolves.toEqual([expect.objectContaining({
-      attempt: 4, windowEpoch: 21, statusText: 'Recording', captureReady: true,
+    resolveAfter({ visible: true, windowEpoch: 21 });
+    await expect(stable).resolves.toEqual([expect.objectContaining({
+      attempt: 4, windowEpoch: 21, statusText: 'Starting', captureReady: false,
     })]);
+
+    const transitioning = { ...reopen, windowEpoch: null };
+    const samples = [{ visible: false, windowEpoch: 20 }, { visible: true, windowEpoch: 21 }];
+    await expect(bindWarmVisibleFrameAfterNative(transitioning,
+      async () => samples.shift()!, () => ({
+        source: 'render', revision: 9, runId: 22, captureReady: false,
+        readinessReason: 'activating-warm-capture', phase: 'mini-status-dot starting',
+        statusText: 'Starting',
+      }))).resolves.toEqual([]);
   });
 
   it('requires positive matching capture and provider PCM for recovery', () => {
