@@ -75,7 +75,8 @@ export async function bindWarmVisibleFrameAfterNative(
   const frames = [...pendingFramesAtCapture, frame].flatMap(candidate =>
     bindWarmVisibleFrameEvidence(reopen, candidate, after, expectedWindowEpoch));
   if (frames.length > 0 && reopen.pendingFrames) {
-    reopen.pendingFrames.splice(0, pendingFramesAtCapture.length);
+    const consumed = new Set(pendingFramesAtCapture);
+    reopen.pendingFrames = reopen.pendingFrames.filter(candidate => !consumed.has(candidate));
   }
   return frames;
 }
@@ -385,9 +386,12 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
         // frame instead of making the evidence gate depend on callback timing.
         if (visibleFrames.length === 0) {
           observeWarmVisibleFrame('sample', activeWarmReopen, recording);
+          await flushWarmVisibleObservations();
           visibleFrames = report.warmVisibleFrames.slice(visibleFrameStart)
             .filter(frame => frame.attempt === attempt + 1 && frame.windowEpoch === recording.windowEpoch);
         }
+        check((activeWarmReopen.pendingFrames?.length ?? 0) === 0,
+          `Warm reopen ${attempt + 1} left unbound first-visible frame evidence`);
         check(visibleFrames.length > 0, `Warm reopen ${attempt + 1} produced no first-visible frame evidence`);
         const firstVisible = visibleFrames[0];
         check(!/\b(starting|processing)\b/.test(firstVisible.phase) &&

@@ -93,6 +93,38 @@ describe('warm mini-window first-visible evidence', () => {
     await expect(observation).resolves.toEqual([]);
   });
 
+  it('removes pending frames by identity when epoch proofs complete concurrently', async () => {
+    const reopen: WarmReopenEvidence = { attempt: 7, baselineWindowEpoch: 21,
+      windowEpoch: null, closed: false };
+    const frame = (source: 'render' | 'shown' | 'sample', statusText: string) => ({
+      source, revision: 12, runId: 25, captureReady: statusText === 'Recording',
+      readinessReason: statusText === 'Recording' ? 'recording' : 'activating-warm-capture',
+      phase: `mini-status-dot ${statusText.toLowerCase()}`, statusText,
+    });
+    await bindWarmVisibleFrameAfterNative(reopen,
+      async () => ({ visible: true, windowEpoch: 22 }), () => frame('render', 'Starting'));
+    let resolveNative!: (value: { visible: boolean; windowEpoch: number }) => void;
+    const native = new Promise<{ visible: boolean; windowEpoch: number }>(resolve => {
+      resolveNative = resolve;
+    });
+    const first = bindWarmVisibleFrameAfterNative(reopen, () => native,
+      () => frame('shown', 'Recording'), 22);
+    const second = bindWarmVisibleFrameAfterNative(reopen, () => native,
+      () => frame('sample', 'Recording'), 22);
+    await bindWarmVisibleFrameAfterNative(reopen,
+      async () => ({ visible: true, windowEpoch: 22 }), () => frame('render', 'Processing'));
+    resolveNative({ visible: true, windowEpoch: 22 });
+    await Promise.all([first, second]);
+    expect(reopen.pendingFrames?.map(candidate => candidate.statusText)).toEqual(['Processing']);
+    await expect(bindWarmVisibleFrameAfterNative(reopen,
+      async () => ({ visible: true, windowEpoch: 22 }), () => frame('sample', 'Recording'),
+      22)).resolves.toEqual([
+      expect.objectContaining({ statusText: 'Processing', windowEpoch: 22 }),
+      expect.objectContaining({ statusText: 'Recording', windowEpoch: 22 }),
+    ]);
+    expect(reopen.pendingFrames).toEqual([]);
+  });
+
   it('requires positive matching capture and provider PCM for recovery', () => {
     const snapshot = { fixture: {
       captureRunAssociations: [{ captureRunId: 42, captureGeneration: 7 }],
