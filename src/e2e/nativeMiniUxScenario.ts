@@ -29,6 +29,7 @@ export type WarmVisibleFrame = {
 };
 export type WarmReopenEvidence = {
   attempt: number; baselineWindowEpoch: number; windowEpoch: number | null; closed: boolean;
+  pendingFrames?: Array<Omit<WarmVisibleFrame, 'attempt' | 'windowEpoch'>>;
 };
 export function bindWarmVisibleFrameEvidence(
   reopen: WarmReopenEvidence,
@@ -56,12 +57,27 @@ export async function bindWarmVisibleFrameAfterNative(
   // provenance; they must never replace the captured UI evidence.
   const frame = readFrame();
   if (!frame) return [];
+  const boundWindowEpochAtCapture = reopen.windowEpoch;
+  const hasCaptureTimeProvenance = firstNative !== undefined || expectedWindowEpoch !== undefined ||
+    boundWindowEpochAtCapture !== null;
+  if (!hasCaptureTimeProvenance) {
+    reopen.pendingFrames ??= [];
+    if (reopen.pendingFrames.length >= 16) throw new Error('Pending first-visible frame evidence overflow');
+    reopen.pendingFrames.push(frame);
+    return [];
+  }
+  const pendingFramesAtCapture = [...(reopen.pendingFrames ?? [])];
   const before = firstNative ?? await readNative();
   const after = await readNative();
+  const provenanceEpoch = firstNative?.windowEpoch ?? expectedWindowEpoch ?? boundWindowEpochAtCapture;
   if (before.visible !== true || after.visible !== true || before.windowEpoch !== after.windowEpoch ||
-      (firstNative === undefined && expectedWindowEpoch === undefined &&
-        reopen.windowEpoch !== before.windowEpoch)) return [];
-  return bindWarmVisibleFrameEvidence(reopen, frame, after, expectedWindowEpoch);
+      before.windowEpoch !== provenanceEpoch) return [];
+  const frames = [...pendingFramesAtCapture, frame].flatMap(candidate =>
+    bindWarmVisibleFrameEvidence(reopen, candidate, after, expectedWindowEpoch));
+  if (frames.length > 0 && reopen.pendingFrames) {
+    reopen.pendingFrames.splice(0, pendingFramesAtCapture.length);
+  }
+  return frames;
 }
 const state = () => invoke<Snapshot>('native_e2e_state');
 const physicalCounts = (snapshot: Snapshot): PhysicalCounts => ({

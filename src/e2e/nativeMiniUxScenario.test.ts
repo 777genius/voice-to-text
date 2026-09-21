@@ -52,9 +52,45 @@ describe('warm mini-window first-visible evidence', () => {
     await expect(bindWarmVisibleFrameAfterNative(unproven,
       async () => ({ visible: true, windowEpoch: 22 }), () => ({
         source: 'render', revision: 10, runId: 23, captureReady: false,
+        readinessReason: 'activating-warm-capture', phase: 'mini-status-dot',
+        statusText: '',
+      }))).resolves.toEqual([]);
+  });
+
+  it('retains an unproven non-neutral frame and never adopts a later mutable epoch', async () => {
+    const reopen: WarmReopenEvidence = { attempt: 5, baselineWindowEpoch: 21,
+      windowEpoch: null, closed: false };
+    let nativeReads = 0;
+    await expect(bindWarmVisibleFrameAfterNative(reopen,
+      async () => { nativeReads += 1; return { visible: true, windowEpoch: 22 }; }, () => ({
+        source: 'render', revision: 10, runId: 23, captureReady: false,
         readinessReason: 'activating-warm-capture', phase: 'mini-status-dot starting',
         statusText: 'Starting',
       }))).resolves.toEqual([]);
+    expect(nativeReads).toBe(0);
+    await expect(bindWarmVisibleFrameAfterNative(reopen,
+      async () => ({ visible: true, windowEpoch: 22 }), () => ({
+        source: 'shown', revision: 11, runId: 23, captureReady: true,
+        readinessReason: 'recording', phase: 'mini-status-dot recording', statusText: 'Recording',
+      }), 22)).resolves.toEqual([
+      expect.objectContaining({ source: 'render', statusText: 'Starting', windowEpoch: 22 }),
+      expect.objectContaining({ source: 'shown', statusText: 'Recording', windowEpoch: 22 }),
+    ]);
+
+    const delayed: WarmReopenEvidence = { attempt: 6, baselineWindowEpoch: 21,
+      windowEpoch: 22, closed: false };
+    let resolveNative!: (value: { visible: boolean; windowEpoch: number }) => void;
+    const firstRead = new Promise<{ visible: boolean; windowEpoch: number }>(resolve => {
+      resolveNative = resolve;
+    });
+    const observation = bindWarmVisibleFrameAfterNative(delayed,
+      () => firstRead, () => ({
+        source: 'render', revision: 11, runId: 24, captureReady: false,
+        readinessReason: 'activating-warm-capture', phase: 'mini-status-dot', statusText: '',
+      }));
+    delayed.windowEpoch = 23;
+    resolveNative({ visible: true, windowEpoch: 23 });
+    await expect(observation).resolves.toEqual([]);
   });
 
   it('requires positive matching capture and provider PCM for recovery', () => {
