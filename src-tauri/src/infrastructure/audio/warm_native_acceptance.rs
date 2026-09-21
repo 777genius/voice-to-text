@@ -20,11 +20,14 @@ async fn native_builtin_warm_acceptance_probe() {
         Ok("1"),
         "explicit native microphone opt-in is required"
     );
+    let requested = std::env::var("VOICETEXT_WARM_ACCEPTANCE_DEVICE")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
     assert!(
-        WarmDictationInput::cpal_is_eligible(None),
-        "default input must have CoreAudio built-in transport"
+        WarmDictationInput::cpal_is_eligible(requested.as_deref()),
+        "requested input must resolve to the current CoreAudio default built-in transport"
     );
-    let owner = WarmDictationInput::new_cpal(None).unwrap();
+    let owner = WarmDictationInput::new_cpal(requested).unwrap();
     let trace = Arc::new(Mutex::new(Vec::<RawObservation>::new()));
     let trace_callback = trace.clone();
     *owner.shared.raw_observer.lock().unwrap() = Some(Arc::new(move |observation| {

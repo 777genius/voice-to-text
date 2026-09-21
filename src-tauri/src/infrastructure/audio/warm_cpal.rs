@@ -69,8 +69,8 @@ fn default_input_id() -> AudioResult<u32> {
     property_u32(1, b"dIn ")
 }
 
-fn eligible_transport(requested: Option<&str>, transport: u32) -> bool {
-    requested.is_none() && transport == u32::from_be_bytes(*b"bltn")
+fn eligible_transport(transport: u32) -> bool {
+    transport == u32::from_be_bytes(*b"bltn")
 }
 
 // Compare the actual CoreAudio device identity, not its user-facing name. CPAL
@@ -92,17 +92,37 @@ fn same_config(left: &SupportedStreamConfig, right: &SupportedStreamConfig) -> b
         && left.sample_format() == right.sample_format()
 }
 
+fn same_default_route(left: &Device, right: &Device) -> bool {
+    same_device(left, right)
+        || (left.name().ok() == right.name().ok()
+            && left
+                .default_input_config()
+                .ok()
+                .zip(right.default_input_config().ok())
+                .is_some_and(|(left, right)| same_config(&left, &right)))
+}
+
 impl WarmDictationInput {
     /// Runtime candidate check only. This does not replace measured hardware
-    /// acceptance; named devices and external transports remain on cold capture.
+    /// acceptance; external transports remain on cold capture. An explicit
+    /// name is accepted only when it still resolves to the current default
+    /// built-in input, so selecting the same physical route by name does not
+    /// accidentally disable the qualified warm path.
     pub fn cpal_is_eligible(requested: Option<&str>) -> bool {
-        if requested.is_some() {
+        let transport_is_eligible = default_input_id()
+            .and_then(|id| property_u32(id, b"tran"))
+            .map(eligible_transport)
+            .unwrap_or(false);
+        if !transport_is_eligible {
             return false;
         }
-        default_input_id()
-            .and_then(|id| property_u32(id, b"tran"))
-            .map(|transport| eligible_transport(requested, transport))
-            .unwrap_or(false)
+        let Some(requested) = requested else {
+            return true;
+        };
+        cpal::default_host()
+            .default_input_device()
+            .and_then(|device| device.name().ok())
+            .is_some_and(|name| SystemAudioCapture::device_name_matches(requested, &name))
     }
     /// Construction creates only the owner thread. Permission and opt-in policy
     /// must be checked by composition before calling prewarm.
@@ -124,10 +144,7 @@ impl WarmNativeFactory for CpalFactory {
     ) -> AudioResult<Box<dyn WarmNativeInput>> {
         let host = cpal::default_host();
         let default_before = default_input_id()?;
-        if !eligible_transport(
-            self.requested.as_deref(),
-            property_u32(default_before, b"tran")?,
-        ) {
+        if !eligible_transport(property_u32(default_before, b"tran")?) {
             return Err(AudioError::Configuration(
                 "Warm input route became unqualified; use cold capture".into(),
             ));
@@ -150,8 +167,13 @@ impl WarmNativeFactory for CpalFactory {
         };
         let default_device_id = host
             .default_input_device()
-            .filter(|default| same_device(default, &device))
+            .filter(|default| same_default_route(default, &device))
             .map(|_| default_before);
+        if self.requested.is_some() && default_device_id.is_none() {
+            return Err(AudioError::Configuration(
+                "Named warm microphone no longer resolves to the default built-in input".into(),
+            ));
+        }
         if default_device_id.is_some() && default_input_id()? != default_before {
             return Err(AudioError::Capture(
                 "Default microphone changed while opening".into(),
@@ -205,14 +227,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn warm_eligibility_excludes_named_and_external_routes() {
-        assert!(eligible_transport(None, u32::from_be_bytes(*b"bltn")));
-        assert!(!eligible_transport(
-            Some("MacBook Pro Microphone"),
-            u32::from_be_bytes(*b"bltn")
-        ));
+    fn warm_eligibility_excludes_external_routes() {
+        assert!(eligible_transport(u32::from_be_bytes(*b"bltn")));
         for transport in [*b"usb ", *b"blue", *b"blea", *b"virt", *b"????"] {
-            assert!(!eligible_transport(None, u32::from_be_bytes(transport)));
+            assert!(!eligible_transport(u32::from_be_bytes(transport)));
         }
     }
 }
