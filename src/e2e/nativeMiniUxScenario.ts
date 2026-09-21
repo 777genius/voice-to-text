@@ -36,6 +36,13 @@ export type WarmReopenEvidence = {
 export async function drainPendingWarmVisibleObservations(pending: Set<Promise<void>>) {
   while (pending.size > 0) await Promise.all([...pending]);
 }
+export function warmVisibleFramesHaveNoStaleStatus(
+  frames: WarmVisibleFrame[],
+  staleStatusTexts: string[],
+) {
+  const stale = new Set(staleStatusTexts);
+  return frames.every(frame => !stale.has(frame.statusText));
+}
 export function bindWarmVisibleFrameEvidence(
   reopen: WarmReopenEvidence,
   frame: Omit<WarmVisibleFrame, 'attempt' | 'windowEpoch'>,
@@ -123,6 +130,7 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
         terminalClosed: PhysicalCounts; recoveryOpened: PhysicalCounts;
       };
     },
+    warmForbiddenStatusTexts: [i18n.global.t('main.starting'), i18n.global.t('main.processing')],
     passed: false, errors: [] as string[], cases: [] as Array<{
     stop: string; hideMs: number; bufferedBeforeStop: boolean; oldProviderStillFinalizing: boolean;
     observations: number; backgroundDidNotReopen: boolean; successorStayedVisible: boolean;
@@ -393,9 +401,9 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
           `Warm reopen ${attempt + 1} left unbound first-visible frame evidence`);
         check(visibleFrames.length > 0, `Warm reopen ${attempt + 1} produced no first-visible frame evidence`);
         const firstVisible = visibleFrames[0];
-        check(!/\b(starting|processing)\b/.test(firstVisible.phase) &&
-          ![i18n.global.t('main.starting'), i18n.global.t('main.processing')].includes(firstVisible.statusText),
-        `Warm reopen ${attempt + 1} first visible frame was stale Starting/Processing`);
+        check(visibleFrames.every(frame => !/\b(starting|processing)\b/.test(frame.phase)) &&
+          warmVisibleFramesHaveNoStaleStatus(visibleFrames, report.warmForbiddenStatusTexts),
+        `Warm reopen ${attempt + 1} retained a stale Starting/Processing frame`);
         if (/\brecording\b/.test(firstVisible.phase)) {
           check(firstVisible.captureReady,
             `Warm reopen ${attempt + 1} showed recording before capture readiness`);

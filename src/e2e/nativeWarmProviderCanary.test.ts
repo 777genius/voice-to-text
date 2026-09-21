@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { validateWarmProviderCanaryPlan } from './nativeWarmProviderCanaryPlan';
 import { releaseWarmCanarySourceBeforeAck, requireWarmProviderCanaryReader,
-  warmCanaryEventMatchesCapture, warmCanaryEventMatchesEpisode } from './nativeWarmProviderCanary';
+  warmCanaryBeforeReadyStopEvidence, warmCanaryEventMatchesCapture,
+  warmCanaryEventMatchesEpisode } from './nativeWarmProviderCanary';
 
 const phases = ['before-ready', 'after-first-pcm', 'during-partial', 'after-final'] as const;
 const jitters = [0, 25, 100, 250, 500] as const;
@@ -54,6 +55,18 @@ describe('warm provider paid canary plan', () => {
       async () => { order.push('ack'); },
     );
     expect(order).toEqual(['release', 'ack']);
+  });
+
+  it('uses authoritative provider readiness at the before-ready stop boundary', () => {
+    expect(warmCanaryBeforeReadyStopEvidence({
+      status: 'Starting', providerTransport: { serverReady: true, connectionRetained: true },
+    })).toEqual({
+      readyBeforeStop: true, statusBeforeStop: 'Starting',
+      providerTransportBeforeStop: { serverReady: true, connectionRetained: true },
+    });
+    expect(warmCanaryBeforeReadyStopEvidence({
+      status: 'Starting', providerTransport: null,
+    }).readyBeforeStop).toBe(false);
   });
 
   it('accepts only the current episode phrase as partial/final trigger evidence', () => {

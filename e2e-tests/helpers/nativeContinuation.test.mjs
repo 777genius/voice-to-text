@@ -160,7 +160,9 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       providerStartSamples,
       association: plan.stopPhase === 'before-ready' ? null : {
         captureGeneration: index + 1, captureRunId, captureFenceGeneration: index + 1 },
-      trigger: plan.stopPhase === 'before-ready' ? { readyBeforeStop: false } :
+      trigger: plan.stopPhase === 'before-ready' ? { readyBeforeStop: false,
+        providerTransportBeforeStop: { serverReady: false, connectionRetained: false },
+        statusBeforeStop: 'Starting' } :
         plan.stopPhase === 'during-partial' ? { event: 'transcription:partial', episode: plan.episode,
           deliverySeq: null } :
         plan.stopPhase === 'after-final' ? { event: 'transcription:final', episode: plan.episode,
@@ -268,6 +270,12 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   missingEarlyTerminal.terminals.shift();
   assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, missingEarlyTerminal),
     /Final warm provider proof is incomplete/);
+  const alreadyReadyAtEarlyStop = structuredClone(report);
+  const earlyCycle = alreadyReadyAtEarlyStop.cycles.find(row => row.stopPhase === 'before-ready');
+  earlyCycle.trigger.readyBeforeStop = true;
+  earlyCycle.trigger.providerTransportBeforeStop.serverReady = true;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, alreadyReadyAtEarlyStop),
+    /before-Ready proof/);
   for (const mutate of [
     value => value.cycles.pop(),
     value => { value.cycles[5].association.captureRunId = 9999; },

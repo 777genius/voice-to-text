@@ -34,6 +34,16 @@ type ProviderTerminal = { sessionId: number; cycleIndex: number | null; complete
 export type WarmCanaryCaptureFence = { sessionId: number; cycleIndex: number;
   providerStartSamples: number; providerSamples: number };
 
+export function warmCanaryBeforeReadyStopEvidence(
+  value: Pick<NativeState, 'status' | 'providerTransport'>,
+) {
+  return {
+    readyBeforeStop: value.providerTransport?.serverReady === true,
+    providerTransportBeforeStop: value.providerTransport,
+    statusBeforeStop: value.status,
+  };
+}
+
 const providerTimingSampleRange = (event: ProviderEvent) => {
   const start = Math.round(event.sourceStartSeconds * 16_000);
   const duration = Math.round(event.sourceDurationSeconds * 16_000);
@@ -203,7 +213,6 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       if (cycle.stopPhase === 'before-ready') {
         check(active.status !== 'Recording' || active.providerTransport?.serverReady !== true,
           `cycle ${cycle.index} reached provider Ready before early stop`);
-        trigger = { readyBeforeStop: false };
       } else {
         const ready = await poll(value =>
           value.providerTransport?.serverReady === true && value.providerTransport.connectionRetained === true &&
@@ -264,6 +273,11 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       }
       const beforeStop = await state();
       if (beforeStop.logicalProviderRunId > 0) sessionCycles.set(beforeStop.logicalProviderRunId, cycle.index);
+      if (cycle.stopPhase === 'before-ready') {
+        trigger = warmCanaryBeforeReadyStopEvidence(beforeStop);
+        check(trigger.readyBeforeStop === false,
+          `cycle ${cycle.index} reached provider Ready at the stop boundary`);
+      }
       const association = beforeStop.fixture.captureRunAssociations.find(row => row.captureGeneration === generation) ?? null;
       if (cycle.stopPhase !== 'before-ready') {
         check(beforeStop.captureEpisode !== null &&

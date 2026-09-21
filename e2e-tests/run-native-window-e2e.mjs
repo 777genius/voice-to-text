@@ -134,6 +134,7 @@ export function validateMiniUxResult(envelope) {
   // Mini UX is an explicit warm acceptance run; cold bypass is not evidence.
   const warmFrames = report?.warmActivationFrames;
   const visibleFrames = report?.warmVisibleFrames;
+  const forbiddenStatusTexts = report?.warmForbiddenStatusTexts;
   const readyFrames = report?.warmReadyFrames;
   const nativeWindowEpochs = report?.warmWindowEpochs;
   const exactPcmEvidenceValid = validateTerminalFixture(final?.fixture, true) &&
@@ -162,7 +163,10 @@ export function validateMiniUxResult(envelope) {
   const captureReadyRecording = frame => frame.captureReady === true &&
     ['finalizing-previous', 'connecting-provider', 'recording'].includes(frame.readinessReason) &&
     /\brecording\b/.test(frame.phase) && !/\b(starting|processing)\b/.test(frame.phase);
-  const visibleFrameEvidenceValid = Array.isArray(visibleFrames) && visibleFrames.length >= 10 &&
+  const visibleFrameEvidenceValid = Array.isArray(forbiddenStatusTexts) &&
+    forbiddenStatusTexts.length === 2 && forbiddenStatusTexts.every(text =>
+      typeof text === 'string' && text.length > 0) && new Set(forbiddenStatusTexts).size === 2 &&
+    Array.isArray(visibleFrames) && visibleFrames.length >= 10 &&
     visibleFrames.length <= 512 && visibleFrames.every(frame =>
       Number.isSafeInteger(frame?.attempt) && frame.attempt >= 1 && frame.attempt <= 10 &&
       ['render', 'shown', 'sample'].includes(frame.source) &&
@@ -183,6 +187,7 @@ export function validateMiniUxResult(envelope) {
           candidate.readinessReason === 'activating-warm-capture' && candidate.statusText === '' &&
           !/\b(recording|starting|processing)\b/.test(candidate.phase);
         return (candidateNeutral || captureReadyRecording(candidate)) &&
+          !forbiddenStatusTexts.includes(candidate.statusText) &&
           candidate.windowEpoch === frame.windowEpoch &&
           candidate.runId === frame.runId && candidate.revision === frame.revision;
       });

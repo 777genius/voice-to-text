@@ -257,6 +257,7 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
   assert.throws(() => validateResult(evidence), /physical warm input evidence/);
   const warm = structuredClone(evidence);
   Object.assign(warm.report, { warmMode: true, warmReopens: 10, idleAcceptedDelta: 0 });
+  warm.report.warmForbiddenStatusTexts = ['Starting...', 'Processing...'];
   warm.report.trace = Array.from({ length: 10 }, (_, i) => ({ label: `warm reopen ${i + 1}`,
     native: { visible: true, windowEpoch: i + 1 }, captureReady: true,
     captureRunId: i + 1, intentRevision: i + 1 }));
@@ -290,6 +291,11 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
   readyFirstVisible.report.warmVisibleFrames[0].phase = 'mini-status-dot recording';
   readyFirstVisible.report.warmVisibleFrames[0].statusText = 'Recording';
   assert.equal(validateResult(readyFirstVisible), readyFirstVisible.report);
+  const staleLateLabel = structuredClone(readyFirstVisible);
+  staleLateLabel.report.warmVisibleFrames.push({
+    ...staleLateLabel.report.warmVisibleFrames[0], source: 'render', statusText: 'Starting...',
+  });
+  assert.throws(() => validateResult(staleLateLabel), /physical warm input evidence/);
   const providerConnecting = structuredClone(warm);
   providerConnecting.report.warmVisibleFrames.push({
     ...providerConnecting.report.warmVisibleFrames[0], source: 'render', captureReady: true,

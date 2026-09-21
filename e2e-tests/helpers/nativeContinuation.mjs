@@ -550,7 +550,12 @@ export function verifyWarmProviderCanary(trial, report) {
       throw new Error(`Warm provider canary cycle ${index} evidence is contradictory`);
     }
     if (plan.stopPhase === 'before-ready') {
-      if (cycle.trigger?.readyBeforeStop !== false || cycle.triggerProviderSamples !== null ||
+      const transportAtStop = cycle.trigger?.providerTransportBeforeStop;
+      if (cycle.trigger?.readyBeforeStop !== false || typeof cycle.trigger?.statusBeforeStop !== 'string' ||
+          !(transportAtStop === null || (typeof transportAtStop === 'object' &&
+            typeof transportAtStop.serverReady === 'boolean' &&
+            typeof transportAtStop.connectionRetained === 'boolean')) ||
+          transportAtStop?.serverReady === true || cycle.triggerProviderSamples !== null ||
           (cycle.association != null && (cycle.association.captureGeneration !== index + 1 ||
             cycle.association.captureRunId !== cycle.captureRunId ||
             cycle.association.captureFenceGeneration !== cycle.captureFenceGeneration))) {

@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { bindWarmVisibleFrameAfterNative, bindWarmVisibleFrameEvidence,
   drainPendingWarmVisibleObservations, hasMatchingRecoveryPcm,
-  type WarmReopenEvidence } from './nativeMiniUxScenario';
+  warmVisibleFramesHaveNoStaleStatus, type WarmReopenEvidence,
+  type WarmVisibleFrame } from './nativeMiniUxScenario';
 
 describe('warm mini-window first-visible evidence', () => {
   it('binds frames only to an authoritative visible native epoch', () => {
@@ -147,6 +148,16 @@ describe('warm mini-window first-visible evidence', () => {
     resolveSecond();
     await drained;
     expect(pending.size).toBe(0);
+  });
+
+  it('rejects a stale label even when its native proof settles after a valid frame', () => {
+    const frame = (statusText: string): WarmVisibleFrame => ({
+      attempt: 1, source: 'render', windowEpoch: 2, revision: 1, runId: 1,
+      captureReady: true, readinessReason: 'recording', phase: 'mini-status-dot recording', statusText,
+    });
+    expect(warmVisibleFramesHaveNoStaleStatus(
+      [frame('Listening...'), frame('Starting...')], ['Starting...', 'Processing...'],
+    )).toBe(false);
   });
 
   it('requires positive matching capture and provider PCM for recovery', () => {
