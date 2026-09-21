@@ -5534,7 +5534,8 @@ describe('transcription connect-retry reliability', () => {
     } finally { vi.useRealTimers(); }
   });
 
-  it('keeps a UI retry alive across the failed-intent cleanup projection', async () => {
+  it.each(['startFailed', 'runtimeFailed'] as const)(
+    'keeps a UI retry alive across the %s cleanup projection', async (fault) => {
     vi.useFakeTimers();
     try {
       invokeMock.mockResolvedValue(null);
@@ -5569,7 +5570,7 @@ describe('transcription connect-retry reliability', () => {
       });
       await handlers.get('recording:intent-projection')({ payload: {
         runId: null, faultRunId: 1, intentRevision: 1, status: 'Error', desiredOn: false,
-        pendingStart: false, processingJobs: 0, shutdownRequested: false, fault: 'startFailed',
+        pendingStart: false, processingJobs: 0, shutdownRequested: false, fault,
       } });
       expect(store.isConnecting).toBe(true);
       expect(store.error).toBeNull();
