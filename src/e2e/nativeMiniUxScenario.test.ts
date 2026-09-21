@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { bindWarmVisibleFrameAfterNative, bindWarmVisibleFrameEvidence,
-  drainPendingWarmVisibleObservations, hasMatchingRecoveryPcm,
+  drainPendingWarmVisibleObservations, hasMatchingRecoveryPcm, sealWarmVisibleObservations,
   warmVisibleFramesHaveNoStaleStatus, type WarmReopenEvidence,
   type WarmVisibleFrame } from './nativeMiniUxScenario';
 
@@ -148,6 +148,25 @@ describe('warm mini-window first-visible evidence', () => {
     resolveSecond();
     await drained;
     expect(pending.size).toBe(0);
+  });
+
+  it('keeps visible-frame admission open until native proofs and the final sample settle', async () => {
+    const reopen = { attempt: 1, baselineWindowEpoch: 1, windowEpoch: 2, closed: false,
+      acceptingObservations: true };
+    const pending = new Set<Promise<void>>();
+    let release!: () => void;
+    const first = new Promise<void>(resolve => { release = resolve; })
+      .finally(() => pending.delete(first));
+    pending.add(first);
+    let sampled = false;
+    const sealed = sealWarmVisibleObservations(reopen, pending, () => { sampled = true; });
+    await Promise.resolve();
+    expect(reopen.acceptingObservations).toBe(true);
+    expect(sampled).toBe(false);
+    release();
+    await sealed;
+    expect(sampled).toBe(true);
+    expect(reopen.acceptingObservations).toBe(false);
   });
 
   it('rejects a stale label even when its native proof settles after a valid frame', () => {

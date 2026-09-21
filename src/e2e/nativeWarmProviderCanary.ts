@@ -32,15 +32,22 @@ type ProviderEvent = { event: string; atMs: number; cycleIndex: number | null; s
   sourceStartSeconds: number; sourceDurationSeconds: number };
 type ProviderTerminal = { sessionId: number; cycleIndex: number | null; complete: boolean };
 export type WarmCanaryCaptureFence = { sessionId: number; cycleIndex: number;
-  providerStartSamples: number; providerSamples: number };
+  providerStartSamples: number; providerSamples: number; deliverySeqFloor: number };
+
+export type WarmCanaryStopBoundary = {
+  statusBeforeStop: string;
+  providerTransportBeforeStop: { serverReady: boolean; connectionRetained: boolean } | null;
+  nativeBoundaryMs: number;
+};
 
 export function warmCanaryBeforeReadyStopEvidence(
-  value: Pick<NativeState, 'status' | 'providerTransport'>,
+  value: WarmCanaryStopBoundary,
 ) {
   return {
-    readyBeforeStop: value.providerTransport?.serverReady === true,
-    providerTransportBeforeStop: value.providerTransport,
-    statusBeforeStop: value.status,
+    readyBeforeStop: value.providerTransportBeforeStop?.serverReady === true,
+    providerTransportBeforeStop: value.providerTransportBeforeStop,
+    statusBeforeStop: value.statusBeforeStop,
+    nativeBoundaryMs: value.nativeBoundaryMs,
   };
 }
 
@@ -65,6 +72,8 @@ async function toggle() {
   await invoke('native_e2e_hotkey', { action: 'press' });
   await invoke('native_e2e_hotkey', { action: 'release' });
 }
+const stopWithTransportBoundary = () =>
+  invoke<WarmCanaryStopBoundary>('native_e2e_stop_with_transport_boundary');
 
 export async function releaseWarmCanarySourceBeforeAck(
   releaseSource: () => Promise<unknown>,
@@ -99,9 +108,18 @@ export function warmCanaryEventMatchesCapture(
 ) {
   if (!warmCanaryEventMatchesEpisode(event, episode, expectedEvent) ||
       event.sessionId !== fence.sessionId || event.cycleIndex !== fence.cycleIndex ||
-      event.timingKnown !== true || !Number.isSafeInteger(fence.providerStartSamples) ||
+      !Number.isSafeInteger(fence.deliverySeqFloor) || fence.deliverySeqFloor < 0 ||
+      !Number.isSafeInteger(fence.providerStartSamples) ||
       !Number.isSafeInteger(fence.providerSamples) || fence.providerStartSamples < 0 ||
-      fence.providerSamples <= 0 || !Number.isFinite(event.sourceStartSeconds) ||
+      fence.providerSamples <= 0) return false;
+  // Production Backend Stable deliveries intentionally carry no source timing.
+  // Their causal proof is a fresh monotonic delivery identity after this
+  // generation's callback/PCM fence plus the exact episode phrase. Partials
+  // and timed finals retain the stricter sample-overlap proof below.
+  if (expectedEvent === 'transcription:final' &&
+      (!Number.isSafeInteger(event.deliverySeq) || Number(event.deliverySeq) <= fence.deliverySeqFloor)) return false;
+  if (event.timingKnown !== true) return expectedEvent === 'transcription:final';
+  if (!Number.isFinite(event.sourceStartSeconds) ||
       !Number.isFinite(event.sourceDurationSeconds) || event.sourceStartSeconds < 0 ||
       event.sourceDurationSeconds <= 0) return false;
   const timing = providerTimingSampleRange(event);
@@ -125,7 +143,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     expectedInsertion: '', finalTextBeforeProof: '', actualPasteVerified: false,
     finalCallbackFence: null as { captureGeneration: number; eventStart: number } | null,
     finalTranscriptFence: null as { eventStart: number; providerSamples: number;
-      providerStartSamples: number } | null,
+      providerStartSamples: number; deliverySeqFloor: number } | null,
     finalStartedAtMs: null as number | null,
     cycles: [] as Array<Record<string, unknown>>,
     finalOwnership: null as { logicalRunId: number; captureRunId: number; captureFenceGeneration: number } | null,
@@ -201,6 +219,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       let callbackFenceGeneration: number | null = null;
       let triggerProviderSamples: number | null = null;
       let triggerProviderStartSamples: number | null = null;
+      let triggerDeliverySeqFloor: number | null = null;
       let triggerLogicalRunId: number | null = null;
       await toggle();
       const active = await poll(value => value.fixture.captureStarts === before.fixture.captureStarts + 1 &&
@@ -253,6 +272,9 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         triggerLogicalRunId = observed.logicalProviderRunId;
         triggerProviderStartSamples = providerStartSamples(observed, observed.logicalProviderRunId);
         triggerEventStart = report.events.length;
+        triggerDeliverySeqFloor = report.events.slice(0, triggerEventStart)
+          .filter(event => event.sessionId === triggerLogicalRunId && Number.isSafeInteger(event.deliverySeq))
+          .reduce((maximum, event) => Math.max(maximum, Number(event.deliverySeq)), 0);
         const deadline = performance.now() + 70_000;
         let triggerEvent: ProviderEvent | undefined;
         while (performance.now() < deadline && !triggerEvent) {
@@ -262,7 +284,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
           triggerProviderStartSamples = providerStartSamples(current, triggerLogicalRunId);
           const fence = { sessionId: triggerLogicalRunId, cycleIndex: cycle.index,
             providerStartSamples: triggerProviderStartSamples,
-            providerSamples: triggerProviderSamples };
+            providerSamples: triggerProviderSamples, deliverySeqFloor: triggerDeliverySeqFloor };
           triggerEvent = report.events.slice(triggerEventStart).find(event =>
             warmCanaryEventMatchesCapture(event, cycle.episode, wanted, fence));
           if (!triggerEvent) await wait(20);
@@ -273,11 +295,6 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       }
       const beforeStop = await state();
       if (beforeStop.logicalProviderRunId > 0) sessionCycles.set(beforeStop.logicalProviderRunId, cycle.index);
-      if (cycle.stopPhase === 'before-ready') {
-        trigger = warmCanaryBeforeReadyStopEvidence(beforeStop);
-        check(trigger.readyBeforeStop === false,
-          `cycle ${cycle.index} reached provider Ready at the stop boundary`);
-      }
       const association = beforeStop.fixture.captureRunAssociations.find(row => row.captureGeneration === generation) ?? null;
       if (cycle.stopPhase !== 'before-ready') {
         check(beforeStop.captureEpisode !== null &&
@@ -297,7 +314,13 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
           `cycle ${cycle.index} reached final before the partial stop`);
       }
       const triggerAtMs = now();
-      await toggle();
+      if (cycle.stopPhase === 'before-ready') {
+        trigger = warmCanaryBeforeReadyStopEvidence(await stopWithTransportBoundary());
+        check(trigger.readyBeforeStop === false,
+          `cycle ${cycle.index} reached provider Ready at the native stop boundary`);
+      } else {
+        await toggle();
+      }
       const stopped = await poll(value => value.fixture.activeCaptures === 0 &&
         value.fixture.captureStops === before.fixture.captureStops + 1, `cycle ${cycle.index} capture stop`, 5_000);
       const captureStoppedAtMs = now();
@@ -317,7 +340,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         captureFenceGeneration: beforeStop.captureEpisode?.generation ?? null,
         logicalRunId: beforeStop.logicalProviderRunId, association, trigger, source: sourceAtStop,
         eventStart, triggerEventStart, stopEventIndex, callbackFenceGeneration, triggerProviderSamples,
-        providerStartSamples: triggerProviderStartSamples,
+        providerStartSamples: triggerProviderStartSamples, triggerDeliverySeqFloor,
         eventEnd: report.events.length, activeCapturesAfterStop: stopped.fixture.activeCaptures });
       lastSettledAtMs = settledAtMs;
       await invoke('native_e2e_progress', { report: { scenario: 'warm-provider-churn',
@@ -368,16 +391,23 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       row.captureGeneration === finalGeneration)!;
     const finalTranscriptEventStart = report.events.length;
     const finalProviderStartSamples = providerStartSamples(delivered, complete.logicalProviderRunId);
+    const finalDeliverySeqFloor = report.events.slice(0, finalTranscriptEventStart)
+      .filter(event => event.sessionId === complete.logicalProviderRunId &&
+        Number.isSafeInteger(event.deliverySeq))
+      .reduce((maximum, event) => Math.max(maximum, Number(event.deliverySeq)), 0);
     report.finalTranscriptFence = { eventStart: finalTranscriptEventStart,
-      providerSamples: finalProviderLedger.samples, providerStartSamples: finalProviderStartSamples };
+      providerSamples: finalProviderLedger.samples, providerStartSamples: finalProviderStartSamples,
+      deliverySeqFloor: finalDeliverySeqFloor };
     const belongsToFinalCallbackGeneration = (event: ProviderEvent) => {
       const timing = providerTimingSampleRange(event);
       return event.event === 'transcription:final' && event.sessionId === complete.logicalProviderRunId &&
-        event.cycleIndex === trial.finalEpisodeIndex && event.timingKnown === true &&
-        Number.isSafeInteger(timing.start) && Number.isSafeInteger(timing.duration) && timing.duration > 0 &&
-        timing.start < finalProviderStartSamples + finalProviderLedger.samples &&
-        timing.end > finalProviderStartSamples &&
-        timing.end <= finalProviderStartSamples + finalProviderLedger.samples &&
+        event.cycleIndex === trial.finalEpisodeIndex && Number.isSafeInteger(event.deliverySeq) &&
+        Number(event.deliverySeq) > finalDeliverySeqFloor &&
+        (event.timingKnown !== true ||
+          (Number.isSafeInteger(timing.start) && Number.isSafeInteger(timing.duration) && timing.duration > 0 &&
+            timing.start < finalProviderStartSamples + finalProviderLedger.samples &&
+            timing.end > finalProviderStartSamples &&
+            timing.end <= finalProviderStartSamples + finalProviderLedger.samples)) &&
         syntheticPhraseOccurrences(event.text ?? '').length === 2 &&
         event.markerIds.length === 2 && event.markerIds.includes(0) && event.markerIds.includes(1);
     };
@@ -448,6 +478,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         warmCanaryEventMatchesCapture(event, cycle.episode, 'transcription:final', {
           sessionId: Number(row?.logicalRunId), cycleIndex,
           providerStartSamples: Number(row?.providerStartSamples), providerSamples: provider.samples,
+          deliverySeqFloor: Number(row?.triggerDeliverySeqFloor),
         });
     }) && finalEvents.every(event => finalEvents.filter(candidate =>
       candidate.sessionId === event.sessionId && candidate.cycleIndex === event.cycleIndex).length === 1) &&

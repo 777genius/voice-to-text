@@ -59,13 +59,15 @@ describe('warm provider paid canary plan', () => {
 
   it('uses authoritative provider readiness at the before-ready stop boundary', () => {
     expect(warmCanaryBeforeReadyStopEvidence({
-      status: 'Starting', providerTransport: { serverReady: true, connectionRetained: true },
+      statusBeforeStop: 'Starting', nativeBoundaryMs: 42,
+      providerTransportBeforeStop: { serverReady: true, connectionRetained: true },
     })).toEqual({
       readyBeforeStop: true, statusBeforeStop: 'Starting',
       providerTransportBeforeStop: { serverReady: true, connectionRetained: true },
+      nativeBoundaryMs: 42,
     });
     expect(warmCanaryBeforeReadyStopEvidence({
-      status: 'Starting', providerTransport: null,
+      statusBeforeStop: 'Starting', providerTransportBeforeStop: null, nativeBoundaryMs: 43,
     }).readyBeforeStop).toBe(false);
   });
 
@@ -90,13 +92,17 @@ describe('warm provider paid canary plan', () => {
       sessionId: 9, cycleIndex: 16, deliverySeq: 88, atMs: 1000, timingKnown: true,
       sourceStartSeconds: 2, sourceDurationSeconds: 0.5 };
     const fence = { sessionId: 9, cycleIndex: 16, providerStartSamples: 32_000,
-      providerSamples: 8_000 };
+      providerSamples: 8_000, deliverySeqFloor: 87 };
     expect(warmCanaryEventMatchesCapture(current, 'episode-b.pcm',
       'transcription:final', fence)).toBe(true);
     expect(warmCanaryEventMatchesCapture({ ...current, sourceStartSeconds: 1.5 },
       'episode-b.pcm', 'transcription:final', fence)).toBe(false);
-    expect(warmCanaryEventMatchesCapture({ ...current, timingKnown: false },
-      'episode-b.pcm', 'transcription:final', fence)).toBe(false);
+    expect(warmCanaryEventMatchesCapture({ ...current, timingKnown: false,
+      sourceStartSeconds: 0, sourceDurationSeconds: 0 },
+    'episode-b.pcm', 'transcription:final', fence)).toBe(true);
+    expect(warmCanaryEventMatchesCapture({ ...current, timingKnown: false, deliverySeq: 87,
+      sourceStartSeconds: 0, sourceDurationSeconds: 0 },
+    'episode-b.pcm', 'transcription:final', fence)).toBe(false);
   });
 
   it('quantizes fractional provider timing before testing the capture boundary', () => {
@@ -104,7 +110,7 @@ describe('warm provider paid canary plan', () => {
       sessionId: 9, cycleIndex: 16, deliverySeq: 89, atMs: 1001, timingKnown: true,
       sourceStartSeconds: 0.1, sourceDurationSeconds: 0.14 };
     const fence = { sessionId: 9, cycleIndex: 16, providerStartSamples: 3_840,
-      providerSamples: 320 };
+      providerSamples: 320, deliverySeqFloor: 88 };
     expect(warmCanaryEventMatchesCapture(stale, 'episode-b.pcm',
       'transcription:final', fence)).toBe(false);
   });

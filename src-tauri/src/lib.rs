@@ -188,6 +188,8 @@ pub fn run() {
             #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
             presentation::native_e2e::native_e2e_hotkey,
             #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            presentation::native_e2e::native_e2e_stop_with_transport_boundary,
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
             presentation::native_e2e::native_e2e_configure,
             #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
             presentation::native_e2e::native_e2e_close_recording,

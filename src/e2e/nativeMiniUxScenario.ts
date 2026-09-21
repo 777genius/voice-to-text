@@ -36,6 +36,16 @@ export type WarmReopenEvidence = {
 export async function drainPendingWarmVisibleObservations(pending: Set<Promise<void>>) {
   while (pending.size > 0) await Promise.all([...pending]);
 }
+export async function sealWarmVisibleObservations(
+  reopen: WarmReopenEvidence,
+  pending: Set<Promise<void>>,
+  sample: () => void,
+) {
+  await drainPendingWarmVisibleObservations(pending);
+  sample();
+  await drainPendingWarmVisibleObservations(pending);
+  reopen.acceptingObservations = false;
+}
 export function warmVisibleFramesHaveNoStaleStatus(
   frames: WarmVisibleFrame[],
   staleStatusTexts: string[],
@@ -188,9 +198,6 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
       report.errors.push(`Warm visible native observation failed: ${String(error)}`);
     }).finally(() => pendingVisibleObservations.delete(observation));
     pendingVisibleObservations.add(observation);
-  };
-  const flushWarmVisibleObservations = async () => {
-    await drainPendingWarmVisibleObservations(pendingVisibleObservations);
   };
   const unlisten = await listen<{ windowEpoch: number }>('recording:window-shown', event => {
     shown += 1;
@@ -390,11 +397,12 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
         await toggle();
         const recording = await until(`warm reopen ${attempt + 1}`, s => s.visible && store.isCaptureReady &&
           (markerForRun(s, store.captureRunId)?.count ?? 0) >= 2);
-        // Seal admissions before draining. A completed proof can schedule another
-        // MutationObserver turn, so one pending-set snapshot is not a causal boundary.
+        // Keep admissions open while native provenance reads settle. A DOM
+        // mutation can happen during either read and its MutationObserver turn
+        // must be admitted before this reopen is sealed.
         observeWarmVisibleFrame('sample', activeWarmReopen, recording);
-        activeWarmReopen.acceptingObservations = false;
-        await flushWarmVisibleObservations();
+        await sealWarmVisibleObservations(activeWarmReopen, pendingVisibleObservations,
+          () => observeWarmVisibleFrame('sample', activeWarmReopen, recording));
         const visibleFrames = report.warmVisibleFrames.slice(visibleFrameStart)
           .filter(frame => frame.attempt === attempt + 1 && frame.windowEpoch === recording.windowEpoch);
         check((activeWarmReopen.pendingFrames?.length ?? 0) === 0,

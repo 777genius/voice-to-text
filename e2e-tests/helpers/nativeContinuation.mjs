@@ -430,14 +430,19 @@ export function verifyWarmProviderCanary(trial, report) {
         Array.isArray(event.markerIds) && event.markerIds.includes(markerId));
   };
   const eventMatchesCapture = (event, episode, expectedEvent, cycleIndex, sessionId,
-    providerStartSamples, providerSamples) => {
+    providerStartSamples, providerSamples, deliverySeqFloor) => {
     const eventStartSamples = Math.round(event?.sourceStartSeconds * 16000);
     const eventDurationSamples = Math.round(event?.sourceDurationSeconds * 16000);
     const eventEndSamples = eventStartSamples + eventDurationSamples;
     const fenceEndSamples = providerStartSamples + providerSamples;
-    return eventMatchesEpisode(event, episode, expectedEvent) && event?.cycleIndex === cycleIndex &&
-      event?.sessionId === sessionId && event?.timingKnown === true &&
-      Number.isSafeInteger(providerStartSamples) && providerStartSamples >= 0 &&
+    if (!eventMatchesEpisode(event, episode, expectedEvent) || event?.cycleIndex !== cycleIndex ||
+      event?.sessionId !== sessionId || !Number.isSafeInteger(deliverySeqFloor) || deliverySeqFloor < 0 ||
+      !Number.isSafeInteger(providerStartSamples) || providerStartSamples < 0 ||
+      !Number.isSafeInteger(providerSamples) || providerSamples <= 0) return false;
+    if (expectedEvent === 'transcription:final' &&
+        (!Number.isSafeInteger(event?.deliverySeq) || event.deliverySeq <= deliverySeqFloor)) return false;
+    if (event?.timingKnown !== true) return expectedEvent === 'transcription:final';
+    return Number.isSafeInteger(providerStartSamples) && providerStartSamples >= 0 &&
       Number.isSafeInteger(providerSamples) && providerSamples > 0 &&
       Number.isSafeInteger(eventStartSamples) && Number.isSafeInteger(eventDurationSamples) &&
       eventDurationSamples > 0 &&
@@ -552,6 +557,7 @@ export function verifyWarmProviderCanary(trial, report) {
     if (plan.stopPhase === 'before-ready') {
       const transportAtStop = cycle.trigger?.providerTransportBeforeStop;
       if (cycle.trigger?.readyBeforeStop !== false || typeof cycle.trigger?.statusBeforeStop !== 'string' ||
+          !Number.isFinite(cycle.trigger?.nativeBoundaryMs) ||
           !(transportAtStop === null || (typeof transportAtStop === 'object' &&
             typeof transportAtStop.serverReady === 'boolean' &&
             typeof transportAtStop.connectionRetained === 'boolean')) ||
@@ -583,7 +589,7 @@ export function verifyWarmProviderCanary(trial, report) {
       const triggerEvents = events.slice(cycle.triggerEventStart, cycle.stopEventIndex);
       if (expectedEvent && !triggerEvents.some(event =>
         eventMatchesCapture(event, plan.episode, expectedEvent, index, cycle.logicalRunId,
-          cycle.providerStartSamples, cycle.triggerProviderSamples) &&
+          cycle.providerStartSamples, cycle.triggerProviderSamples, cycle.triggerDeliverySeqFloor) &&
         cycle.trigger?.episode === plan.episode && cycle.trigger?.deliverySeq === event.deliverySeq)) {
         throw new Error(`Cycle ${index} missed ${expectedEvent} evidence`);
       }
@@ -616,14 +622,18 @@ export function verifyWarmProviderCanary(trial, report) {
     const eventEndSamples = eventStartSamples + eventDurationSamples;
     return event.event === 'transcription:final' && event.cycleIndex === finalIndex &&
       event.sessionId === ownership?.logicalRunId && Number.isSafeInteger(event.deliverySeq) &&
-      event.deliverySeq > 0 && typeof event.text === 'string' && event.text.trim().length > 0 &&
-      event.timingKnown === true && Number.isSafeInteger(report.finalTranscriptFence?.providerStartSamples) &&
+      Number.isSafeInteger(report.finalTranscriptFence?.deliverySeqFloor) &&
+      report.finalTranscriptFence.deliverySeqFloor >= 0 &&
+      event.deliverySeq > report.finalTranscriptFence.deliverySeqFloor &&
+      typeof event.text === 'string' && event.text.trim().length > 0 &&
+      Number.isSafeInteger(report.finalTranscriptFence?.providerStartSamples) &&
       report.finalTranscriptFence.providerStartSamples >= 0 &&
-      Number.isSafeInteger(eventStartSamples) && Number.isSafeInteger(eventDurationSamples) &&
-      eventDurationSamples > 0 &&
-      eventStartSamples < report.finalTranscriptFence.providerStartSamples + finalProviderLedger?.samples &&
-      eventEndSamples > report.finalTranscriptFence.providerStartSamples &&
-      eventEndSamples <= report.finalTranscriptFence.providerStartSamples + finalProviderLedger?.samples &&
+      (event.timingKnown !== true ||
+        (Number.isSafeInteger(eventStartSamples) && Number.isSafeInteger(eventDurationSamples) &&
+          eventDurationSamples > 0 &&
+          eventStartSamples < report.finalTranscriptFence.providerStartSamples + finalProviderLedger?.samples &&
+          eventEndSamples > report.finalTranscriptFence.providerStartSamples &&
+          eventEndSamples <= report.finalTranscriptFence.providerStartSamples + finalProviderLedger?.samples)) &&
       event.markerIds.length === 2 && event.markerIds.includes(0) && event.markerIds.includes(1) &&
       (normalizedEventText(event).split('на столе').length - 1) === 1 &&
       (normalizedEventText(event).split('за окном').length - 1) === 1;
@@ -696,7 +706,8 @@ export function verifyWarmProviderCanary(trial, report) {
         const provider = providerByGeneration.get(cycleIndex + 1);
         return cycle == null || event.sessionId !== cycle.logicalRunId || episode == null ||
           !provider || !eventMatchesCapture(event, episode, 'transcription:final', cycleIndex,
-            cycle.logicalRunId, cycle.providerStartSamples, provider.samples);
+            cycle.logicalRunId, cycle.providerStartSamples, provider.samples,
+            cycle.triggerDeliverySeqFloor);
       }) ||
       allFinalEvents.some(event => allFinalEvents.filter(candidate =>
         candidate.sessionId === event.sessionId && candidate.cycleIndex === event.cycleIndex).length !== 1) ||

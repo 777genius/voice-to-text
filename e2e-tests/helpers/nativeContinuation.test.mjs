@@ -133,6 +133,9 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     const eventStart = events.length;
     const markerId = plan.episode === 'episode-a.pcm' ? 0 : 1;
     const phrase = markerId === 0 ? 'на столе лежит книга' : 'за окном растет береза';
+    const triggerDeliverySeqFloor = events.filter(event => event.sessionId === logicalRunId &&
+      Number.isSafeInteger(event.deliverySeq))
+      .reduce((maximum, event) => Math.max(maximum, event.deliverySeq), 0);
     const providerStartSamples = index < warmProviderCanaryTrial.readyGateFromIndex
       ? null : (index - warmProviderCanaryTrial.readyGateFromIndex) * 320;
     if (plan.stopPhase === 'during-partial') events.push({ event: 'transcription:partial', text: phrase,
@@ -140,7 +143,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       timingKnown: true, sourceStartSeconds: providerStartSamples / 16000, sourceDurationSeconds: 0.02 });
     if (plan.stopPhase === 'after-final') events.push({ event: 'transcription:final', text: phrase,
       cycleIndex: index, sessionId: logicalRunId, deliverySeq: index + 1, markerIds: [markerId],
-      timingKnown: true, sourceStartSeconds: providerStartSamples / 16000, sourceDurationSeconds: 0.02 });
+      timingKnown: false, sourceStartSeconds: 0, sourceDurationSeconds: 0 });
     const stopEventIndex = events.length;
     if (plan.stopPhase === 'before-ready') {
       events.push({ event: 'transcription:terminal', cycleIndex: index, sessionId: logicalRunId,
@@ -157,12 +160,13 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       stopEventIndex,
       callbackFenceGeneration: index > warmProviderCanaryTrial.readyGateFromIndex ? index + 1 : null,
       triggerProviderSamples: plan.stopPhase === 'before-ready' ? null : 320,
-      providerStartSamples,
+      providerStartSamples, triggerDeliverySeqFloor: plan.stopPhase === 'before-ready'
+        ? null : triggerDeliverySeqFloor,
       association: plan.stopPhase === 'before-ready' ? null : {
         captureGeneration: index + 1, captureRunId, captureFenceGeneration: index + 1 },
       trigger: plan.stopPhase === 'before-ready' ? { readyBeforeStop: false,
         providerTransportBeforeStop: { serverReady: false, connectionRetained: false },
-        statusBeforeStop: 'Starting' } :
+        statusBeforeStop: 'Starting', nativeBoundaryMs: index + 1 } :
         plan.stopPhase === 'during-partial' ? { event: 'transcription:partial', episode: plan.episode,
           deliverySeq: null } :
         plan.stopPhase === 'after-final' ? { event: 'transcription:final', episode: plan.episode,
@@ -177,8 +181,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   const finalSourceFrames = approvedFixtures['long-auto-commit.pcm'][0] / 2;
   events.push({ event: 'transcription:final', cycleIndex: 20, sessionId: finalLogicalRunId,
     deliverySeq: 99, text: 'на столе лежит книга за окном растет береза', markerIds: [0, 1],
-    timingKnown: true, sourceStartSeconds: finalProviderStartSamples / 16000,
-    sourceDurationSeconds: finalSourceFrames / 16000 });
+    timingKnown: false, sourceStartSeconds: 0, sourceDurationSeconds: 0 });
   events.push({ event: 'transcription:terminal', cycleIndex: 20, sessionId: finalLogicalRunId,
     deliverySeq: null, markerIds: [] });
   terminals.push({ sessionId: finalLogicalRunId, cycleIndex: 20, complete: true });
@@ -220,7 +223,10 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     finalStartedAtMs: cycleClock,
     finalCallbackFence: { captureGeneration: 21, eventStart: events.length - 2 },
     finalTranscriptFence: { eventStart: events.length - 2,
-      providerSamples: sources[20].sourceFrames, providerStartSamples: finalProviderStartSamples },
+      providerSamples: sources[20].sourceFrames, providerStartSamples: finalProviderStartSamples,
+      deliverySeqFloor: events.slice(0, -2).filter(event => event.sessionId === finalLogicalRunId &&
+        Number.isSafeInteger(event.deliverySeq))
+        .reduce((maximum, event) => Math.max(maximum, event.deliverySeq), 0) },
     finalOwnership: { logicalRunId: finalLogicalRunId, captureRunId: 999, captureFenceGeneration: 21 },
     terminals, final: { status: 'Idle', preparedCaptureTokenCount: 0,
       providerTransport: { connectionRetained: false }, fixture } };
@@ -276,6 +282,11 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   earlyCycle.trigger.providerTransportBeforeStop.serverReady = true;
   assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, alreadyReadyAtEarlyStop),
     /before-Ready proof/);
+  const missingNativeStopBoundary = structuredClone(report);
+  delete missingNativeStopBoundary.cycles.find(row => row.stopPhase === 'before-ready')
+    .trigger.nativeBoundaryMs;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, missingNativeStopBoundary),
+    /before-Ready proof/);
   for (const mutate of [
     value => value.cycles.pop(),
     value => { value.cycles[5].association.captureRunId = 9999; },
@@ -299,6 +310,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     value => { value.finalCallbackFence.captureGeneration = 20; },
     value => { value.finalCallbackFence.eventStart = value.events.length; },
     value => { value.finalTranscriptFence.eventStart = value.events.length - 1; },
+    value => { value.finalTranscriptFence.deliverySeqFloor = 99; },
     value => { const cycle = value.cycles.find(row => row.stopPhase === 'after-final');
       cycle.triggerEventStart += 1; },
     value => { const cycle = value.cycles.find(row => row.stopPhase === 'after-final');
@@ -309,14 +321,20 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     value => { const cycle = value.cycles.find(row => row.stopPhase === 'after-final');
       const event = value.events.slice(cycle.triggerEventStart, cycle.stopEventIndex)
         .find(row => row.event === 'transcription:final');
+      event.timingKnown = true;
       event.sourceStartSeconds = Math.max(0, (cycle.providerStartSamples - 320) / 16000);
       event.sourceDurationSeconds = 0.02; },
     value => { const cycle = value.cycles.find(row => row.stopPhase === 'after-final' &&
         row.providerStartSamples === 3_840);
       const event = value.events.slice(cycle.triggerEventStart, cycle.stopEventIndex)
         .find(row => row.event === 'transcription:final');
+      event.timingKnown = true;
       event.sourceStartSeconds = 0.1;
       event.sourceDurationSeconds = 0.14; },
+    value => { const cycle = value.cycles.find(row => row.stopPhase === 'after-final');
+      const event = value.events.slice(cycle.triggerEventStart, cycle.stopEventIndex)
+        .find(row => row.event === 'transcription:final');
+      cycle.triggerDeliverySeqFloor = event.deliverySeq; },
     value => { value.cycles[1].previousSettleToStartMs = 5_000; },
     value => { delete value.events.find(event => event.event === 'transcription:final').deliverySeq; },
     value => { value.events.find(event => event.cycleIndex === 20 && event.event === 'transcription:final').event = 'transcription:partial'; },
@@ -475,6 +493,21 @@ test('seal-close TEST command invokes the product native close Stop path with is
   assert.match(lib, /commands::stop_recording_on_native_close\(window_clone.app_handle\(\)\)/);
   assert.match(cases, /selected === 'seal-close'\) await invoke\('native_e2e_close_recording'\)/);
   assert.doesNotMatch(cases, /getCurrentWindow|hide_recording_window_if_current/);
+});
+
+test('warm canary Stop samples transport and dispatches without a JS or async readiness gap', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const native = await readFile(new URL('../../src-tauri/src/presentation/native_e2e.rs', import.meta.url), 'utf8');
+  const lib = await readFile(new URL('../../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+  const start = native.indexOf('pub async fn native_e2e_stop_with_transport_boundary');
+  const command = native.slice(start, native.indexOf('\nfn dispatch_hotkey', start));
+  assert.ok(start > 0);
+  assert.match(command, /trial\["kind"\] != "warm-provider-canary"/);
+  const observation = command.indexOf('.native_e2e_transport_observation()');
+  const press = command.indexOf('dispatch_hotkey(&app, true)');
+  assert.ok(observation > 0 && press > observation);
+  assert.doesNotMatch(command.slice(observation, press), /\.await[\s\S]*\.await/);
+  assert.match(lib, /#\[cfg\(all\(debug_assertions, feature = "native-window-e2e"\)\)\]\s*presentation::native_e2e::native_e2e_stop_with_transport_boundary/);
 });
 
 test('normal baseline/cold reject continuation controls', async () => {

@@ -4040,6 +4040,48 @@ pub async fn native_e2e_hotkey(
     Ok(())
 }
 
+/// Paid warm-canary only: sample transport readiness and dispatch the Stop
+/// gesture in one native command. There is deliberately no await between the
+/// transport observation and dispatch, so a JS/state RPC gap cannot turn an
+/// already-Ready provider into false before-Ready evidence.
+#[tauri::command]
+pub async fn native_e2e_stop_with_transport_boundary(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    if !qualification_live() {
+        return Err("transport-boundary stop requires live qualification".into());
+    }
+    let directory = RESULT_PATH
+        .get()
+        .and_then(|path| path.parent())
+        .ok_or("unvalidated qualification")?;
+    let trial: Value = serde_json::from_slice(
+        &std::fs::read(directory.join("qualification-trial.json"))
+            .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    if trial["kind"] != "warm-provider-canary" {
+        return Err("transport-boundary stop requires warm provider canary".into());
+    }
+    let status = state.transcription_service.get_status().await;
+    let transport = state
+        .transcription_service
+        .native_e2e_transport_observation()
+        .await;
+    let boundary = json!({
+        "statusBeforeStop": format!("{status:?}"),
+        "providerTransportBeforeStop": transport.map(|(ready, retained)| json!({
+            "serverReady": ready,
+            "connectionRetained": retained,
+        })),
+        "nativeBoundaryMs": observation::now_ms(),
+    });
+    dispatch_hotkey(&app, true);
+    dispatch_hotkey(&app, false);
+    Ok(boundary)
+}
+
 fn dispatch_hotkey(app: &AppHandle, pressed: bool) {
     if diagnostic_refuses_effect() {
         return;
