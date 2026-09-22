@@ -302,6 +302,13 @@ pub(super) fn execute(app: AppHandle, effect: Effect) {
                         .remove(&run_id.get());
                     finish_registration(state.inner(), run_id).await;
                 }
+                if !active {
+                    reconcile_warm_input_after_capture_release(
+                        state.inner(),
+                        "continuation pending capture stop",
+                    )
+                    .await;
+                }
                 drop(state);
                 emit(
                     app,

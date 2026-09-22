@@ -176,6 +176,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     const logicalRunId = index < warmProviderCanaryTrial.readyGateFromIndex
       ? 100 + index : index < 15 ? 100 + warmProviderCanaryTrial.readyGateFromIndex : 100 + index;
     const captureRunId = 100 + index;
+    const captureFenceGeneration = index * 2 + 1;
     const eventStart = events.length;
     const markerId = plan.episode === 'episode-a.pcm' ? 0 : 1;
     const phrase = markerId === 0 ? 'на столе лежит книга' : 'за окном растет береза';
@@ -208,7 +209,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     const cycle = { ...plan, startedAtMs, previousSettleToStartMs, triggerAtMs: startedAtMs + 20,
       captureStoppedAtMs: startedAtMs + 30, settledAtMs: startedAtMs + 50,
       captureGeneration: index + 1, logicalRunId, captureRunId,
-      captureFenceGeneration: index + 1,
+      captureFenceGeneration,
       triggerEventStart: eventStart,
       stopEventIndex,
       callbackFenceGeneration: expectedWarmProviderCallbackGenerations(warmProviderCanaryTrial)
@@ -218,7 +219,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
         ? null : triggerDeliverySeqFloor,
       readyGateElapsedMs: index >= warmProviderCanaryTrial.readyGateFromIndex ? 1200 : null,
       association: plan.stopPhase === 'before-ready' ? null : {
-        captureGeneration: index + 1, captureRunId, captureFenceGeneration: index + 1 },
+        captureGeneration: index + 1, captureRunId, captureFenceGeneration },
       trigger: plan.stopPhase === 'before-ready' ? { readyBeforeStop: false,
         providerTransportBeforeStop: { serverReady: false, connectionRetained: false },
         statusBeforeStop: 'Starting', nativeBoundaryMs: index + 1 } :
@@ -277,7 +278,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
         { serverReady: true, status: 'Processing', nativeReadyMs: 900, emittedFrames: 0 } : null };
   });
   const captureRunAssociations = cycles.flatMap((cycle, index) => cycle.association ? [cycle.association] : [])
-    .concat({ captureGeneration: 21, captureRunId: 999, captureFenceGeneration: 21 });
+    .concat({ captureGeneration: 21, captureRunId: 999, captureFenceGeneration: 41 });
   const capturePcmLedgers = sources.map((source, index) => ({
     captureGeneration: index + 1,
     chunks: Math.ceil(source.emittedFrames / 320),
@@ -302,7 +303,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       providerSamples: sources[20].sourceFrames, providerStartSamples: finalProviderStartSamples,
       deliverySeqFloor: finalDeliverySeqFloor },
     finalOwnership: { logicalRunId: finalLogicalRunId, captureRunId: 999,
-      captureFenceGeneration: 21 },
+      captureFenceGeneration: 41 },
     terminals, final: { status: 'Idle', preparedCaptureTokenCount: 0,
       providerTransport: { connectionRetained: false }, fixture } };
   assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, report).churnCycles, 20);
@@ -456,7 +457,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   const ledgerBytes = fixture.providerPcmLedgers.reduce((sum, row) => sum + row.samples * 2, 0);
   const ownerByGeneration = new Map(report.cycles.map(cycle =>
     [cycle.captureGeneration, cycle.logicalRunId]));
-  ownerByGeneration.set(report.finalOwnership.captureFenceGeneration,
+  ownerByGeneration.set(captureRunAssociations.at(-1).captureGeneration,
     report.finalOwnership.logicalRunId);
   const buildTransport = forcedSplitIndex => {
     const result = [];
@@ -515,8 +516,11 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   ], { providerPcmLedgers: [
     { captureGeneration: 1, chunks: 1, samples: 2, hash: '0123456789abcdef' },
     { captureGeneration: 2, chunks: 1, samples: 3, hash: 'fedcba9876543210' },
+  ], captureRunAssociations: [
+    { captureGeneration: 2, captureRunId: 20, captureFenceGeneration: 3 },
   ] }, { cycles: [{ captureGeneration: 1, logicalRunId: 1 }],
-    finalOwnership: { captureFenceGeneration: 2, logicalRunId: 2 } }).transmittedPcmBytes, 10);
+    finalOwnership: { captureRunId: 20, captureFenceGeneration: 3,
+      logicalRunId: 2 } }).transmittedPcmBytes, 10);
   const contradictoryProviderLifecycle = structuredClone(report);
   Object.assign(contradictoryProviderLifecycle.final.fixture,
     { providerStarts: 9, providerStops: 0, activeProviders: 8, maxActiveProviders: 8 });
@@ -552,6 +556,15 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       { ...value.final.fixture.captureRunAssociations[0] }); },
     value => { value.final.fixture.captureRunAssociations.find(row => row.captureGeneration === 6)
       .captureRunId = 99999; },
+    value => { const previous = value.cycles[5]; const cycle = value.cycles[6];
+      cycle.captureRunId = previous.captureRunId;
+      cycle.captureFenceGeneration = previous.captureFenceGeneration;
+      cycle.association.captureRunId = previous.captureRunId;
+      cycle.association.captureFenceGeneration = previous.captureFenceGeneration;
+      const association = value.final.fixture.captureRunAssociations
+        .find(row => row.captureGeneration === cycle.captureGeneration);
+      association.captureRunId = previous.captureRunId;
+      association.captureFenceGeneration = previous.captureFenceGeneration; },
     value => { value.final.fixture.captureRunAssociations = value.final.fixture.captureRunAssociations
       .filter(row => row.captureGeneration !== 6); },
     value => { value.final.fixture.captureRunAssociations.push({ captureGeneration: 1,
@@ -974,6 +987,17 @@ test('warm canary binds a fresh Ready provider owner before releasing gated PCM'
   const bindOwner = readySection.indexOf('sessionCycles.set(ready.logicalProviderRunId, cycle.index);');
   const release = readySection.indexOf('releaseWarmCanarySourceBeforeAck(');
   assert.ok(bindOwner >= 0 && bindOwner < release);
+});
+
+test('continuation pending capture release reconciles a deferred warm microphone policy change', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(
+    new URL('../../src-tauri/src/presentation/commands/continuation.rs', import.meta.url), 'utf8');
+  const seal = source.slice(source.indexOf('Effect::SealPending {'),
+    source.indexOf('Effect::WaitForWindow {'));
+  assert.match(seal, /if !active \{\s*reconcile_warm_input_after_capture_release\(/);
+  assert.ok(seal.indexOf('reconcile_warm_input_after_capture_release(') <
+    seal.indexOf('Event::PendingCaptureStopped'));
 });
 
 test('paid live backend instruments real provider lifecycle counters', async () => {

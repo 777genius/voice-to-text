@@ -1193,8 +1193,9 @@ export function validateResult(envelope) {
   const cycleFinalDeliveries = report.cycleFinalDeliveries;
   const allFinalDeliveries = report.allFinalDeliveries;
   const expectedFinalSessionIds = report.expectedFinalSessionIds;
-  const independentlyExpectedFinalSessionIds = Array.isArray(cycles)
-    ? [...cycles.map(row => row?.sessionId), report.hiddenIdleEvidence?.wakeSessionId] : [];
+  const independentlyExpectedFinalSessionIds = [...new Set((fixture.providerMarkers ?? [])
+    .map(markerRow => markerRow?.captureRunId)
+    .filter(positiveSafeInteger))].sort((left, right) => left - right);
   const expectedTranscriptForSession = sessionId => {
     const providerSessionIds = [...new Set((fixture.providerMarkers ?? [])
       .filter(markerRow => markerRow.captureRunId === sessionId)

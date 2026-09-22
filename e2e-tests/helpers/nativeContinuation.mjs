@@ -423,7 +423,12 @@ export function verifyWarmProviderTransport(events, fixture, report) {
   const ownershipRows = Array.isArray(report?.cycles) ? report.cycles.map(cycle => ({
     captureGeneration: cycle?.captureGeneration, logicalRunId: cycle?.logicalRunId,
   })) : [];
-  ownershipRows.push({ captureGeneration: report?.finalOwnership?.captureFenceGeneration,
+  const finalAssociation = Array.isArray(fixture?.captureRunAssociations)
+    ? fixture.captureRunAssociations.find(row =>
+      row?.captureRunId === report?.finalOwnership?.captureRunId &&
+      row?.captureFenceGeneration === report?.finalOwnership?.captureFenceGeneration)
+    : null;
+  ownershipRows.push({ captureGeneration: finalAssociation?.captureGeneration,
     logicalRunId: report?.finalOwnership?.logicalRunId });
   const owners = new Map();
   for (const row of ownershipRows) {
@@ -716,6 +721,8 @@ export function verifyWarmProviderCanary(trial, report) {
         !Number.isSafeInteger(cycle.logicalRunId) || cycle.logicalRunId <= 0 ||
         !Number.isSafeInteger(cycle.captureRunId) || cycle.captureRunId <= 0 ||
         !Number.isSafeInteger(cycle.captureFenceGeneration) || cycle.captureFenceGeneration <= 0 ||
+        (index > 0 && (cycle.captureRunId <= previousCycle.captureRunId ||
+          cycle.captureFenceGeneration <= previousCycle.captureFenceGeneration)) ||
         cycle.activeCapturesAfterStop !== 0 || source?.name !== plan.episode ||
         source.captureGeneration !== index + 1 || !Number.isSafeInteger(source.emittedFrames) ||
         source.emittedFrames < 0 || source.emittedFrames > source.sourceFrames ||
@@ -899,6 +906,8 @@ export function verifyWarmProviderCanary(trial, report) {
       !finalAssociation || !ownership ||
       ownership.captureRunId !== finalAssociation.captureRunId ||
       ownership.captureFenceGeneration !== finalAssociation.captureFenceGeneration ||
+      ownership.captureRunId <= cycles.at(-1).captureRunId ||
+      ownership.captureFenceGeneration <= cycles.at(-1).captureFenceGeneration ||
       !Number.isSafeInteger(ownership.logicalRunId) || ownership.logicalRunId <= 0 ||
       !finalProviderLedger || finalProviderLedger.samples <= 0 ||
       callbackFence?.captureGeneration !== finalIndex + 1 ||

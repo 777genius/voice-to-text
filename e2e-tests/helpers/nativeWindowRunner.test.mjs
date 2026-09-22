@@ -163,20 +163,44 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
       lastVisibleElapsedMs: 1210, visibilityTransitionCount: 1 },
     scenarios: ['50-audio-transcript-stop-hide-reopen-cycles', 'real-hidden-idle-180s-and-fresh-audio',
       ...Array.from({ length: 10 }, (_, i) => `scenario-${i}`)] } };
+  for (const sessionId of [52, 53]) {
+    const captureGeneration = sessionId;
+    const association = { captureGeneration, captureRunId: sessionId,
+      captureFenceGeneration: captureGeneration };
+    const markerRow = { captureGeneration, count: 1, firstSequence: 1, lastSequence: 1 };
+    const ledger = { captureGeneration, chunks: 1, samples: 320, hash: '0123456789abcdef' };
+    valid.fixture.captureStarts += 1;
+    valid.fixture.captureStops += 1;
+    valid.fixture.providerStarts += 1;
+    valid.fixture.providerStops += 1;
+    valid.fixture.finals += 1;
+    valid.fixture.captureRunAssociations.push(association);
+    valid.fixture.captureMarkers.push(markerRow);
+    valid.fixture.providerMarkers.push({ ...markerRow, ...association, providerSessionId: sessionId });
+    valid.fixture.capturePcmLedgers.push(ledger);
+    valid.fixture.providerPcmLedgers.push({ ...ledger });
+    valid.report.expectedFinalSessionIds.push(sessionId);
+    valid.report.allFinalDeliveries.push({ sessionId,
+      text: `Native fixture session ${sessionId}`, deliverySeq: sessionId });
+  }
+  valid.report.final.fixture = structuredClone(valid.fixture);
   assert.equal(validateResult(valid), valid.report);
   const stallRestart = structuredClone(valid);
   const wakeAssociation = stallRestart.fixture.captureRunAssociations.find(row =>
     row.captureGeneration === stallRestart.report.hiddenIdleEvidence.wakeCaptureGeneration);
+  const restartGeneration = Math.max(...stallRestart.fixture.captureRunAssociations
+    .map(row => row.captureGeneration)) + 1;
   stallRestart.fixture.captureStarts += 1;
   stallRestart.fixture.captureStops += 1;
-  stallRestart.fixture.captureRunAssociations.push({ ...wakeAssociation, captureGeneration: 52 });
-  stallRestart.fixture.captureMarkers.push({ captureGeneration: 52, count: 1,
+  stallRestart.fixture.captureRunAssociations.push({ ...wakeAssociation,
+    captureGeneration: restartGeneration });
+  stallRestart.fixture.captureMarkers.push({ captureGeneration: restartGeneration, count: 1,
     firstSequence: 1, lastSequence: 1 });
-  stallRestart.fixture.providerMarkers.push({ ...wakeAssociation, captureGeneration: 52,
+  stallRestart.fixture.providerMarkers.push({ ...wakeAssociation, captureGeneration: restartGeneration,
     providerSessionId: 51, count: 1, firstSequence: 1, lastSequence: 1 });
-  stallRestart.fixture.capturePcmLedgers.push({ captureGeneration: 52, chunks: 1,
+  stallRestart.fixture.capturePcmLedgers.push({ captureGeneration: restartGeneration, chunks: 1,
     samples: 320, hash: 'fedcba9876543210' });
-  stallRestart.fixture.providerPcmLedgers.push({ captureGeneration: 52, chunks: 1,
+  stallRestart.fixture.providerPcmLedgers.push({ captureGeneration: restartGeneration, chunks: 1,
     samples: 320, hash: 'fedcba9876543210' });
   stallRestart.report.final.fixture = structuredClone(stallRestart.fixture);
   assert.equal(validateResult(stallRestart), stallRestart.report,
