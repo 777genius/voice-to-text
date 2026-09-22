@@ -3545,6 +3545,10 @@ impl TranscriptionService {
             .await
     }
 
+    pub fn uses_owner_managed_capture(&self) -> bool {
+        *self.capture_recovery_policy.lock().unwrap() == CaptureRecoveryPolicy::OwnerManaged
+    }
+
     pub fn has_capture_owner(&self) -> bool {
         self.capture_run_id.load(Ordering::Acquire) != 0
     }

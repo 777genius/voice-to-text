@@ -125,7 +125,9 @@ export function validateMiniUxResult(envelope) {
     sameCounts(physical.warmReopenStart, physical.warmReopenEnd) &&
     sameCounts(physical.warmReopenEnd, physical.policyActive) &&
     oneClose(physical.policyActive, physical.policyClosed) &&
-    oneOpen(physical.policyClosed, physical.policyResumed) &&
+    sameCounts(physical.policyClosed, physical.policyColdActive) &&
+    sameCounts(physical.policyColdActive, physical.policyColdStopped) &&
+    oneOpen(physical.policyColdStopped, physical.policyResumed) &&
     oneClose(physical.policyResumed, physical.sleepClosed) &&
     oneOpen(physical.sleepClosed, physical.wakeOpened) &&
     oneClose(physical.wakeOpened, physical.terminalClosed) &&
@@ -1044,7 +1046,9 @@ export function validateResult(envelope) {
       !Array.isArray(report.scenarios) || new Set(report.scenarios).size !== report.scenarios.length ||
       report.scenarios.some((name) => typeof name !== 'string' || !name) || report.scenarios.length < 12 ||
       report.passed !== true || report.completedCycles !== 50 ||
+      !Number.isSafeInteger(fixture.finals) || fixture.finals < 50 ||
       report.final?.fixture?.activeCaptures !== 0 || report.final?.fixture?.activeProviders !== 0 ||
+      !isDeepStrictEqual(fixture, report.final?.fixture) ||
       report.final?.preparedCaptureTokenCount !== 0 ||
       !Number.isFinite(report.hiddenIdleMs) || report.hiddenIdleMs < 180_000 || report.skipped) {
     throw new Error(`Native result is incomplete: ${JSON.stringify(envelope)}`);
@@ -1059,10 +1063,14 @@ export function validateResult(envelope) {
     !Number.isSafeInteger(row.sessionId) || row.sessionId <= 0 ||
     !Number.isSafeInteger(row.windowEpoch) || row.windowEpoch <= 0 ||
     !Number.isSafeInteger(row.captureGeneration) || row.captureGeneration <= 0 ||
+    typeof row.expectedTranscript !== 'string' || !row.expectedTranscript.trim() ||
+    row.finalSessionId !== row.sessionId || row.finalText !== row.expectedTranscript ||
+    (row.finalDeliverySeq !== null && (!Number.isSafeInteger(row.finalDeliverySeq) || row.finalDeliverySeq <= 0)) ||
     (index > 0 && (row.captureStartsBefore !== cycles[index - 1].captureStartsAfter ||
       row.captureStopsBefore !== cycles[index - 1].captureStopsAfter ||
       row.sessionId <= cycles[index - 1].sessionId || row.windowEpoch <= cycles[index - 1].windowEpoch ||
-      row.captureGeneration <= cycles[index - 1].captureGeneration))) ||
+      row.captureGeneration <= cycles[index - 1].captureGeneration ||
+      row.finalSessionId <= cycles[index - 1].finalSessionId))) ||
     cycles[49].captureStartsAfter > fixture.captureStarts || cycles[49].captureStopsAfter > fixture.captureStops ||
     cycles.some(row => {
       const capture = fixture.capturePcmLedgers.find(ledger => ledger.captureGeneration === row.captureGeneration);
@@ -1236,7 +1244,7 @@ export async function main(args = process.argv.slice(2)) {
   try {
     if (interruption) throw interruption;
     // Event/preparation timeout: 30 seconds, then up to 5 seconds SIGTERM grace before SIGKILL.
-    const runtimeTimeoutMs = options.miniUx ? 90_000
+    const runtimeTimeoutMs = options.miniUx ? 180_000
       : trial?.kind === 'warm-provider-canary' ? 900_000
       : options.readerPreparation || ['E04', 'E41', 'E42', 'after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle'].includes(options.continuationCase) ? 30_000
       : 480_000;

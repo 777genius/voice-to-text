@@ -145,6 +145,13 @@ export function expectedWarmProviderCallbackGenerations(trial) {
   if (retained) generations.push(trial.finalEpisodeIndex + 1);
   return generations;
 }
+export function expectedWarmProviderLogicalRuns(trial) {
+  if (trial?.kind !== 'warm-provider-canary') throw new Error('Warm provider canary plan required');
+  return trial.cycles.reduce((count, cycle, index) => count + (
+    index === 0 || cycle.resetProviderBefore === true ||
+    trial.cycles[index - 1]?.stopPhase === 'before-ready' ? 1 : 0
+  ), 0);
+}
 export function verifyWarmProviderFinalFixtureAgreement(reportFixture, envelopeFixture) {
   const keys = [
     'captureStarts', 'captureStops', 'activeCaptures', 'maxActiveCaptures',
@@ -558,6 +565,9 @@ export function verifyWarmProviderCanary(trial, report) {
     const previousSettlement = index === 0 ? null :
       (cycles[index - 1].providerResetSettledAtMs ?? cycles[index - 1].settledAtMs);
     const resetAfter = trial.cycles[index + 1]?.resetProviderBefore === true;
+    const previousCycle = cycles[index - 1];
+    const mustReusePrevious = index > 0 && plan.resetProviderBefore !== true &&
+      trial.cycles[index - 1]?.stopPhase !== 'before-ready';
     if (cycle.index !== index || cycle.stopPhase !== plan.stopPhase || cycle.jitterMs !== plan.jitterMs ||
         cycle.episode !== plan.episode || cycle.resetProviderBefore !== plan.resetProviderBefore ||
         cycle.captureGeneration !== index + 1 ||
@@ -598,6 +608,9 @@ export function verifyWarmProviderCanary(trial, report) {
         (index === 0 ? cycle.eventStart !== 0 : cycle.eventStart !== cycles[index - 1].eventEnd) ||
         (plan.resetProviderBefore === true &&
           cycle.logicalRunId === cycles[index - 1]?.logicalRunId) ||
+        (index > 0 && (mustReusePrevious
+          ? cycle.logicalRunId !== previousCycle.logicalRunId
+          : cycle.logicalRunId === previousCycle.logicalRunId)) ||
         cycleWindowEvents.some(event => !Number.isSafeInteger(event.cycleIndex) || event.cycleIndex > index) ||
         cycleEvents.some(event => !Number.isSafeInteger(event.sessionId) || event.sessionId <= 0 ||
           event.sessionId !== cycle.logicalRunId)) {
@@ -688,6 +701,8 @@ export function verifyWarmProviderCanary(trial, report) {
       (normalizedEventText(event).split('за окном').length - 1) === 1;
   };
   const allFinalEvents = events.filter(event => event.event === 'transcription:final');
+  const acceptedFinalDeliveries = events.slice(report.finalTranscriptFence?.eventStart)
+    .filter(finalTranscriptMatchesCallbackGeneration);
   if (finalSource?.name !== trial.episodes[finalIndex] ||
       finalSource.bytes !== finalBytes || finalSource.sourceFrames !== finalBytes / 2 ||
       finalSource.sourceDurationMs !== finalBytes / 32 || finalSource.cadenceMs !== 20 ||
@@ -725,11 +740,16 @@ export function verifyWarmProviderCanary(trial, report) {
       typeof report.finalTextBeforeProof !== 'string' ||
       typeof report.expectedInsertion !== 'string' || !report.expectedInsertion.trim() ||
       report.expectedInsertion === report.finalTextBeforeProof ||
+      acceptedFinalDeliveries.length !== 1 ||
+      normalizedEventText({ text: report.expectedInsertion }) !==
+        normalizedEventText(acceptedFinalDeliveries[0]) ||
       new Set(finalEvents.flatMap(event => event.markerIds)).size < 2 ||
       !events.slice(report.finalTranscriptFence.eventStart).some(finalTranscriptMatchesCallbackGeneration) ||
       finalEvents.some(event => ['transcription:partial', 'transcription:final'].includes(event.event) &&
         event.sessionId !== ownership.logicalRunId) ||
       !Array.isArray(terminals) || terminals.length !== terminalEvents.length ||
+      expectedTerminalCycles.size !== expectedWarmProviderLogicalRuns(trial) ||
+      ownership.logicalRunId !== cycles.at(-1)?.logicalRunId ||
       terminals.length !== expectedTerminalCycles.size ||
       terminals.some(terminal => terminal.complete !== true ||
         expectedTerminalCycles.get(terminal.sessionId) !== terminal.cycleIndex ||

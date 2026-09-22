@@ -165,7 +165,9 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
       sleepClosed: boolean; wakeOpenedOnce: boolean; terminalCount: number; recoveryOpenedOnce: boolean;
       physical: {
         warmReopenStart: PhysicalCounts; warmReopenEnd: PhysicalCounts;
-        policyActive: PhysicalCounts; policyClosed: PhysicalCounts; policyResumed: PhysicalCounts;
+        policyActive: PhysicalCounts; policyClosed: PhysicalCounts;
+        policyColdActive: PhysicalCounts; policyColdStopped: PhysicalCounts;
+        policyResumed: PhysicalCounts;
         sleepClosed: PhysicalCounts; wakeOpened: PhysicalCounts;
         terminalClosed: PhysicalCounts; recoveryOpened: PhysicalCounts;
       };
@@ -501,9 +503,21 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
       const disabledAndStopped = await until('policy disable closes after capture release', s => !s.visible &&
         s.status === 'Idle' && s.fixture.activeCaptures === 0 &&
         s.fixture.physicalCloseCount === beforePolicyDisable.fixture.physicalCloseCount + 1);
+      const coldProviderLedgers = disabledAndStopped.fixture.providerPcmLedgers.length;
+      await toggle();
+      const policyColdActive = await until('disabled policy uses cold capture', s => s.visible &&
+        s.status === 'Recording' && store.isCaptureReady && s.fixture.activeCaptures === 1 &&
+        s.fixture.providerPcmLedgers.length > coldProviderLedgers &&
+        s.fixture.providerPcmLedgers[s.fixture.providerPcmLedgers.length - 1].samples > 0);
+      check(physicalCounts(policyColdActive).open === physicalCounts(disabledAndStopped).open &&
+        physicalCounts(policyColdActive).close === physicalCounts(disabledAndStopped).close,
+      'Cold fallback reopened the suspended warm input');
+      await toggle();
+      const policyColdStopped = await until('disabled policy cold capture stops', s => !s.visible &&
+        s.status === 'Idle' && s.fixture.activeCaptures === 0);
       await invoke('update_app_config', { keepMicrophoneReady: true });
       const resumedPolicy = await until('policy re-enable resumes cached owner', s => !s.visible &&
-        s.fixture.physicalOpenCount === disabledAndStopped.fixture.physicalOpenCount + 1);
+        s.fixture.physicalOpenCount === policyColdStopped.fixture.physicalOpenCount + 1);
       const reuse = resumedPolicy;
       report.warmReuseOpenCount = reuse.fixture.physicalOpenCount;
       await invoke('native_e2e_hotkey', { action: 'sleep' });
@@ -540,6 +554,8 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
           warmReopenEnd: physicalCounts(warmReopenEnd),
           policyActive: physicalCounts(disabledWhileActive),
           policyClosed: physicalCounts(disabledAndStopped),
+          policyColdActive: physicalCounts(policyColdActive),
+          policyColdStopped: physicalCounts(policyColdStopped),
           policyResumed: physicalCounts(resumedPolicy),
           sleepClosed: physicalCounts(slept),
           wakeOpened: physicalCounts(awake),

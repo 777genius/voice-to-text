@@ -1939,7 +1939,10 @@ impl AppState {
         let normalized_device_name = normalize_audio_capture_device_name(device_name);
         let cached_device = self.active_audio_capture_device.read().await.clone();
 
-        if !force && audio_capture_device_cache_matches(&cached_device, &normalized_device_name) {
+        if !force
+            && !self.transcription_service.uses_owner_managed_capture()
+            && audio_capture_device_cache_matches(&cached_device, &normalized_device_name)
+        {
             log::debug!(
                 "Audio capture reuse: device unchanged ({:?})",
                 normalized_device_name
@@ -2378,7 +2381,14 @@ impl AppState {
             // Retain deterministic capture; never enumerate/open a real audio device.
             let _ = (device_name, app_handle, vad_timeout_ms);
             self.transcription_service
+                .replace_audio_capture(Box::new(super::native_e2e::FixtureCapture::new(
+                    super::native_e2e::fixture(),
+                )))
+                .await
+                .map_err(|error| format!("Failed to restore native E2E cold capture: {error}"))?;
+            self.transcription_service
                 .set_effective_capture_device(Some("native-window-e2e".into()));
+            *self.active_audio_capture_device.write().await = Some(None);
             return Ok(());
         }
         let normalized_device_name = normalize_audio_capture_device_name(device_name);

@@ -106,11 +106,14 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
   if ((await state()).terminalMode) { await runNativeTerminalScenario(pinia); return; }
   const runStarted = Date.now();
   let confirmed = false;
+  let unlistenFinal: (() => void) | null = null;
+  const finalDeliveries: Array<{ sessionId: number; text: string; deliverySeq: number | null }> = [];
   const report = { lastProgress: null as unknown, failureContext: null as unknown, elapsedMs: 0,
     passed: false, completedCycles: 0, hiddenIdleMs: 0,
     cycleEvidence: [] as Array<{ index: number; captureStartsBefore: number; captureStartsAfter: number;
       captureStopsBefore: number; captureStopsAfter: number; sessionId: number; windowEpoch: number;
-      captureGeneration: number }>,
+      captureGeneration: number; expectedTranscript: string; finalSessionId: number;
+      finalText: string; finalDeliverySeq: number | null }>,
     hiddenIdleEvidence: null as null | { nativeHiddenIdleMs: number; webviewElapsedMs: number;
       baselineCaptureStarts: number; baselineCaptureStops: number; baselineActiveCaptures: number;
       baselineActiveProviders: number; baselineCaptureGeneration: number; wakeCaptureGeneration: number;
@@ -124,6 +127,14 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
       try { return await state(); } catch { return null; }
     }, (value) => value?.ready === true, 'Native test-only fixture handshake unavailable', 20_000);
     confirmed = true;
+    unlistenFinal = await listen<{ session_id: number; text: string; delivery_seq?: number }>(
+      'transcription:final',
+      ({ payload }) => finalDeliveries.push({
+        sessionId: payload.session_id,
+        text: payload.text,
+        deliverySeq: Number.isSafeInteger(payload.delivery_seq) ? Number(payload.delivery_seq) : null,
+      }),
+    );
     const now = Date.now();
     const appConfig = useAppConfigStore(pinia);
     const store = useTranscriptionStore(pinia);
@@ -416,6 +427,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     await progress('recording-cycles-starting');
     for (let cycle = 0; cycle < 50; cycle += 1) {
       if (cycle === 25) await configure({ keepAlive: true });
+      const finalDeliveryStart = finalDeliveries.length;
       const cycleBefore = await state();
       current = await start();
       const association = current.fixture.captureRunAssociations[
@@ -424,6 +436,13 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
         `Rapid cycle ${cycle} did not create exactly one owned capture generation`);
       await observe(90, async () => {}, current.expected);
       await stop();
+      const finalDelivery = await until(
+        async () => finalDeliveries.slice(finalDeliveryStart).find(delivery =>
+          delivery.sessionId === current.sessionId && transcriptMatches(delivery.text, current.expected)) ?? null,
+        (delivery) => delivery !== null,
+        `Rapid cycle ${cycle} produced no matching final delivery`,
+      );
+      check(finalDelivery, `Rapid cycle ${cycle} final delivery disappeared`);
       const cycleAfter = await state();
       check(cycleAfter.fixture.captureStops === cycleBefore.fixture.captureStops + 1,
         `Rapid cycle ${cycle} did not close exactly one capture generation`);
@@ -433,7 +452,11 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
         captureStopsBefore: cycleBefore.fixture.captureStops,
         captureStopsAfter: cycleAfter.fixture.captureStops,
         sessionId: current.sessionId, windowEpoch: current.windowEpoch,
-        captureGeneration: association.captureGeneration });
+        captureGeneration: association.captureGeneration,
+        expectedTranscript: current.expected,
+        finalSessionId: finalDelivery.sessionId,
+        finalText: finalDelivery.text,
+        finalDeliverySeq: finalDelivery.deliverySeq });
       report.completedCycles += 1;
       if (cycle % 5 === 0) await progress(`recording-cycle-${cycle + 1}`);
     }
@@ -955,6 +978,12 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
       'Capture or provider remained active after final stop');
     check(final.fixture.finals - baseline.fixture.finals === successfulStarts + sealedPendingStarts,
       'Completed provider sessions/finals differ from visible and sealed recordings');
+    for (const cycle of report.cycleEvidence) {
+      const deliveries = finalDeliveries.filter(delivery => delivery.sessionId === cycle.sessionId &&
+        transcriptMatches(delivery.text, cycle.expectedTranscript));
+      check(deliveries.length === 1,
+        `Rapid cycle ${cycle.index} did not deliver exactly one matching final: ${JSON.stringify(deliveries)}`);
+    }
     check(transcripts.size === successfulStarts && sessions.size === successfulStarts, 'Unique session/transcript count mismatch');
     check(listeningSeen && recordingSeen && stoppedProcessingFrameSeen,
       'Missing listening, recording, or stopped-processing UI frame');
@@ -981,6 +1010,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     report.error = error instanceof Error ? `${error.message}\n${error.stack || ''}` : String(error);
     console.error('[native-e2e] FAIL', report.error);
   }
+  if (unlistenFinal) unlistenFinal();
   report.elapsedMs = Date.now() - runStarted;
   if (confirmed) await invoke('native_e2e_finish', { report });
 }

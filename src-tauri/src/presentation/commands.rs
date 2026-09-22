@@ -963,8 +963,8 @@ fn update_recording_capture_readiness(
         .recording_capture_readiness
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let keeps_warm_activation = run
-        .is_some_and(|run| warm_activation_matches(&snapshot, run.run_id.get(), intent_revision));
+    let keeps_warm_activation =
+        run.is_some_and(|run| warm_activation_run_matches(&snapshot, run.run_id.get()));
     let (readiness_state, reason) = match capture {
         recording_intent::CaptureState::Preparing {
             cancel_requested: true,
@@ -976,11 +976,7 @@ fn update_recording_capture_readiness(
         recording_intent::CaptureState::Preparing { .. } => (
             RecordingCaptureReadinessState::Unavailable,
             if keeps_warm_activation
-                || (warm_eligible
-                    && (snapshot.run_id != run.map(|run| run.run_id.get())
-                        || snapshot.revision != Some(intent_revision)
-                        || snapshot.reason
-                            == RecordingCaptureReadinessReason::ActivatingWarmCapture))
+                || (warm_eligible && snapshot.run_id != run.map(|run| run.run_id.get()))
             {
                 RecordingCaptureReadinessReason::ActivatingWarmCapture
             } else {
@@ -1076,6 +1072,7 @@ fn update_recording_capture_readiness(
 
 // The admission budget only changes the projection. It never cancels admitted
 // PCM, and a late timeout cannot overwrite readiness for this or a newer run.
+#[cfg(test)]
 fn warm_activation_matches(
     snapshot: &RecordingCaptureReadinessPayload,
     run_id: u64,
@@ -1139,7 +1136,7 @@ mod warm_activation_tests {
 
     #[test]
     fn activation_deadline_survives_duplicate_start_revision() {
-        let snapshot = RecordingCaptureReadinessPayload {
+        let mut snapshot = RecordingCaptureReadinessPayload {
             capture_generation: None,
             logical_run_id: None,
             capture_episode_id: None,
@@ -1154,6 +1151,9 @@ mod warm_activation_tests {
         assert!(!warm_activation_matches(&snapshot, 7, 9));
         assert!(warm_activation_run_matches(&snapshot, 7));
         assert!(!warm_activation_run_matches(&snapshot, 8));
+        snapshot.reason = RecordingCaptureReadinessReason::StartingCapture;
+        snapshot.revision = Some(11);
+        assert!(!warm_activation_run_matches(&snapshot, 7));
     }
 }
 

@@ -169,6 +169,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     id: string;
     controller: AbortController;
     sessionId: number | null;
+    reachedRecording: boolean;
     phase: 'preparing' | 'starting' | 'backoff';
     validations: Set<{ promise: Promise<void>; resolve: () => void }>;
   };
@@ -2150,6 +2151,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               (event.payload.fault === 'startFailed' || event.payload.fault === 'runtimeFailed') &&
               status.value !== RecordingStatus.Recording &&
               connectOperation !== null &&
+              connectOperation.reachedRecording === false &&
               faultOwnerRunId !== null &&
               connectOperation.sessionId === faultOwnerRunId;
             recordingDesiredOn.value = event.payload.desiredOn;
@@ -2368,6 +2370,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               cancelConnectOperation();
             } else {
               connectOperation.sessionId = payloadSessionId;
+              if (nextStatus === RecordingStatus.Recording) {
+                connectOperation.reachedRecording = true;
+              }
             }
           }
           if (isStartLike && payloadSessionId !== prevSessionId) {
@@ -3445,6 +3450,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   async function startRecordingOnce(operation: ConnectOperation): Promise<void> {
     operation.sessionId = null;
+    operation.reachedRecording = false;
     operation.phase = 'starting';
     // Начинаем новую сессию "с чистого листа": пока не получим Starting/Recording с новым session_id,
     // игнорируем любые поздние события от прошлых запусков.
@@ -3482,7 +3488,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
     const operation: ConnectOperation = {
       id: `${connectClientId}:${++connectSequence}`, controller: new AbortController(),
-      sessionId: null, phase: 'preparing', validations: new Set(),
+      sessionId: null, reachedRecording: false, phase: 'preparing', validations: new Set(),
     };
     connectOperation = operation;
     const isCurrent = () => connectOperation === operation && !operation.controller.signal.aborted;

@@ -2,7 +2,8 @@ import type { Pinia } from 'pinia';
 import { invoke } from '@tauri-apps/api/core';
 import { boundedSyntheticText, syntheticPhraseOccurrences } from './nativeContinuationMetrics';
 import { nativeLivePreflight } from './nativeContinuationLive';
-import { expectedWarmProviderCallbackGenerations, validateWarmProviderCanaryPlan,
+import { expectedWarmProviderCallbackGenerations, expectedWarmProviderLogicalRuns,
+  validateWarmProviderCanaryPlan,
   type WarmProviderCanaryTrial as Trial } from './nativeWarmProviderCanaryPlan';
 
 type SourceEpisode = { name: string; bytes: number; captureGeneration: number; sourceFrames: number;
@@ -241,6 +242,15 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         check(ready.fixture.sourceEpisodes[cycle.index].sourceGateRequired === true,
           `cycle ${cycle.index} source was not held behind provider Ready`);
         triggerLogicalRunId = ready.logicalProviderRunId;
+        if (cycle.stopPhase === 'during-partial' || cycle.stopPhase === 'after-final') {
+          // Snapshot the delivery boundary before releasing the first PCM. A
+          // fresh provider may emit its only Stable while the retained-session
+          // callback ACK or the PCM ledger is still being observed.
+          triggerEventStart = report.events.length;
+          triggerDeliverySeqFloor = report.events.slice(0, triggerEventStart)
+            .filter(event => event.sessionId === triggerLogicalRunId && Number.isSafeInteger(event.deliverySeq))
+            .reduce((maximum, event) => Math.max(maximum, Number(event.deliverySeq)), 0);
+        }
         const requiresCallbackFence = callbackFenceGenerations.has(generation);
         await releaseWarmCanarySourceBeforeAck(
           () => invoke('native_e2e_configure', { config: { sourceGateReady: true } }),
@@ -250,7 +260,6 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         );
         if (requiresCallbackFence) {
           callbackFenceGeneration = generation;
-          triggerEventStart = report.events.length;
         }
       }
       if (cycle.stopPhase === 'after-first-pcm') {
@@ -271,10 +280,8 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
           row.captureGeneration === generation)?.samples ?? null;
         triggerLogicalRunId = observed.logicalProviderRunId;
         triggerProviderStartSamples = providerStartSamples(observed, observed.logicalProviderRunId);
-        triggerEventStart = report.events.length;
-        triggerDeliverySeqFloor = report.events.slice(0, triggerEventStart)
-          .filter(event => event.sessionId === triggerLogicalRunId && Number.isSafeInteger(event.deliverySeq))
-          .reduce((maximum, event) => Math.max(maximum, Number(event.deliverySeq)), 0);
+        check(triggerDeliverySeqFloor !== null,
+          `cycle ${cycle.index} transcript boundary was not captured before PCM release`);
         const deadline = performance.now() + 70_000;
         let triggerEvent: ProviderEvent | undefined;
         while (performance.now() < deadline && !triggerEvent) {
@@ -345,6 +352,15 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         eventStart, triggerEventStart, stopEventIndex, callbackFenceGeneration, triggerProviderSamples,
         providerStartSamples: triggerProviderStartSamples, triggerDeliverySeqFloor,
         eventEnd: report.events.length, activeCapturesAfterStop: stopped.fixture.activeCaptures };
+      const previousCycle = report.cycles[report.cycles.length - 1];
+      if (previousCycle) {
+        const mustReuse = cycle.resetProviderBefore !== true &&
+          trial.cycles[cycle.index - 1]?.stopPhase !== 'before-ready';
+        check(mustReuse
+          ? Number(previousCycle.logicalRunId) === beforeStop.logicalProviderRunId
+          : Number(previousCycle.logicalRunId) !== beforeStop.logicalProviderRunId,
+        `cycle ${cycle.index} provider ownership transition contradicted the fixed plan`);
+      }
       report.cycles.push(cycleReport);
       const nextCycle = trial.cycles[cycle.index + 1];
       if (nextCycle?.resetProviderBefore === true) {
@@ -381,6 +397,8 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       value.logicalProviderRunId > 0 && value.captureEpisode !== null &&
       value.fixture.sourceEpisodes.length === trial.finalEpisodeIndex + 1,
     'final full proof provider Ready', 30_000);
+    check(ready.logicalProviderRunId === Number(report.cycles[report.cycles.length - 1]?.logicalRunId),
+      'Final proof opened a new provider instead of continuing the retained session');
     sessionCycles.set(ready.logicalProviderRunId, trial.finalEpisodeIndex);
     check(ready.fixture.sourceEpisodes[trial.finalEpisodeIndex].emittedFrames === 0,
       'Final source escaped the real provider Ready gate');
@@ -441,8 +459,14 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       value.fixture.activeCaptures === 0 &&
       value.pausedContinuation?.logicalRunId === complete.logicalProviderRunId &&
       value.providerTransport?.connectionRetained === true, 'final full proof pause', 45_000);
-    await poll(() => store.finalText !== report.finalTextBeforeProof &&
-      report.events.slice(finalTranscriptEventStart).some(belongsToFinalCallbackGeneration),
+    const normalizeTranscript = (text: string | null) => (text ?? '')
+      .toLocaleLowerCase('ru').replace(/ё/g, 'е').replace(/[.,!?]/g, '').replace(/\s+/g, ' ').trim();
+    await poll(() => {
+      const delivery = report.events.slice(finalTranscriptEventStart)
+        .find(belongsToFinalCallbackGeneration);
+      return store.finalText !== report.finalTextBeforeProof && delivery != null &&
+        normalizeTranscript(store.finalText) === normalizeTranscript(delivery.text);
+    },
     'final stable transcript proof', 30_000);
     report.expectedInsertion = store.finalText;
     const finalMarkers = new Set(report.events.filter(event => event.cycleIndex === trial.finalEpisodeIndex)
@@ -474,7 +498,9 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     if (report.finalOwnership) {
       expectedTerminalCycles.set(report.finalOwnership.logicalRunId, trial.finalEpisodeIndex);
     }
-    check(report.terminals.length === expectedTerminalCycles.size &&
+    check(expectedTerminalCycles.size === expectedWarmProviderLogicalRuns(trial) &&
+      report.finalOwnership?.logicalRunId === Number(report.cycles[report.cycles.length - 1]?.logicalRunId) &&
+      report.terminals.length === expectedTerminalCycles.size &&
       terminalEvents.length === expectedTerminalCycles.size &&
       report.terminals.every(terminal => terminal.complete &&
         expectedTerminalCycles.get(terminal.sessionId) === terminal.cycleIndex &&

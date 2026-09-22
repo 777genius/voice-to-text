@@ -17,6 +17,13 @@ export function expectedWarmProviderCallbackGenerations(trial: WarmProviderCanar
   return generations;
 }
 
+export function expectedWarmProviderLogicalRuns(trial: WarmProviderCanaryTrial) {
+  return trial.cycles.reduce((count, cycle, index) => count + (
+    index === 0 || cycle.resetProviderBefore === true ||
+    trial.cycles[index - 1]?.stopPhase === 'before-ready' ? 1 : 0
+  ), 0);
+}
+
 export function validateWarmProviderCanaryPlan(trial: WarmProviderCanaryTrial) {
   const phases: WarmProviderStopPhase[] = ['before-ready', 'after-first-pcm', 'during-partial', 'after-final'];
   const jitters = [0, 25, 100, 250, 500];

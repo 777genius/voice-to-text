@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { approvedFixtures, maxProxyEvidenceEvents, validatePcm, readApprovedFixtures, liveTrials,
   warmProviderCanaryJittersMs, warmProviderCanaryPhases, warmProviderCanaryTrial,
   validateHarnessConfig, exactInsertionEvidence, expectedWarmProviderCallbackGenerations,
-  expectedWarmProviderContinues,
+  expectedWarmProviderContinues, expectedWarmProviderLogicalRuns,
   verifyWarmProviderFinalFixtureAgreement } from './nativeContinuation.mjs';
 import { parseArguments, sanitizedEnvironment, validateResult } from '../run-native-window-e2e.mjs';
 test('qualification requires explicit opt in and inherits no feature flags', () => {
@@ -88,6 +88,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   assert.equal(expected.captures, 21);
   assert.deepEqual([expected.minBackendConnections, expected.maxBackendConnections], [6, 12]);
   assert.equal(expectedWarmProviderContinues(warmProviderCanaryTrial), 10);
+  assert.equal(expectedWarmProviderLogicalRuns(warmProviderCanaryTrial), 11);
   assert.deepEqual(expectedWarmProviderCallbackGenerations(warmProviderCanaryTrial),
     [7, 8, 9, 10, 11, 12, 13, 14, 15, 21]);
   const connection = (connectionId, captures) => {
@@ -247,7 +248,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     providerCallbackGenerations: expectedWarmProviderCallbackGenerations(warmProviderCanaryTrial) };
   const report = { mode: 'warm-provider-canary', passed: true, trialId: warmProviderCanaryTrial.id,
     errors: [], duplicateDeliveries: [], cycles, events, finalTextBeforeProof: 'stale transcript',
-    expectedInsertion: 'stable transcript',
+    expectedInsertion: 'на столе лежит книга за окном растет береза',
     finalStartedAtMs: cycleClock,
     finalCallbackFence: { captureGeneration: 21, eventStart: finalCallbackEventStart },
     finalTranscriptFence: { eventStart: finalTranscriptEventStart,
@@ -339,6 +340,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     value => { value.final.fixture.sourceEpisodes[20].pacingIntervalsChecked = 0; },
     value => { value.final.fixture.sourceEpisodes[20].lastSourceFrameElapsedMs = 0; },
     value => { value.finalTextBeforeProof = value.expectedInsertion; },
+    value => { value.expectedInsertion = 'unrelated junk'; },
     value => { value.final.fixture.providerCallbackGenerations.pop(); },
     value => { value.finalCallbackFence.captureGeneration = 20; },
     value => { value.finalCallbackFence.eventStart = value.events.length; },
@@ -368,6 +370,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
         .find(row => row.event === 'transcription:final');
       cycle.triggerDeliverySeqFloor = event.deliverySeq; },
     value => { value.cycles[1].previousSettleToStartMs = 5_000; },
+    value => { value.cycles[6].logicalRunId = 500; },
     value => { delete value.events.find(event => event.event === 'transcription:final').deliverySeq; },
     value => { value.events.find(event => event.cycleIndex === 20 && event.event === 'transcription:final').event = 'transcription:partial'; },
     value => { value.finalOwnership.logicalRunId = value.finalOwnership.captureRunId; },

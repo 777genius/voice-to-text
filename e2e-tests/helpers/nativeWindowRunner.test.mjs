@@ -108,7 +108,7 @@ test('cached executable requires feature marker and matching checksum; no proces
 test('passing envelope requires full non-skipped wall time, distinct cases, balanced capture', () => {
   const association = { captureGeneration: 1, captureRunId: 1, captureFenceGeneration: 1 };
   const captureMarker = { captureGeneration: 1, count: 1, firstSequence: 1, lastSequence: 1 };
-  const fixture = { captureStarts: 35, captureStops: 35, providerStarts: 1, providerStops: 1,
+  const fixture = { captureStarts: 35, captureStops: 35, providerStarts: 1, providerStops: 1, finals: 51,
     providerFailures: 0, providerFailureCaptureGenerations: [],
     providerResumes: 0, providerNoAudioStops: 0, warmTerminalCount: 0,
     activeCaptures: 0, activeProviders: 0, maxActiveCaptures: 1,
@@ -124,7 +124,10 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
   const cycleEvidence = Array.from({ length: 50 }, (_, index) => ({ index,
     captureStartsBefore: index, captureStartsAfter: index + 1,
     captureStopsBefore: index, captureStopsAfter: index + 1,
-    sessionId: index + 1, windowEpoch: index + 1, captureGeneration: index + 1 }));
+    sessionId: index + 1, windowEpoch: index + 1, captureGeneration: index + 1,
+    expectedTranscript: `Native fixture session ${index + 1}`,
+    finalSessionId: index + 1, finalText: `Native fixture session ${index + 1}`,
+    finalDeliverySeq: index + 1 }));
   fixture.captureStarts = 51; fixture.captureStops = 51;
   fixture.captureRunAssociations.push(...Array.from({ length: 15 }, (_, index) => ({
     captureGeneration: index + 36, captureRunId: index + 36, captureFenceGeneration: index + 36 })));
@@ -162,6 +165,7 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
     v => { v.fixture.markerViolations.push('gap'); },
     v => { v.fixture.providerStops = -1; }, v => { v.fixture.providerStops = '1'; },
     v => { v.fixture.providerFailures = 1; },
+    v => { v.fixture.finals = 49; },
     v => { v.fixture.providerNoAudioStops = 1; },
     v => { v.fixture.captureMarkers[0].lastSequence = 2; },
     v => { v.fixture.capturePcmLedgers.pop(); v.fixture.captureRunAssociations.pop(); },
@@ -169,6 +173,8 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
     v => { v.fixture.providerPcmLedgers[0].hash = 'fedcba9876543210'; },
     v => { v.report.cycleEvidence.pop(); },
     v => { v.report.cycleEvidence[12].captureGeneration = v.report.cycleEvidence[11].captureGeneration; },
+    v => { v.report.cycleEvidence[12].finalSessionId = v.report.cycleEvidence[11].finalSessionId; },
+    v => { v.report.cycleEvidence[12].finalText = 'stale transcript'; },
     v => { v.report.hiddenIdleEvidence.webviewElapsedMs = 179999; },
     v => { v.report.hiddenIdleEvidence.wakeCaptureGeneration = 50; },
     v => { v.report.scenarios[1] = v.report.scenarios[0]; }]) {
@@ -276,6 +282,7 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
     physical: {
       warmReopenStart: { open: 1, close: 0 }, warmReopenEnd: { open: 1, close: 0 },
       policyActive: { open: 1, close: 0 }, policyClosed: { open: 1, close: 1 },
+      policyColdActive: { open: 1, close: 1 }, policyColdStopped: { open: 1, close: 1 },
       policyResumed: { open: 2, close: 1 }, sleepClosed: { open: 2, close: 2 },
       wakeOpened: { open: 3, close: 2 }, terminalClosed: { open: 3, close: 3 },
       recoveryOpened: { open: 4, close: 3 },
@@ -324,6 +331,7 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
     e => { e.report.warmReopens = 9; },
     e => { e.report.idleAcceptedDelta = 1; },
     e => { e.report.lifecycle.physical.policyResumed.open = 3; },
+    e => { e.report.lifecycle.physical.policyColdActive.open = 2; },
     e => { e.report.final.fixture.physicalOpenCount = 5; },
     e => { e.report.final.fixture.physicalCloseCount = 2; },
     e => { e.report.warmMode = false; },
