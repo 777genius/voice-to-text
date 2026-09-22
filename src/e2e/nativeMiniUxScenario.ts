@@ -31,7 +31,29 @@ export type WarmReopenEvidence = {
   attempt: number; baselineWindowEpoch: number; windowEpoch: number | null; closed: boolean;
   acceptingObservations?: boolean;
   pendingFrames?: Array<Omit<WarmVisibleFrame, 'attempt' | 'windowEpoch'>>;
+  observedFrameSignatures?: Set<string>;
 };
+
+export function reserveWarmVisibleFrameObservation(
+  reopen: WarmReopenEvidence,
+  frame: Omit<WarmVisibleFrame, 'attempt' | 'windowEpoch'>,
+  expectedWindowEpoch?: number,
+) {
+  reopen.observedFrameSignatures ??= new Set<string>();
+  const signature = JSON.stringify([
+    frame.source,
+    expectedWindowEpoch ?? reopen.windowEpoch,
+    frame.revision,
+    frame.runId,
+    frame.captureReady,
+    frame.readinessReason,
+    frame.phase,
+    frame.statusText,
+  ]);
+  if (reopen.observedFrameSignatures.has(signature)) return false;
+  reopen.observedFrameSignatures.add(signature);
+  return true;
+}
 
 export async function drainPendingWarmVisibleObservations(pending: Set<Promise<void>>) {
   while (pending.size > 0) await Promise.all([...pending]);
@@ -195,8 +217,10 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
         readinessReason: store.captureReadiness?.reason, phase: dot.className,
         statusText: dot.getAttribute('aria-label') ?? '' };
     };
+    const frame = readFrame();
+    if (!frame || !reserveWarmVisibleFrameObservation(reopen, frame, expectedWindowEpoch)) return;
     const observation = bindWarmVisibleFrameAfterNative(
-      reopen, state, readFrame, expectedWindowEpoch, native)
+      reopen, state, () => frame, expectedWindowEpoch, native)
       .then(frames => { report.warmVisibleFrames.push(...frames); }).catch(error => {
       report.errors.push(`Warm visible native observation failed: ${String(error)}`);
     }).finally(() => pendingVisibleObservations.delete(observation));
@@ -400,6 +424,8 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
         await toggle();
         const recording = await until(`warm reopen ${attempt + 1}`, s => s.visible && store.isCaptureReady &&
           (markerForRun(s, store.captureRunId)?.count ?? 0) >= 2);
+        const recordingRunId = store.captureRunId;
+        check(recordingRunId !== null, `Warm reopen ${attempt + 1} has no capture run identity`);
         // Keep admissions open while native provenance reads settle. A DOM
         // mutation can happen during either read and its MutationObserver turn
         // must be admitted before this reopen is sealed.
@@ -422,13 +448,14 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
           check(firstVisible.statusText === '',
             `Warm reopen ${attempt + 1} neutral first frame exposed status text`);
         }
-        const generation = markerForRun(recording, store.captureRunId)!.captureGeneration;
+        const generation = markerForRun(recording, recordingRunId)?.captureGeneration;
+        check(generation !== undefined, `Warm reopen ${attempt + 1} has no capture marker identity`);
         const phase = document.querySelector('.mini-status-dot')?.className ?? '';
         check(/\brecording\b/.test(phase) && !/\b(starting|processing)\b/.test(phase),
           'Admitted warm input failed to render ready recording phase');
-        report.warmReadyFrames.push({ runId: store.captureRunId, revision: store.recordingIntentRevision, phase });
+        report.warmReadyFrames.push({ runId: recordingRunId, revision: store.recordingIntentRevision, phase });
         report.warmWindowEpochs.push({ attempt: attempt + 1, windowEpoch: recording.windowEpoch,
-          runId: store.captureRunId, revision: store.recordingIntentRevision });
+          runId: recordingRunId, revision: store.recordingIntentRevision });
         check(!generations.has(generation), 'Warm reopen reused logical lease identity');
         generations.add(generation);
         check(recording.fixture.physicalOpenCount === 1, 'Warm reopen physically reopened input');

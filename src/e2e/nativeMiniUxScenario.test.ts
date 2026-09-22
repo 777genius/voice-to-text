@@ -1,10 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import { bindWarmVisibleFrameAfterNative, bindWarmVisibleFrameEvidence,
-  drainPendingWarmVisibleObservations, hasMatchingRecoveryPcm, sealWarmVisibleObservations,
+  drainPendingWarmVisibleObservations, hasMatchingRecoveryPcm, reserveWarmVisibleFrameObservation,
+  sealWarmVisibleObservations,
   warmVisibleFramesHaveNoStaleStatus, type WarmReopenEvidence,
   type WarmVisibleFrame } from './nativeMiniUxScenario';
 
 describe('warm mini-window first-visible evidence', () => {
+  it('coalesces identical render proofs without dropping a distinct status frame', () => {
+    const reopen: WarmReopenEvidence = { attempt: 1, baselineWindowEpoch: 1,
+      windowEpoch: 2, closed: false };
+    const frame = { source: 'render' as const, revision: 3, runId: 4, captureReady: false,
+      readinessReason: 'activating-warm-capture', phase: 'mini-status-dot', statusText: '' };
+    expect(reserveWarmVisibleFrameObservation(reopen, frame, 2)).toBe(true);
+    expect(reserveWarmVisibleFrameObservation(reopen, frame, 2)).toBe(false);
+    expect(reserveWarmVisibleFrameObservation(reopen,
+      { ...frame, statusText: 'Starting' }, 2)).toBe(true);
+  });
+
   it('binds frames only to an authoritative visible native epoch', () => {
     const reopen: WarmReopenEvidence = { attempt: 3, baselineWindowEpoch: 16,
       windowEpoch: null, closed: false };
