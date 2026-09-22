@@ -1905,6 +1905,7 @@ pub struct Fixture {
     warm_stalled: std::sync::atomic::AtomicBool,
     warm_route_valid: std::sync::atomic::AtomicBool,
     qualification_source_ready: tokio::sync::Notify,
+    capture_run_association_ready: tokio::sync::Notify,
     capture_stop_release: tokio::sync::Notify,
     saved_capture_events: Mutex<Option<[super::recording_intent_coordinator::CoordinatorEvent; 2]>>,
 }
@@ -2232,6 +2233,8 @@ pub(super) fn record_capture_run(capture_run_id: u64, capture_fence_generation: 
             capture_fence_generation,
             capture_generation,
         });
+    drop(counters);
+    fixture.capture_run_association_ready.notify_waiters();
 }
 
 /// Observe PCM accepted by the production provider boundary during the paid
@@ -3195,22 +3198,29 @@ impl SttProvider for FixtureProvider {
             .map(|marker| marker.capture_generation)
             .or(self.capture_generation)
             .expect("first provider chunk requires a capture marker");
-        let mut counters = self.shared.counters.lock().unwrap();
-        let association = counters
-            .capture_run_associations
-            .iter()
-            .find(|association| association.capture_generation == capture_generation)
-            .copied();
-        let association = association.or_else(|| {
+        let association_ready = self.shared.capture_run_association_ready.notified();
+        tokio::pin!(association_ready);
+        association_ready.as_mut().enable();
+        let association = {
+            let counters = self.shared.counters.lock().unwrap();
             counters
                 .capture_run_associations
-                .is_empty()
-                .then_some(CaptureRunAssociation {
-                    capture_run_id: 0,
-                    capture_fence_generation: 0,
-                    capture_generation,
-                })
-        });
+                .iter()
+                .find(|association| association.capture_generation == capture_generation)
+                .copied()
+        };
+        let association = if association.is_some() {
+            association
+        } else {
+            let _ = tokio::time::timeout(Duration::from_secs(1), association_ready.as_mut()).await;
+            let counters = self.shared.counters.lock().unwrap();
+            counters
+                .capture_run_associations
+                .iter()
+                .find(|candidate| candidate.capture_generation == capture_generation)
+                .copied()
+        };
+        let mut counters = self.shared.counters.lock().unwrap();
         let Some(association) = association else {
             record_marker_violation(
                 &mut counters,
@@ -5303,7 +5313,17 @@ mod drain_tests {
     use super::*;
     async fn provider_without_audio() -> (FixtureProvider, Arc<Mutex<Vec<String>>>) {
         let shared = Arc::new(Fixture::default());
-        shared.counters.lock().unwrap().active_providers = 1;
+        {
+            let mut counters = shared.counters.lock().unwrap();
+            counters.active_providers = 1;
+            counters
+                .capture_run_associations
+                .push(CaptureRunAssociation {
+                    capture_run_id: 1,
+                    capture_fence_generation: 1,
+                    capture_generation: 1,
+                });
+        }
         let mut provider = FixtureProvider {
             shared,
             partial: None,
@@ -5360,6 +5380,42 @@ mod drain_tests {
         )
         .await
         .unwrap()
+    }
+    #[tokio::test]
+    async fn first_pcm_waits_for_capture_run_association() {
+        let (mut provider, _) = provider_without_audio().await;
+        let shared = provider.shared.clone();
+        shared
+            .counters
+            .lock()
+            .unwrap()
+            .capture_run_associations
+            .clear();
+
+        let send = tokio::spawn(async move { provider.send_audio(&audio(1)).await });
+        tokio::task::yield_now().await;
+        assert!(!send.is_finished());
+
+        shared
+            .counters
+            .lock()
+            .unwrap()
+            .capture_run_associations
+            .push(CaptureRunAssociation {
+                capture_run_id: 7,
+                capture_fence_generation: 3,
+                capture_generation: 1,
+            });
+        shared.capture_run_association_ready.notify_waiters();
+
+        tokio::time::timeout(Duration::from_secs(1), send)
+            .await
+            .expect("provider should resume when association becomes visible")
+            .expect("provider task should not panic")
+            .expect("provider should accept associated PCM");
+        let counters = shared.counters.lock().unwrap();
+        assert!(counters.marker_violations.is_empty());
+        assert_eq!(counters.provider_audio_chunks, 1);
     }
     async fn wait_deadline(at: std::time::Instant) {
         tokio::time::sleep_until(tokio::time::Instant::from_std(at) + Duration::from_millis(10))
