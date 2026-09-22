@@ -2100,11 +2100,13 @@ pub(super) fn observe_warm_capture(inner: Box<dyn AudioCapture>) -> Box<dyn Audi
     Box::new(ObservedWarmCapture {
         inner,
         generation: None,
+        identity: None,
     })
 }
 struct ObservedWarmCapture {
     inner: Box<dyn AudioCapture>,
     generation: Option<u64>,
+    identity: Option<AudioCaptureIdentity>,
 }
 impl Drop for ObservedWarmCapture {
     fn drop(&mut self) {
@@ -2131,6 +2133,7 @@ impl AudioCapture for ObservedWarmCapture {
         self.inner.health_probe()
     }
     fn set_capture_identity(&mut self, identity: Option<AudioCaptureIdentity>) {
+        self.identity = identity;
         self.inner.set_capture_identity(identity);
     }
     fn set_terminal_error_callback(&mut self, callback: Option<AudioCaptureErrorCallback>) {
@@ -2187,9 +2190,23 @@ impl AudioCapture for ObservedWarmCapture {
         self.generation = Some(generation);
         let mut counters = shared.counters.lock().unwrap();
         ensure_pcm_ledger(&mut counters.capture_pcm_ledgers, generation);
+        let association_inserted = if let Some(identity) = self.identity {
+            record_capture_generation_association(
+                &mut counters,
+                identity.run_id,
+                identity.generation,
+                generation,
+            )
+        } else {
+            false
+        };
         counters.capture_starts += 1;
         counters.active_captures += 1;
         counters.max_active_captures = counters.max_active_captures.max(counters.active_captures);
+        drop(counters);
+        if association_inserted {
+            shared.capture_run_association_ready.notify_waiters();
+        }
         Ok(())
     }
     async fn stop_capture(&mut self) -> AudioResult<()> {
@@ -2204,27 +2221,36 @@ impl AudioCapture for ObservedWarmCapture {
     }
 }
 
-pub(super) fn record_capture_run(capture_run_id: u64, capture_fence_generation: u64) {
-    let fixture = fixture();
-    let capture_generation = fixture
-        .next_capture_generation
-        .load(std::sync::atomic::Ordering::SeqCst);
-    let mut counters = fixture.counters.lock().unwrap();
+fn record_capture_generation_association(
+    counters: &mut Counters,
+    capture_run_id: u64,
+    capture_fence_generation: u64,
+    capture_generation: u64,
+) -> bool {
     if capture_generation == 0 {
         record_marker_violation(
-            &mut counters,
+            counters,
             "capture run associated before fixture capture started",
         );
-        return;
+        return false;
     }
-    if counters.capture_run_associations.iter().any(|association| {
-        association.capture_run_id == capture_run_id
-            || association.capture_generation == capture_generation
-    }) {
-        record_marker_violation(&mut counters, format!(
-            "duplicate capture run association for run {capture_run_id} generation {capture_generation}"
-        ));
-        return;
+    if let Some(association) = counters
+        .capture_run_associations
+        .iter()
+        .find(|association| association.capture_generation == capture_generation)
+    {
+        if association.capture_run_id == capture_run_id
+            && association.capture_fence_generation == capture_fence_generation
+        {
+            return false;
+        }
+        record_marker_violation(
+            counters,
+            format!(
+                "conflicting capture run association for generation {capture_generation}: run {capture_run_id} fence {capture_fence_generation}"
+            ),
+        );
+        return false;
     }
     counters
         .capture_run_associations
@@ -2233,8 +2259,25 @@ pub(super) fn record_capture_run(capture_run_id: u64, capture_fence_generation: 
             capture_fence_generation,
             capture_generation,
         });
+    true
+}
+
+pub(super) fn record_capture_run(capture_run_id: u64, capture_fence_generation: u64) {
+    let fixture = fixture();
+    let capture_generation = fixture
+        .next_capture_generation
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let mut counters = fixture.counters.lock().unwrap();
+    let inserted = record_capture_generation_association(
+        &mut counters,
+        capture_run_id,
+        capture_fence_generation,
+        capture_generation,
+    );
     drop(counters);
-    fixture.capture_run_association_ready.notify_waiters();
+    if inserted {
+        fixture.capture_run_association_ready.notify_waiters();
+    }
 }
 
 /// Observe PCM accepted by the production provider boundary during the paid
@@ -2247,7 +2290,7 @@ fn live_provider_capture_generation(
 ) -> Option<u64> {
     associations
         .iter()
-        .find(|association| {
+        .rfind(|association| {
             association.capture_run_id == capture_run_id
                 && association.capture_fence_generation == capture_fence_generation
         })
@@ -2486,6 +2529,7 @@ pub struct FixtureCapture {
     config: AudioConfig,
     task: Option<tokio::task::JoinHandle<()>>,
     generation: u64,
+    identity: Option<AudioCaptureIdentity>,
 }
 impl FixtureCapture {
     pub fn new(shared: Arc<Fixture>) -> Self {
@@ -2494,6 +2538,7 @@ impl FixtureCapture {
             config: AudioConfig::default(),
             task: None,
             generation: 0,
+            identity: None,
         }
     }
 }
@@ -2734,6 +2779,10 @@ impl Drop for CaptureLease {
 }
 #[async_trait]
 impl AudioCapture for FixtureCapture {
+    fn set_capture_identity(&mut self, identity: Option<AudioCaptureIdentity>) {
+        self.identity = identity;
+    }
+
     fn set_terminal_error_callback(
         &mut self,
         callback: Option<crate::domain::AudioCaptureErrorCallback>,
@@ -2790,9 +2839,19 @@ impl AudioCapture for FixtureCapture {
             .next_capture_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
-        {
+        let association_inserted = {
             let mut counters = self.shared.counters.lock().unwrap();
             ensure_pcm_ledger(&mut counters.capture_pcm_ledgers, capture_generation);
+            let association_inserted = if let Some(identity) = self.identity {
+                record_capture_generation_association(
+                    &mut counters,
+                    identity.run_id,
+                    identity.generation,
+                    capture_generation,
+                )
+            } else {
+                false
+            };
             counters.capture_starts += 1;
             counters.active_captures += 1;
             counters.max_active_captures =
@@ -2804,6 +2863,10 @@ impl AudioCapture for FixtureCapture {
                         .push(pressed_at.elapsed().as_millis() as u64);
                 }
             }
+            association_inserted
+        };
+        if association_inserted {
+            self.shared.capture_run_association_ready.notify_waiters();
         }
         // Create the lease before spawn: abort before the first poll also releases it.
         capture_event(&self.shared, "capture-start", capture_generation);
@@ -3245,9 +3308,21 @@ impl SttProvider for FixtureProvider {
         counters.provider_audio_chunks += 1;
         counters.provider_pcm_bytes += (chunk.data.len() * 2) as u64;
         self.continuation.bytes += (chunk.data.len() * 2) as u64;
-        if self.continuation_enabled
-            && self.continuation.first_write_gate
-            && self.capture_generation != Some(capture_generation)
+        let same_capture_restart = self.capture_generation.is_some_and(|expected| {
+            expected < capture_generation
+                && counters
+                    .capture_run_associations
+                    .iter()
+                    .find(|candidate| candidate.capture_generation == expected)
+                    .is_some_and(|previous| {
+                        previous.capture_run_id == association.capture_run_id
+                            && previous.capture_fence_generation
+                                == association.capture_fence_generation
+                    })
+        });
+        if self.capture_generation != Some(capture_generation)
+            && ((self.continuation_enabled && self.continuation.first_write_gate)
+                || same_capture_restart)
         {
             self.capture_generation = None;
             self.last_marker_sequence = 0;
@@ -4921,6 +4996,44 @@ mod tests {
     }
 
     #[test]
+    fn capture_restart_rebinds_new_generation_to_same_logical_run() {
+        let mut counters = Counters::default();
+        assert!(record_capture_generation_association(
+            &mut counters,
+            41,
+            7,
+            1
+        ));
+        assert!(!record_capture_generation_association(
+            &mut counters,
+            41,
+            7,
+            1
+        ));
+        assert!(record_capture_generation_association(
+            &mut counters,
+            41,
+            7,
+            2
+        ));
+
+        assert!(counters.marker_violations.is_empty());
+        assert_eq!(counters.capture_run_associations.len(), 2);
+        assert_eq!(
+            live_provider_capture_generation(&counters.capture_run_associations, 41, 7),
+            Some(2)
+        );
+
+        assert!(!record_capture_generation_association(
+            &mut counters,
+            42,
+            8,
+            2
+        ));
+        assert_eq!(counters.marker_violations.len(), 1);
+    }
+
+    #[test]
     fn provider_callback_swaps_follow_capture_generations_exactly_once() {
         let mut counters = Counters::default();
         counters
@@ -5358,16 +5471,19 @@ mod drain_tests {
         provider.send_audio(&audio(1)).await.unwrap();
         (provider, results)
     }
-    fn audio(sequence: u64) -> AudioChunk {
+    fn audio_for(capture_generation: u64, sequence: u64) -> AudioChunk {
         let mut samples = vec![0; 320];
         encode_audio_marker(
             &mut samples,
             AudioMarker {
-                capture_generation: 1,
+                capture_generation,
                 sequence,
             },
         );
         AudioChunk::new(samples, 16000, 1)
+    }
+    fn audio(sequence: u64) -> AudioChunk {
+        audio_for(1, sequence)
     }
     async fn control(
         p: &mut FixtureProvider,
@@ -5416,6 +5532,37 @@ mod drain_tests {
         let counters = shared.counters.lock().unwrap();
         assert!(counters.marker_violations.is_empty());
         assert_eq!(counters.provider_audio_chunks, 1);
+    }
+
+    #[tokio::test]
+    async fn provider_accepts_forward_capture_generation_after_same_run_stall_restart() {
+        let (mut provider, _) = provider_without_audio().await;
+        provider
+            .shared
+            .counters
+            .lock()
+            .unwrap()
+            .capture_run_associations
+            .push(CaptureRunAssociation {
+                capture_run_id: 1,
+                capture_fence_generation: 1,
+                capture_generation: 2,
+            });
+
+        provider.send_audio(&audio_for(1, 1)).await.unwrap();
+        provider.send_audio(&audio_for(2, 1)).await.unwrap();
+        {
+            let counters = provider.shared.counters.lock().unwrap();
+            assert!(counters.marker_violations.is_empty());
+            assert_eq!(counters.provider_pcm_ledgers.len(), 2);
+        }
+
+        provider.send_audio(&audio_for(1, 2)).await.unwrap();
+        let counters = provider.shared.counters.lock().unwrap();
+        assert!(counters
+            .marker_violations
+            .iter()
+            .any(|entry| entry.contains("mixed capture generation 1 after 2")));
     }
     async fn wait_deadline(at: std::time::Instant) {
         tokio::time::sleep_until(tokio::time::Instant::from_std(at) + Duration::from_millis(10))

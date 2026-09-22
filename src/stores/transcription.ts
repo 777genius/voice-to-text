@@ -861,6 +861,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       // но уже видим события transcription:* — значит запись реально идёт.
       if (status.value === RecordingStatus.Starting) {
         status.value = RecordingStatus.Recording;
+        if (connectOperation?.sessionId === payloadSessionId) {
+          connectOperation.reachedRecording = true;
+        }
       }
     }
 
@@ -980,6 +983,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           sessionId.value = null;
           awaitingSessionStart.value = false;
         }
+      }
+
+      if (backendStatus === RecordingStatus.Recording &&
+          status.value === RecordingStatus.Recording && connectOperation !== null) {
+        connectOperation.reachedRecording = true;
       }
 
       return backendStatus;

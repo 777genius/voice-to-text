@@ -125,6 +125,7 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
     captureStartsBefore: index, captureStartsAfter: index + 1,
     captureStopsBefore: index, captureStopsAfter: index + 1,
     sessionId: index + 1, windowEpoch: index + 1, captureGeneration: index + 1,
+    captureGenerations: [index + 1],
     expectedTranscript: `Native fixture session ${index + 1}`,
     finalSessionId: index + 1, finalText: `Native fixture session ${index + 1}`,
     finalDeliverySeq: index + 1 }));
@@ -147,6 +148,8 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
     ...association, providerSessionId: index + 1, count: 1, firstSequence: 1, lastSequence: 1 }));
   const valid = { marker, passed: true, fixture, report: { passed: true, completedCycles: 50,
     hiddenIdleMs: 180000, elapsedMs: 220000, cycleEvidence,
+    cycleFinalDeliveries: cycleEvidence.map(row => ({ sessionId: row.sessionId,
+      text: row.expectedTranscript, deliverySeq: row.finalDeliverySeq })),
     final: { preparedCaptureTokenCount: 0, fixture: structuredClone(fixture) },
     hiddenIdleEvidence: { nativeHiddenIdleMs: 180000, webviewElapsedMs: 180001,
       baselineCaptureStarts: 50, baselineCaptureStops: 50, baselineActiveCaptures: 0,
@@ -159,6 +162,7 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
   assert.equal(validateResult(valid), valid.report);
   for (const edit of [v => { v.marker = 'normal'; }, v => { v.report.skipped = true; },
     v => { v.report.hiddenIdleMs = 179999; }, v => { v.report.elapsedMs = Infinity; },
+    v => { v.report.elapsedMs = 900001; },
     v => { v.report.completedCycles = 49; }, v => { v.fixture.captureStops--; },
     v => { v.fixture.activeCaptures = 1; }, v => { v.fixture.activeProviders = 1; },
     v => { v.report.final.fixture.activeProviders = 1; },
@@ -172,9 +176,11 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
     v => { v.fixture.providerPcmLedgers = []; v.fixture.providerMarkers = []; },
     v => { v.fixture.providerPcmLedgers[0].hash = 'fedcba9876543210'; },
     v => { v.report.cycleEvidence.pop(); },
+    v => { v.report.cycleEvidence[12].captureGenerations = []; },
     v => { v.report.cycleEvidence[12].captureGeneration = v.report.cycleEvidence[11].captureGeneration; },
     v => { v.report.cycleEvidence[12].finalSessionId = v.report.cycleEvidence[11].finalSessionId; },
     v => { v.report.cycleEvidence[12].finalText = 'stale transcript'; },
+    v => { v.report.cycleFinalDeliveries.push({ sessionId: 12, text: 'late stale transcript', deliverySeq: 99 }); },
     v => { v.report.hiddenIdleEvidence.webviewElapsedMs = 179999; },
     v => { v.report.hiddenIdleEvidence.wakeCaptureGeneration = 50; },
     v => { v.report.scenarios[1] = v.report.scenarios[0]; }]) {

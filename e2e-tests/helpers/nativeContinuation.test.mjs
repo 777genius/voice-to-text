@@ -160,7 +160,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     if (plan.stopPhase === 'before-ready') {
       events.push({ event: 'transcription:terminal', cycleIndex: index, sessionId: logicalRunId,
         deliverySeq: null, markerIds: [] });
-      terminals.push({ sessionId: logicalRunId, cycleIndex: index, complete: true });
+      terminals.push({ sessionId: logicalRunId, cycleIndex: index, complete: true,
+        stableSnapshot: null });
     }
     const startedAtMs = cycleClock;
     const previousSettleToStartMs = index === 0 ? null : warmProviderCanaryTrial.cycles[index - 1].jitterMs;
@@ -191,7 +192,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     if (resetAfter) {
       events.push({ event: 'transcription:terminal', cycleIndex: index, sessionId: logicalRunId,
         deliverySeq: null, markerIds: [] });
-      terminals.push({ sessionId: logicalRunId, cycleIndex: index, complete: true });
+      terminals.push({ sessionId: logicalRunId, cycleIndex: index, complete: true,
+        stableSnapshot: null });
       cycle.eventEnd = events.length;
     }
     cycleClock = (providerResetSettledAtMs ?? cycle.settledAtMs) + plan.jitterMs;
@@ -213,7 +215,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   const finalCallbackEventStart = events.length;
   events.push({ event: 'transcription:terminal', cycleIndex: 20, sessionId: finalLogicalRunId,
     deliverySeq: null, markerIds: [] });
-  terminals.push({ sessionId: finalLogicalRunId, cycleIndex: 20, complete: true });
+  terminals.push({ sessionId: finalLogicalRunId, cycleIndex: 20, complete: true,
+    stableSnapshot: 'на столе лежит книга за окном растет береза' });
   const sources = warmProviderCanaryTrial.episodes.map((name, index) => {
     const bytes = approvedFixtures[name][0];
     const sourceFrames = bytes / 2;
@@ -341,6 +344,9 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     value => { value.final.fixture.sourceEpisodes[20].lastSourceFrameElapsedMs = 0; },
     value => { value.finalTextBeforeProof = value.expectedInsertion; },
     value => { value.expectedInsertion = 'unrelated junk'; },
+    value => { value.terminals.at(-1).stableSnapshot = 'WRONG TERMINAL TEXT'; },
+    value => { value.events.find(event => event.cycleIndex === 20 &&
+      event.event === 'transcription:final').text += '!!!'; },
     value => { value.final.fixture.providerCallbackGenerations.pop(); },
     value => { value.finalCallbackFence.captureGeneration = 20; },
     value => { value.finalCallbackFence.eventStart = value.events.length; },

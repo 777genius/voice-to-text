@@ -5653,12 +5653,19 @@ describe('transcription connect-retry reliability', () => {
     expect(store.sessionId).toBeNull();
   });
 
-  it('does not retry a run that reached Recording when a provider error arrives before runtimeFailed', async () => {
+  it.each(['status', 'partial-adoption', 'reconcile'] as const)(
+    'does not retry a run that reached Recording through %s when a provider error arrives before runtimeFailed',
+    async (recordingEvidence) => {
     vi.useFakeTimers();
     try {
       const pending = deferred<string>();
       invokeMock.mockImplementation(async (command) => {
         if (command === 'start_recording') return pending.promise;
+        if (command === 'get_recording_status') return 'Recording';
+        if (command === 'get_recording_capture_readiness') return {
+          revision: 1, runId: 71, captureEpisodeId: 71, captureGeneration: 1,
+          state: 'streaming', reason: 'recording', captureReady: true, generation: 1,
+        };
         return null;
       });
       const { handlers, store } = await initializeStoreWithHandlers();
@@ -5668,9 +5675,18 @@ describe('transcription connect-retry reliability', () => {
         runId: 71, intentRevision: 1, status: 'Starting', desiredOn: true,
         pendingStart: false, processingJobs: 0, shutdownRequested: false,
       } });
-      await handlers.get('recording:status')({ payload: {
-        session_id: 71, status: 'Recording', stopped_via_hotkey: false,
-      } });
+      if (recordingEvidence === 'status') {
+        await handlers.get('recording:status')({ payload: {
+          session_id: 71, status: 'Recording', stopped_via_hotkey: false,
+        } });
+      } else if (recordingEvidence === 'partial-adoption') {
+        await handlers.get('transcription:partial')({ payload: {
+          session_id: 71, text: 'provider is active', is_segment_final: false,
+        } });
+      } else {
+        expect(await store.reconcileBackendStatus('recording_recovery')).toBe('Recording');
+      }
+      expect(store.status).toBe('Recording');
       await handlers.get('transcription:error')({ payload: {
         session_id: 71, error: 'Provider quota exceeded', error_type: 'provider_quota_exceeded',
         error_details: {

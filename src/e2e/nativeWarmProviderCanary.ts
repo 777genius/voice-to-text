@@ -31,7 +31,8 @@ type NativeState = { status: string; logicalProviderRunId: number; preparedCaptu
 type ProviderEvent = { event: string; atMs: number; cycleIndex: number | null; sessionId: number;
   deliverySeq: number | null; text: string | null; markerIds: number[]; timingKnown: boolean;
   sourceStartSeconds: number; sourceDurationSeconds: number };
-type ProviderTerminal = { sessionId: number; cycleIndex: number | null; complete: boolean };
+type ProviderTerminal = { sessionId: number; cycleIndex: number | null; complete: boolean;
+  stableSnapshot: string | null };
 export type WarmCanaryCaptureFence = { sessionId: number; cycleIndex: number;
   providerStartSamples: number; providerSamples: number; deliverySeqFloor: number };
 
@@ -200,7 +201,10 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         if (name === 'transcription:terminal') {
           const complete = payload.delivery_complete === true && !payload.error;
           if (!complete) report.errors.push('Incomplete provider terminal');
-          report.terminals.push({ sessionId, cycleIndex: eventCycle ?? null, complete });
+          const stable = boundedSyntheticText(payload.stable_snapshot);
+          if (!stable.syntheticTextValid) report.errors.push('Provider terminal text evidence overflow');
+          report.terminals.push({ sessionId, cycleIndex: eventCycle ?? null, complete,
+            stableSnapshot: stable.rawSyntheticText });
         }
         if (name === 'transcription:error') report.errors.push(JSON.stringify(payload));
       }, { keepAlive: true, autoPasteText: false, autoCopyToClipboard: true });
@@ -459,19 +463,17 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       value.fixture.activeCaptures === 0 &&
       value.pausedContinuation?.logicalRunId === complete.logicalProviderRunId &&
       value.providerTransport?.connectionRetained === true, 'final full proof pause', 45_000);
-    const normalizeTranscript = (text: string | null) => (text ?? '')
-      .toLocaleLowerCase('ru').replace(/ё/g, 'е').replace(/[.,!?]/g, '').replace(/\s+/g, ' ').trim();
+    let acceptedFinalDelivery: ProviderEvent | undefined;
     await poll(() => {
-      const delivery = report.events.slice(finalTranscriptEventStart)
+      acceptedFinalDelivery = report.events.slice(finalTranscriptEventStart)
         .find(belongsToFinalCallbackGeneration);
-      return store.finalText !== report.finalTextBeforeProof && delivery != null &&
-        normalizeTranscript(store.finalText) === normalizeTranscript(delivery.text);
+      return store.finalText !== report.finalTextBeforeProof && acceptedFinalDelivery != null &&
+        store.finalText === acceptedFinalDelivery.text;
     },
     'final stable transcript proof', 30_000);
-    report.expectedInsertion = store.finalText;
     const finalMarkers = new Set(report.events.filter(event => event.cycleIndex === trial.finalEpisodeIndex)
       .flatMap(event => event.markerIds));
-    check(report.expectedInsertion.trim().length > 0 && finalMarkers.size >= 2,
+    check(store.finalText.trim().length > 0 && finalMarkers.size >= 2,
       'Final full PCM did not produce the complete multi-phrase transcript proof');
     // Retire the paused provider through the production configuration invalidation
     // path, after proving that the final capture reused the warm connection.
@@ -479,6 +481,13 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       backendStreamingProvider: 'elevenlabs' });
     await poll(value => value.status === 'Idle' &&
       value.providerTransport?.connectionRetained === false, 'final provider release', 15_000);
+    await poll(() => {
+      const terminal = report.terminals.find(row =>
+        row.sessionId === complete.logicalProviderRunId && row.cycleIndex === trial.finalEpisodeIndex);
+      return terminal?.complete === true && terminal.stableSnapshot === acceptedFinalDelivery?.text &&
+        store.finalText === terminal.stableSnapshot;
+    }, 'final terminal transcript proof', 15_000);
+    report.expectedInsertion = store.finalText;
     await wait(250);
     report.final = await state(true);
     check(report.final.fixture.captureStarts === 21 && report.final.fixture.captureStops === 21 &&

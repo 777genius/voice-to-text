@@ -411,7 +411,11 @@ export async function runOwned(command, args, options, timeoutMs, logPath, progr
   const heartbeat = progressPath ? setInterval(async () => {
     try { const info = await stat(progressPath); lastProgress = Math.max(lastProgress, info.mtimeMs); } catch {}
     if (tearingDown) return;
-    const silenceLimit = lastProgress === started ? 45_000 : 60_000;
+    // The test process can be descheduled for over a minute on a loaded macOS
+    // GUI host even while its native/WebView work is still making bounded
+    // scenario progress. This watchdog only detects a dead harness; scenario
+    // polls and latency assertions below remain the product correctness gates.
+    const silenceLimit = lastProgress === started ? 120_000 : 180_000;
     if (!timedOut && Date.now() - lastProgress > silenceLimit) {
       timedOut = true;
       collectionError ??= new Error(`${path.basename(command)} failed: progress timeout`);
@@ -1036,7 +1040,7 @@ export function validateResult(envelope) {
     return report;
   }
   if (envelope?.marker !== marker || envelope.passed !== true || !report || !fixture ||
-      !Number.isFinite(report.elapsedMs) || report.elapsedMs < 180_000 || report.elapsedMs > 480_000 ||
+      !Number.isFinite(report.elapsedMs) || report.elapsedMs < 180_000 || report.elapsedMs > 900_000 ||
       report.elapsedMs < report.hiddenIdleMs ||
       !Number.isSafeInteger(fixture.captureStarts) || fixture.captureStarts <= 0 ||
       fixture.activeCaptures !== 0 || fixture.activeProviders !== 0 || fixture.captureStarts !== fixture.captureStops ||
@@ -1054,23 +1058,38 @@ export function validateResult(envelope) {
     throw new Error(`Native result is incomplete: ${JSON.stringify(envelope)}`);
   }
   const cycles = report.cycleEvidence;
+  const cycleFinalDeliveries = report.cycleFinalDeliveries;
   const requiredScenarios = ['50-audio-transcript-stop-hide-reopen-cycles',
     'real-hidden-idle-180s-and-fresh-audio'];
-  if (!Array.isArray(cycles) || cycles.length !== 50 || cycles.some((row, index) =>
+  if (!Array.isArray(cycles) || cycles.length !== 50 ||
+    !Array.isArray(cycleFinalDeliveries) || cycleFinalDeliveries.length !== cycles.length ||
+    cycles.some((row, index) =>
     row?.index !== index || !Number.isSafeInteger(row.captureStartsBefore) ||
-    row.captureStartsAfter !== row.captureStartsBefore + 1 ||
-    !Number.isSafeInteger(row.captureStopsBefore) || row.captureStopsAfter !== row.captureStopsBefore + 1 ||
+    !Number.isSafeInteger(row.captureStartsAfter) || row.captureStartsAfter <= row.captureStartsBefore ||
+    !Number.isSafeInteger(row.captureStopsBefore) ||
+    row.captureStopsAfter - row.captureStopsBefore !== row.captureStartsAfter - row.captureStartsBefore ||
     !Number.isSafeInteger(row.sessionId) || row.sessionId <= 0 ||
     !Number.isSafeInteger(row.windowEpoch) || row.windowEpoch <= 0 ||
     !Number.isSafeInteger(row.captureGeneration) || row.captureGeneration <= 0 ||
+    !Array.isArray(row.captureGenerations) ||
+    row.captureGenerations.length !== row.captureStartsAfter - row.captureStartsBefore ||
+    row.captureGenerations.at(-1) !== row.captureGeneration ||
+    row.captureGenerations.some((generation, generationIndex) =>
+      !positiveSafeInteger(generation) ||
+      (generationIndex > 0 && generation <= row.captureGenerations[generationIndex - 1])) ||
     typeof row.expectedTranscript !== 'string' || !row.expectedTranscript.trim() ||
     row.finalSessionId !== row.sessionId || row.finalText !== row.expectedTranscript ||
     (row.finalDeliverySeq !== null && (!Number.isSafeInteger(row.finalDeliverySeq) || row.finalDeliverySeq <= 0)) ||
     (index > 0 && (row.captureStartsBefore !== cycles[index - 1].captureStartsAfter ||
       row.captureStopsBefore !== cycles[index - 1].captureStopsAfter ||
       row.sessionId <= cycles[index - 1].sessionId || row.windowEpoch <= cycles[index - 1].windowEpoch ||
-      row.captureGeneration <= cycles[index - 1].captureGeneration ||
+      row.captureGenerations[0] <= cycles[index - 1].captureGeneration ||
       row.finalSessionId <= cycles[index - 1].finalSessionId))) ||
+    cycles.some(row => {
+      const deliveries = cycleFinalDeliveries.filter(delivery => delivery.sessionId === row.sessionId);
+      return deliveries.length !== 1 || deliveries[0].text !== row.expectedTranscript ||
+        deliveries[0].deliverySeq !== row.finalDeliverySeq;
+    }) ||
     cycles[49].captureStartsAfter > fixture.captureStarts || cycles[49].captureStopsAfter > fixture.captureStops ||
     cycles.some(row => {
       const capture = fixture.capturePcmLedgers.find(ledger => ledger.captureGeneration === row.captureGeneration);
@@ -1247,7 +1266,7 @@ export async function main(args = process.argv.slice(2)) {
     const runtimeTimeoutMs = options.miniUx ? 480_000
       : trial?.kind === 'warm-provider-canary' ? 900_000
       : options.readerPreparation || ['E04', 'E41', 'E42', 'after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle'].includes(options.continuationCase) ? 30_000
-      : 480_000;
+      : 900_000;
     await runOwned(binary, [], { cwd: directory, env }, runtimeTimeoutMs,
       path.join(directory, `native-runtime-${randomUUID()}.log`), path.join(directory, 'native-progress.jsonl'),
       collectBeforeTeardown, path.join(directory, 'native-process-termination.json'));

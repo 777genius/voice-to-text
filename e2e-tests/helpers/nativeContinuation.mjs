@@ -741,8 +741,7 @@ export function verifyWarmProviderCanary(trial, report) {
       typeof report.expectedInsertion !== 'string' || !report.expectedInsertion.trim() ||
       report.expectedInsertion === report.finalTextBeforeProof ||
       acceptedFinalDeliveries.length !== 1 ||
-      normalizedEventText({ text: report.expectedInsertion }) !==
-        normalizedEventText(acceptedFinalDeliveries[0]) ||
+      report.expectedInsertion !== acceptedFinalDeliveries[0].text ||
       new Set(finalEvents.flatMap(event => event.markerIds)).size < 2 ||
       !events.slice(report.finalTranscriptFence.eventStart).some(finalTranscriptMatchesCallbackGeneration) ||
       finalEvents.some(event => ['transcription:partial', 'transcription:final'].includes(event.event) &&
@@ -765,7 +764,7 @@ export function verifyWarmProviderCanary(trial, report) {
           terminals.filter(row => row.sessionId === terminal.sessionId).length !== 1;
       }) ||
       terminals.filter(terminal => terminal.sessionId === ownership.logicalRunId &&
-        terminal.cycleIndex === finalIndex).length !== 1 ||
+        terminal.cycleIndex === finalIndex && terminal.stableSnapshot === report.expectedInsertion).length !== 1 ||
       terminalEvents.filter(event => event.sessionId === ownership.logicalRunId &&
         event.cycleIndex === finalIndex).length !== 1 ||
       allFinalEvents.some(event => {

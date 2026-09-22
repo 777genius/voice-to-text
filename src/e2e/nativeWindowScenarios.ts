@@ -45,6 +45,7 @@ interface NativeState {
     capturePcmLedgers: Array<{ captureGeneration: number; chunks: number; samples: number; hash: string }>;
     providerPcmLedgers: Array<{ captureGeneration: number; chunks: number; samples: number; hash: string }>;
     captureRunAssociations: Array<{ captureRunId: number; captureFenceGeneration: number; captureGeneration: number }>;
+    intentObservations: Array<{ atMs: number; pressed: boolean }>;
     markerViolations: string[];
     autoPasteTargetCaptures: number; autoPastes: number; lastPastedText: string | null;
     lastPastedSessionId: number | null;
@@ -112,8 +113,9 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     passed: false, completedCycles: 0, hiddenIdleMs: 0,
     cycleEvidence: [] as Array<{ index: number; captureStartsBefore: number; captureStartsAfter: number;
       captureStopsBefore: number; captureStopsAfter: number; sessionId: number; windowEpoch: number;
-      captureGeneration: number; expectedTranscript: string; finalSessionId: number;
+      captureGeneration: number; captureGenerations: number[]; expectedTranscript: string; finalSessionId: number;
       finalText: string; finalDeliverySeq: number | null }>,
+    cycleFinalDeliveries: [] as Array<{ sessionId: number; text: string; deliverySeq: number | null }>,
     hiddenIdleEvidence: null as null | { nativeHiddenIdleMs: number; webviewElapsedMs: number;
       baselineCaptureStarts: number; baselineCaptureStops: number; baselineActiveCaptures: number;
       baselineActiveProviders: number; baselineCaptureGeneration: number; wakeCaptureGeneration: number;
@@ -220,6 +222,16 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
       await invoke('native_e2e_progress', { report: report.lastProgress });
     };
     const configure = (config: Record<string, unknown>) => invoke('native_e2e_configure', { config });
+    const toggleHotkey = async () => {
+      const observationCount = (await state()).fixture.intentObservations.length;
+      await hotkey('press');
+      await hotkey('release');
+      await until(state, (snapshot) => {
+        const observations = snapshot.fixture.intentObservations.slice(observationCount);
+        const releaseIndex = observations.findIndex(observation => !observation.pressed);
+        return releaseIndex > 0 && observations.slice(0, releaseIndex).some(observation => observation.pressed);
+      }, 'Toggle hotkey press/release was not observed in order', 30_000);
+    };
     const mode = async (mini: boolean) => {
       await invoke('update_app_config', { showMiniRecordingWindow: mini, hideRecordingWindowOnHotkey: mini });
       await appConfig.refresh();
@@ -271,8 +283,8 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
         attributes: true, attributeFilter: ['class'] });
       try {
         sampleTransientUi();
-        await hotkey('press');
-        if (!holdMode) await hotkey('release');
+        if (holdMode) await hotkey('press');
+        else await toggleHotkey();
         const ready = await until(async () => ({ backend: await state(), captureReady: store.isCaptureReady }),
           (sample) => sample.captureReady && sample.backend.fixture.captureStarts > previous.fixture.captureStarts &&
             sample.backend.fixture.captureStartLatenciesMs.length > previous.fixture.captureStartLatenciesMs.length,
@@ -323,7 +335,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     const stop = async (timeout = 8_000) => {
       report.lastProgress = { phase: 'stop', completedCycles: report.completedCycles, ui: uiSnapshot() };
       if (holdMode) await hotkey('release');
-      else { await hotkey('press'); await hotkey('release'); }
+      else await toggleHotkey();
       await until(state, (s) => s.status === 'Idle' && !s.visible && s.fixture.activeCaptures === 0 &&
         s.preparedCaptureTokenCount === 0,
       'Stop did not reach Idle/hidden/no capture/no prepared token', timeout);
@@ -430,10 +442,16 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
       const finalDeliveryStart = finalDeliveries.length;
       const cycleBefore = await state();
       current = await start();
-      const association = current.fixture.captureRunAssociations[
-        current.fixture.captureRunAssociations.length - 1];
-      check(current.fixture.captureStarts === cycleBefore.fixture.captureStarts + 1 && association,
-        `Rapid cycle ${cycle} did not create exactly one owned capture generation`);
+      const previousGenerations = new Set(cycleBefore.fixture.captureRunAssociations.map(row => row.captureGeneration));
+      const associations = current.fixture.captureRunAssociations.filter(row =>
+        !previousGenerations.has(row.captureGeneration));
+      const association = associations[associations.length - 1];
+      check(current.fixture.captureStarts > cycleBefore.fixture.captureStarts && association &&
+        associations.length === current.fixture.captureStarts - cycleBefore.fixture.captureStarts &&
+        association.captureRunId === current.sessionId &&
+        associations.every(row => row.captureRunId === association.captureRunId &&
+          row.captureFenceGeneration === association.captureFenceGeneration),
+      `Rapid cycle ${cycle} did not retain every owned capture generation`);
       await observe(90, async () => {}, current.expected);
       await stop();
       const finalDelivery = await until(
@@ -444,8 +462,9 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
       );
       check(finalDelivery, `Rapid cycle ${cycle} final delivery disappeared`);
       const cycleAfter = await state();
-      check(cycleAfter.fixture.captureStops === cycleBefore.fixture.captureStops + 1,
-        `Rapid cycle ${cycle} did not close exactly one capture generation`);
+      check(cycleAfter.fixture.captureStops - cycleBefore.fixture.captureStops ===
+        current.fixture.captureStarts - cycleBefore.fixture.captureStarts,
+      `Rapid cycle ${cycle} did not close every owned capture generation`);
       report.cycleEvidence.push({ index: cycle,
         captureStartsBefore: cycleBefore.fixture.captureStarts,
         captureStartsAfter: current.fixture.captureStarts,
@@ -453,6 +472,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
         captureStopsAfter: cycleAfter.fixture.captureStops,
         sessionId: current.sessionId, windowEpoch: current.windowEpoch,
         captureGeneration: association.captureGeneration,
+        captureGenerations: associations.map(row => row.captureGeneration),
         expectedTranscript: current.expected,
         finalSessionId: finalDelivery.sessionId,
         finalText: finalDelivery.text,
@@ -477,9 +497,18 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     await invoke('update_app_config', { holdToRecord: false });
     holdMode = false;
     current = await start();
-    await hotkey('press');
-    await hotkey('release');
-    await until(async () => Boolean(document.querySelector('.mini-closing')), Boolean, 'No closing interval before delayed native hide', 1000);
+    let closingSeen = !!document.querySelector('.mini-closing');
+    const closingObserver = new MutationObserver((changes) => {
+      closingSeen ||= !!document.querySelector('.mini-closing') || changes.some((change) =>
+        (change.oldValue || '').split(/\s+/).includes('mini-closing'));
+    });
+    closingObserver.observe(document.documentElement,
+      { subtree: true, attributes: true, attributeFilter: ['class'], attributeOldValue: true });
+    try {
+      await toggleHotkey();
+      await until(async () => closingSeen || Boolean(document.querySelector('.mini-closing')),
+        Boolean, 'No closing interval before delayed native hide', 5000);
+    } finally { closingObserver.disconnect(); }
     const old = current;
     let replacementError = '';
     let replacementSeen = false;
@@ -983,11 +1012,15 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     check(final.fixture.finals - baseline.fixture.finals === successfulStarts + sealedPendingStarts,
       'Completed provider sessions/finals differ from visible and sealed recordings');
     for (const cycle of report.cycleEvidence) {
-      const deliveries = finalDeliveries.filter(delivery => delivery.sessionId === cycle.sessionId &&
-        transcriptMatches(delivery.text, cycle.expectedTranscript));
-      check(deliveries.length === 1,
-        `Rapid cycle ${cycle.index} did not deliver exactly one matching final: ${JSON.stringify(deliveries)}`);
+      const deliveries = finalDeliveries.filter(delivery => delivery.sessionId === cycle.sessionId);
+      check(deliveries.length === 1 && deliveries[0].text === cycle.expectedTranscript &&
+        deliveries[0].deliverySeq === cycle.finalDeliverySeq,
+      `Rapid cycle ${cycle.index} did not deliver exactly one exact final: ${JSON.stringify(deliveries)}`);
     }
+    const cycleSessionIds = new Set(report.cycleEvidence.map(cycle => cycle.sessionId));
+    report.cycleFinalDeliveries = finalDeliveries.filter(delivery => cycleSessionIds.has(delivery.sessionId));
+    check(report.cycleFinalDeliveries.length === report.cycleEvidence.length,
+      'Rapid cycles retained an extra, late, or foreign final delivery');
     check(transcripts.size === successfulStarts && sessions.size === successfulStarts, 'Unique session/transcript count mismatch');
     check(listeningSeen && recordingSeen && stoppedProcessingFrameSeen,
       'Missing listening, recording, or stopped-processing UI frame');
