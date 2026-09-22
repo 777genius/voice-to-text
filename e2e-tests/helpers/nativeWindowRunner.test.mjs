@@ -285,6 +285,12 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
   rebatched.report.final.fixture.providerPcmLedgers[0].chunks = 3;
   rebatched.fixture.providerPcmLedgers[0].chunks = 3;
   assert.equal(validateResult(rebatched), rebatched.report);
+  const terminalStop = structuredClone(warm);
+  terminalStop.report.final.fixture.providerStops = 0;
+  terminalStop.report.final.fixture.warmTerminalCount = 1;
+  terminalStop.fixture.providerStops = 0;
+  terminalStop.fixture.warmTerminalCount = 1;
+  assert.equal(validateResult(terminalStop), terminalStop.report);
   const readyFirstVisible = structuredClone(warm);
   readyFirstVisible.report.warmVisibleFrames[0].captureReady = true;
   readyFirstVisible.report.warmVisibleFrames[0].readinessReason = 'recording';

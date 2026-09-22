@@ -55,7 +55,10 @@ function validateExactPcmEvidence(fixture, requireEveryCaptureDelivered, provide
       !Array.isArray(failureGenerations) ||
       failureGenerations.length !== fixture.providerFailures ||
       failureGenerations.some(generation => !positiveSafeInteger(generation) || !captures.has(generation)) ||
-      (providerStopPerGeneration && providers.size + fixture.providerNoAudioStops !== fixture.providerStops)) return false;
+      (providerStopPerGeneration &&
+        (providers.size + fixture.providerNoAudioStops < fixture.providerStops ||
+         providers.size + fixture.providerNoAudioStops >
+           fixture.providerStops + fixture.warmTerminalCount))) return false;
   const sameGenerations = (left, right) =>
     left.size === right.size && [...left.keys()].every(generation => right.has(generation));
   const capturesWithPcm = new Map([...captures].filter(([, ledger]) => ledger.chunks > 0));
