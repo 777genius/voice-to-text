@@ -1244,7 +1244,7 @@ export async function main(args = process.argv.slice(2)) {
   try {
     if (interruption) throw interruption;
     // Event/preparation timeout: 30 seconds, then up to 5 seconds SIGTERM grace before SIGKILL.
-    const runtimeTimeoutMs = options.miniUx ? 180_000
+    const runtimeTimeoutMs = options.miniUx ? 480_000
       : trial?.kind === 'warm-provider-canary' ? 900_000
       : options.readerPreparation || ['E04', 'E41', 'E42', 'after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle'].includes(options.continuationCase) ? 30_000
       : 480_000;

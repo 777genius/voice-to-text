@@ -458,7 +458,11 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
         finalText: finalDelivery.text,
         finalDeliverySeq: finalDelivery.deliverySeq });
       report.completedCycles += 1;
-      if (cycle % 5 === 0) await progress(`recording-cycle-${cycle + 1}`);
+      // A loaded macOS host can legitimately need over a minute for five
+      // complete native stop/finalize cycles. Publish every completed cycle so
+      // the parent watchdog observes forward progress without extending any
+      // in-scenario correctness or latency bound.
+      await progress(`recording-cycle-${cycle + 1}`);
     }
     report.scenarios.push('50-audio-transcript-stop-hide-reopen-cycles');
     const afterRapidCycles = await state();
