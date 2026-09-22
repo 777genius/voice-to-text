@@ -1100,7 +1100,13 @@ export function validateResult(envelope) {
   const cycleFinalDeliveries = report.cycleFinalDeliveries;
   const allFinalDeliveries = report.allFinalDeliveries;
   const expectedFinalSessionIds = report.expectedFinalSessionIds;
-  const expectedTranscriptForSession = sessionId => `Native fixture session ${sessionId}`;
+  const expectedTranscriptForSession = sessionId => {
+    const providerSessionIds = [...new Set((fixture.providerMarkers ?? [])
+      .filter(markerRow => markerRow.captureRunId === sessionId)
+      .map(markerRow => markerRow.providerSessionId))];
+    return providerSessionIds.length === 1 && positiveSafeInteger(providerSessionIds[0])
+      ? `Native fixture session ${providerSessionIds[0]}` : null;
+  };
   const requiredScenarios = ['50-audio-transcript-stop-hide-reopen-cycles',
     'real-hidden-idle-180s-and-fresh-audio'];
   if (!Array.isArray(cycles) || cycles.length !== 50 ||

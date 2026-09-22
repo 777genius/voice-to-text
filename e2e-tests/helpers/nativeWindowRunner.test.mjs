@@ -212,6 +212,10 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
       row.expectedTranscript = stale; row.finalText = stale;
       v.report.cycleFinalDeliveries.find(delivery => delivery.sessionId === row.sessionId).text = stale;
       v.report.allFinalDeliveries.find(delivery => delivery.sessionId === row.sessionId).text = stale; },
+    v => { const row = v.report.cycleEvidence[12];
+      v.fixture.providerMarkers.find(markerRow =>
+        markerRow.captureRunId === row.sessionId).providerSessionId = 12;
+      v.report.final.fixture = structuredClone(v.fixture); },
     v => { v.report.cycleFinalDeliveries.push({ sessionId: 12, text: 'late stale transcript', deliverySeq: 99 }); },
     v => { v.report.allFinalDeliveries.push({ sessionId: 999, text: 'foreign final', deliverySeq: 999 }); },
     v => { v.report.allFinalDeliveries.find(delivery => delivery.sessionId === 51).text =
