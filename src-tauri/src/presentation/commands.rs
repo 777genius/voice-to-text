@@ -4023,6 +4023,17 @@ fn audio_takeover_blocks_dictation(status: RecordingStatus, has_capture_owner: b
     has_capture_owner || live_translation_health_check_blocks_recording_status(status)
 }
 
+fn microphone_test_takeover_blocks_dictation(
+    status: RecordingStatus,
+    has_capture_owner: bool,
+) -> bool {
+    has_capture_owner
+        || matches!(
+            status,
+            RecordingStatus::Starting | RecordingStatus::Recording
+        )
+}
+
 fn live_translation_health_check_blocks_service_status(
     status: RecordingStatus,
     has_active_session: bool,
@@ -5836,6 +5847,30 @@ mod snapshot_contract_tests {
             true
         ));
         assert!(!super::audio_takeover_blocks_dictation(
+            RecordingStatus::Idle,
+            false
+        ));
+    }
+
+    #[test]
+    fn microphone_test_allows_provider_only_processing_after_capture_release() {
+        assert!(!super::microphone_test_takeover_blocks_dictation(
+            RecordingStatus::Processing,
+            false
+        ));
+        assert!(super::microphone_test_takeover_blocks_dictation(
+            RecordingStatus::Processing,
+            true
+        ));
+        assert!(super::microphone_test_takeover_blocks_dictation(
+            RecordingStatus::Starting,
+            false
+        ));
+        assert!(super::microphone_test_takeover_blocks_dictation(
+            RecordingStatus::Recording,
+            false
+        ));
+        assert!(!super::microphone_test_takeover_blocks_dictation(
             RecordingStatus::Idle,
             false
         ));
@@ -7972,7 +8007,7 @@ pub async fn start_microphone_test(
     }
 
     let recording_status = active_recording_status(state.inner()).await;
-    if audio_takeover_blocks_dictation(
+    if microphone_test_takeover_blocks_dictation(
         recording_status,
         state.transcription_service.has_capture_owner(),
     ) {
