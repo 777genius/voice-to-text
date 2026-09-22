@@ -13,7 +13,9 @@ const createQualificationCollector = new Function('verifyQualificationConnection
   verifyQualificationConnections, 'VOICETEXT_NATIVE_WINDOW_E2E_V1');
 const close = (code, connectionId = 1) => ({ event: 'fault_proxy_close', connectionId,
   direction: 'upstream', code });
-const eventsFor = trial => Array.from({ length: trial.id.startsWith('cold-') ? 2 : 1 },
+const eventsFor = trial => Array.from({
+  length: trial.kind === 'warm-provider-canary' ? 6 : trial.id.startsWith('cold-') ? 2 : 1,
+},
   (_, index) => [{ event: 'fault_proxy_connected', connectionId: index + 1 },
     close(1000, index + 1)]).flat();
 const boundary = () => ({ event: 'qualification_pre_teardown', atMs: 10, clock: 'runner-performance-now', nativeProcessAlive: true });
