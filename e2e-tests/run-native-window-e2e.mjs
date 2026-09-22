@@ -1031,6 +1031,7 @@ export function validateResult(envelope) {
   if (report?.mode === 'continuation-fake') {
     const cycles = report.cycles;
     const latencies = fixture?.firstPcmLatenciesMs;
+    const continuationGenerations = Array.from({ length: 51 }, (_, index) => index + 1);
     const validCycles = Array.isArray(cycles) && cycles.length === 50 && cycles.every((cycle, index) =>
       cycle?.cycle === index && cycle.captureGeneration === index + 2 &&
       Number.isSafeInteger(cycle.windowEpoch) && cycle.windowEpoch > 0 &&
@@ -1043,12 +1044,32 @@ export function validateResult(envelope) {
       cycle.controls[0].result?.decision === 'accepted' && cycle.controls[1].result?.decision === 'accepted' &&
       cycle.controls[0].result.pause_epoch === cycle.controls[1].result.pause_epoch &&
       Number.isSafeInteger(cycle.controls[0].result.pause_epoch) && cycle.controls[0].result.pause_epoch > 0);
+    const latencyValues = Array.isArray(latencies) ? latencies.slice(0, 51).map(row => row?.elapsedMs) : [];
+    const sortedLatencies = latencyValues.every(value => Number.isFinite(value) && value >= 0)
+      ? [...latencyValues].sort((left, right) => left - right) : [];
+    const measuredP95 = sortedLatencies.length === 51
+      ? sortedLatencies[Math.ceil(sortedLatencies.length * .95) - 1] : null;
     const validLatencies = Array.isArray(latencies) && latencies.length >= 51 &&
-      latencies.slice(0, 51).every((row, index) => row?.captureGeneration === index + 1 &&
-        Number.isFinite(row.elapsedMs) && row.elapsedMs >= 0 && row.elapsedMs <= 250);
+      latencies.slice(0, 51).every((row, index) => row?.captureGeneration === index + 1) &&
+      measuredP95 !== null && measuredP95 <= 250 && report.p95FirstPcmMs === measuredP95;
+    const captureLedgers = generationMap(fixture?.capturePcmLedgers, ledger =>
+      positiveSafeInteger(ledger.chunks) && positiveSafeInteger(ledger.samples) &&
+      typeof ledger.hash === 'string' && /^[0-9a-f]{16}$/.test(ledger.hash) && ledger.hash !== emptyPcmHash);
+    const providerLedgers = generationMap(fixture?.providerPcmLedgers, ledger =>
+      positiveSafeInteger(ledger.chunks) && positiveSafeInteger(ledger.samples) &&
+      typeof ledger.hash === 'string' && /^[0-9a-f]{16}$/.test(ledger.hash) && ledger.hash !== emptyPcmHash);
+    const providerMarkers = generationMap(fixture?.providerMarkers, row =>
+      positiveSafeInteger(row.count) && positiveSafeInteger(row.firstSequence) &&
+      positiveSafeInteger(row.lastSequence) && row.firstSequence <= row.lastSequence &&
+      positiveSafeInteger(row.captureRunId) && positiveSafeInteger(row.captureFenceGeneration) &&
+      positiveSafeInteger(row.providerSessionId));
+    const validContinuationPcm = captureLedgers?.size === 51 && providerLedgers?.size === 51 &&
+      providerMarkers?.size === 51 && continuationGenerations.every(generation =>
+        captureLedgers.has(generation) && providerLedgers.has(generation) && providerMarkers.has(generation)) &&
+      new Set([...providerMarkers.values()].map(row => row.providerSessionId)).size === 1;
     if (envelope.marker !== marker || envelope.passed !== true || report.passed !== true ||
         report.terminalCount !== 1 || report.stableDeliveries?.length !== 1 || report.final?.historyEntryCount !== 1 ||
-        report.completedCycles !== 50 || !validCycles || !validLatencies ||
+        report.completedCycles !== 50 || !validCycles || !validLatencies || !validContinuationPcm ||
         !validateExactPcmEvidence(fixture, true, false) || fixture?.observationOverflow !== false ||
         !Array.isArray(report.errors) || report.errors.length ||
         !Number.isFinite(report.p95FirstPcmMs) || report.p95FirstPcmMs < 0 || report.p95FirstPcmMs > 250 ||

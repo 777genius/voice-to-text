@@ -258,10 +258,29 @@ test('continuation qualification requires balanced and identical terminal lifecy
     final: { status: 'Idle', historyEntryCount: 1, preparedCaptureTokenCount: 0,
       fixture: structuredClone(fixture) } } };
   assert.equal(validateResult(valid), valid.report);
+  const p95AllowsBoundedOutliers = structuredClone(valid);
+  p95AllowsBoundedOutliers.fixture.firstPcmLatenciesMs.at(-1).elapsedMs = 251;
+  p95AllowsBoundedOutliers.fixture.firstPcmLatenciesMs.at(-2).elapsedMs = 251;
+  p95AllowsBoundedOutliers.report.final.fixture = structuredClone(p95AllowsBoundedOutliers.fixture);
+  assert.equal(validateResult(p95AllowsBoundedOutliers), p95AllowsBoundedOutliers.report);
   for (const mutate of [
     value => { value.fixture.maxActiveCaptures = 2; value.report.final.fixture.maxActiveCaptures = 2; },
     value => { value.fixture.providerStops = 0; value.report.final.fixture.providerStops = 0; },
     value => { value.report.final.fixture.activeCaptures = 1; },
+    value => {
+      value.fixture.capturePcmLedgers.find(row => row.captureGeneration === 2).chunks = 0;
+      value.fixture.capturePcmLedgers.find(row => row.captureGeneration === 2).samples = 0;
+      value.fixture.capturePcmLedgers.find(row => row.captureGeneration === 2).hash = 'cbf29ce484222325';
+      value.fixture.captureMarkers = value.fixture.captureMarkers.filter(row => row.captureGeneration !== 2);
+      value.fixture.providerPcmLedgers = value.fixture.providerPcmLedgers.filter(row => row.captureGeneration !== 2);
+      value.fixture.providerMarkers = value.fixture.providerMarkers.filter(row => row.captureGeneration !== 2);
+      value.report.final.fixture = structuredClone(value.fixture);
+    },
+    value => {
+      value.fixture.providerMarkers.forEach(row => { row.providerSessionId = row.captureGeneration; });
+      value.report.final.fixture = structuredClone(value.fixture);
+    },
+    value => { value.report.p95FirstPcmMs = 11; },
   ]) {
     const invalid = structuredClone(valid); mutate(invalid);
     assert.throws(() => validateResult(invalid), /Incomplete native continuation qualification/);

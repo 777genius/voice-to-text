@@ -607,7 +607,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       if (terminalIndex < 0) return false;
       const deliveredFinals = report.events.slice(0, terminalIndex).filter(event =>
         event.event === 'transcription:final' && event.sessionId === terminal.sessionId &&
-        Number.isSafeInteger(event.deliverySeq));
+        typeof event.text === 'string' && event.text.trim().length > 0);
       const expectedStableSnapshot = deliveredFinals.reduce((stable, delivery) =>
         appendTranscriptText(stable, delivery.text ?? ''), '');
       return terminal.stableSnapshot === expectedStableSnapshot;

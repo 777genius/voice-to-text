@@ -585,8 +585,17 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     sourceStartSeconds: timedCycle.providerStartSamples / 16000,
     sourceDurationSeconds: timedCycle.triggerProviderSamples / 16000,
   });
+  const timedTerminal = postStopTimedFinal.terminals.find(terminal =>
+    terminal.sessionId === timedCycle.logicalRunId);
+  timedTerminal.stableSnapshot = [timedTerminal.stableSnapshot, timedPhrase].filter(Boolean).join(' ');
   assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, postStopTimedFinal).churnCycles, 20,
     'a contained truncated provider tail remains owned by an early-stopped cycle');
+  const missingTimedTerminalText = structuredClone(postStopTimedFinal);
+  missingTimedTerminalText.terminals.find(terminal => terminal.sessionId === timedCycle.logicalRunId)
+    .stableSnapshot = '';
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, missingTimedTerminalText),
+    /Final warm provider proof is incomplete|terminal ownership is incomplete or duplicated/,
+    'terminal reconciliation includes accepted timed Finals without delivery sequence IDs');
   const firstPcmTail = structuredClone(report);
   const firstPcmTailCycle = firstPcmTail.cycles.find(row => row.stopPhase === 'after-first-pcm' &&
     row.index >= warmProviderCanaryTrial.readyGateFromIndex);
@@ -598,6 +607,10 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     sourceStartSeconds: firstPcmTailCycle.providerStartSamples / 16000,
     sourceDurationSeconds: firstPcmTailCycle.triggerProviderSamples / 16000,
   });
+  const firstPcmTerminal = firstPcmTail.terminals.find(terminal =>
+    terminal.sessionId === firstPcmTailCycle.logicalRunId);
+  firstPcmTerminal.stableSnapshot = [firstPcmTerminal.stableSnapshot, firstPcmPrefix]
+    .filter(Boolean).join(' ');
   assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, firstPcmTail).churnCycles, 20,
     'first-PCM cycles retain a sequence floor for owned post-Stop tails');
   const missingPartial = structuredClone(report);

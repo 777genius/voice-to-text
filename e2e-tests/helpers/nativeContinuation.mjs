@@ -776,7 +776,7 @@ export function verifyWarmProviderCanary(trial, report) {
     .filter(Boolean).join(' ');
   const stableTranscript = (sessionId, endIndex) => events.slice(0, endIndex)
     .filter(event => event.event === 'transcription:final' && event.sessionId === sessionId &&
-      Number.isSafeInteger(event.deliverySeq))
+      typeof event.text === 'string' && event.text.trim().length > 0)
     .reduce((stable, delivery) => appendStableText(stable, delivery.text), '');
   const terminalSnapshotsAgree = terminals.every(terminal => {
     const terminalIndex = events.findIndex(event => event.event === 'transcription:terminal' &&
