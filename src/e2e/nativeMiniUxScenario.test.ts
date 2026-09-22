@@ -150,7 +150,7 @@ describe('warm mini-window first-visible evidence', () => {
     expect(pending.size).toBe(0);
   });
 
-  it('keeps visible-frame admission open until native proofs and the final sample settle', async () => {
+  it('closes admission with the final sample and still drains admitted native proofs', async () => {
     const reopen = { attempt: 1, baselineWindowEpoch: 1, windowEpoch: 2, closed: false,
       acceptingObservations: true };
     const pending = new Set<Promise<void>>();
@@ -161,11 +161,10 @@ describe('warm mini-window first-visible evidence', () => {
     let sampled = false;
     const sealed = sealWarmVisibleObservations(reopen, pending, () => { sampled = true; });
     await Promise.resolve();
-    expect(reopen.acceptingObservations).toBe(true);
-    expect(sampled).toBe(false);
+    expect(reopen.acceptingObservations).toBe(false);
+    expect(sampled).toBe(true);
     release();
     await sealed;
-    expect(sampled).toBe(true);
     expect(reopen.acceptingObservations).toBe(false);
   });
 

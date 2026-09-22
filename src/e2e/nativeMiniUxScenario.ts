@@ -41,12 +41,11 @@ export async function sealWarmVisibleObservations(
   pending: Set<Promise<void>>,
   sample: () => void,
 ) {
-  await drainPendingWarmVisibleObservations(pending);
+  // Take the final synchronous UI sample and close admission in one turn.
+  // Previously admitted native proofs remain in `pending` and are drained
+  // below; closing first prevents a busy renderer from extending that set
+  // forever while the capture remains active.
   sample();
-  // Close admission synchronously with the final sample, then await only the
-  // observations that were already admitted. Closing after the drain would
-  // leave a microtask gap; keeping admission open during the drain can livelock
-  // while a busy renderer continues to enqueue observations.
   reopen.acceptingObservations = false;
   await drainPendingWarmVisibleObservations(pending);
 }
