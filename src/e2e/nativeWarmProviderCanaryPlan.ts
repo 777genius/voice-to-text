@@ -1,6 +1,6 @@
 export type WarmProviderStopPhase = 'before-ready' | 'after-first-pcm' | 'during-partial' | 'after-final';
 export type WarmProviderCyclePlan = { index: number; jitterMs: number;
-  stopPhase: WarmProviderStopPhase; episode: string };
+  stopPhase: WarmProviderStopPhase; episode: string; resetProviderBefore?: boolean };
 export type WarmProviderCanaryTrial = { id: string; kind: 'warm-provider-canary';
   cycles: WarmProviderCyclePlan[]; episodes: string[]; readyGateFromIndex?: number;
   finalEpisodeIndex: number };
@@ -19,7 +19,8 @@ export function validateWarmProviderCanaryPlan(trial: WarmProviderCanaryTrial) {
   for (const [index, cycle] of trial.cycles.entries()) {
     if (cycle.index !== index || cycle.stopPhase !== phases[Math.floor(index / jitters.length)] ||
         cycle.jitterMs !== jitters[index % jitters.length] || cycle.episode !== trial.episodes[index] ||
-        cycle.episode !== phrases[index % phrases.length]) {
+        cycle.episode !== phrases[index % phrases.length] ||
+        cycle.resetProviderBefore !== (cycle.stopPhase === 'after-final' ? true : undefined)) {
       throw new Error(`Warm canary cycle ${index} differs from the fixed paid plan`);
     }
   }

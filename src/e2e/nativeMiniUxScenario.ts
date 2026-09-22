@@ -43,7 +43,11 @@ export async function sealWarmVisibleObservations(
 ) {
   await drainPendingWarmVisibleObservations(pending);
   sample();
-  await drainPendingWarmVisibleObservations(pending);
+  // Seal in the same continuation that observes an empty pending set. If this
+  // delegated to drainPendingWarmVisibleObservations, its resolved promise
+  // would add one microtask turn in which a MutationObserver callback could
+  // still admit a native read that nobody subsequently awaited.
+  while (pending.size > 0) await Promise.all([...pending]);
   reopen.acceptingObservations = false;
 }
 export function warmVisibleFramesHaveNoStaleStatus(

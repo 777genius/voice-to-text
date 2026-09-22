@@ -11,7 +11,8 @@ function plan() {
   const cycles = Array.from({ length: 20 }, (_, index) => {
     const stopPhase = phases[Math.floor(index / jitters.length)];
     return { index, stopPhase, jitterMs: jitters[index % jitters.length],
-      episode: index % 2 === 0 ? 'episode-a.pcm' : 'episode-b.pcm' };
+      episode: index % 2 === 0 ? 'episode-a.pcm' : 'episode-b.pcm',
+      ...(stopPhase === 'after-final' ? { resetProviderBefore: true } : {}) };
   });
   return { id: 'warm-provider-churn-20', kind: 'warm-provider-canary' as const,
     cycles, episodes: [...cycles.map(cycle => cycle.episode), 'long-auto-commit.pcm'],
@@ -26,6 +27,8 @@ describe('warm provider paid canary plan', () => {
       (value: ReturnType<typeof plan>) => { value.cycles[4].jitterMs = 25; },
       (value: ReturnType<typeof plan>) => { value.cycles[7].stopPhase = 'before-ready'; },
       (value: ReturnType<typeof plan>) => { value.cycles[9].episode = 'episode-a.pcm'; },
+      (value: ReturnType<typeof plan>) => { delete value.cycles[15].resetProviderBefore; },
+      (value: ReturnType<typeof plan>) => { value.cycles[14].resetProviderBefore = true; },
       (value: ReturnType<typeof plan>) => { value.readyGateFromIndex = 4; },
       (value: ReturnType<typeof plan>) => { value.finalEpisodeIndex = 19; },
       (value: ReturnType<typeof plan>) => { value.episodes[20] = 'episode-a.pcm'; },

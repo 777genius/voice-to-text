@@ -1,7 +1,7 @@
 import { runRestartCrash } from './helpers/nativeRestartCrash.mjs';
 import { closeOwnedDocument, ownedDocumentMatches } from './helpers/nativeOwnedDocument.mjs';
 import { isDeepStrictEqual, promisify } from 'node:util';
-import { verifyQualificationTerminals, verifyQualificationSources, verifyQualificationConnections, verifyQualificationRoute, verifyWarmProviderCanary, verifyWarmProviderTransport, maxProxyEvidenceEvents, liveTrials, readApprovedFixtures, validateHarnessConfig, exactInsertionEvidence } from './helpers/nativeContinuation.mjs';
+import { verifyQualificationTerminals, verifyQualificationSources, verifyQualificationConnections, verifyQualificationRoute, verifyWarmProviderCanary, verifyWarmProviderTransport, verifyWarmProviderFinalFixtureAgreement, expectedWarmProviderContinues, maxProxyEvidenceEvents, liveTrials, readApprovedFixtures, validateHarnessConfig, exactInsertionEvidence } from './helpers/nativeContinuation.mjs';
 import { createWriteStream } from 'node:fs';
 import { spawn, execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -1286,6 +1286,8 @@ export async function main(args = process.argv.slice(2)) {
           throw new Error('Warm provider canary changed immutable delivery policy or pasted unexpectedly');
         }
         verification.noUnexpectedPaste = true;
+        Object.assign(verification,
+          verifyWarmProviderFinalFixtureAgreement(report.final.fixture, envelope.fixture));
         Object.assign(verification, verifyWarmProviderCanary(trial, report));
         Object.assign(verification, verifyWarmProviderTransport(proxyEvents, report.final.fixture));
         if (verification.clientAudioBytes !== verification.transmittedPcmBytes) {
@@ -1293,7 +1295,7 @@ export async function main(args = process.argv.slice(2)) {
         }
         const accepted = proxyEvents.filter(e => e.event === 'backend_control' &&
           e.type === 'continue_result' && e.decision === 'accepted' && e.eligible_now === true);
-        const expectedContinues = trial.cycles.length - trial.readyGateFromIndex;
+        const expectedContinues = expectedWarmProviderContinues(trial);
         if (accepted.length !== expectedContinues) {
           throw new Error('Warm provider canary did not retain every expected continuation');
         }

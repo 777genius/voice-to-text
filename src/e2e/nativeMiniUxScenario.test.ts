@@ -169,6 +169,36 @@ describe('warm mini-window first-visible evidence', () => {
     expect(reopen.acceptingObservations).toBe(false);
   });
 
+  it('seals atomically when the final pending set becomes empty', async () => {
+    const reopen = { attempt: 1, baselineWindowEpoch: 1, windowEpoch: 2, closed: false,
+      acceptingObservations: true };
+    let armLateAdmission = false;
+    let lateAdmissionAttempted = false;
+    let lateAdmissionAccepted = false;
+    class AdmissionSet extends Set<Promise<void>> {
+      override get size() {
+        const current = super.size;
+        if (current === 0 && armLateAdmission && !lateAdmissionAttempted) {
+          lateAdmissionAttempted = true;
+          queueMicrotask(() => {
+            if (!reopen.acceptingObservations) return;
+            lateAdmissionAccepted = true;
+            const observation = Promise.resolve().finally(() => this.delete(observation));
+            this.add(observation);
+          });
+        }
+        return current;
+      }
+    }
+    const pending = new AdmissionSet();
+    await sealWarmVisibleObservations(reopen, pending, () => { armLateAdmission = true; });
+    await Promise.resolve();
+    expect(lateAdmissionAttempted).toBe(true);
+    expect(lateAdmissionAccepted).toBe(false);
+    expect(reopen.acceptingObservations).toBe(false);
+    expect(pending.size).toBe(0);
+  });
+
   it('rejects a stale label even when its native proof settles after a valid frame', () => {
     const frame = (statusText: string): WarmVisibleFrame => ({
       attempt: 1, source: 'render', windowEpoch: 2, revision: 1, runId: 1,

@@ -27,6 +27,7 @@ export const warmProviderCanaryCycles = Object.freeze(Array.from({ length: 20 },
     jitterMs: warmProviderCanaryJittersMs[index % warmProviderCanaryJittersMs.length],
     stopPhase,
     episode: warmProviderCanaryPhrases[index % warmProviderCanaryPhrases.length],
+    ...(stopPhase === 'after-final' ? { resetProviderBefore: true } : {}),
   });
 }));
 export const warmProviderCanaryTrial = Object.freeze({
@@ -107,15 +108,43 @@ export function qualificationExpectations(trial) {
   if (!liveTrials.some(row => JSON.stringify(row) === JSON.stringify(trial))) throw new Error('Unplanned qualification trial');
   if (trial.kind === 'warm-provider-canary') {
     const earlyStops = trial.cycles.filter(cycle => cycle.stopPhase === 'before-ready').length;
+    const providerResets = trial.cycles.filter(cycle => cycle.resetProviderBefore === true).length;
     return { warmProviderCanary: true, captures: trial.cycles.length + 1,
-      minBackendConnections: 1, maxBackendConnections: earlyStops + 2,
-      providerHandshakes: { min: 1, max: earlyStops + 2 }, maxActiveUpstream: 1,
+      minBackendConnections: providerResets + 1,
+      maxBackendConnections: earlyStops + providerResets + 2,
+      providerHandshakes: { min: providerResets + 1, max: earlyStops + providerResets + 2 },
+      maxActiveUpstream: 1,
       gateInitialSource: false, finalGateIndex: trial.finalEpisodeIndex, gapMs: null };
   }
   const baseline = trial.id.startsWith('warm-baseline-');
   return { baseline, captures: baseline ? 1 : 2, backendConnections: baseline || trial.continuation ? 1 : 2,
     providerHandshakes: baseline || trial.continuation ? 1 : 2, maxActiveUpstream: 1,
     gateInitialSource: baseline || trial.continuation, gapMs: 120 };
+}
+export function expectedWarmProviderContinues(trial) {
+  if (trial?.kind !== 'warm-provider-canary') throw new Error('Warm provider canary plan required');
+  let retained = false;
+  let continues = 0;
+  for (const cycle of trial.cycles) {
+    if (cycle.resetProviderBefore === true) retained = false;
+    if (retained) continues += 1;
+    retained = cycle.stopPhase !== 'before-ready';
+  }
+  if (retained) continues += 1; // final full-PCM recovery capture
+  return continues;
+}
+export function verifyWarmProviderFinalFixtureAgreement(reportFixture, envelopeFixture) {
+  const keys = [
+    'captureStarts', 'captureStops', 'activeCaptures', 'maxActiveCaptures',
+    'providerStarts', 'providerResumes', 'providerStops', 'activeProviders', 'maxActiveProviders',
+    'observationOverflow', 'markerViolations', 'sourceEpisodes', 'captureRunAssociations',
+    'capturePcmLedgers', 'providerPcmLedgers', 'providerCallbackGenerations',
+  ];
+  const project = fixture => Object.fromEntries(keys.map(key => [key, fixture?.[key]]));
+  if (JSON.stringify(project(reportFixture)) !== JSON.stringify(project(envelopeFixture))) {
+    throw new Error('Warm provider final report contradicts terminal native fixture evidence');
+  }
+  return { finalNativeFixtureAgreement: true };
 }
 export function verifyQualificationConnections(trial, events) {
   const expected = qualificationExpectations(trial);
@@ -192,57 +221,58 @@ export function verifyQualificationRoute(trial, events) {
     const ready = events.filter(event => event.event === 'backend_control' && event.type === 'ready');
     const rejected = events.filter(event => event.event === 'backend_control' &&
       (event.type === 'pause_rejected' || (event.type === 'continue_result' && event.decision !== 'accepted')));
-    const retainedCycles = trial.cycles.length - trial.readyGateFromIndex;
-    const retainedReady = ready.filter(event => event.connectionId === lastConnectionId);
-    const providerSessionId = retainedReady[0]?.session_id;
-    const retainedConnectionId = retainedReady[0]?.connectionId;
+    const expectedPauses = trial.cycles.filter(cycle => cycle.stopPhase !== 'before-ready').length + 1;
+    const expectedContinues = expectedWarmProviderContinues(trial);
     const pauses = events.filter(event => event.event === 'backend_control' &&
-      event.type === 'pause_accepted' && event.decision === 'accepted' &&
-      event.connectionId === retainedConnectionId);
+      event.type === 'pause_accepted' && event.decision === 'accepted');
     const continues = events.filter(event => event.event === 'backend_control' &&
-      event.type === 'continue_result' && event.decision === 'accepted' && event.eligible_now === true &&
-      event.connectionId === retainedConnectionId);
+      event.type === 'continue_result' && event.decision === 'accepted' && event.eligible_now === true);
     if (ready.length < expected.providerHandshakes.min || ready.length > expected.providerHandshakes.max ||
         new Set(ready.map(event => event.connectionId)).size !== ready.length ||
         new Set(ready.map(event => event.session_id)).size !== ready.length ||
         ready.some(event => !connectionIds.has(event.connectionId) ||
           typeof event.session_id !== 'string' || !event.session_id) ||
-        retainedReady.length !== 1 || typeof providerSessionId !== 'string' || !providerSessionId ||
-        retainedConnectionId !== lastConnectionId ||
-        rejected.length !== 0 || pauses.length !== retainedCycles + 1 || continues.length !== retainedCycles ||
-        [...pauses, ...continues].some(event => event.connectionId !== retainedConnectionId ||
-          event.provider_session_id !== providerSessionId)) {
-      throw new Error('Warm canary did not retain exactly one provider session across churn');
+        ready.filter(event => event.connectionId === lastConnectionId).length !== 1 ||
+        rejected.length !== 0 || pauses.length !== expectedPauses || continues.length !== expectedContinues) {
+      throw new Error('Warm canary provider session counts are contradictory');
     }
-    const readyIndex = events.indexOf(retainedReady[0]);
-    let active = true;
-    let orderedPauses = 0;
-    let orderedContinues = 0;
-    for (const event of events.slice(readyIndex + 1)) {
-      if (event.event === 'client_binary' && event.connectionId === retainedConnectionId) {
-        if (!active) throw new Error('Warm canary sent audio while provider session was paused');
-        continue;
+    for (const handshake of ready) {
+      const start = events.indexOf(handshake) + 1;
+      const endOffset = events.slice(start).findIndex(event => event.event === 'fault_proxy_close' &&
+        event.direction === 'upstream' && event.connectionId === handshake.connectionId);
+      const end = endOffset < 0 ? events.length : start + endOffset;
+      const sessionEvents = events.slice(start, end).filter(event => event.connectionId === handshake.connectionId);
+      let active = true;
+      let audioFrames = 0;
+      let sessionPauses = 0;
+      for (const event of sessionEvents) {
+        if (event.event === 'client_binary') {
+          if (!active) throw new Error('Warm canary sent audio while provider session was paused');
+          audioFrames += 1;
+        } else if (event.event === 'backend_control' && event.type === 'pause_accepted' &&
+            event.decision === 'accepted') {
+          if (!active || event.provider_session_id !== handshake.session_id) {
+            throw new Error('Warm canary Pause acceptance is out of order');
+          }
+          active = false;
+          sessionPauses += 1;
+        } else if (event.event === 'backend_control' && event.type === 'continue_result' &&
+            event.decision === 'accepted' && event.eligible_now === true) {
+          if (active || event.provider_session_id !== handshake.session_id) {
+            throw new Error('Warm canary Continue acceptance is out of order');
+          }
+          active = true;
+        }
       }
-      if (event.event !== 'backend_control' || event.connectionId !== retainedConnectionId ||
-          event.provider_session_id !== providerSessionId) continue;
-      if (event.type === 'pause_accepted' && event.decision === 'accepted') {
-        if (!active) throw new Error('Warm canary Pause acceptance is out of order');
-        active = false;
-        orderedPauses += 1;
-      } else if (event.type === 'continue_result' && event.decision === 'accepted' && event.eligible_now === true) {
-        if (active) throw new Error('Warm canary Continue acceptance is out of order');
-        active = true;
-        orderedContinues += 1;
+      if (audioFrames > 0 && (active || sessionPauses === 0)) {
+        throw new Error('Warm canary provider session did not end in an ordered paused state');
       }
-    }
-    if (active || orderedPauses !== retainedCycles + 1 || orderedContinues !== retainedCycles) {
-      throw new Error('Warm canary retained session did not end in an ordered paused state');
     }
     return { clientAudioFrames: binary.length,
       clientAudioBytes: binary.reduce((sum, event) => sum + event.bytes, 0),
       clientAudioConnections: connectionIds.size,
       routeVerified: trial.route, maximumActiveConnections: 1, maximumActiveProviderSessions: 1,
-      retainedProviderSessionId: providerSessionId, acceptedPauses: pauses.length,
+      retainedProviderSessionIds: ready.map(event => event.session_id), acceptedPauses: pauses.length,
       acceptedContinues: continues.length };
   }
   if (!trial.continuation) return { clientAudioFrames: binary.length,
@@ -516,17 +546,25 @@ export function verifyWarmProviderCanary(trial, report) {
     const cycleWindowEvents = events.slice(cycle.eventStart, cycle.eventEnd);
     const cycleEvents = events.filter(event => event.cycleIndex === index);
     const gated = index >= trial.readyGateFromIndex;
+    const previousSettlement = index === 0 ? null :
+      (cycles[index - 1].providerResetSettledAtMs ?? cycles[index - 1].settledAtMs);
+    const resetAfter = trial.cycles[index + 1]?.resetProviderBefore === true;
     if (cycle.index !== index || cycle.stopPhase !== plan.stopPhase || cycle.jitterMs !== plan.jitterMs ||
-        cycle.episode !== plan.episode || cycle.captureGeneration !== index + 1 ||
+        cycle.episode !== plan.episode || cycle.resetProviderBefore !== plan.resetProviderBefore ||
+        cycle.captureGeneration !== index + 1 ||
         !Number.isFinite(cycle.startedAtMs) || !Number.isFinite(cycle.triggerAtMs) ||
         !Number.isFinite(cycle.captureStoppedAtMs) || !Number.isFinite(cycle.settledAtMs) ||
         cycle.triggerAtMs < cycle.startedAtMs || cycle.triggerAtMs - cycle.startedAtMs > 75_000 ||
         (index === 0 ? cycle.previousSettleToStartMs !== null :
           !Number.isFinite(cycle.previousSettleToStartMs) ||
           Math.abs(cycle.previousSettleToStartMs -
-            (cycle.startedAtMs - cycles[index - 1].settledAtMs)) > 1 ||
+            (cycle.startedAtMs - previousSettlement)) > 1 ||
           cycle.previousSettleToStartMs < trial.cycles[index - 1].jitterMs ||
           cycle.previousSettleToStartMs > trial.cycles[index - 1].jitterMs + 500) ||
+        (resetAfter ? (!Number.isFinite(cycle.providerResetSettledAtMs) ||
+          cycle.providerResetSettledAtMs < cycle.settledAtMs ||
+          cycle.providerResetSettledAtMs - cycle.settledAtMs > 15_500) :
+          cycle.providerResetSettledAtMs != null) ||
         cycle.captureStoppedAtMs < cycle.triggerAtMs || cycle.captureStoppedAtMs - cycle.triggerAtMs > 5_500 ||
         cycle.settledAtMs < cycle.captureStoppedAtMs || cycle.settledAtMs - cycle.captureStoppedAtMs > 45_500 ||
         !Number.isSafeInteger(cycle.logicalRunId) || cycle.logicalRunId <= 0 ||
@@ -549,6 +587,8 @@ export function verifyWarmProviderCanary(trial, report) {
         cycle.triggerEventStart < cycle.eventStart || cycle.triggerEventStart > cycle.eventEnd ||
         cycle.stopEventIndex < cycle.triggerEventStart || cycle.stopEventIndex > cycle.eventEnd ||
         (index === 0 ? cycle.eventStart !== 0 : cycle.eventStart !== cycles[index - 1].eventEnd) ||
+        (plan.resetProviderBefore === true &&
+          cycle.logicalRunId === cycles[index - 1]?.logicalRunId) ||
         cycleWindowEvents.some(event => !Number.isSafeInteger(event.cycleIndex) || event.cycleIndex > index) ||
         cycleEvents.some(event => !Number.isSafeInteger(event.sessionId) || event.sessionId <= 0 ||
           event.sessionId !== cycle.logicalRunId)) {
@@ -658,7 +698,7 @@ export function verifyWarmProviderCanary(trial, report) {
       !finalProviderLedger || finalProviderLedger.samples <= 0 ||
       callbackFence?.captureGeneration !== finalIndex + 1 ||
       !Number.isSafeInteger(report.finalTranscriptFence?.eventStart) ||
-      report.finalTranscriptFence.eventStart < callbackFence.eventStart ||
+      report.finalTranscriptFence.eventStart > callbackFence.eventStart ||
       report.finalTranscriptFence.eventStart > events.length ||
       report.finalTranscriptFence.providerSamples !== finalSource.sourceFrames ||
       !Number.isSafeInteger(report.finalTranscriptFence.providerStartSamples) ||
@@ -668,9 +708,11 @@ export function verifyWarmProviderCanary(trial, report) {
       report.finalStartedAtMs - cycles.at(-1).settledAtMs > cycles.at(-1).jitterMs + 500 ||
       !Number.isSafeInteger(callbackFence?.eventStart) || callbackFence.eventStart < cycles.at(-1).eventEnd ||
       callbackFence.eventStart > events.length ||
-      events.slice(cycles.at(-1).eventEnd, callbackFence.eventStart)
+      events.slice(cycles.at(-1).eventEnd, report.finalTranscriptFence.eventStart)
         .some(event => Number.isSafeInteger(event.cycleIndex) && event.cycleIndex >= finalIndex) ||
-      events.slice(callbackFence.eventStart).some(event => event.cycleIndex !== finalIndex) ||
+      events.slice(report.finalTranscriptFence.eventStart, callbackFence.eventStart)
+        .some(event => event.event === 'transcription:terminal') ||
+      events.slice(report.finalTranscriptFence.eventStart).some(event => event.cycleIndex !== finalIndex) ||
       typeof report.finalTextBeforeProof !== 'string' ||
       typeof report.expectedInsertion !== 'string' || !report.expectedInsertion.trim() ||
       report.expectedInsertion === report.finalTextBeforeProof ||

@@ -302,6 +302,17 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
           association.captureFenceGeneration === beforeStop.captureEpisode.generation,
           `cycle ${cycle.index} lost capture generation to logical run ownership`);
       }
+      const triggerAtMs = now();
+      if (cycle.stopPhase === 'before-ready') {
+        trigger = warmCanaryBeforeReadyStopEvidence(await stopWithTransportBoundary());
+        check(trigger.readyBeforeStop === false,
+          `cycle ${cycle.index} reached provider Ready at the native stop boundary`);
+      } else {
+        await toggle();
+      }
+      // Classify the phase only after native gesture acceptance. A final that
+      // lands while Stop is being dispatched belongs before the boundary and
+      // must invalidate a during-partial/first-PCM claim.
       const stopEventIndex = report.events.length;
       const eventsBeforeStop = report.events.slice(eventStart, stopEventIndex)
         .filter(event => event.sessionId === beforeStop.logicalProviderRunId && event.cycleIndex === cycle.index);
@@ -312,14 +323,6 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       } else if (cycle.stopPhase === 'during-partial') {
         check(!eventsBeforeStop.some(event => event.event === 'transcription:final'),
           `cycle ${cycle.index} reached final before the partial stop`);
-      }
-      const triggerAtMs = now();
-      if (cycle.stopPhase === 'before-ready') {
-        trigger = warmCanaryBeforeReadyStopEvidence(await stopWithTransportBoundary());
-        check(trigger.readyBeforeStop === false,
-          `cycle ${cycle.index} reached provider Ready at the native stop boundary`);
-      } else {
-        await toggle();
       }
       const stopped = await poll(value => value.fixture.activeCaptures === 0 &&
         value.fixture.captureStops === before.fixture.captureStops + 1, `cycle ${cycle.index} capture stop`, 5_000);
@@ -333,7 +336,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       const sourceAtStop = await source();
       check(sourceAtStop?.name === cycle.episode && sourceAtStop.captureGeneration === generation,
         `cycle ${cycle.index} source identity mismatch`);
-      report.cycles.push({ ...cycle, startedAtMs, triggerAtMs,
+      const cycleReport: Record<string, unknown> = { ...cycle, startedAtMs, triggerAtMs,
         previousSettleToStartMs,
         captureStoppedAtMs, settledAtMs, captureGeneration: generation,
         captureRunId: beforeStop.captureEpisode?.runId ?? null,
@@ -341,8 +344,27 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         logicalRunId: beforeStop.logicalProviderRunId, association, trigger, source: sourceAtStop,
         eventStart, triggerEventStart, stopEventIndex, callbackFenceGeneration, triggerProviderSamples,
         providerStartSamples: triggerProviderStartSamples, triggerDeliverySeqFloor,
-        eventEnd: report.events.length, activeCapturesAfterStop: stopped.fixture.activeCaptures });
-      lastSettledAtMs = settledAtMs;
+        eventEnd: report.events.length, activeCapturesAfterStop: stopped.fixture.activeCaptures };
+      report.cycles.push(cycleReport);
+      const nextCycle = trial.cycles[cycle.index + 1];
+      if (nextCycle?.resetProviderBefore === true) {
+        // Repeated spoken fixtures are safe only across distinct provider
+        // sessions. Retire the paused session before every after-final cycle;
+        // the next cycle cannot consume a delayed Stable from its predecessor.
+        await invoke('update_stt_config', { provider: 'backend', language: 'en',
+          backendStreamingProvider: 'elevenlabs' });
+        await poll(value => value.status === 'Idle' &&
+          value.providerTransport?.connectionRetained === false,
+        `cycle ${cycle.index} provider reset`, 15_000);
+        const terminalDeadline = performance.now() + 5_000;
+        while (performance.now() < terminalDeadline && !report.terminals.some(terminal =>
+          terminal.sessionId === beforeStop.logicalProviderRunId)) await wait(20);
+        check(report.terminals.some(terminal => terminal.sessionId === beforeStop.logicalProviderRunId),
+          `cycle ${cycle.index} provider reset lacked terminal ownership`);
+        cycleReport.providerResetSettledAtMs = now();
+        cycleReport.eventEnd = report.events.length;
+      }
+      lastSettledAtMs = Number(cycleReport.providerResetSettledAtMs ?? settledAtMs);
       await invoke('native_e2e_progress', { report: { scenario: 'warm-provider-churn',
         completedCycles: cycle.index + 1, stopPhase: cycle.stopPhase } });
       await wait(cycle.jitterMs);
@@ -362,6 +384,14 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     sessionCycles.set(ready.logicalProviderRunId, trial.finalEpisodeIndex);
     check(ready.fixture.sourceEpisodes[trial.finalEpisodeIndex].emittedFrames === 0,
       'Final source escaped the real provider Ready gate');
+    // Establish the transcript boundary before releasing this generation's
+    // source. A healthy Stable final can arrive while the later PCM readbacks
+    // are still being polled, so those polls must not advance the floor past it.
+    const finalTranscriptEventStart = report.events.length;
+    const finalDeliverySeqFloor = report.events.slice(0, finalTranscriptEventStart)
+      .filter(event => event.sessionId === ready.logicalProviderRunId &&
+        Number.isSafeInteger(event.deliverySeq))
+      .reduce((maximum, event) => Math.max(maximum, Number(event.deliverySeq)), 0);
     await invoke('native_e2e_configure', { config: { sourceGateReady: true } });
     const finalGeneration = trial.finalEpisodeIndex + 1;
     await poll(value => (value.fixture.sourceEpisodes[trial.finalEpisodeIndex]?.emittedFrames ?? 0) > 0 &&
@@ -389,12 +419,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     'final provider full PCM drain', 30_000);
     const finalProviderLedger = delivered.fixture.providerPcmLedgers.find(row =>
       row.captureGeneration === finalGeneration)!;
-    const finalTranscriptEventStart = report.events.length;
     const finalProviderStartSamples = providerStartSamples(delivered, complete.logicalProviderRunId);
-    const finalDeliverySeqFloor = report.events.slice(0, finalTranscriptEventStart)
-      .filter(event => event.sessionId === complete.logicalProviderRunId &&
-        Number.isSafeInteger(event.deliverySeq))
-      .reduce((maximum, event) => Math.max(maximum, Number(event.deliverySeq)), 0);
     report.finalTranscriptFence = { eventStart: finalTranscriptEventStart,
       providerSamples: finalProviderLedger.samples, providerStartSamples: finalProviderStartSamples,
       deliverySeqFloor: finalDeliverySeqFloor };

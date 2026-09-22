@@ -560,6 +560,21 @@ impl TranscriptionService {
         }
     }
 
+    #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+    pub async fn native_e2e_transport_observation_at_boundary(
+        &self,
+        mut boundary: impl FnMut(),
+    ) -> Option<(bool, bool)> {
+        let provider = self.stt_provider.read().await;
+        match provider.as_ref() {
+            Some(provider) => provider.native_e2e_transport_observation_at_boundary(&mut boundary),
+            None => {
+                boundary();
+                Some((false, false))
+            }
+        }
+    }
+
     /// Upper bound for the service-owned portion of a normal recording stop.
     /// The app shutdown gate adds a small grace period for reducer finalization
     /// and transcript delivery after this work completes.

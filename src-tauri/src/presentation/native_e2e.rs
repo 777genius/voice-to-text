@@ -4065,9 +4065,14 @@ pub async fn native_e2e_stop_with_transport_boundary(
         return Err("transport-boundary stop requires warm provider canary".into());
     }
     let status = state.transcription_service.get_status().await;
+    let mut native_boundary_ms = 0.0;
     let transport = state
         .transcription_service
-        .native_e2e_transport_observation()
+        .native_e2e_transport_observation_at_boundary(|| {
+            dispatch_hotkey(&app, true);
+            dispatch_hotkey(&app, false);
+            native_boundary_ms = observation::now_ms();
+        })
         .await;
     let boundary = json!({
         "statusBeforeStop": format!("{status:?}"),
@@ -4075,10 +4080,8 @@ pub async fn native_e2e_stop_with_transport_boundary(
             "serverReady": ready,
             "connectionRetained": retained,
         })),
-        "nativeBoundaryMs": observation::now_ms(),
+        "nativeBoundaryMs": native_boundary_ms,
     });
-    dispatch_hotkey(&app, true);
-    dispatch_hotkey(&app, false);
     Ok(boundary)
 }
 

@@ -2732,6 +2732,29 @@ impl SttProvider for BackendProvider {
         Some((ready, retained))
     }
 
+    #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+    fn native_e2e_transport_observation_at_boundary(
+        &self,
+        boundary: &mut dyn FnMut(),
+    ) -> Option<(bool, bool)> {
+        // Ready is written under this same mutex by the receiver. Holding it
+        // across synchronous gesture acceptance makes the observed ordering
+        // authoritative even if gesture/fixture mutexes are briefly contended.
+        let transport = self.continuation.lock().unwrap();
+        let retained = self.ws_write.is_some();
+        let ready = retained
+            && self.is_streaming
+            && !self.is_closed.load(Ordering::SeqCst)
+            && self
+                .receiver_task
+                .as_ref()
+                .is_some_and(|task| !task.is_finished())
+            && transport.ready_seen
+            && !transport.native_e2e_error_seen;
+        boundary();
+        Some((ready, retained))
+    }
+
     fn is_online(&self) -> bool {
         true // Backend всегда онлайн (облачный сервис)
     }
@@ -2825,6 +2848,15 @@ mod tests {
             provider.native_e2e_transport_observation(),
             Some((false, true))
         );
+        let mut boundary_held = false;
+        let mut boundary = || {
+            boundary_held = provider.continuation.try_lock().is_err();
+        };
+        assert_eq!(
+            provider.native_e2e_transport_observation_at_boundary(&mut boundary),
+            Some((false, true))
+        );
+        assert!(boundary_held);
         send.send(serde_json::json!({"type":"ready", "session_id":"r2-ready", "accepted_capabilities":[]})).await.unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
             while provider.native_e2e_transport_observation() != Some((true, true)) {

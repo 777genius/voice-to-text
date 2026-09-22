@@ -274,6 +274,19 @@ pub trait SttProvider: Send + Sync {
         None
     }
 
+    /// TEST boundary only: run a synchronous Stop-acceptance callback while
+    /// the provider's readiness synchronization is held. Implementations that
+    /// do not expose such synchronization still execute the callback.
+    #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+    fn native_e2e_transport_observation_at_boundary(
+        &self,
+        boundary: &mut dyn FnMut(),
+    ) -> Option<(bool, bool)> {
+        let observation = self.native_e2e_transport_observation();
+        boundary();
+        observation
+    }
+
     /// Check if provider is online (cloud-based)
     fn is_online(&self) -> bool;
 }
