@@ -113,11 +113,11 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     for (let index = 0; index < captures; index++) {
       if (index > 0) rows.push({ event: 'backend_control', type: 'continue_result', connectionId,
         provider_session_id: providerSessionId, decision: 'accepted', eligible_now: true,
-        request_id: `continue-${connectionId}-${index}` });
+        request_id: `continue-${connectionId}-${index}`, pause_epoch: index });
       rows.push({ event: 'client_binary', connectionId, bytes: 640 });
       rows.push({ event: 'backend_control', type: 'pause_accepted', connectionId,
         provider_session_id: providerSessionId, decision: 'accepted',
-        request_id: `pause-${connectionId}-${index}` });
+        request_id: `pause-${connectionId}-${index}`, pause_epoch: index + 1 });
     }
     rows.push({ event: 'fault_proxy_close', connectionId, direction: 'upstream', code: 1000 });
     return rows;
@@ -138,6 +138,14 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     routeEvents).retainedProviderSessionIds,
   ['provider-1', 'provider-2', 'provider-3', 'provider-4', 'provider-5', 'provider-6',
     'provider-7']);
+  const replayedContinue = structuredClone(routeEvents);
+  const firstContinue = replayedContinue.find(event => event.type === 'continue_result');
+  replayedContinue.filter(event => event.type === 'continue_result').slice(1).forEach(event => {
+    event.request_id = firstContinue.request_id;
+    event.pause_epoch = firstContinue.pause_epoch;
+  });
+  assert.throws(() => verifyQualificationRoute(warmProviderCanaryTrial, replayedContinue),
+    /Continue acceptance is out of order/);
   const audioWhilePaused = structuredClone(routeEvents);
   const firstPause = audioWhilePaused.findIndex(event => event.type === 'pause_accepted');
   audioWhilePaused.splice(firstPause + 1, 0,
@@ -286,6 +294,16 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     terminals, final: { status: 'Idle', preparedCaptureTokenCount: 0,
       providerTransport: { connectionRetained: false }, fixture } };
   assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, report).churnCycles, 20);
+  const foreignStartupTranscript = structuredClone(report);
+  const startupEventIndex = foreignStartupTranscript.finalTranscriptFence.eventStart;
+  foreignStartupTranscript.events.splice(startupEventIndex, 0, {
+    event: 'transcription:partial', cycleIndex: -1, sessionId: 9999,
+    text: 'stale foreign text', deliverySeq: null, markerIds: [],
+  });
+  foreignStartupTranscript.finalTranscriptFence.eventStart += 1;
+  foreignStartupTranscript.finalCallbackFence.eventStart += 1;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial,
+    foreignStartupTranscript), /Final warm provider proof is incomplete/);
   const slowFinalReset = structuredClone(report);
   const lastCycle = slowFinalReset.cycles.at(-1);
   lastCycle.providerResetSettledAtMs = lastCycle.settledAtMs + 700;
@@ -392,6 +410,13 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   contradictoryTerminalFixture.providerPcmLedgers.at(-1).samples -= 320;
   assert.throws(() => verifyWarmProviderFinalFixtureAgreement(fixture, contradictoryTerminalFixture),
     /contradicts terminal native fixture/);
+  for (const field of ['providerFailures', 'providerNoAudioStops', 'warmTerminalCount']) {
+    const contradictoryLifecycle = structuredClone(fixture);
+    contradictoryLifecycle[field] += 1;
+    assert.throws(() => verifyWarmProviderFinalFixtureAgreement(fixture, contradictoryLifecycle),
+      /contradicts terminal native fixture/,
+      `terminal native ${field} cannot contradict the retained report`);
+  }
   const ledgerBytes = fixture.providerPcmLedgers.reduce((sum, row) => sum + row.samples * 2, 0);
   const ownerByGeneration = new Map(report.cycles.map(cycle =>
     [cycle.captureGeneration, cycle.logicalRunId]));
@@ -913,6 +938,19 @@ test('warm canary binds a fresh Ready provider owner before releasing gated PCM'
   const bindOwner = readySection.indexOf('sessionCycles.set(ready.logicalProviderRunId, cycle.index);');
   const release = readySection.indexOf('releaseWarmCanarySourceBeforeAck(');
   assert.ok(bindOwner >= 0 && bindOwner < release);
+});
+
+test('paid live backend instruments real provider lifecycle counters', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const provider = await readFile(
+    new URL('../../src-tauri/src/infrastructure/stt/backend.rs', import.meta.url), 'utf8');
+  const native = await readFile(
+    new URL('../../src-tauri/src/presentation/native_e2e.rs', import.meta.url), 'utf8');
+  assert.match(provider, /native_e2e_lifecycle_active: bool/);
+  assert.match(provider, /record_native_e2e_stream_started\(\)/);
+  assert.match(provider, /record_native_e2e_stream_stopped\(\)/);
+  assert.match(native, /pub\(crate\) fn record_live_provider_started\(\)/);
+  assert.match(native, /pub\(crate\) fn record_live_provider_stopped\(no_audio: bool\)/);
 });
 
 test('E63 after-write diagnostics retain the full 900000 ms outer runtime contract', async () => {

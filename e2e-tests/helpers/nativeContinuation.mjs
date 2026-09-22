@@ -177,6 +177,8 @@ export function verifyWarmProviderFinalFixtureAgreement(reportFixture, envelopeF
   const keys = [
     'captureStarts', 'captureStops', 'activeCaptures', 'maxActiveCaptures',
     'providerStarts', 'providerResumes', 'providerStops', 'activeProviders', 'maxActiveProviders',
+    'providerFailures', 'providerFailureCaptureGenerations', 'providerNoAudioStops',
+    'warmTerminalCount',
     'observationOverflow', 'markerViolations', 'sourceEpisodes', 'captureRunAssociations',
     'capturePcmLedgers', 'providerPcmLedgers', 'providerCallbackGenerations',
   ];
@@ -267,6 +269,7 @@ export function verifyQualificationRoute(trial, events) {
       event.type === 'pause_accepted' && event.decision === 'accepted');
     const continues = events.filter(event => event.event === 'backend_control' &&
       event.type === 'continue_result' && event.decision === 'accepted' && event.eligible_now === true);
+    const requestIds = new Set();
     if (ready.length < expected.providerHandshakes.min || ready.length > expected.providerHandshakes.max ||
         new Set(ready.map(event => event.connectionId)).size !== ready.length ||
         new Set(ready.map(event => event.session_id)).size !== ready.length ||
@@ -285,23 +288,36 @@ export function verifyQualificationRoute(trial, events) {
       let active = true;
       let audioFrames = 0;
       let sessionPauses = 0;
+      let lastPauseEpoch = 0;
+      let pendingPauseEpoch = null;
       for (const event of sessionEvents) {
         if (event.event === 'client_binary') {
           if (!active) throw new Error('Warm canary sent audio while provider session was paused');
           audioFrames += 1;
         } else if (event.event === 'backend_control' && event.type === 'pause_accepted' &&
             event.decision === 'accepted') {
-          if (!active || event.provider_session_id !== handshake.session_id) {
+          if (!active || event.provider_session_id !== handshake.session_id ||
+              typeof event.request_id !== 'string' || !event.request_id ||
+              requestIds.has(event.request_id) || !Number.isSafeInteger(event.pause_epoch) ||
+              event.pause_epoch !== lastPauseEpoch + 1) {
             throw new Error('Warm canary Pause acceptance is out of order');
           }
+          requestIds.add(event.request_id);
           active = false;
           sessionPauses += 1;
+          lastPauseEpoch = event.pause_epoch;
+          pendingPauseEpoch = event.pause_epoch;
         } else if (event.event === 'backend_control' && event.type === 'continue_result' &&
             event.decision === 'accepted' && event.eligible_now === true) {
-          if (active || event.provider_session_id !== handshake.session_id) {
+          if (active || event.provider_session_id !== handshake.session_id ||
+              typeof event.request_id !== 'string' || !event.request_id ||
+              requestIds.has(event.request_id) || !Number.isSafeInteger(event.pause_epoch) ||
+              event.pause_epoch !== pendingPauseEpoch) {
             throw new Error('Warm canary Continue acceptance is out of order');
           }
+          requestIds.add(event.request_id);
           active = true;
+          pendingPauseEpoch = null;
         }
       }
       if (audioFrames > 0 && (active || sessionPauses === 0)) {
@@ -900,7 +916,7 @@ export function verifyWarmProviderCanary(trial, report) {
       !Number.isSafeInteger(callbackFence?.eventStart) || callbackFence.eventStart < cycles.at(-1).eventEnd ||
       callbackFence.eventStart > events.length ||
       events.slice(cycles.at(-1).eventEnd, finalTranscriptEventStart)
-        .some(event => Number.isSafeInteger(event.cycleIndex) && event.cycleIndex >= finalIndex) ||
+        .some(event => typeof event.event === 'string' && event.event.startsWith('transcription:')) ||
       events.slice(finalTranscriptEventStart, callbackFence.eventStart)
         .some(event => event.event === 'transcription:terminal') ||
       events.slice(finalTranscriptEventStart).some(event => event.cycleIndex !== finalIndex) ||

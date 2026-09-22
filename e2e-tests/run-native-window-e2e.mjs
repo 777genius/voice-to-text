@@ -1044,6 +1044,7 @@ export function validateResult(envelope) {
       cycle.controls[0].logicalRunId === cycle.controls[1].logicalRunId &&
       cycle.controls[0].logicalRunId === retainedLogicalRunId &&
       Number.isSafeInteger(retainedLogicalRunId) && retainedLogicalRunId > 0 &&
+      cycle.controls[0].delivered === true && cycle.controls[1].delivered === true &&
       cycle.controls[0].result?.decision === 'accepted' && cycle.controls[1].result?.decision === 'accepted' &&
       cycle.controls[0].result.pause_epoch === cycle.controls[1].result.pause_epoch &&
       cycle.controls[0].result.pause_epoch === index + 1);
@@ -1178,15 +1179,20 @@ export function validateResult(envelope) {
     allFinalDeliveries.length !== expectedFinalSessionIds.length ||
     allFinalDeliveries.length !== fixture.finals ||
     new Set(expectedFinalSessionIds).size !== expectedFinalSessionIds.length ||
+    expectedFinalSessionIds.some((sessionId, index) =>
+      allFinalDeliveries[index]?.sessionId !== sessionId) ||
     expectedFinalSessionIds.some(sessionId => !positiveSafeInteger(sessionId) ||
       allFinalDeliveries.filter(delivery => delivery.sessionId === sessionId).length !== 1) ||
     allFinalDeliveries.some(delivery => !expectedFinalSessionIds.includes(delivery.sessionId) ||
       typeof delivery.text !== 'string' || !delivery.text.trim() ||
       delivery.text !== expectedTranscriptForSession(delivery.sessionId) ||
       (delivery.deliverySeq !== null && !positiveSafeInteger(delivery.deliverySeq))) ||
-    cycleFinalDeliveries.some(delivery => !allFinalDeliveries.some(candidate =>
-      candidate.sessionId === delivery.sessionId && candidate.text === delivery.text &&
-      candidate.deliverySeq === delivery.deliverySeq)) ||
+    cycleFinalDeliveries.some((delivery, index) =>
+      delivery.sessionId !== cycles[index]?.sessionId ||
+      delivery.text !== cycles[index]?.expectedTranscript ||
+      delivery.deliverySeq !== cycles[index]?.finalDeliverySeq ||
+      !allFinalDeliveries.some(candidate => candidate.sessionId === delivery.sessionId &&
+        candidate.text === delivery.text && candidate.deliverySeq === delivery.deliverySeq)) ||
     cycles.some((row, index) =>
     row?.index !== index || !Number.isSafeInteger(row.captureStartsBefore) ||
     !Number.isSafeInteger(row.captureStartsAfter) || row.captureStartsAfter <= row.captureStartsBefore ||

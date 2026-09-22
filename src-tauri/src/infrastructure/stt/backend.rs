@@ -205,6 +205,8 @@ pub struct BackendProvider {
     control_seq: u64,
     delivery: Arc<std::sync::Mutex<DeliveryLedger>>,
     ack_changed: Arc<tokio::sync::Notify>,
+    #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+    native_e2e_lifecycle_active: bool,
 }
 
 struct ControlWaiterLease {
@@ -339,6 +341,7 @@ impl DeliveryLedger {
 
 impl Drop for BackendProvider {
     fn drop(&mut self) {
+        self.record_native_e2e_stream_stopped();
         self.is_closed.store(true, Ordering::SeqCst);
         super::abort_background_task(&mut self.keepalive_task);
         super::abort_background_task(&mut self.receiver_task);
@@ -452,6 +455,26 @@ impl BackendProvider {
             control_seq: 0,
             delivery: Arc::new(std::sync::Mutex::new(DeliveryLedger::default())),
             ack_changed: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            native_e2e_lifecycle_active: false,
+        }
+    }
+
+    fn record_native_e2e_stream_started(&mut self) {
+        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+        if !self.native_e2e_lifecycle_active {
+            crate::presentation::native_e2e::record_live_provider_started();
+            self.native_e2e_lifecycle_active = true;
+        }
+    }
+
+    fn record_native_e2e_stream_stopped(&mut self) {
+        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+        if self.native_e2e_lifecycle_active {
+            crate::presentation::native_e2e::record_live_provider_stopped(
+                self.sent_chunks_count == 0,
+            );
+            self.native_e2e_lifecycle_active = false;
         }
     }
 
@@ -2227,6 +2250,7 @@ impl SttProvider for BackendProvider {
         self.is_paused = false;
         self.sent_chunks_count = 0;
         self.sent_bytes_total = 0;
+        self.record_native_e2e_stream_started();
 
         log::info!("BackendProvider: Stream started");
         Ok(())
@@ -2431,6 +2455,7 @@ impl SttProvider for BackendProvider {
 
         if !self.is_streaming {
             self.is_closed.store(true, Ordering::SeqCst);
+            self.record_native_e2e_stream_stopped();
             return Ok(());
         }
 
@@ -2503,6 +2528,7 @@ impl SttProvider for BackendProvider {
         self.ws_write = None;
         self.is_streaming = false;
         self.is_paused = false;
+        self.record_native_e2e_stream_stopped();
         self.session_id = None;
         self.audio_batch.clear();
         self.next_send_at = None;
@@ -2548,6 +2574,7 @@ impl SttProvider for BackendProvider {
         self.ws_write = None;
         self.is_streaming = false;
         self.is_paused = false;
+        self.record_native_e2e_stream_stopped();
         self.session_id = None;
         self.audio_batch.clear();
         self.next_send_at = None;

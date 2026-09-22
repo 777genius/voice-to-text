@@ -220,6 +220,10 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
     v => { v.report.allFinalDeliveries.push({ sessionId: 999, text: 'foreign final', deliverySeq: 999 }); },
     v => { v.report.allFinalDeliveries.find(delivery => delivery.sessionId === 51).text =
       'Native fixture session 50'; },
+    v => {
+      v.report.allFinalDeliveries.push(v.report.allFinalDeliveries.shift());
+      v.report.cycleFinalDeliveries.push(v.report.cycleFinalDeliveries.shift());
+    },
     v => { v.report.hiddenIdleEvidence.webviewElapsedMs = 179999; },
     v => { v.report.hiddenIdleEvidence.wakeCaptureGeneration = 50; },
     v => { v.fixture.captureRunAssociations.find(row => row.captureGeneration === 51).captureRunId = 1051;
@@ -307,6 +311,11 @@ test('continuation qualification requires balanced and identical terminal lifecy
       control.result.pause_epoch = 1;
     })); },
     value => { value.report.logicalRunId = 999; },
+    value => {
+      value.fixture.controlResults[1].delivered = false;
+      value.report.cycles[0].controls[1].delivered = false;
+      value.report.final.fixture.controlResults[1].delivered = false;
+    },
     value => { value.fixture.controlResults[0].logicalRunId = 999;
       value.report.final.fixture.controlResults[0].logicalRunId = 999; },
     value => { value.fixture.providerNoAudioStops = 1; value.report.final.fixture.providerNoAudioStops = 1; },

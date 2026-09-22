@@ -2328,6 +2328,34 @@ pub(crate) fn record_live_provider_pcm(
     );
 }
 
+pub(crate) fn record_live_provider_started() {
+    if !qualification_live() {
+        return;
+    }
+    let fixture = fixture();
+    let mut counters = fixture.counters.lock().unwrap();
+    counters.provider_starts += 1;
+    counters.active_providers += 1;
+    counters.max_active_providers = counters.max_active_providers.max(counters.active_providers);
+}
+
+pub(crate) fn record_live_provider_stopped(no_audio: bool) {
+    if !qualification_live() {
+        return;
+    }
+    let fixture = fixture();
+    let mut counters = fixture.counters.lock().unwrap();
+    if counters.active_providers == 0 {
+        record_marker_violation(&mut counters, "live provider lifecycle underflow");
+        return;
+    }
+    counters.active_providers -= 1;
+    counters.provider_stops += 1;
+    if no_audio {
+        counters.provider_no_audio_stops += 1;
+    }
+}
+
 fn record_provider_callback_swap(counters: &mut Counters) {
     let Some(capture_generation) = counters
         .capture_run_associations
