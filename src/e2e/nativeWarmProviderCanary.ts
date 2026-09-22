@@ -108,9 +108,12 @@ export function warmCanaryAttributedFinalEvidence(
   fence: WarmCanaryCaptureFence,
   allowUntimedStable: boolean,
 ) {
-  const stableDeliveries = allowUntimedStable
-    ? events.filter(event => eventIsFreshStable(event, fence))
-    : [];
+  const stableCandidates = allowUntimedStable
+    ? events.filter(event => eventIsFreshStable(event, fence)) : [];
+  const stableSequencesIncrease = stableCandidates.every((event, index) =>
+    Number(event.deliverySeq) > (index === 0
+      ? fence.deliverySeqFloor : Number(stableCandidates[index - 1].deliverySeq)));
+  const stableDeliveries = stableSequencesIncrease ? stableCandidates : [];
   const timedDeliveries = events.filter(event => eventOwnsCaptureFence(event, fence) &&
     eventTimingContainedByFence(event, fence) && normalizedProviderText(event.text).length > 0);
   return { stableDeliveries, timedDeliveries };

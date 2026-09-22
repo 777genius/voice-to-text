@@ -550,10 +550,12 @@ export function verifyWarmProviderCanary(trial, report) {
         Number.isSafeInteger(duration) && duration > 0 && start >= providerStartSamples &&
         start + duration <= providerStartSamples + providerSamples;
     });
-    const stableDeliveries = allowUntimedStable
+    const stableCandidates = allowUntimedStable
       ? candidateEvents.filter(event => baseMatches(event) && event.timingKnown !== true &&
-        Number.isSafeInteger(event.deliverySeq) && event.deliverySeq > deliverySeqFloor)
-      : [];
+        Number.isSafeInteger(event.deliverySeq) && event.deliverySeq > deliverySeqFloor) : [];
+    const stableSequencesIncrease = stableCandidates.every((event, index) =>
+      event.deliverySeq > (index === 0 ? deliverySeqFloor : stableCandidates[index - 1].deliverySeq));
+    const stableDeliveries = stableSequencesIncrease ? stableCandidates : [];
     return { stableDeliveries, timedDeliveries };
   };
   const ledgerIsValid = row => Number.isSafeInteger(row?.captureGeneration) && row.captureGeneration > 0 &&

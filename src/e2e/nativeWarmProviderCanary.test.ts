@@ -149,6 +149,9 @@ describe('warm provider paid canary plan', () => {
     expect(warmCanaryAttributedFinalEvidence([
       { ...timed, sourceStartSeconds: 1.9999375 },
     ], fence, false).timedDeliveries).toEqual([]);
+    expect(warmCanaryAttributedFinalEvidence([
+      { ...stable, deliverySeq: 89 }, { ...stable, deliverySeq: 88 },
+    ], fence, true).stableDeliveries).toEqual([]);
   });
 
   it('accepts segmented episode text but rejects duplicate fragments', () => {

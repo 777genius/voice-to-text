@@ -667,6 +667,18 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     .stableSnapshot = `${markerPrefix} ${markerSuffix}`;
   assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, segmentedChurnFinal).churnCycles, 20,
     'after-final trigger evidence may be split across sequential Stable deliveries');
+  const decreasingChurnFinal = structuredClone(segmentedChurnFinal);
+  const decreasingCycle = decreasingChurnFinal.cycles.find(row =>
+    row.index === segmentedCycle.index);
+  const decreasingFinals = decreasingChurnFinal.events.slice(
+    decreasingCycle.triggerEventStart, decreasingCycle.stopEventIndex)
+    .filter(row => row.event === 'transcription:final');
+  decreasingFinals[0].deliverySeq = 702;
+  decreasingFinals[1].deliverySeq = 701;
+  decreasingCycle.trigger.deliverySeq = 701;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, decreasingChurnFinal),
+    /missed transcription:final evidence|Final warm provider proof is incomplete/,
+  'Stable delivery sequences must increase within a provider session');
   const duplicatePostStopFragment = structuredClone(report);
   const postStopCycle = duplicatePostStopFragment.cycles.find(row => row.stopPhase === 'after-final');
   insertAfterStop(duplicatePostStopFragment, postStopCycle, {
