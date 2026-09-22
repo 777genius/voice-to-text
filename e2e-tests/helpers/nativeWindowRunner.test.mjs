@@ -288,17 +288,27 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
       oldProviderStillFinalizing: true, observations: 20, backgroundDidNotReopen: true,
       successorStayedVisible: true, markerDeliveryComplete: true, backgroundStartingBeforeHide: true })),
     final: { status: 'Idle', visible: false, preparedCaptureTokenCount: 0,
-      fixture: { captureStarts: 1, captureStops: 1, providerStarts: 1, providerStops: 1,
+      fixture: { captureStarts: 10, captureStops: 10, providerStarts: 10, providerStops: 10,
         providerFailures: 0, providerFailureCaptureGenerations: [],
         providerResumes: 0, providerNoAudioStops: 0, warmTerminalCount: 0,
         activeCaptures: 0, activeProviders: 0, maxActiveCaptures: 1,
         maxActiveProviders: 1, observationOverflow: false, markerViolations: [],
-        captureRunAssociations: [{ captureGeneration: 1, captureRunId: 1, captureFenceGeneration: 1 }],
-        captureMarkers: [{ captureGeneration: 1, count: 1, firstSequence: 1, lastSequence: 1 }],
-        providerMarkers: [{ captureGeneration: 1, captureRunId: 1, captureFenceGeneration: 1,
-          providerSessionId: 1, count: 1, firstSequence: 1, lastSequence: 1 }],
-        capturePcmLedgers: [{ captureGeneration: 1, chunks: 2, samples: 800, hash: '0123456789abcdef' }],
-        providerPcmLedgers: [{ captureGeneration: 1, chunks: 2, samples: 800, hash: '0123456789abcdef' }] } } } };
+        captureRunAssociations: Array.from({ length: 10 }, (_, index) => ({
+          captureGeneration: index + 1, captureRunId: index + 1,
+          captureFenceGeneration: index + 1 })),
+        captureMarkers: Array.from({ length: 10 }, (_, index) => ({
+          captureGeneration: index + 1, count: 1, firstSequence: index + 1,
+          lastSequence: index + 1 })),
+        providerMarkers: Array.from({ length: 10 }, (_, index) => ({
+          captureGeneration: index + 1, captureRunId: index + 1,
+          captureFenceGeneration: index + 1, providerSessionId: index + 1,
+          count: 1, firstSequence: index + 1, lastSequence: index + 1 })),
+        capturePcmLedgers: Array.from({ length: 10 }, (_, index) => ({
+          captureGeneration: index + 1, chunks: 2, samples: 800,
+          hash: `${index.toString(16).padStart(15, '0')}1` })),
+        providerPcmLedgers: Array.from({ length: 10 }, (_, index) => ({
+          captureGeneration: index + 1, chunks: 2, samples: 800,
+          hash: `${index.toString(16).padStart(15, '0')}1` })) } } } };
   evidence.fixture = structuredClone(evidence.report.final.fixture);
   assert.throws(() => validateResult(evidence), /physical warm input evidence/);
   const warm = structuredClone(evidence);
@@ -330,18 +340,35 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
   warm.fixture.physicalOpenCount = 4;
   warm.fixture.physicalCloseCount = 3;
   assert.equal(validateResult(warm), warm.report);
+  const collapsedNativeCapture = structuredClone(warm);
+  collapsedNativeCapture.report.final.fixture.captureRunAssociations =
+    collapsedNativeCapture.report.final.fixture.captureRunAssociations.slice(0, 1);
+  collapsedNativeCapture.report.final.fixture.capturePcmLedgers =
+    collapsedNativeCapture.report.final.fixture.capturePcmLedgers.slice(0, 1);
+  collapsedNativeCapture.report.final.fixture.providerPcmLedgers =
+    collapsedNativeCapture.report.final.fixture.providerPcmLedgers.slice(0, 1);
+  collapsedNativeCapture.fixture = structuredClone(collapsedNativeCapture.report.final.fixture);
+  assert.throws(() => validateResult(collapsedNativeCapture),
+    /physical warm input evidence|mini UX window evidence/,
+    'ten UI reopen identities cannot be backed by one native PCM generation');
   const neutralBeforeOwnership = structuredClone(warm);
   neutralBeforeOwnership.report.warmVisibleFrames[0].runId = null;
   neutralBeforeOwnership.report.warmVisibleFrames[0].revision = null;
   assert.equal(validateResult(neutralBeforeOwnership), neutralBeforeOwnership.report);
+  const neutralWithoutReason = structuredClone(neutralBeforeOwnership);
+  delete neutralWithoutReason.report.warmVisibleFrames[0].readinessReason;
+  assert.equal(validateResult(neutralWithoutReason), neutralWithoutReason.report);
+  const neutralIdleReason = structuredClone(neutralBeforeOwnership);
+  neutralIdleReason.report.warmVisibleFrames[0].readinessReason = 'idle';
+  assert.equal(validateResult(neutralIdleReason), neutralIdleReason.report);
   const rebatched = structuredClone(warm);
   rebatched.report.final.fixture.providerPcmLedgers[0].chunks = 3;
   rebatched.fixture.providerPcmLedgers[0].chunks = 3;
   assert.equal(validateResult(rebatched), rebatched.report);
   const terminalStop = structuredClone(warm);
-  terminalStop.report.final.fixture.providerStops = 0;
+  terminalStop.report.final.fixture.providerStops = 9;
   terminalStop.report.final.fixture.warmTerminalCount = 1;
-  terminalStop.fixture.providerStops = 0;
+  terminalStop.fixture.providerStops = 9;
   terminalStop.fixture.warmTerminalCount = 1;
   assert.equal(validateResult(terminalStop), terminalStop.report);
   const readyFirstVisible = structuredClone(warm);
@@ -441,6 +468,7 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
     e => { e.report.warmActivationFrames[0].revision = null; },
   ]) {
     const broken = structuredClone(warm); mutate(broken);
-    assert.throws(() => validateResult(broken), /mini UX window evidence/);
+    assert.throws(() => validateResult(broken),
+      /physical warm input evidence|mini UX window evidence/);
   }
 });

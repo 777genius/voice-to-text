@@ -13,6 +13,12 @@ export const approvedFixtures = Object.freeze({
 // followed by the complete 49.3s proof at 20ms cadence.
 export const maxProxyEvidenceEvents = 32768;
 export const warmProviderCanaryJittersMs = Object.freeze([0, 25, 100, 250, 500]);
+function jitterEvidenceUpperBoundMs(jitterMs) {
+  const index = warmProviderCanaryJittersMs.indexOf(jitterMs);
+  return index >= 0 && index + 1 < warmProviderCanaryJittersMs.length
+    ? warmProviderCanaryJittersMs[index + 1]
+    : jitterMs + 500;
+}
 export const warmProviderCanaryPhases = Object.freeze([
   'before-ready',
   'after-first-pcm',
@@ -595,7 +601,8 @@ export function verifyWarmProviderCanary(trial, report) {
           Math.abs(cycle.previousSettleToStartMs -
             (cycle.startedAtMs - previousSettlement)) > 1 ||
           cycle.previousSettleToStartMs < trial.cycles[index - 1].jitterMs ||
-          cycle.previousSettleToStartMs > trial.cycles[index - 1].jitterMs + 500) ||
+          cycle.previousSettleToStartMs >=
+            jitterEvidenceUpperBoundMs(trial.cycles[index - 1].jitterMs)) ||
         (resetAfter ? (!Number.isFinite(cycle.providerResetSettledAtMs) ||
           cycle.providerResetSettledAtMs < cycle.settledAtMs ||
           cycle.providerResetSettledAtMs - cycle.settledAtMs > 15_500) :
@@ -726,12 +733,12 @@ export function verifyWarmProviderCanary(trial, report) {
       typeof event.text === 'string' && event.text.trim().length > 0 &&
       Number.isSafeInteger(report.finalTranscriptFence?.providerStartSamples) &&
       report.finalTranscriptFence.providerStartSamples >= 0 &&
-      (event.timingKnown !== true ||
-        (Number.isSafeInteger(eventStartSamples) && Number.isSafeInteger(eventDurationSamples) &&
-          eventDurationSamples > 0 &&
-          eventStartSamples < report.finalTranscriptFence.providerStartSamples + finalProviderLedger?.samples &&
-          eventEndSamples > report.finalTranscriptFence.providerStartSamples &&
-          eventEndSamples <= report.finalTranscriptFence.providerStartSamples + finalProviderLedger?.samples)) &&
+      event.timingKnown === true &&
+      Number.isSafeInteger(eventStartSamples) && Number.isSafeInteger(eventDurationSamples) &&
+      eventDurationSamples > 0 &&
+      eventStartSamples < report.finalTranscriptFence.providerStartSamples + finalProviderLedger?.samples &&
+      eventEndSamples > report.finalTranscriptFence.providerStartSamples &&
+      eventEndSamples <= report.finalTranscriptFence.providerStartSamples + finalProviderLedger?.samples &&
       Array.isArray(event.markerIds) && event.markerIds.every(markerId => markerId === 0 || markerId === 1);
   };
   const allFinalEvents = events.filter(event => event.event === 'transcription:final');
@@ -743,9 +750,10 @@ export function verifyWarmProviderCanary(trial, report) {
   );
   const acceptedFinalText = acceptedFinalDeliveries.reduce((stable, delivery) =>
     appendStableText(stable, delivery.text), '');
-  const acceptedMarkerIds = acceptedFinalDeliveries.flatMap(event => event.markerIds);
-  const expectedFinalTranscript = appendStableText(finalTranscriptBeforeProof, acceptedFinalText);
   const acceptedNormalizedText = normalizedEventText({ text: acceptedFinalText });
+  const acceptedMarkerIds = [...acceptedNormalizedText.matchAll(/(?:на столе|за окном)/g)]
+    .map(match => match[0] === 'на столе' ? 0 : 1);
+  const expectedFinalTranscript = appendStableText(finalTranscriptBeforeProof, acceptedFinalText);
   if (finalSource?.name !== trial.episodes[finalIndex] ||
       finalSource.bytes !== finalBytes || finalSource.sourceFrames !== finalBytes / 2 ||
       finalSource.sourceDurationMs !== finalBytes / 32 || finalSource.cadenceMs !== 20 ||
@@ -774,7 +782,8 @@ export function verifyWarmProviderCanary(trial, report) {
       !Number.isFinite(report.finalReadyElapsedMs) || report.finalReadyElapsedMs < 0 ||
       report.finalReadyElapsedMs > trial.readyGateTimeoutMs ||
       report.finalStartedAtMs - cycles.at(-1).settledAtMs < cycles.at(-1).jitterMs ||
-      report.finalStartedAtMs - cycles.at(-1).settledAtMs > cycles.at(-1).jitterMs + 500 ||
+      report.finalStartedAtMs - cycles.at(-1).settledAtMs >=
+        jitterEvidenceUpperBoundMs(cycles.at(-1).jitterMs) ||
       !Number.isSafeInteger(callbackFence?.eventStart) || callbackFence.eventStart < cycles.at(-1).eventEnd ||
       callbackFence.eventStart > events.length ||
       events.slice(cycles.at(-1).eventEnd, report.finalTranscriptFence.eventStart)
@@ -792,7 +801,6 @@ export function verifyWarmProviderCanary(trial, report) {
       (acceptedNormalizedText.split('на столе').length - 1) !== 1 ||
       (acceptedNormalizedText.split('за окном').length - 1) !== 1 ||
       report.expectedInsertion !== expectedFinalTranscript ||
-      new Set(finalEvents.flatMap(event => event.markerIds)).size < 2 ||
       !events.slice(report.finalTranscriptFence.eventStart).some(finalTranscriptMatchesCallbackGeneration) ||
       finalEvents.some(event => ['transcription:partial', 'transcription:final'].includes(event.event) &&
         event.sessionId !== ownership.logicalRunId) ||

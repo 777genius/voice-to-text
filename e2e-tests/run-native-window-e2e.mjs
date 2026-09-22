@@ -156,6 +156,29 @@ export function validateMiniUxResult(envelope) {
     `${frame.runId}:${frame.revision}`) : [];
   const distinctAttemptIdentities = attemptIdentities.every(Boolean) &&
     new Set(attemptIdentities).size === attemptIdentities.length;
+  const warmCaptureEvidenceValid = (() => {
+    const fixture = final?.fixture;
+    if (!Array.isArray(readyFrames) || !Array.isArray(fixture?.captureRunAssociations) ||
+        !Array.isArray(fixture?.capturePcmLedgers) || !Array.isArray(fixture?.providerPcmLedgers)) {
+      return false;
+    }
+    const generations = new Set();
+    return readyFrames.every(ready => {
+      const owned = fixture.captureRunAssociations.filter(row =>
+        row?.captureRunId === ready?.runId);
+      if (owned.length !== 1 || generations.has(owned[0].captureGeneration)) return false;
+      generations.add(owned[0].captureGeneration);
+      const capture = fixture.capturePcmLedgers.find(row =>
+        row.captureGeneration === owned[0].captureGeneration);
+      const provider = fixture.providerPcmLedgers.find(row =>
+        row.captureGeneration === owned[0].captureGeneration);
+      return positiveSafeInteger(owned[0].captureGeneration) &&
+        positiveSafeInteger(owned[0].captureFenceGeneration) &&
+        positiveSafeInteger(capture?.chunks) && positiveSafeInteger(capture?.samples) &&
+        positiveSafeInteger(provider?.chunks) && provider.samples === capture.samples &&
+        provider.hash === capture.hash;
+    });
+  })();
   const advancingWindowEpochs = Array.isArray(nativeWindowEpochs) &&
     nativeWindowEpochs.every((row, index) => index === 0 ||
       row.windowEpoch > nativeWindowEpochs[index - 1].windowEpoch);
@@ -172,6 +195,9 @@ export function validateMiniUxResult(envelope) {
   const captureReadyRecording = frame => frame.captureReady === true &&
     ['finalizing-previous', 'connecting-provider', 'recording'].includes(frame.readinessReason) &&
     /\brecording\b/.test(frame.phase) && !/\b(starting|processing)\b/.test(frame.phase);
+  const neutralAdmissionFrame = frame => frame.captureReady === false &&
+    [undefined, null, 'idle', 'activating-warm-capture'].includes(frame.readinessReason) &&
+    frame.statusText === '' && !/\b(recording|starting|processing)\b/.test(frame.phase);
   const visibleFrameEvidenceValid = Array.isArray(forbiddenStatusTexts) &&
     forbiddenStatusTexts.length === 2 && forbiddenStatusTexts.every(text =>
       typeof text === 'string' && text.length > 0) && new Set(forbiddenStatusTexts).size === 2 &&
@@ -190,13 +216,9 @@ export function validateMiniUxResult(envelope) {
       const ready = readyFrames?.[index];
       const nativeWindow = nativeWindowEpochs?.[index];
       const attemptFrames = visibleFrames.filter(candidate => candidate.attempt === index + 1);
-      const neutralActivation = frame.captureReady === false &&
-        frame.readinessReason === 'activating-warm-capture' && frame.statusText === '' &&
-        !/\b(recording|starting|processing)\b/.test(frame.phase);
+      const neutralActivation = neutralAdmissionFrame(frame);
       const attemptFramesValid = attemptFrames.every(candidate => {
-        const candidateNeutral = candidate.captureReady === false &&
-          candidate.readinessReason === 'activating-warm-capture' && candidate.statusText === '' &&
-          !/\b(recording|starting|processing)\b/.test(candidate.phase);
+        const candidateNeutral = neutralAdmissionFrame(candidate);
         const candidateOwnershipValid = candidateNeutral
           ? ((candidate.runId === null && candidate.revision === null) ||
             (candidate.runId === ready?.runId && candidate.revision === ready?.revision))
@@ -212,7 +234,8 @@ export function validateMiniUxResult(envelope) {
         : frame.runId === ready?.runId && frame.revision === ready?.revision;
       return (neutralActivation || captureReadyRecording(frame)) && firstOwnershipValid &&
         frame.windowEpoch === nativeWindow?.windowEpoch && attemptFramesValid;
-    }) && distinctAttemptIdentities && advancingWindowEpochs && nativeWindowEvidenceValid;
+    }) && distinctAttemptIdentities && warmCaptureEvidenceValid &&
+    advancingWindowEpochs && nativeWindowEvidenceValid;
   if (report?.warmMode !== true || report.warmReopens !== 10 || report.idleAcceptedDelta !== 0 ||
        !Array.isArray(report.trace) || report.trace.length === 0 ||
        !Array.isArray(readyFrames) || readyFrames.length !== 10 ||

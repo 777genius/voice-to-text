@@ -470,11 +470,11 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       return event.event === 'transcription:final' && event.sessionId === complete.logicalProviderRunId &&
         event.cycleIndex === trial.finalEpisodeIndex && Number.isSafeInteger(event.deliverySeq) &&
         Number(event.deliverySeq) > finalDeliverySeqFloor &&
-        (event.timingKnown !== true ||
-          (Number.isSafeInteger(timing.start) && Number.isSafeInteger(timing.duration) && timing.duration > 0 &&
-            timing.start < finalProviderStartSamples + finalProviderLedger.samples &&
-            timing.end > finalProviderStartSamples &&
-            timing.end <= finalProviderStartSamples + finalProviderLedger.samples)) &&
+        event.timingKnown === true &&
+        Number.isSafeInteger(timing.start) && Number.isSafeInteger(timing.duration) && timing.duration > 0 &&
+        timing.start < finalProviderStartSamples + finalProviderLedger.samples &&
+        timing.end > finalProviderStartSamples &&
+        timing.end <= finalProviderStartSamples + finalProviderLedger.samples &&
         typeof event.text === 'string' && event.text.trim().length > 0 &&
         event.markerIds.every(markerId => markerId === 0 || markerId === 1);
     };
@@ -500,8 +500,8 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         );
     },
     'final stable transcript proof', 30_000);
-    const finalMarkers = new Set(report.events.filter(event => event.cycleIndex === trial.finalEpisodeIndex)
-      .flatMap(event => event.markerIds));
+    const finalMarkers = new Set(syntheticPhraseOccurrences(acceptedFinalText)
+      .map(marker => marker.markerId));
     check(store.finalText.trim().length > 0 && finalMarkers.size >= 2,
       'Final full PCM did not produce the complete multi-phrase transcript proof');
     // Retire the paused provider through the production configuration invalidation

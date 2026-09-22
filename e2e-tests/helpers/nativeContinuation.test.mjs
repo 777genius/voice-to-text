@@ -222,7 +222,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     .reduce((maximum, event) => Math.max(maximum, event.deliverySeq), 0);
   events.push({ event: 'transcription:final', cycleIndex: 20, sessionId: finalLogicalRunId,
     deliverySeq: 99, text: 'на столе лежит книга за окном растет береза', markerIds: [0, 1],
-    timingKnown: false, sourceStartSeconds: 0, sourceDurationSeconds: 0 });
+    timingKnown: true, sourceStartSeconds: finalProviderStartSamples / 16000,
+    sourceDurationSeconds: 1 });
   // Model the real race: the final is delivered before the state poll observes
   // the native callback generation. The earlier source-release fence must keep
   // this valid delivery eligible.
@@ -287,8 +288,46 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       text: 'за окном растет береза', markerIds: [1] });
   segmentedFinal.finalCallbackFence.eventStart += 1;
   assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, segmentedFinal).churnCycles, 20);
+  const phraseSegmentedFinal = structuredClone(segmentedFinal);
+  const firstFinalIndex = phraseSegmentedFinal.events.findIndex(event =>
+    event.cycleIndex === 20 && event.event === 'transcription:final');
+  phraseSegmentedFinal.events.splice(firstFinalIndex, 1,
+    { ...phraseSegmentedFinal.events[firstFinalIndex], text: 'на', markerIds: [] },
+    { ...phraseSegmentedFinal.events[firstFinalIndex], deliverySeq: 100,
+      text: 'столе лежит книга', markerIds: [] });
+  phraseSegmentedFinal.events[firstFinalIndex + 2].deliverySeq = 101;
+  phraseSegmentedFinal.finalCallbackFence.eventStart += 1;
+  assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, phraseSegmentedFinal).churnCycles, 20,
+    'markers are derived from the aggregate when a provider segments inside a phrase');
+  const staleMixedFinal = structuredClone(segmentedFinal);
+  const stalePhrase = staleMixedFinal.events.find(event => event.cycleIndex === 20 &&
+    event.event === 'transcription:final' && event.markerIds.includes(1));
+  stalePhrase.timingKnown = false;
+  stalePhrase.sourceStartSeconds = 0;
+  stalePhrase.sourceDurationSeconds = 0;
+  stalePhrase.deliverySeq = 1_000;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, staleMixedFinal),
+    /Final warm provider proof is incomplete/,
+    'a fresh-sequence stale phrase cannot complete the current final generation');
   assert.equal(verifyWarmProviderFinalFixtureAgreement(fixture, structuredClone(fixture))
     .finalNativeFixtureAgreement, true);
+  const collapsedJitters = structuredClone(report);
+  let previousSettlement = collapsedJitters.cycles[0].providerResetSettledAtMs ??
+    collapsedJitters.cycles[0].settledAtMs;
+  for (const cycle of collapsedJitters.cycles.slice(1)) {
+    const shiftedStart = previousSettlement + 500;
+    const shift = shiftedStart - cycle.startedAtMs;
+    for (const field of ['startedAtMs', 'triggerAtMs', 'captureStoppedAtMs', 'settledAtMs',
+      'providerResetSettledAtMs']) {
+      if (Number.isFinite(cycle[field])) cycle[field] += shift;
+    }
+    cycle.previousSettleToStartMs = 500;
+    previousSettlement = cycle.providerResetSettledAtMs ?? cycle.settledAtMs;
+  }
+  collapsedJitters.finalStartedAtMs = previousSettlement + 500;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, collapsedJitters),
+    /cycle 1 evidence is contradictory/,
+    'measured reopen intervals cannot collapse every requested jitter to 500ms');
   const contradictoryTerminalFixture = structuredClone(fixture);
   contradictoryTerminalFixture.providerPcmLedgers.at(-1).samples -= 320;
   assert.throws(() => verifyWarmProviderFinalFixtureAgreement(fixture, contradictoryTerminalFixture),
