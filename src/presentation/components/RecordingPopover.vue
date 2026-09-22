@@ -99,32 +99,6 @@ interface MiniCaptureProjection {
   placeholderText: string;
 }
 
-// Native publishes activating-warm-capture before it tries to reattach the
-// prepared input. Preserve that exact intent lineage while the readiness
-// reason advances through starting-capture; otherwise the mini window can
-// briefly render a cold-start label for an already-warm admission.
-const warmActivationRevision = ref<number | null>(null);
-watch(
-  [
-    () => store.recordingIntentRevision,
-    () => store.recordingDesiredOn,
-    () => store.captureReadiness,
-  ],
-  ([revision, desiredOn, readiness]) => {
-    if (!desiredOn || revision === null) {
-      warmActivationRevision.value = null;
-      return;
-    }
-    if (warmActivationRevision.value !== null && warmActivationRevision.value !== revision) {
-      warmActivationRevision.value = null;
-    }
-    if (readiness?.revision === revision && readiness.reason === 'activating-warm-capture') {
-      warmActivationRevision.value = revision;
-    }
-  },
-  { flush: 'sync' },
-);
-
 const stoppedMiniWindowOwnerRunId = computed<number | null>(() => {
   if (!appConfigStore.showMiniRecordingWindow) return null;
   const projection = store.lastAcceptedRecordingIntentProjection;
@@ -162,25 +136,28 @@ const miniCaptureProjection = computed<MiniCaptureProjection>(() => {
   }
 
   const hasIndependentStartingCapture = store.incomingTranslationStatus === 'Starting';
+  if (hasIndependentStartingCapture) {
+    const message = t('main.starting');
+    return { phase: 'starting', statusText: message, placeholderText: message };
+  }
+  if (store.incomingTranslationStatus === 'Processing') {
+    const message = t('main.processing');
+    return { phase: 'processing', statusText: message, placeholderText: message };
+  }
   // A native hotkey publishes its UI start hint before the coordinator can
   // publish readiness for the new intent. When warm input is enabled, keep that
-  // short admission gap neutral as well as the explicit activation frame. A
-  // cold fallback immediately publishes starting-capture and remains honest.
+  // short admission gap neutral as well as the explicit activation frame.
+  // Native preserves that explicit reason through healthy admission and
+  // publishes starting-capture on cold, stale or timed-out fallback.
   const isExplicitWarmActivation = store.recordingDesiredOn &&
     readiness?.state === 'unavailable' &&
     readiness.reason === 'activating-warm-capture';
-  const isWarmAdmissionPending = store.recordingDesiredOn &&
-    warmActivationRevision.value !== null &&
-    warmActivationRevision.value === readiness?.revision &&
-    !store.isCaptureReady;
   const isWarmAdmissionGap = appConfigStore.keepMicrophoneReady &&
     store.activeRecordingMode === 'dictation' &&
     (store.recordingDesiredOn || store.isStarting) &&
     (!readiness || (readiness.state === 'unavailable' &&
       readiness.reason === 'idle'));
-  if (isWarmAdmissionPending ||
-      (!hasIndependentStartingCapture && (isExplicitWarmActivation || isWarmAdmissionGap) &&
-        store.incomingTranslationStatus !== 'Processing')) {
+  if (isExplicitWarmActivation || isWarmAdmissionGap) {
     return { phase: 'idle', statusText: '', placeholderText: '' };
   }
   const hasCurrentStartingCapture = !hasTerminalReadiness && (
@@ -191,7 +168,7 @@ const miniCaptureProjection = computed<MiniCaptureProjection>(() => {
       store.isRecording
     ))
   );
-  if (hasIndependentStartingCapture || hasCurrentStartingCapture) {
+  if (hasCurrentStartingCapture) {
     let statusText = t('main.starting');
     if (readiness?.reason === 'finalizing-previous') {
       statusText = `${t('main.starting')} ${t('main.processing')}`;
@@ -199,11 +176,6 @@ const miniCaptureProjection = computed<MiniCaptureProjection>(() => {
       statusText = `${t('main.starting')} ${t('main.connecting')}`;
     }
     return { phase: 'starting', statusText, placeholderText: t('main.starting') };
-  }
-
-  if (store.incomingTranslationStatus === 'Processing') {
-    const message = t('main.processing');
-    return { phase: 'processing', statusText: message, placeholderText: message };
   }
 
   // A stopped foreground capture may continue provider delivery in the

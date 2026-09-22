@@ -1155,7 +1155,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
       expectMiniCapturePhase('idle', '');
       await emitTauriEvent('recording:capture-readiness', { ...warm, revision: 9, generation: 5,
         reason: 'starting-capture' });
-      expectMiniCapturePhase('idle', '');
+      expectMiniCapturePhase('starting', 'Starting');
       await emitTauriEvent('recording:capture-readiness', { ...warm, revision: 9, generation: 6,
         state: 'buffering', reason: 'connecting-provider', captureReady: true });
       expectMiniCapturePhase('recording', 'Listening');
@@ -1199,6 +1199,41 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     expectMiniCapturePhase('starting', 'Starting');
     wrapper.unmount();
   });
+
+  it.each([RecordingStatus.Starting, RecordingStatus.Processing] as const)(
+    'does not mask independent incoming translation %s during warm admission', async (status) => {
+      const wrapper = mountRecordingPopover();
+      const store = useTranscriptionStore();
+      await waitForListenerCount('recording:intent-projection', 1);
+      await waitForListenerCount('recording:capture-readiness', 1);
+
+      store.incomingTranslationStatus = status;
+      await emitTauriEvent('recording:intent-projection', {
+        runId: 101,
+        intentRevision: 8,
+        status: RecordingStatus.Starting,
+        desiredOn: true,
+        pendingStart: true,
+        processingJobs: 0,
+        shutdownRequested: false,
+      });
+      await emitTauriEvent('recording:capture-readiness', {
+        revision: 8,
+        runId: 101,
+        state: 'unavailable',
+        reason: 'activating-warm-capture',
+        generation: 1,
+        captureReady: false,
+        transportReady: false,
+      });
+
+      const phase = status === 'Starting' ? 'starting' : 'processing';
+      const statusDot = document.querySelector<HTMLElement>('.mini-status-dot');
+      expect(statusDot?.classList.contains(phase)).toBe(true);
+      expect(statusDot?.getAttribute('aria-label')).toContain(status);
+      wrapper.unmount();
+    },
+  );
 
   it.each([
     { order: 'intent before readiness', state: 'buffering' as const },

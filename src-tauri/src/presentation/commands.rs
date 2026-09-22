@@ -963,6 +963,8 @@ fn update_recording_capture_readiness(
         .recording_capture_readiness
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let keeps_warm_activation = run
+        .is_some_and(|run| warm_activation_matches(&snapshot, run.run_id.get(), intent_revision));
     let (readiness_state, reason) = match capture {
         recording_intent::CaptureState::Preparing {
             cancel_requested: true,
@@ -973,10 +975,12 @@ fn update_recording_capture_readiness(
         ),
         recording_intent::CaptureState::Preparing { .. } => (
             RecordingCaptureReadinessState::Unavailable,
-            if warm_eligible
-                && (snapshot.run_id != run.map(|run| run.run_id.get())
-                    || snapshot.revision != Some(intent_revision)
-                    || snapshot.reason == RecordingCaptureReadinessReason::ActivatingWarmCapture)
+            if keeps_warm_activation
+                || (warm_eligible
+                    && (snapshot.run_id != run.map(|run| run.run_id.get())
+                        || snapshot.revision != Some(intent_revision)
+                        || snapshot.reason
+                            == RecordingCaptureReadinessReason::ActivatingWarmCapture))
             {
                 RecordingCaptureReadinessReason::ActivatingWarmCapture
             } else {
