@@ -22,7 +22,7 @@ export function hashPcm16Mono16k(chunks) {
 export async function startConfigDelayProxy(upstreamUrl, delayMs, record) {
   const url = new URL(upstreamUrl);
   if (url.protocol !== 'ws:' || url.hostname !== '127.0.0.1' || !url.port || url.port === '51866' || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw new Error('Explicit TEST loopback required');
-  if (![0, 4000, 8000].includes(delayMs)) throw new Error('Unplanned Config delay');
+  if (![0, 1000, 4000, 8000].includes(delayMs)) throw new Error('Unplanned Config delay');
   const route = '/api/v1/transcribe/stream';
   url.pathname = route;
   const server = new WebSocketServer({ verifyClient: ({ req }) => req.url === route, host: '127.0.0.1', port: 0, maxPayload: 960_000, perMessageDeflate: false });

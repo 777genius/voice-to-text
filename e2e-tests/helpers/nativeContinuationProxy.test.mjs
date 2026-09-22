@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { once } from 'node:events';
 import { hashPcm16Mono16k, startConfigDelayProxy } from './nativeContinuationProxy.mjs';
+import { warmProviderCanaryTrial } from './nativeContinuation.mjs';
 const require = createRequire(import.meta.url);
 const WebSocket = createRequire(require.resolve('jsdom'))('ws');
 
@@ -11,6 +12,12 @@ test('proxy rejects external endpoints and unplanned fault delays before opening
     await assert.rejects(startConfigDelayProxy(url, 0, () => {}));
   }
   await assert.rejects(startConfigDelayProxy('ws://127.0.0.1:51869', 1, () => {}));
+});
+test('proxy admits the exact paid warm-provider canary delay', async () => {
+  assert.equal(warmProviderCanaryTrial.configDelayMs, 1000);
+  const proxy = await startConfigDelayProxy(
+    'ws://127.0.0.1:51869', warmProviderCanaryTrial.configDelayMs, () => {});
+  await proxy.close();
 });
 test('bounded Config fault preserves text control frames and exact ordered PCM', { timeout: 8000 }, async () => {
   const server = new WebSocket.Server({ host: '127.0.0.1', port: 0 });

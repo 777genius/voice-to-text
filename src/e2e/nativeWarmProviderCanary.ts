@@ -148,6 +148,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     finalTranscriptFence: null as { eventStart: number; providerSamples: number;
       providerStartSamples: number; deliverySeqFloor: number } | null,
     finalStartedAtMs: null as number | null,
+    finalReadyElapsedMs: null as number | null,
     cycles: [] as Array<Record<string, unknown>>,
     finalOwnership: null as { logicalRunId: number; captureRunId: number; captureFenceGeneration: number } | null,
     events: [] as ProviderEvent[], terminals: [] as ProviderTerminal[], duplicateDeliveries: [] as string[],
@@ -229,6 +230,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       let triggerProviderStartSamples: number | null = null;
       let triggerDeliverySeqFloor: number | null = null;
       let triggerLogicalRunId: number | null = null;
+      let readyGateElapsedMs: number | null = null;
       await toggle();
       const active = await poll(value => value.fixture.captureStarts === before.fixture.captureStarts + 1 &&
         value.fixture.activeCaptures === 1 && value.fixture.sourceEpisodes.length === cycle.index + 1,
@@ -241,11 +243,17 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         check(active.status !== 'Recording' || active.providerTransport?.serverReady !== true,
           `cycle ${cycle.index} reached provider Ready before early stop`);
       } else {
+        const readyGateBudgetMs = trial.readyGateTimeoutMs - (now() - startedAtMs);
+        check(readyGateBudgetMs > 0,
+          `cycle ${cycle.index} exhausted the safe provider Ready gate budget`);
         const ready = await poll(value =>
           value.providerTransport?.serverReady === true && value.providerTransport.connectionRetained === true &&
           value.logicalProviderRunId > 0 && value.captureEpisode !== null &&
           value.fixture.sourceEpisodes[cycle.index]?.emittedFrames === 0,
-        `cycle ${cycle.index} actual provider Ready`, 30_000);
+        `cycle ${cycle.index} actual provider Ready`, readyGateBudgetMs);
+        readyGateElapsedMs = now() - startedAtMs;
+        check(readyGateElapsedMs <= trial.readyGateTimeoutMs,
+          `cycle ${cycle.index} provider Ready exceeded the safe audio watchdog budget`);
         check(ready.fixture.sourceEpisodes[cycle.index].sourceGateRequired === true,
           `cycle ${cycle.index} source was not held behind provider Ready`);
         triggerLogicalRunId = ready.logicalProviderRunId;
@@ -361,7 +369,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         captureFenceGeneration: beforeStop.captureEpisode?.generation ?? null,
         logicalRunId: beforeStop.logicalProviderRunId, association, trigger, source: sourceAtStop,
         eventStart, triggerEventStart, stopEventIndex, callbackFenceGeneration, triggerProviderSamples,
-        providerStartSamples: triggerProviderStartSamples, triggerDeliverySeqFloor,
+        providerStartSamples: triggerProviderStartSamples, triggerDeliverySeqFloor, readyGateElapsedMs,
         eventEnd: report.events.length, activeCapturesAfterStop: stopped.fixture.activeCaptures };
       const previousCycle = report.cycles[report.cycles.length - 1];
       if (previousCycle) {
@@ -403,11 +411,16 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     }
     report.finalStartedAtMs = now();
     await toggle();
+    const finalReadyGateBudgetMs = trial.readyGateTimeoutMs - (now() - report.finalStartedAtMs);
+    check(finalReadyGateBudgetMs > 0, 'Final proof exhausted the safe provider Ready gate budget');
     const ready = await poll(value =>
       value.providerTransport?.serverReady === true && value.providerTransport.connectionRetained === true &&
       value.logicalProviderRunId > 0 && value.captureEpisode !== null &&
       value.fixture.sourceEpisodes.length === trial.finalEpisodeIndex + 1,
-    'final full proof provider Ready', 30_000);
+    'final full proof provider Ready', finalReadyGateBudgetMs);
+    report.finalReadyElapsedMs = now() - report.finalStartedAtMs;
+    check(report.finalReadyElapsedMs <= trial.readyGateTimeoutMs,
+      'Final proof provider Ready exceeded the safe audio watchdog budget');
     check(ready.logicalProviderRunId === Number(report.cycles[report.cycles.length - 1]?.logicalRunId),
       'Final proof opened a new provider instead of continuing the retained session');
     sessionCycles.set(ready.logicalProviderRunId, trial.finalEpisodeIndex);
@@ -462,22 +475,28 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
             timing.start < finalProviderStartSamples + finalProviderLedger.samples &&
             timing.end > finalProviderStartSamples &&
             timing.end <= finalProviderStartSamples + finalProviderLedger.samples)) &&
-        syntheticPhraseOccurrences(event.text ?? '').length === 2 &&
-        event.markerIds.length === 2 && event.markerIds.includes(0) && event.markerIds.includes(1);
+        typeof event.text === 'string' && event.text.trim().length > 0 &&
+        event.markerIds.every(markerId => markerId === 0 || markerId === 1);
     };
     await toggle();
     await poll(value => value.fixture.captureStops === beforeFinal.fixture.captureStops + 1 &&
       value.fixture.activeCaptures === 0 &&
       value.pausedContinuation?.logicalRunId === complete.logicalProviderRunId &&
       value.providerTransport?.connectionRetained === true, 'final full proof pause', 45_000);
-    let acceptedFinalDelivery: ProviderEvent | undefined;
+    let acceptedFinalDeliveries: ProviderEvent[] = [];
+    let acceptedFinalText = '';
     await poll(() => {
-      acceptedFinalDelivery = report.events.slice(finalTranscriptEventStart)
-        .find(belongsToFinalCallbackGeneration);
-      return store.finalText !== report.finalTextBeforeProof && acceptedFinalDelivery != null &&
+      acceptedFinalDeliveries = report.events.slice(finalTranscriptEventStart)
+        .filter(belongsToFinalCallbackGeneration);
+      acceptedFinalText = acceptedFinalDeliveries.reduce((stable, delivery) =>
+        appendTranscriptText(stable, delivery.text ?? ''), '');
+      const occurrences = syntheticPhraseOccurrences(acceptedFinalText);
+      return acceptedFinalDeliveries.length > 0 && occurrences.length === 2 &&
+        new Set(occurrences.map(marker => marker.markerId)).size === 2 &&
+        store.finalText !== report.finalTextBeforeProof &&
         store.finalText === appendTranscriptText(
           report.finalTextBeforeProof,
-          acceptedFinalDelivery.text ?? '',
+          acceptedFinalText,
         );
     },
     'final stable transcript proof', 30_000);
@@ -496,7 +515,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         row.sessionId === complete.logicalProviderRunId && row.cycleIndex === trial.finalEpisodeIndex);
       return terminal?.complete === true && terminal.stableSnapshot === appendTranscriptText(
         report.finalTextBeforeProof,
-        acceptedFinalDelivery?.text ?? '',
+        acceptedFinalText,
       ) &&
         store.finalText === terminal.stableSnapshot;
     }, 'final terminal transcript proof', 15_000);
@@ -551,8 +570,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       if (typeof cycleIndex !== 'number' || !Number.isSafeInteger(cycleIndex) ||
           cycleIndex < 0 || cycleIndex > trial.finalEpisodeIndex) return false;
       if (cycleIndex === trial.finalEpisodeIndex) {
-        return event.sessionId === report.finalOwnership?.logicalRunId && event.markerIds.length >= 2 &&
-          typeof event.text === 'string' && event.text.trim().length > 0;
+        return belongsToFinalCallbackGeneration(event);
       }
       const cycle = trial.cycles[cycleIndex];
       const row = report.cycles[cycleIndex];
@@ -560,17 +578,21 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         ledger.captureGeneration === Number(row?.captureGeneration));
       const logicalRunCycleCount = report.cycles.filter(candidate =>
         Number(candidate.logicalRunId) === event.sessionId).length;
+      const eventIndex = report.events.indexOf(event);
       return cycle != null && provider != null &&
-        (event.timingKnown === true || logicalRunCycleCount === 1) &&
+        (event.timingKnown === true || logicalRunCycleCount === 1 ||
+          (eventIndex >= Number(row?.eventStart) && eventIndex < Number(row?.eventEnd))) &&
         warmCanaryEventMatchesCapture(event, cycle.episode, 'transcription:final', {
           sessionId: Number(row?.logicalRunId), cycleIndex,
           providerStartSamples: Number(row?.providerStartSamples), providerSamples: provider.samples,
           deliverySeqFloor: Number(row?.triggerDeliverySeqFloor),
         });
-    }) && finalEvents.every(event => finalEvents.filter(candidate =>
-      candidate.sessionId === event.sessionId && candidate.cycleIndex === event.cycleIndex).length === 1) &&
+    }) && finalEvents.every(event => event.cycleIndex === trial.finalEpisodeIndex ||
+      finalEvents.filter(candidate => candidate.sessionId === event.sessionId &&
+        candidate.cycleIndex === event.cycleIndex).length === 1) &&
       finalEvents.filter(event => event.sessionId === report.finalOwnership?.logicalRunId &&
-        event.cycleIndex === trial.finalEpisodeIndex).length === 1,
+        event.cycleIndex === trial.finalEpisodeIndex).length === acceptedFinalDeliveries.length &&
+      acceptedFinalDeliveries.length > 0,
     'Warm provider canary retained a late, duplicate, stale, or misowned final');
     const generations = report.final.fixture.capturePcmLedgers.map(row => row.captureGeneration);
     check(generations.length === 21 && new Set(generations).size === 21 &&

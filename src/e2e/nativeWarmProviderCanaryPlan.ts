@@ -3,7 +3,7 @@ export type WarmProviderCyclePlan = { index: number; jitterMs: number;
   stopPhase: WarmProviderStopPhase; episode: string; resetProviderBefore?: boolean };
 export type WarmProviderCanaryTrial = { id: string; kind: 'warm-provider-canary';
   cycles: WarmProviderCyclePlan[]; episodes: string[]; readyGateFromIndex?: number;
-  finalEpisodeIndex: number };
+  readyGateTimeoutMs: number; finalEpisodeIndex: number };
 
 export function expectedWarmProviderCallbackGenerations(trial: WarmProviderCanaryTrial) {
   let retained = false;
@@ -32,7 +32,8 @@ export function validateWarmProviderCanaryPlan(trial: WarmProviderCanaryTrial) {
     throw new Error('Wrong warm canary identity');
   }
   if (trial.cycles.length !== 20 || trial.episodes.length !== 21 ||
-      trial.readyGateFromIndex !== 5 || trial.finalEpisodeIndex !== 20) {
+      trial.readyGateFromIndex !== 5 || trial.readyGateTimeoutMs !== 1800 ||
+      trial.finalEpisodeIndex !== 20) {
     throw new Error('Warm canary must contain 20 churn cycles and one final proof');
   }
   for (const [index, cycle] of trial.cycles.entries()) {

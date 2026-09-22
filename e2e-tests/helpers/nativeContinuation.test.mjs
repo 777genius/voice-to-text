@@ -10,7 +10,7 @@ test('qualification requires explicit opt in and inherits no feature flags', () 
   assert.deepEqual(parseArguments(['--continuation-fake']), { continuationFake: true });
   assert.equal(sanitizedEnvironment('/tmp/example', { VOICETEXT_EL_PAUSE_CONTINUE_V1: 'true' }).VOICETEXT_EL_PAUSE_CONTINUE_V1, undefined);
 });
-test('fixed live budget includes all trials and full long clock', async () => {
+test('fixed live budget includes all trials and full long clock', async t => {
   assert.equal(liveTrials.length, 13);
   assert.equal(liveTrials.filter(x => x.id.startsWith('warm-baseline')).length, 3);
   assert.equal(liveTrials.filter(x => x.id.startsWith('warm-continue')).length, 3);
@@ -18,7 +18,16 @@ test('fixed live budget includes all trials and full long clock', async () => {
   assert.equal(approvedFixtures['long-auto-commit.pcm'][0] / 32, 49268);
   const longestTwoEpisodeBytes = approvedFixtures['long-auto-commit.pcm'][0] + approvedFixtures['episode-b.pcm'][0];
   assert.ok(Math.ceil(longestTwoEpisodeBytes / 640) + 128 < maxProxyEvidenceEvents);
-  const rows = await readApprovedFixtures(new URL('../../../qualification-fixtures', import.meta.url).pathname);
+  let rows;
+  try {
+    rows = await readApprovedFixtures(new URL('../../../qualification-fixtures', import.meta.url).pathname);
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      t.diagnostic('external qualification PCM is unavailable; pinned identity checks remain covered offline');
+      return;
+    }
+    throw error;
+  }
   assert.equal(rows.length, 5);
   for (const row of rows) assert.equal(validatePcm(row.name, row.pcm).sourceFrames * 2, row.bytes);
 });
@@ -77,6 +86,9 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     verifyWarmProviderCanary, verifyWarmProviderTransport } = await import('./nativeContinuation.mjs');
   assert.equal(warmProviderCanaryTrial.cycles.length, 20);
   assert.equal(warmProviderCanaryTrial.configDelayMs, 1000);
+  assert.equal(warmProviderCanaryTrial.readyGateTimeoutMs, 1800);
+  assert.ok(warmProviderCanaryTrial.configDelayMs < warmProviderCanaryTrial.readyGateTimeoutMs);
+  assert.ok(warmProviderCanaryTrial.readyGateTimeoutMs < 2200);
   assert.deepEqual([...new Set(warmProviderCanaryTrial.cycles.map(cycle => cycle.stopPhase))], warmProviderCanaryPhases);
   assert.deepEqual([...new Set(warmProviderCanaryTrial.cycles.map(cycle => cycle.jitterMs))], warmProviderCanaryJittersMs);
   assert.equal(new Set(warmProviderCanaryTrial.cycles.map(cycle => cycle.episode)).size, 2);
@@ -179,6 +191,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       triggerProviderSamples: plan.stopPhase === 'before-ready' ? null : 320,
       providerStartSamples, triggerDeliverySeqFloor: plan.stopPhase === 'before-ready'
         ? null : triggerDeliverySeqFloor,
+      readyGateElapsedMs: index >= warmProviderCanaryTrial.readyGateFromIndex ? 1200 : null,
       association: plan.stopPhase === 'before-ready' ? null : {
         captureGeneration: index + 1, captureRunId, captureFenceGeneration: index + 1 },
       trigger: plan.stopPhase === 'before-ready' ? { readyBeforeStop: false,
@@ -255,6 +268,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     finalTextBeforeProof: 'за окном растет береза',
     expectedInsertion: 'за окном растет береза на столе лежит книга за окном растет береза',
     finalStartedAtMs: cycleClock,
+    finalReadyElapsedMs: 1200,
     finalCallbackFence: { captureGeneration: 21, eventStart: finalCallbackEventStart },
     finalTranscriptFence: { eventStart: finalTranscriptEventStart,
       providerSamples: sources[20].sourceFrames, providerStartSamples: finalProviderStartSamples,
@@ -263,6 +277,16 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     terminals, final: { status: 'Idle', preparedCaptureTokenCount: 0,
       providerTransport: { connectionRetained: false }, fixture } };
   assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, report).churnCycles, 20);
+  const segmentedFinal = structuredClone(report);
+  const finalEventIndex = segmentedFinal.events.findIndex(event =>
+    event.cycleIndex === 20 && event.event === 'transcription:final');
+  segmentedFinal.events.splice(finalEventIndex, 1,
+    { ...segmentedFinal.events[finalEventIndex], deliverySeq: 99,
+      text: 'на столе лежит книга', markerIds: [0] },
+    { ...segmentedFinal.events[finalEventIndex], deliverySeq: 100,
+      text: 'за окном растет береза', markerIds: [1] });
+  segmentedFinal.finalCallbackFence.eventStart += 1;
+  assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, segmentedFinal).churnCycles, 20);
   assert.equal(verifyWarmProviderFinalFixtureAgreement(fixture, structuredClone(fixture))
     .finalNativeFixtureAgreement, true);
   const contradictoryTerminalFixture = structuredClone(fixture);
@@ -336,6 +360,14 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       event.text = cycle.episode === 'episode-a.pcm' ? 'за окном растет береза' : 'на столе лежит книга'; },
     value => { value.final.fixture.sourceEpisodes[20].emittedFrames--; },
     value => { value.final.fixture.capturePcmLedgers.pop(); },
+    value => { value.final.fixture.captureRunAssociations.push(
+      { ...value.final.fixture.captureRunAssociations[0] }); },
+    value => { value.final.fixture.captureRunAssociations.find(row => row.captureGeneration === 6)
+      .captureRunId = 99999; },
+    value => { value.final.fixture.captureRunAssociations = value.final.fixture.captureRunAssociations
+      .filter(row => row.captureGeneration !== 6); },
+    value => { value.final.fixture.captureRunAssociations.push({ captureGeneration: 1,
+      captureRunId: 99999, captureFenceGeneration: 1 }); },
     value => { value.final.fixture.providerPcmLedgers[0].hash = 'ffffffffffffffff'; },
     value => { value.final.fixture.capturePcmLedgers.forEach(row => { row.chunks = 0; row.samples = 0; row.hash = 'cbf29ce484222325'; });
       value.final.fixture.providerPcmLedgers = []; },
@@ -345,6 +377,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     value => { value.final.fixture.sourceEpisodes[20].pacingIntervalsChecked = 0; },
     value => { value.final.fixture.sourceEpisodes[20].lastSourceFrameElapsedMs = 0; },
     value => { value.finalTextBeforeProof = value.expectedInsertion; },
+    value => { value.cycles[5].readyGateElapsedMs = 2200; },
+    value => { value.finalReadyElapsedMs = 2200; },
     value => { value.expectedInsertion = 'unrelated junk'; },
     value => { value.expectedInsertion = 'на столе лежит книга за окном растет береза'; },
     value => { value.events.splice(-1, 0, { event: 'transcription:error', cycleIndex: 20,
@@ -442,9 +476,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   });
   lateRetainedFinal.terminals.find(terminal =>
     terminal.sessionId === retainedCycle.logicalRunId).stableSnapshot = retainedPhrase;
-  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, lateRetainedFinal),
-    /Final warm provider proof is incomplete/,
-    'an untimed final cannot be reassigned to a later capture on a retained provider run');
+  assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, lateRetainedFinal).churnCycles, 20,
+    'an untimed Stable settled inside its owned cycle remains valid on a retained provider run');
   const collapsedPartial = structuredClone(report);
   const partialCycle = collapsedPartial.cycles.find(row => row.stopPhase === 'during-partial');
   insertBeforeStop(collapsedPartial, partialCycle, { event: 'transcription:final',
@@ -616,6 +649,16 @@ test('warm canary binds a fresh Ready provider owner before releasing gated PCM'
   const bindOwner = readySection.indexOf('sessionCycles.set(ready.logicalProviderRunId, cycle.index);');
   const release = readySection.indexOf('releaseWarmCanarySourceBeforeAck(');
   assert.ok(bindOwner >= 0 && bindOwner < release);
+});
+
+test('E63 after-write diagnostics retain the full 900000 ms outer runtime contract', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(new URL('../run-native-window-e2e.mjs', import.meta.url), 'utf8');
+  const timeout = source.slice(source.indexOf('const runtimeTimeoutMs ='),
+    source.indexOf('await runOwned(', source.indexOf('const runtimeTimeoutMs =')));
+  assert.match(timeout, /trial\?\.kind === 'warm-provider-canary' \? 900_000/);
+  assert.doesNotMatch(timeout, /after-write-stop|after-write-hold|after-write-close|after-write-toggle/);
+  assert.match(timeout, /: 900_000;/);
 });
 
 test('normal baseline/cold reject continuation controls', async () => {
@@ -1245,7 +1288,7 @@ test('E63 native submission precedes teardown and runner keeps the original inde
   assert.match(finish, /"preFinish":true/);
   assert.match(finish, /diagnostic::healthy\(\)/);
   const runner = await readFile(new URL('../run-native-window-e2e.mjs', import.meta.url), 'utf8');
-  assert.match(runner, /options\.readerPreparation \|\| \['E04', 'E41', 'E42', 'after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle'\]\.includes\(options\.continuationCase\) \? 30_000\s*: 900_000/);
+  assert.match(runner, /options\.readerPreparation \|\| \['E04', 'E41', 'E42'\]\.includes\(options\.continuationCase\) \? 30_000\s*: 900_000/);
   assert.ok(runner.indexOf('E63 native diagnostic failed') < runner.lastIndexOf('validateResult(envelope)'));
   const envelope = afterWriteEnvelope('after-write-stop');
   envelope.afterWriteServiceAfter.pausedContinuation = 9;

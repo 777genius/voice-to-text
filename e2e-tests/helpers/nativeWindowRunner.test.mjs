@@ -330,6 +330,10 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
   warm.fixture.physicalOpenCount = 4;
   warm.fixture.physicalCloseCount = 3;
   assert.equal(validateResult(warm), warm.report);
+  const neutralBeforeOwnership = structuredClone(warm);
+  neutralBeforeOwnership.report.warmVisibleFrames[0].runId = null;
+  neutralBeforeOwnership.report.warmVisibleFrames[0].revision = null;
+  assert.equal(validateResult(neutralBeforeOwnership), neutralBeforeOwnership.report);
   const rebatched = structuredClone(warm);
   rebatched.report.final.fixture.providerPcmLedgers[0].chunks = 3;
   rebatched.fixture.providerPcmLedgers[0].chunks = 3;

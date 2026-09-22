@@ -17,7 +17,7 @@ function plan() {
   });
   return { id: 'warm-provider-churn-20', kind: 'warm-provider-canary' as const,
     cycles, episodes: [...cycles.map(cycle => cycle.episode), 'long-auto-commit.pcm'],
-    readyGateFromIndex: 5, finalEpisodeIndex: 20 };
+    readyGateFromIndex: 5, readyGateTimeoutMs: 1800, finalEpisodeIndex: 20 };
 }
 
 describe('warm provider paid canary plan', () => {
@@ -31,6 +31,7 @@ describe('warm provider paid canary plan', () => {
       (value: ReturnType<typeof plan>) => { delete value.cycles[15].resetProviderBefore; },
       (value: ReturnType<typeof plan>) => { value.cycles[14].resetProviderBefore = true; },
       (value: ReturnType<typeof plan>) => { value.readyGateFromIndex = 4; },
+      (value: ReturnType<typeof plan>) => { value.readyGateTimeoutMs = 2200; },
       (value: ReturnType<typeof plan>) => { value.finalEpisodeIndex = 19; },
       (value: ReturnType<typeof plan>) => { value.episodes[20] = 'episode-a.pcm'; },
     ];

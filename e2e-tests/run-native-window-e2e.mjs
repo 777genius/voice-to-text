@@ -152,18 +152,19 @@ export function validateMiniUxResult(envelope) {
     Array.isArray(visibleFrames)
       ? visibleFrames.find(frame => frame?.attempt === index + 1)
       : undefined);
-  const attemptIdentities = firstVisibleFrames.map(frame => frame &&
-    `${frame.runId}:${frame.revision}`);
+  const attemptIdentities = Array.isArray(readyFrames) ? readyFrames.map(frame => frame &&
+    `${frame.runId}:${frame.revision}`) : [];
   const distinctAttemptIdentities = attemptIdentities.every(Boolean) &&
     new Set(attemptIdentities).size === attemptIdentities.length;
-  const advancingWindowEpochs = firstVisibleFrames.every((frame, index) =>
-    Boolean(frame) && (index === 0 || Boolean(firstVisibleFrames[index - 1]) &&
-      frame.windowEpoch > firstVisibleFrames[index - 1].windowEpoch));
+  const advancingWindowEpochs = Array.isArray(nativeWindowEpochs) &&
+    nativeWindowEpochs.every((row, index) => index === 0 ||
+      row.windowEpoch > nativeWindowEpochs[index - 1].windowEpoch);
   const nativeWindowEvidenceValid = Array.isArray(nativeWindowEpochs) &&
     nativeWindowEpochs.length === 10 && nativeWindowEpochs.every((row, index) => {
-      const frame = firstVisibleFrames[index];
+      const ready = readyFrames?.[index];
       return row?.attempt === index + 1 && Number.isSafeInteger(row.windowEpoch) && row.windowEpoch > 0 &&
-        frame?.windowEpoch === row.windowEpoch && frame?.runId === row.runId && frame?.revision === row.revision &&
+        ready?.runId === row.runId && ready?.revision === row.revision &&
+        visibleFrames?.some(frame => frame.attempt === index + 1 && frame.windowEpoch === row.windowEpoch) &&
         report.trace.some(sample => sample?.native?.visible === true &&
           sample.native.windowEpoch === row.windowEpoch && sample.captureRunId === row.runId &&
           sample.intentRevision === row.revision);
@@ -179,13 +180,15 @@ export function validateMiniUxResult(envelope) {
       Number.isSafeInteger(frame?.attempt) && frame.attempt >= 1 && frame.attempt <= 10 &&
       ['render', 'shown', 'sample'].includes(frame.source) &&
       Number.isSafeInteger(frame.windowEpoch) && frame.windowEpoch > 0 &&
-      Number.isSafeInteger(frame.revision) && frame.revision > 0 &&
-      Number.isSafeInteger(frame.runId) && frame.runId > 0 &&
+      ((frame.revision === null && frame.runId === null) ||
+        (Number.isSafeInteger(frame.revision) && frame.revision > 0 &&
+          Number.isSafeInteger(frame.runId) && frame.runId > 0)) &&
       typeof frame.captureReady === 'boolean' && typeof frame.phase === 'string' &&
       typeof frame.statusText === 'string') &&
     firstVisibleFrames.every((frame, index) => {
       if (!frame) return false;
       const ready = readyFrames?.[index];
+      const nativeWindow = nativeWindowEpochs?.[index];
       const attemptFrames = visibleFrames.filter(candidate => candidate.attempt === index + 1);
       const neutralActivation = frame.captureReady === false &&
         frame.readinessReason === 'activating-warm-capture' && frame.statusText === '' &&
@@ -194,13 +197,21 @@ export function validateMiniUxResult(envelope) {
         const candidateNeutral = candidate.captureReady === false &&
           candidate.readinessReason === 'activating-warm-capture' && candidate.statusText === '' &&
           !/\b(recording|starting|processing)\b/.test(candidate.phase);
-        return (candidateNeutral || captureReadyRecording(candidate)) &&
+        const candidateOwnershipValid = candidateNeutral
+          ? ((candidate.runId === null && candidate.revision === null) ||
+            (candidate.runId === ready?.runId && candidate.revision === ready?.revision))
+          : candidate.runId === ready?.runId && candidate.revision === ready?.revision;
+        return (candidateNeutral || captureReadyRecording(candidate)) && candidateOwnershipValid &&
           !forbiddenStatusTexts.includes(candidate.statusText) &&
           candidate.windowEpoch === frame.windowEpoch &&
-          candidate.runId === frame.runId && candidate.revision === frame.revision;
+          candidate.windowEpoch === nativeWindow?.windowEpoch;
       });
-      return (neutralActivation || captureReadyRecording(frame)) && ready?.runId === frame.runId &&
-        ready?.revision === frame.revision && attemptFramesValid;
+      const firstOwnershipValid = neutralActivation
+        ? ((frame.runId === null && frame.revision === null) ||
+          (frame.runId === ready?.runId && frame.revision === ready?.revision))
+        : frame.runId === ready?.runId && frame.revision === ready?.revision;
+      return (neutralActivation || captureReadyRecording(frame)) && firstOwnershipValid &&
+        frame.windowEpoch === nativeWindow?.windowEpoch && attemptFramesValid;
     }) && distinctAttemptIdentities && advancingWindowEpochs && nativeWindowEvidenceValid;
   if (report?.warmMode !== true || report.warmReopens !== 10 || report.idleAcceptedDelta !== 0 ||
        !Array.isArray(report.trace) || report.trace.length === 0 ||
@@ -1291,7 +1302,7 @@ export async function main(args = process.argv.slice(2)) {
     // Event/preparation timeout: 30 seconds, then up to 5 seconds SIGTERM grace before SIGKILL.
     const runtimeTimeoutMs = options.miniUx ? 480_000
       : trial?.kind === 'warm-provider-canary' ? 900_000
-      : options.readerPreparation || ['E04', 'E41', 'E42', 'after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle'].includes(options.continuationCase) ? 30_000
+      : options.readerPreparation || ['E04', 'E41', 'E42'].includes(options.continuationCase) ? 30_000
       : 900_000;
     await runOwned(binary, [], { cwd: directory, env }, runtimeTimeoutMs,
       path.join(directory, `native-runtime-${randomUUID()}.log`), path.join(directory, 'native-progress.jsonl'),
