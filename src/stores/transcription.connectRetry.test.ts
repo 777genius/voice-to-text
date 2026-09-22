@@ -1781,6 +1781,7 @@ describe('transcription connect-retry reliability', () => {
       },
     });
     expect(store.finalText).toContain('previous transcript tail');
+    expect(store.status).toBe('Starting');
 
     await handlers.get('recording:status')({
       payload: { session_id: 161, status: 'Starting', stopped_via_hotkey: false },
@@ -5653,7 +5654,8 @@ describe('transcription connect-retry reliability', () => {
     expect(store.sessionId).toBeNull();
   });
 
-  it.each(['status', 'partial-adoption', 'partial-existing-session', 'reconcile'] as const)(
+  it.each(['status', 'partial-adoption', 'partial-existing-session',
+    'sequenced-existing-session', 'reconcile'] as const)(
     'does not retry a run that reached Recording through %s when a provider error arrives before runtimeFailed',
     async (recordingEvidence) => {
     vi.useFakeTimers();
@@ -5689,6 +5691,14 @@ describe('transcription connect-retry reliability', () => {
         } });
         await handlers.get('transcription:partial')({ payload: {
           session_id: 71, text: 'provider is already active', is_segment_final: false,
+        } });
+      } else if (recordingEvidence === 'sequenced-existing-session') {
+        await handlers.get('recording:status')({ payload: {
+          session_id: 71, status: 'Starting', stopped_via_hotkey: false,
+        } });
+        await handlers.get('transcription:final')({ payload: {
+          session_id: 71, text: 'sequenced provider is already active',
+          delivery_seq: 1, continuation_delivery: true,
         } });
       } else {
         expect(await store.reconcileBackendStatus('recording_recovery')).toBe('Recording');

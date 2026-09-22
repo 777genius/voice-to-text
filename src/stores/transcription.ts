@@ -802,9 +802,32 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
+  function recordAcceptedTextEvidence(payloadSessionId: number, source: string): void {
+    const isTranslationEvent = source.startsWith('translation:');
+    const isActiveSessionEvent = payloadSessionId === sessionId.value;
+    const isDictationTextEvent =
+      source === 'transcription:stable' ||
+      source === 'transcription:partial' ||
+      source === 'transcription:final';
+    const isTextEvent = isDictationTextEvent || source === 'translation:delta';
+    // While a successor is awaiting its native session identity, the retained
+    // predecessor may still deliver its final tail. Preserve that text without
+    // presenting it as evidence that the successor reached Recording.
+    if (isActiveSessionEvent && isTextEvent && !awaitingSessionStart.value &&
+        status.value === RecordingStatus.Starting) {
+      status.value = RecordingStatus.Recording;
+    }
+    if (isActiveSessionEvent && isDictationTextEvent && !awaitingSessionStart.value &&
+        connectOperation?.sessionId === payloadSessionId) {
+      connectOperation.reachedRecording = true;
+    }
+    if (isTranslationEvent && isActiveSessionEvent) {
+      activeRecordingMode.value = 'live_translation';
+    }
+  }
+
   function ensureActiveSessionForIncomingEvent(payloadSessionId: number, source: string): boolean {
     bumpLastSeenSessionId(payloadSessionId);
-    const isTranslationEvent = source.startsWith('translation:');
 
     if (payloadSessionId <= 0) {
       return false;
@@ -859,26 +882,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
     }
 
-    const isActiveSessionEvent = payloadSessionId === sessionId.value;
-    const isDictationTextEvent =
-      source === 'transcription:stable' ||
-      source === 'transcription:partial' ||
-      source === 'transcription:final';
-    const isTextEvent = isDictationTextEvent || source === 'translation:delta';
     // Accepted dictation text is authoritative evidence that this session
     // reached the provider even when Starting already established sessionId
     // and the Recording status event was delayed or lost.
-    if (isActiveSessionEvent && isTextEvent && status.value === RecordingStatus.Starting) {
-      status.value = RecordingStatus.Recording;
-    }
-    if (isActiveSessionEvent && isDictationTextEvent) {
-      if (connectOperation?.sessionId === payloadSessionId) {
-        connectOperation.reachedRecording = true;
-      }
-    }
-    if (isTranslationEvent && isActiveSessionEvent) {
-      activeRecordingMode.value = 'live_translation';
-    }
+    const isActiveSessionEvent = payloadSessionId === sessionId.value;
+    if (isActiveSessionEvent) recordAcceptedTextEvidence(payloadSessionId, source);
 
     return isActiveSessionEvent;
   }
@@ -1327,6 +1335,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       deliveryRevision.value++;
       return Promise.resolve(true);
     }
+    recordAcceptedTextEvidence(payload.session_id, 'transcription:stable');
     ledger.stableSnapshot = appendTranscriptText(ledger.stableSnapshot, payload.text);
     ledger.interimSnapshot = '';
     deliveryRevision.value++;

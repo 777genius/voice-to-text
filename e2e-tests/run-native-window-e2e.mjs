@@ -1126,6 +1126,9 @@ export function validateResult(envelope) {
       idle.wakeCaptureGeneration <= idle.baselineCaptureGeneration ||
       idle.wakeCaptureGeneration <= cycles[49].captureGeneration ||
       !Number.isSafeInteger(idle.wakeSessionId) || idle.wakeSessionId <= cycles[49].sessionId ||
+      allFinalDeliveries.filter(delivery => delivery.sessionId === idle.wakeSessionId).length !== 1 ||
+      !allFinalDeliveries.some(delivery => delivery.sessionId === idle.wakeSessionId &&
+        delivery.text === idle.wakeTranscript) ||
       !Number.isSafeInteger(idle.wakeWindowEpoch) || idle.wakeWindowEpoch <= cycles[49].windowEpoch ||
       typeof idle.wakeTranscript !== 'string' || !idle.wakeTranscript.trim() ||
       !fixture.capturePcmLedgers.some(capture => {

@@ -161,7 +161,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       events.push({ event: 'transcription:terminal', cycleIndex: index, sessionId: logicalRunId,
         deliverySeq: null, markerIds: [] });
       terminals.push({ sessionId: logicalRunId, cycleIndex: index, complete: true,
-        stableSnapshot: null });
+        stableSnapshot: '' });
     }
     const startedAtMs = cycleClock;
     const previousSettleToStartMs = index === 0 ? null : warmProviderCanaryTrial.cycles[index - 1].jitterMs;
@@ -193,7 +193,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       events.push({ event: 'transcription:terminal', cycleIndex: index, sessionId: logicalRunId,
         deliverySeq: null, markerIds: [] });
       terminals.push({ sessionId: logicalRunId, cycleIndex: index, complete: true,
-        stableSnapshot: plan.stopPhase === 'after-final' ? phrase : null });
+        stableSnapshot: plan.stopPhase === 'after-final' ? phrase : '' });
       cycle.eventEnd = events.length;
     }
     cycleClock = (providerResetSettledAtMs ?? cycle.settledAtMs) + plan.jitterMs;
@@ -216,7 +216,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   events.push({ event: 'transcription:terminal', cycleIndex: 20, sessionId: finalLogicalRunId,
     deliverySeq: null, markerIds: [] });
   terminals.push({ sessionId: finalLogicalRunId, cycleIndex: 20, complete: true,
-    stableSnapshot: 'на столе лежит книга за окном растет береза' });
+    stableSnapshot: 'за окном растет береза на столе лежит книга за окном растет береза' });
   const sources = warmProviderCanaryTrial.episodes.map((name, index) => {
     const bytes = approvedFixtures[name][0];
     const sourceFrames = bytes / 2;
@@ -250,8 +250,9 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     providerPcmLedgers: capturePcmLedgers.filter(row => row.samples > 0).map(row => ({ ...row })),
     providerCallbackGenerations: expectedWarmProviderCallbackGenerations(warmProviderCanaryTrial) };
   const report = { mode: 'warm-provider-canary', passed: true, trialId: warmProviderCanaryTrial.id,
-    errors: [], duplicateDeliveries: [], cycles, events, finalTextBeforeProof: 'stale transcript',
-    expectedInsertion: 'на столе лежит книга за окном растет береза',
+    errors: [], duplicateDeliveries: [], cycles, events,
+    finalTextBeforeProof: 'за окном растет береза',
+    expectedInsertion: 'за окном растет береза на столе лежит книга за окном растет береза',
     finalStartedAtMs: cycleClock,
     finalCallbackFence: { captureGeneration: 21, eventStart: finalCallbackEventStart },
     finalTranscriptFence: { eventStart: finalTranscriptEventStart,
@@ -344,6 +345,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     value => { value.final.fixture.sourceEpisodes[20].lastSourceFrameElapsedMs = 0; },
     value => { value.finalTextBeforeProof = value.expectedInsertion; },
     value => { value.expectedInsertion = 'unrelated junk'; },
+    value => { value.expectedInsertion = 'на столе лежит книга за окном растет береза'; },
+    value => { value.terminals.find(terminal => terminal.cycleIndex === 0).stableSnapshot = null; },
     value => { value.terminals.at(-1).stableSnapshot = 'WRONG TERMINAL TEXT'; },
     value => { value.terminals.find(terminal => terminal.cycleIndex === 15).stableSnapshot =
       'WRONG EARLIER TERMINAL TEXT'; },

@@ -207,6 +207,8 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
     v => { v.report.cycleEvidence[12].finalText = 'stale transcript'; },
     v => { v.report.cycleFinalDeliveries.push({ sessionId: 12, text: 'late stale transcript', deliverySeq: 99 }); },
     v => { v.report.allFinalDeliveries.push({ sessionId: 999, text: 'foreign final', deliverySeq: 999 }); },
+    v => { v.report.allFinalDeliveries.find(delivery => delivery.sessionId === 51).text =
+      'Native fixture session 50'; },
     v => { v.report.hiddenIdleEvidence.webviewElapsedMs = 179999; },
     v => { v.report.hiddenIdleEvidence.wakeCaptureGeneration = 50; },
     v => { v.report.scenarios[1] = v.report.scenarios[0]; }]) {

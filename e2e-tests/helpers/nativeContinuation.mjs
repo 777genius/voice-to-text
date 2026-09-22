@@ -678,13 +678,17 @@ export function verifyWarmProviderCanary(trial, report) {
   if (Number.isSafeInteger(ownership?.logicalRunId)) {
     expectedTerminalCycles.set(ownership.logicalRunId, finalIndex);
   }
+  const appendStableText = (stable, delivery) => [stable, delivery]
+    .map(value => typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '')
+    .filter(Boolean).join(' ');
+  const stableTranscript = (sessionId, endIndex) => events.slice(0, endIndex)
+    .filter(event => event.event === 'transcription:final' && event.sessionId === sessionId)
+    .reduce((stable, delivery) => appendStableText(stable, delivery.text), '');
   const terminalSnapshotsAgree = terminals.every(terminal => {
     const terminalIndex = events.findIndex(event => event.event === 'transcription:terminal' &&
       event.sessionId === terminal.sessionId && event.cycleIndex === terminal.cycleIndex);
     if (terminalIndex < 0) return false;
-    const deliveredFinals = events.slice(0, terminalIndex).filter(event =>
-      event.event === 'transcription:final' && event.sessionId === terminal.sessionId);
-    return terminal.stableSnapshot === (deliveredFinals.at(-1)?.text ?? null);
+    return terminal.stableSnapshot === stableTranscript(terminal.sessionId, terminalIndex);
   });
   const finalTranscriptMatchesCallbackGeneration = event => {
     const eventStartSamples = Math.round(event?.sourceStartSeconds * 16000);
@@ -711,6 +715,13 @@ export function verifyWarmProviderCanary(trial, report) {
   const allFinalEvents = events.filter(event => event.event === 'transcription:final');
   const acceptedFinalDeliveries = events.slice(report.finalTranscriptFence?.eventStart)
     .filter(finalTranscriptMatchesCallbackGeneration);
+  const finalTranscriptBeforeProof = stableTranscript(
+    ownership?.logicalRunId,
+    report.finalTranscriptFence?.eventStart,
+  );
+  const expectedFinalTranscript = acceptedFinalDeliveries.length === 1
+    ? appendStableText(finalTranscriptBeforeProof, acceptedFinalDeliveries[0].text)
+    : '';
   if (finalSource?.name !== trial.episodes[finalIndex] ||
       finalSource.bytes !== finalBytes || finalSource.sourceFrames !== finalBytes / 2 ||
       finalSource.sourceDurationMs !== finalBytes / 32 || finalSource.cadenceMs !== 20 ||
@@ -746,10 +757,11 @@ export function verifyWarmProviderCanary(trial, report) {
         .some(event => event.event === 'transcription:terminal') ||
       events.slice(report.finalTranscriptFence.eventStart).some(event => event.cycleIndex !== finalIndex) ||
       typeof report.finalTextBeforeProof !== 'string' ||
+      report.finalTextBeforeProof !== finalTranscriptBeforeProof ||
       typeof report.expectedInsertion !== 'string' || !report.expectedInsertion.trim() ||
       report.expectedInsertion === report.finalTextBeforeProof ||
       acceptedFinalDeliveries.length !== 1 ||
-      report.expectedInsertion !== acceptedFinalDeliveries[0].text ||
+      report.expectedInsertion !== expectedFinalTranscript ||
       new Set(finalEvents.flatMap(event => event.markerIds)).size < 2 ||
       !events.slice(report.finalTranscriptFence.eventStart).some(finalTranscriptMatchesCallbackGeneration) ||
       finalEvents.some(event => ['transcription:partial', 'transcription:final'].includes(event.event) &&

@@ -2,6 +2,7 @@ import type { Pinia } from 'pinia';
 import { invoke } from '@tauri-apps/api/core';
 import { boundedSyntheticText, syntheticPhraseOccurrences } from './nativeContinuationMetrics';
 import { nativeLivePreflight } from './nativeContinuationLive';
+import { appendTranscriptText } from '../utils/transcriptionText';
 import { expectedWarmProviderCallbackGenerations, expectedWarmProviderLogicalRuns,
   validateWarmProviderCanaryPlan,
   type WarmProviderCanaryTrial as Trial } from './nativeWarmProviderCanaryPlan';
@@ -32,7 +33,7 @@ type ProviderEvent = { event: string; atMs: number; cycleIndex: number | null; s
   deliverySeq: number | null; text: string | null; markerIds: number[]; timingKnown: boolean;
   sourceStartSeconds: number; sourceDurationSeconds: number };
 type ProviderTerminal = { sessionId: number; cycleIndex: number | null; complete: boolean;
-  stableSnapshot: string | null };
+  stableSnapshot: string };
 export type WarmCanaryCaptureFence = { sessionId: number; cycleIndex: number;
   providerStartSamples: number; providerSamples: number; deliverySeqFloor: number };
 
@@ -202,9 +203,11 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
           const complete = payload.delivery_complete === true && !payload.error;
           if (!complete) report.errors.push('Incomplete provider terminal');
           const stable = boundedSyntheticText(payload.stable_snapshot);
-          if (!stable.syntheticTextValid) report.errors.push('Provider terminal text evidence overflow');
+          if (!stable.syntheticTextValid || stable.rawSyntheticText === null) {
+            report.errors.push('Provider terminal text evidence is missing or overflowed');
+          }
           report.terminals.push({ sessionId, cycleIndex: eventCycle ?? null, complete,
-            stableSnapshot: stable.rawSyntheticText });
+            stableSnapshot: stable.rawSyntheticText ?? '' });
         }
         if (name === 'transcription:error') report.errors.push(JSON.stringify(payload));
       }, { keepAlive: true, autoPasteText: false, autoCopyToClipboard: true });
@@ -468,7 +471,10 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       acceptedFinalDelivery = report.events.slice(finalTranscriptEventStart)
         .find(belongsToFinalCallbackGeneration);
       return store.finalText !== report.finalTextBeforeProof && acceptedFinalDelivery != null &&
-        store.finalText === acceptedFinalDelivery.text;
+        store.finalText === appendTranscriptText(
+          report.finalTextBeforeProof,
+          acceptedFinalDelivery.text ?? '',
+        );
     },
     'final stable transcript proof', 30_000);
     const finalMarkers = new Set(report.events.filter(event => event.cycleIndex === trial.finalEpisodeIndex)
@@ -484,7 +490,10 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     await poll(() => {
       const terminal = report.terminals.find(row =>
         row.sessionId === complete.logicalProviderRunId && row.cycleIndex === trial.finalEpisodeIndex);
-      return terminal?.complete === true && terminal.stableSnapshot === acceptedFinalDelivery?.text &&
+      return terminal?.complete === true && terminal.stableSnapshot === appendTranscriptText(
+        report.finalTextBeforeProof,
+        acceptedFinalDelivery?.text ?? '',
+      ) &&
         store.finalText === terminal.stableSnapshot;
     }, 'final terminal transcript proof', 15_000);
     report.expectedInsertion = store.finalText;
@@ -510,8 +519,9 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       if (terminalIndex < 0) return false;
       const deliveredFinals = report.events.slice(0, terminalIndex).filter(event =>
         event.event === 'transcription:final' && event.sessionId === terminal.sessionId);
-      return terminal.stableSnapshot ===
-        (deliveredFinals[deliveredFinals.length - 1]?.text ?? null);
+      const expectedStableSnapshot = deliveredFinals.reduce((stable, delivery) =>
+        appendTranscriptText(stable, delivery.text ?? ''), '');
+      return terminal.stableSnapshot === expectedStableSnapshot;
     });
     if (report.finalOwnership) {
       expectedTerminalCycles.set(report.finalOwnership.logicalRunId, trial.finalEpisodeIndex);

@@ -1030,10 +1030,14 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
       'Rapid cycles retained an extra, late, or foreign final delivery');
     report.allFinalDeliveries = [...finalDeliveries];
     report.expectedFinalSessionIds = [...expectedFinalSessionIds].sort((left, right) => left - right);
+    const wakeFinalDeliveries = report.allFinalDeliveries.filter(delivery =>
+      delivery.sessionId === report.hiddenIdleEvidence?.wakeSessionId);
     check(report.allFinalDeliveries.length === report.expectedFinalSessionIds.length &&
       report.expectedFinalSessionIds.every(sessionId =>
         report.allFinalDeliveries.filter(delivery => delivery.sessionId === sessionId).length === 1) &&
-      report.allFinalDeliveries.every(delivery => expectedFinalSessionIds.has(delivery.sessionId)),
+      report.allFinalDeliveries.every(delivery => expectedFinalSessionIds.has(delivery.sessionId)) &&
+      wakeFinalDeliveries.length === 1 &&
+      wakeFinalDeliveries[0].text === report.hiddenIdleEvidence?.wakeTranscript,
     'Native run retained a duplicate, late, or foreign final delivery');
     check(transcripts.size === successfulStarts && sessions.size === successfulStarts, 'Unique session/transcript count mismatch');
     check(listeningSeen && recordingSeen && stoppedProcessingFrameSeen,
