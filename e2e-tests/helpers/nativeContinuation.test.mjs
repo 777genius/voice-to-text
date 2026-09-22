@@ -76,6 +76,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   const { qualificationExpectations, verifyQualificationConnections, verifyQualificationRoute,
     verifyWarmProviderCanary, verifyWarmProviderTransport } = await import('./nativeContinuation.mjs');
   assert.equal(warmProviderCanaryTrial.cycles.length, 20);
+  assert.equal(warmProviderCanaryTrial.configDelayMs, 1000);
   assert.deepEqual([...new Set(warmProviderCanaryTrial.cycles.map(cycle => cycle.stopPhase))], warmProviderCanaryPhases);
   assert.deepEqual([...new Set(warmProviderCanaryTrial.cycles.map(cycle => cycle.jitterMs))], warmProviderCanaryJittersMs);
   assert.equal(new Set(warmProviderCanaryTrial.cycles.map(cycle => cycle.episode)).size, 2);
@@ -346,6 +347,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     value => { value.finalTextBeforeProof = value.expectedInsertion; },
     value => { value.expectedInsertion = 'unrelated junk'; },
     value => { value.expectedInsertion = 'на столе лежит книга за окном растет береза'; },
+    value => { value.events.splice(-1, 0, { event: 'transcription:error', cycleIndex: 20,
+      sessionId: 1019, deliverySeq: null, markerIds: [] }); },
     value => { value.terminals.find(terminal => terminal.cycleIndex === 0).stableSnapshot = null; },
     value => { value.terminals.at(-1).stableSnapshot = 'WRONG TERMINAL TEXT'; },
     value => { value.terminals.find(terminal => terminal.cycleIndex === 15).stableSnapshot =
@@ -605,6 +608,14 @@ test('warm canary captures the transcript baseline before releasing final PCM', 
   const release = finalSection.indexOf("native_e2e_configure', { config: { sourceGateReady: true }");
   const callbackFence = finalSection.indexOf('report.finalCallbackFence =');
   assert.ok(baseline >= 0 && baseline < release && release < callbackFence);
+});
+test('warm canary binds a fresh Ready provider owner before releasing gated PCM', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(new URL('../../src/e2e/nativeWarmProviderCanary.ts', import.meta.url), 'utf8');
+  const readySection = source.slice(source.indexOf('const ready = await poll(value =>'));
+  const bindOwner = readySection.indexOf('sessionCycles.set(ready.logicalProviderRunId, cycle.index);');
+  const release = readySection.indexOf('releaseWarmCanarySourceBeforeAck(');
+  assert.ok(bindOwner >= 0 && bindOwner < release);
 });
 
 test('normal baseline/cold reject continuation controls', async () => {
@@ -1234,7 +1245,7 @@ test('E63 native submission precedes teardown and runner keeps the original inde
   assert.match(finish, /"preFinish":true/);
   assert.match(finish, /diagnostic::healthy\(\)/);
   const runner = await readFile(new URL('../run-native-window-e2e.mjs', import.meta.url), 'utf8');
-  assert.match(runner, /options\.readerPreparation \|\| \['E04', 'E41', 'E42', 'after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle'\]\.includes\(options\.continuationCase\) \? 30_000\s*: 480_000/);
+  assert.match(runner, /options\.readerPreparation \|\| \['E04', 'E41', 'E42', 'after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle'\]\.includes\(options\.continuationCase\) \? 30_000\s*: 900_000/);
   assert.ok(runner.indexOf('E63 native diagnostic failed') < runner.lastIndexOf('validateResult(envelope)'));
   const envelope = afterWriteEnvelope('after-write-stop');
   envelope.afterWriteServiceAfter.pausedContinuation = 9;

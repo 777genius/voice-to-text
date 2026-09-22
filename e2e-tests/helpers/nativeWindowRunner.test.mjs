@@ -203,6 +203,8 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
     v => { v.report.cycleEvidence.pop(); },
     v => { v.report.cycleEvidence[12].captureGenerations = []; },
     v => { v.report.cycleEvidence[12].captureGeneration = v.report.cycleEvidence[11].captureGeneration; },
+    v => { v.fixture.captureRunAssociations.find(row => row.captureGeneration === 13).captureRunId = 1013;
+      v.report.final.fixture = structuredClone(v.fixture); },
     v => { v.report.cycleEvidence[12].finalSessionId = v.report.cycleEvidence[11].finalSessionId; },
     v => { v.report.cycleEvidence[12].finalText = 'stale transcript'; },
     v => { v.report.cycleFinalDeliveries.push({ sessionId: 12, text: 'late stale transcript', deliverySeq: 99 }); },
@@ -211,6 +213,8 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
       'Native fixture session 50'; },
     v => { v.report.hiddenIdleEvidence.webviewElapsedMs = 179999; },
     v => { v.report.hiddenIdleEvidence.wakeCaptureGeneration = 50; },
+    v => { v.fixture.captureRunAssociations.find(row => row.captureGeneration === 51).captureRunId = 1051;
+      v.report.final.fixture = structuredClone(v.fixture); },
     v => { v.report.scenarios[1] = v.report.scenarios[0]; }]) {
     const invalid = structuredClone(valid); edit(invalid); assert.throws(() => validateResult(invalid), /incomplete/);
   }
@@ -323,6 +327,8 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
     } };
   warm.report.final.fixture.physicalOpenCount = 4;
   warm.report.final.fixture.physicalCloseCount = 3;
+  warm.fixture.physicalOpenCount = 4;
+  warm.fixture.physicalCloseCount = 3;
   assert.equal(validateResult(warm), warm.report);
   const rebatched = structuredClone(warm);
   rebatched.report.final.fixture.providerPcmLedgers[0].chunks = 3;
@@ -393,6 +399,11 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
     mutate(broken);
     assert.throws(() => validateResult(broken), /physical warm input evidence/);
   }
+  const contradictoryTerminalLifecycle = structuredClone(warm);
+  contradictoryTerminalLifecycle.fixture.physicalOpenCount = 50;
+  contradictoryTerminalLifecycle.fixture.physicalCloseCount = 49;
+  assert.throws(() => validateResult(contradictoryTerminalLifecycle),
+    /Incomplete mini UX window evidence/);
   for (const mutate of [
     e => { e.report.cases[0].hideMs = 5000; },
     e => { e.report.cases[0].backgroundDidNotReopen = false; },

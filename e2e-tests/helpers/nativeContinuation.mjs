@@ -34,7 +34,11 @@ export const warmProviderCanaryTrial = Object.freeze({
   id: 'warm-provider-churn-20',
   kind: 'warm-provider-canary',
   continuation: true,
-  configDelayMs: 4000,
+  // Keep the deterministic pre-Ready window long enough for an immediate
+  // before-ready Stop, but below the product's 2200ms no-audio watchdog. Later
+  // gated cycles intentionally emit no PCM until Ready and must not manufacture
+  // capture restarts that consume extra source generations.
+  configDelayMs: 1000,
   route: 'warm-provider-churn',
   cycles: warmProviderCanaryCycles,
   readyGateFromIndex: warmProviderCanaryJittersMs.length,
@@ -450,6 +454,7 @@ export function verifyWarmProviderCanary(trial, report) {
     ? [`${event.sessionId}:${event.deliverySeq}:${event.event}`] : []);
   if (new Set(deliveryKeys).size !== deliveryKeys.length ||
       !events.some(event => event.event === 'transcription:terminal') ||
+      events.some(event => event.event === 'transcription:error') ||
       events.some(event => event.event === 'transcription:final' &&
         (!Number.isSafeInteger(event.deliverySeq) || event.deliverySeq <= 0)) ||
       trial.cycles.some(cycle => cycle.episode === trial.episodes[finalIndex])) {

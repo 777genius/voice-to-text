@@ -249,6 +249,10 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         check(ready.fixture.sourceEpisodes[cycle.index].sourceGateRequired === true,
           `cycle ${cycle.index} source was not held behind provider Ready`);
         triggerLogicalRunId = ready.logicalProviderRunId;
+        // A fresh connection may not have a logical provider owner at capture
+        // start. Bind the Ready-confirmed owner before releasing PCM so an
+        // immediate partial/final callback is attributed to this exact cycle.
+        sessionCycles.set(ready.logicalProviderRunId, cycle.index);
         if (cycle.stopPhase === 'during-partial' || cycle.stopPhase === 'after-final') {
           // Snapshot the delivery boundary before releasing the first PCM. A
           // fresh provider may emit its only Stable while the retained-session

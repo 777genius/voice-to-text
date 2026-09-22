@@ -107,7 +107,8 @@ function terminalEvidenceSignature(fixture) {
   const keys = ['captureStarts', 'captureStops', 'providerStarts', 'providerResumes',
     'providerFailures', 'providerFailureCaptureGenerations',
     'providerStops', 'providerNoAudioStops', 'warmTerminalCount', 'activeCaptures',
-    'activeProviders', 'maxActiveCaptures', 'maxActiveProviders', 'observationOverflow',
+    'activeProviders', 'maxActiveCaptures', 'maxActiveProviders', 'physicalOpenCount',
+    'physicalCloseCount', 'observationOverflow',
     'markerViolations', 'captureRunAssociations', 'captureMarkers', 'providerMarkers',
     'capturePcmLedgers', 'providerPcmLedgers'];
   return JSON.stringify(Object.fromEntries(keys.map(key => [key, fixture?.[key]])));
@@ -1110,7 +1111,10 @@ export function validateResult(envelope) {
     cycles.some(row => {
       const capture = fixture.capturePcmLedgers.find(ledger => ledger.captureGeneration === row.captureGeneration);
       const provider = fixture.providerPcmLedgers.find(ledger => ledger.captureGeneration === row.captureGeneration);
-      return !capture || capture.samples <= 0 || !provider || provider.chunks <= 0 ||
+      const ownershipValid = row.captureGenerations.every(generation =>
+        fixture.captureRunAssociations.some(association =>
+          association.captureGeneration === generation && association.captureRunId === row.sessionId));
+      return !ownershipValid || !capture || capture.samples <= 0 || !provider || provider.chunks <= 0 ||
         provider.samples !== capture.samples || provider.hash !== capture.hash;
     }) || requiredScenarios.some(name => !report.scenarios.includes(name))) {
     throw new Error(`Native result cycle evidence is incomplete: ${JSON.stringify(envelope)}`);
@@ -1131,6 +1135,9 @@ export function validateResult(envelope) {
         delivery.text === idle.wakeTranscript) ||
       !Number.isSafeInteger(idle.wakeWindowEpoch) || idle.wakeWindowEpoch <= cycles[49].windowEpoch ||
       typeof idle.wakeTranscript !== 'string' || !idle.wakeTranscript.trim() ||
+      !fixture.captureRunAssociations.some(association =>
+        association.captureGeneration === idle.wakeCaptureGeneration &&
+        association.captureRunId === idle.wakeSessionId) ||
       !fixture.capturePcmLedgers.some(capture => {
         const provider = fixture.providerPcmLedgers.find(ledger =>
           ledger.captureGeneration === idle.wakeCaptureGeneration);
