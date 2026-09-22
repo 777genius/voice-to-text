@@ -193,7 +193,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       events.push({ event: 'transcription:terminal', cycleIndex: index, sessionId: logicalRunId,
         deliverySeq: null, markerIds: [] });
       terminals.push({ sessionId: logicalRunId, cycleIndex: index, complete: true,
-        stableSnapshot: null });
+        stableSnapshot: plan.stopPhase === 'after-final' ? phrase : null });
       cycle.eventEnd = events.length;
     }
     cycleClock = (providerResetSettledAtMs ?? cycle.settledAtMs) + plan.jitterMs;
@@ -345,6 +345,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     value => { value.finalTextBeforeProof = value.expectedInsertion; },
     value => { value.expectedInsertion = 'unrelated junk'; },
     value => { value.terminals.at(-1).stableSnapshot = 'WRONG TERMINAL TEXT'; },
+    value => { value.terminals.find(terminal => terminal.cycleIndex === 15).stableSnapshot =
+      'WRONG EARLIER TERMINAL TEXT'; },
     value => { value.events.find(event => event.cycleIndex === 20 &&
       event.event === 'transcription:final').text += '!!!'; },
     value => { value.final.fixture.providerCallbackGenerations.pop(); },
@@ -407,6 +409,36 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     value.finalCallbackFence.eventStart += 1;
     value.finalTranscriptFence.eventStart += 1;
   };
+  const insertAfterStop = (value, cycle, event) => {
+    const at = cycle.eventEnd;
+    value.events.splice(at, 0, event);
+    cycle.eventEnd += 1;
+    for (const row of value.cycles) {
+      if (row.index > cycle.index) {
+        row.eventStart += 1;
+        row.triggerEventStart += 1;
+        row.stopEventIndex += 1;
+        row.eventEnd += 1;
+      }
+    }
+    value.finalCallbackFence.eventStart += 1;
+    value.finalTranscriptFence.eventStart += 1;
+  };
+  const lateRetainedFinal = structuredClone(report);
+  const retainedCycle = lateRetainedFinal.cycles[12];
+  const retainedPhrase = retainedCycle.episode === 'episode-a.pcm'
+    ? 'на столе лежит книга' : 'за окном растет береза';
+  insertAfterStop(lateRetainedFinal, retainedCycle, {
+    event: 'transcription:final', cycleIndex: retainedCycle.index,
+    sessionId: retainedCycle.logicalRunId, deliverySeq: 700, text: retainedPhrase,
+    markerIds: [retainedCycle.episode === 'episode-a.pcm' ? 0 : 1],
+    timingKnown: false, sourceStartSeconds: 0, sourceDurationSeconds: 0,
+  });
+  lateRetainedFinal.terminals.find(terminal =>
+    terminal.sessionId === retainedCycle.logicalRunId).stableSnapshot = retainedPhrase;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, lateRetainedFinal),
+    /Final warm provider proof is incomplete/,
+    'an untimed final cannot be reassigned to a later capture on a retained provider run');
   const collapsedPartial = structuredClone(report);
   const partialCycle = collapsedPartial.cycles.find(row => row.stopPhase === 'during-partial');
   insertBeforeStop(collapsedPartial, partialCycle, { event: 'transcription:final',

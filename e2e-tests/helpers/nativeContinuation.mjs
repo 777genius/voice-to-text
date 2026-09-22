@@ -678,6 +678,14 @@ export function verifyWarmProviderCanary(trial, report) {
   if (Number.isSafeInteger(ownership?.logicalRunId)) {
     expectedTerminalCycles.set(ownership.logicalRunId, finalIndex);
   }
+  const terminalSnapshotsAgree = terminals.every(terminal => {
+    const terminalIndex = events.findIndex(event => event.event === 'transcription:terminal' &&
+      event.sessionId === terminal.sessionId && event.cycleIndex === terminal.cycleIndex);
+    if (terminalIndex < 0) return false;
+    const deliveredFinals = events.slice(0, terminalIndex).filter(event =>
+      event.event === 'transcription:final' && event.sessionId === terminal.sessionId);
+    return terminal.stableSnapshot === (deliveredFinals.at(-1)?.text ?? null);
+  });
   const finalTranscriptMatchesCallbackGeneration = event => {
     const eventStartSamples = Math.round(event?.sourceStartSeconds * 16000);
     const eventDurationSamples = Math.round(event?.sourceDurationSeconds * 16000);
@@ -757,6 +765,7 @@ export function verifyWarmProviderCanary(trial, report) {
       [...expectedTerminalCycles].some(([sessionId, cycleIndex]) =>
         terminals.filter(terminal => terminal.sessionId === sessionId &&
           terminal.cycleIndex === cycleIndex).length !== 1) ||
+      !terminalSnapshotsAgree ||
       terminalEvents.some(terminal => {
         const sessionEvents = events.filter(event => event.sessionId === terminal.sessionId);
         return expectedTerminalCycles.get(terminal.sessionId) !== terminal.cycleIndex ||
@@ -774,8 +783,11 @@ export function verifyWarmProviderCanary(trial, report) {
         const cycle = cycles[cycleIndex];
         const episode = trial.cycles[cycleIndex]?.episode;
         const provider = providerByGeneration.get(cycleIndex + 1);
+        const logicalRunCycleCount = cycles.filter(candidate =>
+          candidate.logicalRunId === event.sessionId).length;
         return cycle == null || event.sessionId !== cycle.logicalRunId || episode == null ||
-          !provider || !eventMatchesCapture(event, episode, 'transcription:final', cycleIndex,
+          !provider || (event.timingKnown !== true && logicalRunCycleCount > 1) ||
+          !eventMatchesCapture(event, episode, 'transcription:final', cycleIndex,
             cycle.logicalRunId, cycle.providerStartSamples, provider.samples,
             cycle.triggerDeliverySeqFloor);
       }) ||

@@ -857,17 +857,25 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       if (connectOperation && connectOperation.sessionId === null) connectOperation.sessionId = payloadSessionId;
       awaitingSessionStart.value = false;
 
-      // Если мы "залипли" в Starting из-за пропущенного recording:status=Recording,
-      // но уже видим события transcription:* — значит запись реально идёт.
-      if (status.value === RecordingStatus.Starting) {
-        status.value = RecordingStatus.Recording;
-        if (connectOperation?.sessionId === payloadSessionId) {
-          connectOperation.reachedRecording = true;
-        }
-      }
     }
 
     const isActiveSessionEvent = payloadSessionId === sessionId.value;
+    const isDictationTextEvent =
+      source === 'transcription:stable' ||
+      source === 'transcription:partial' ||
+      source === 'transcription:final';
+    const isTextEvent = isDictationTextEvent || source === 'translation:delta';
+    // Accepted dictation text is authoritative evidence that this session
+    // reached the provider even when Starting already established sessionId
+    // and the Recording status event was delayed or lost.
+    if (isActiveSessionEvent && isTextEvent && status.value === RecordingStatus.Starting) {
+      status.value = RecordingStatus.Recording;
+    }
+    if (isActiveSessionEvent && isDictationTextEvent) {
+      if (connectOperation?.sessionId === payloadSessionId) {
+        connectOperation.reachedRecording = true;
+      }
+    }
     if (isTranslationEvent && isActiveSessionEvent) {
       activeRecordingMode.value = 'live_translation';
     }

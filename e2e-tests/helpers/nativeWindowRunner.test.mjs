@@ -150,6 +150,10 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
     hiddenIdleMs: 180000, elapsedMs: 220000, cycleEvidence,
     cycleFinalDeliveries: cycleEvidence.map(row => ({ sessionId: row.sessionId,
       text: row.expectedTranscript, deliverySeq: row.finalDeliverySeq })),
+    allFinalDeliveries: cycleEvidence.map(row => ({ sessionId: row.sessionId,
+      text: row.expectedTranscript, deliverySeq: row.finalDeliverySeq }))
+      .concat({ sessionId: 51, text: 'Native fixture session 51', deliverySeq: 51 }),
+    expectedFinalSessionIds: Array.from({ length: 51 }, (_, index) => index + 1),
     final: { preparedCaptureTokenCount: 0, fixture: structuredClone(fixture) },
     hiddenIdleEvidence: { nativeHiddenIdleMs: 180000, webviewElapsedMs: 180001,
       baselineCaptureStarts: 50, baselineCaptureStops: 50, baselineActiveCaptures: 0,
@@ -160,6 +164,27 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
     scenarios: ['50-audio-transcript-stop-hide-reopen-cycles', 'real-hidden-idle-180s-and-fresh-audio',
       ...Array.from({ length: 10 }, (_, i) => `scenario-${i}`)] } };
   assert.equal(validateResult(valid), valid.report);
+  const stallRestart = structuredClone(valid);
+  const wakeAssociation = stallRestart.fixture.captureRunAssociations.find(row =>
+    row.captureGeneration === stallRestart.report.hiddenIdleEvidence.wakeCaptureGeneration);
+  stallRestart.fixture.captureStarts += 1;
+  stallRestart.fixture.captureStops += 1;
+  stallRestart.fixture.captureRunAssociations.push({ ...wakeAssociation, captureGeneration: 52 });
+  stallRestart.fixture.captureMarkers.push({ captureGeneration: 52, count: 1,
+    firstSequence: 1, lastSequence: 1 });
+  stallRestart.fixture.providerMarkers.push({ ...wakeAssociation, captureGeneration: 52,
+    providerSessionId: 51, count: 1, firstSequence: 1, lastSequence: 1 });
+  stallRestart.fixture.capturePcmLedgers.push({ captureGeneration: 52, chunks: 1,
+    samples: 320, hash: 'fedcba9876543210' });
+  stallRestart.fixture.providerPcmLedgers.push({ captureGeneration: 52, chunks: 1,
+    samples: 320, hash: 'fedcba9876543210' });
+  stallRestart.report.final.fixture = structuredClone(stallRestart.fixture);
+  assert.equal(validateResult(stallRestart), stallRestart.report,
+    'a newer physical generation may retain the same logical provider session after a stall restart');
+  stallRestart.fixture.providerMarkers.at(-1).providerSessionId = 52;
+  stallRestart.report.final.fixture = structuredClone(stallRestart.fixture);
+  assert.throws(() => validateResult(stallRestart), /incomplete/,
+    'a new provider session still requires its own balanced stop');
   for (const edit of [v => { v.marker = 'normal'; }, v => { v.report.skipped = true; },
     v => { v.report.hiddenIdleMs = 179999; }, v => { v.report.elapsedMs = Infinity; },
     v => { v.report.elapsedMs = 900001; },
@@ -181,6 +206,7 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
     v => { v.report.cycleEvidence[12].finalSessionId = v.report.cycleEvidence[11].finalSessionId; },
     v => { v.report.cycleEvidence[12].finalText = 'stale transcript'; },
     v => { v.report.cycleFinalDeliveries.push({ sessionId: 12, text: 'late stale transcript', deliverySeq: 99 }); },
+    v => { v.report.allFinalDeliveries.push({ sessionId: 999, text: 'foreign final', deliverySeq: 999 }); },
     v => { v.report.hiddenIdleEvidence.webviewElapsedMs = 179999; },
     v => { v.report.hiddenIdleEvidence.wakeCaptureGeneration = 50; },
     v => { v.report.scenarios[1] = v.report.scenarios[0]; }]) {

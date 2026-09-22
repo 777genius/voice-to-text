@@ -116,6 +116,8 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
       captureGeneration: number; captureGenerations: number[]; expectedTranscript: string; finalSessionId: number;
       finalText: string; finalDeliverySeq: number | null }>,
     cycleFinalDeliveries: [] as Array<{ sessionId: number; text: string; deliverySeq: number | null }>,
+    allFinalDeliveries: [] as Array<{ sessionId: number; text: string; deliverySeq: number | null }>,
+    expectedFinalSessionIds: [] as number[],
     hiddenIdleEvidence: null as null | { nativeHiddenIdleMs: number; webviewElapsedMs: number;
       baselineCaptureStarts: number; baselineCaptureStops: number; baselineActiveCaptures: number;
       baselineActiveProviders: number; baselineCaptureGeneration: number; wakeCaptureGeneration: number;
@@ -162,6 +164,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     const baseline = await state();
     check(baseline.status === 'Idle' && baseline.fixture.activeCaptures === 0, 'Fixture must begin Idle without capture');
     const sessions = new Set<number>();
+    const expectedFinalSessionIds = new Set<number>();
     const transcripts = new Set<string>();
     let successfulStarts = 0;
     let stoppedProcessingFrameSeen = false;
@@ -243,6 +246,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
         'Hotkey did not create a visible recording', timeout);
       check(!sessions.has(recording.sessionId), 'A new recording reused a session ID');
       sessions.add(recording.sessionId);
+      expectedFinalSessionIds.add(recording.sessionId);
       successfulStarts += 1;
       if (requireListening) {
         await until(async () => ({ observed: listeningWasObserved(), listening: store.isListeningPlaceholder,
@@ -679,6 +683,9 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     'Released admitted hold did not deliver its buffered PCM exactly once');
     assertPcmDeliveryComplete(afterPending, sealedGeneration);
     sealedPendingStarts += 1;
+    check(Number.isSafeInteger(pendingReady.readiness?.runId) && Number(pendingReady.readiness?.runId) > 0,
+      'Sealed pending start has no final-delivery session ownership');
+    expectedFinalSessionIds.add(Number(pendingReady.readiness?.runId));
     assertMarkerEvidence(afterPending);
     await invoke('hide_recording_window_if_current', { windowEpoch: afterPending.windowEpoch });
     await configure({ stopDelayMs: 130 });
@@ -1021,6 +1028,13 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     report.cycleFinalDeliveries = finalDeliveries.filter(delivery => cycleSessionIds.has(delivery.sessionId));
     check(report.cycleFinalDeliveries.length === report.cycleEvidence.length,
       'Rapid cycles retained an extra, late, or foreign final delivery');
+    report.allFinalDeliveries = [...finalDeliveries];
+    report.expectedFinalSessionIds = [...expectedFinalSessionIds].sort((left, right) => left - right);
+    check(report.allFinalDeliveries.length === report.expectedFinalSessionIds.length &&
+      report.expectedFinalSessionIds.every(sessionId =>
+        report.allFinalDeliveries.filter(delivery => delivery.sessionId === sessionId).length === 1) &&
+      report.allFinalDeliveries.every(delivery => expectedFinalSessionIds.has(delivery.sessionId)),
+    'Native run retained a duplicate, late, or foreign final delivery');
     check(transcripts.size === successfulStarts && sessions.size === successfulStarts, 'Unique session/transcript count mismatch');
     check(listeningSeen && recordingSeen && stoppedProcessingFrameSeen,
       'Missing listening, recording, or stopped-processing UI frame');

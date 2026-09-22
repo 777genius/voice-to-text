@@ -47,6 +47,8 @@ function validateExactPcmEvidence(fixture, requireEveryCaptureDelivered, provide
   const providers = generationMap(fixture?.providerPcmLedgers, validLedger);
   const captureMarkers = generationMap(fixture?.captureMarkers, validCaptureMarker);
   const providerMarkers = generationMap(fixture?.providerMarkers, validProviderMarker);
+  const providerSessionCount = providerMarkers ?
+    new Set([...providerMarkers.values()].map(row => row.providerSessionId)).size : 0;
   const associations = generationMap(fixture?.captureRunAssociations, validAssociation);
   const failureGenerations = fixture?.providerFailureCaptureGenerations;
   if (!captures || !providers || !captureMarkers || !providerMarkers || !associations ||
@@ -56,8 +58,8 @@ function validateExactPcmEvidence(fixture, requireEveryCaptureDelivered, provide
       failureGenerations.length !== fixture.providerFailures ||
       failureGenerations.some(generation => !positiveSafeInteger(generation) || !captures.has(generation)) ||
       (providerStopPerGeneration &&
-        (providers.size + fixture.providerNoAudioStops < fixture.providerStops ||
-         providers.size + fixture.providerNoAudioStops >
+        (providerSessionCount + fixture.providerNoAudioStops < fixture.providerStops ||
+         providerSessionCount + fixture.providerNoAudioStops >
            fixture.providerStops + fixture.warmTerminalCount))) return false;
   const sameGenerations = (left, right) =>
     left.size === right.size && [...left.keys()].every(generation => right.has(generation));
@@ -1059,10 +1061,24 @@ export function validateResult(envelope) {
   }
   const cycles = report.cycleEvidence;
   const cycleFinalDeliveries = report.cycleFinalDeliveries;
+  const allFinalDeliveries = report.allFinalDeliveries;
+  const expectedFinalSessionIds = report.expectedFinalSessionIds;
   const requiredScenarios = ['50-audio-transcript-stop-hide-reopen-cycles',
     'real-hidden-idle-180s-and-fresh-audio'];
   if (!Array.isArray(cycles) || cycles.length !== 50 ||
     !Array.isArray(cycleFinalDeliveries) || cycleFinalDeliveries.length !== cycles.length ||
+    !Array.isArray(allFinalDeliveries) || !Array.isArray(expectedFinalSessionIds) ||
+    allFinalDeliveries.length !== expectedFinalSessionIds.length ||
+    allFinalDeliveries.length !== fixture.finals ||
+    new Set(expectedFinalSessionIds).size !== expectedFinalSessionIds.length ||
+    expectedFinalSessionIds.some(sessionId => !positiveSafeInteger(sessionId) ||
+      allFinalDeliveries.filter(delivery => delivery.sessionId === sessionId).length !== 1) ||
+    allFinalDeliveries.some(delivery => !expectedFinalSessionIds.includes(delivery.sessionId) ||
+      typeof delivery.text !== 'string' || !delivery.text.trim() ||
+      (delivery.deliverySeq !== null && !positiveSafeInteger(delivery.deliverySeq))) ||
+    cycleFinalDeliveries.some(delivery => !allFinalDeliveries.some(candidate =>
+      candidate.sessionId === delivery.sessionId && candidate.text === delivery.text &&
+      candidate.deliverySeq === delivery.deliverySeq)) ||
     cycles.some((row, index) =>
     row?.index !== index || !Number.isSafeInteger(row.captureStartsBefore) ||
     !Number.isSafeInteger(row.captureStartsAfter) || row.captureStartsAfter <= row.captureStartsBefore ||

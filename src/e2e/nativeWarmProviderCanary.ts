@@ -504,6 +504,15 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       event.sessionId === report.finalOwnership?.logicalRunId);
     const expectedTerminalCycles = new Map(report.cycles.map(cycle =>
       [Number(cycle.logicalRunId), Number(cycle.index)]));
+    const terminalSnapshotsAgree = report.terminals.every(terminal => {
+      const terminalIndex = report.events.findIndex(event => event.event === 'transcription:terminal' &&
+        event.sessionId === terminal.sessionId && event.cycleIndex === terminal.cycleIndex);
+      if (terminalIndex < 0) return false;
+      const deliveredFinals = report.events.slice(0, terminalIndex).filter(event =>
+        event.event === 'transcription:final' && event.sessionId === terminal.sessionId);
+      return terminal.stableSnapshot ===
+        (deliveredFinals[deliveredFinals.length - 1]?.text ?? null);
+    });
     if (report.finalOwnership) {
       expectedTerminalCycles.set(report.finalOwnership.logicalRunId, trial.finalEpisodeIndex);
     }
@@ -518,6 +527,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       [...expectedTerminalCycles].every(([sessionId, cycleIndex]) =>
         report.terminals.filter(terminal => terminal.sessionId === sessionId &&
           terminal.cycleIndex === cycleIndex).length === 1) &&
+      terminalSnapshotsAgree &&
       finalTerminals.length === 1 && finalTerminals[0].cycleIndex === trial.finalEpisodeIndex &&
       finalTerminalEvents.length === 1 && finalTerminalEvents[0].cycleIndex === trial.finalEpisodeIndex,
     'Warm provider canary terminal ownership is incomplete or duplicated');
@@ -534,7 +544,10 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       const row = report.cycles[cycleIndex];
       const provider = report.final?.fixture.providerPcmLedgers.find(ledger =>
         ledger.captureGeneration === Number(row?.captureGeneration));
+      const logicalRunCycleCount = report.cycles.filter(candidate =>
+        Number(candidate.logicalRunId) === event.sessionId).length;
       return cycle != null && provider != null &&
+        (event.timingKnown === true || logicalRunCycleCount === 1) &&
         warmCanaryEventMatchesCapture(event, cycle.episode, 'transcription:final', {
           sessionId: Number(row?.logicalRunId), cycleIndex,
           providerStartSamples: Number(row?.providerStartSamples), providerSamples: provider.samples,

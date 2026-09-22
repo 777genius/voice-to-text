@@ -5653,7 +5653,7 @@ describe('transcription connect-retry reliability', () => {
     expect(store.sessionId).toBeNull();
   });
 
-  it.each(['status', 'partial-adoption', 'reconcile'] as const)(
+  it.each(['status', 'partial-adoption', 'partial-existing-session', 'reconcile'] as const)(
     'does not retry a run that reached Recording through %s when a provider error arrives before runtimeFailed',
     async (recordingEvidence) => {
     vi.useFakeTimers();
@@ -5682,6 +5682,13 @@ describe('transcription connect-retry reliability', () => {
       } else if (recordingEvidence === 'partial-adoption') {
         await handlers.get('transcription:partial')({ payload: {
           session_id: 71, text: 'provider is active', is_segment_final: false,
+        } });
+      } else if (recordingEvidence === 'partial-existing-session') {
+        await handlers.get('recording:status')({ payload: {
+          session_id: 71, status: 'Starting', stopped_via_hotkey: false,
+        } });
+        await handlers.get('transcription:partial')({ payload: {
+          session_id: 71, text: 'provider is already active', is_segment_final: false,
         } });
       } else {
         expect(await store.reconcileBackendStatus('recording_recovery')).toBe('Recording');
