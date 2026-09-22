@@ -99,6 +99,32 @@ interface MiniCaptureProjection {
   placeholderText: string;
 }
 
+// Native publishes activating-warm-capture before it tries to reattach the
+// prepared input. Preserve that exact intent lineage while the readiness
+// reason advances through starting-capture; otherwise the mini window can
+// briefly render a cold-start label for an already-warm admission.
+const warmActivationRevision = ref<number | null>(null);
+watch(
+  [
+    () => store.recordingIntentRevision,
+    () => store.recordingDesiredOn,
+    () => store.captureReadiness,
+  ],
+  ([revision, desiredOn, readiness]) => {
+    if (!desiredOn || revision === null) {
+      warmActivationRevision.value = null;
+      return;
+    }
+    if (warmActivationRevision.value !== null && warmActivationRevision.value !== revision) {
+      warmActivationRevision.value = null;
+    }
+    if (readiness?.revision === revision && readiness.reason === 'activating-warm-capture') {
+      warmActivationRevision.value = revision;
+    }
+  },
+  { flush: 'sync' },
+);
+
 const stoppedMiniWindowOwnerRunId = computed<number | null>(() => {
   if (!appConfigStore.showMiniRecordingWindow) return null;
   const projection = store.lastAcceptedRecordingIntentProjection;
@@ -143,13 +169,18 @@ const miniCaptureProjection = computed<MiniCaptureProjection>(() => {
   const isExplicitWarmActivation = store.recordingDesiredOn &&
     readiness?.state === 'unavailable' &&
     readiness.reason === 'activating-warm-capture';
+  const isWarmAdmissionPending = store.recordingDesiredOn &&
+    warmActivationRevision.value !== null &&
+    warmActivationRevision.value === readiness?.revision &&
+    !store.isCaptureReady;
   const isWarmAdmissionGap = appConfigStore.keepMicrophoneReady &&
     store.activeRecordingMode === 'dictation' &&
     (store.recordingDesiredOn || store.isStarting) &&
     (!readiness || (readiness.state === 'unavailable' &&
       readiness.reason === 'idle'));
-  if (!hasIndependentStartingCapture && (isExplicitWarmActivation || isWarmAdmissionGap) &&
-      store.incomingTranslationStatus !== 'Processing') {
+  if (isWarmAdmissionPending ||
+      (!hasIndependentStartingCapture && (isExplicitWarmActivation || isWarmAdmissionGap) &&
+        store.incomingTranslationStatus !== 'Processing')) {
     return { phase: 'idle', statusText: '', placeholderText: '' };
   }
   const hasCurrentStartingCapture = !hasTerminalReadiness && (

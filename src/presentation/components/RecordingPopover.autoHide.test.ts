@@ -1137,7 +1137,10 @@ describe('RecordingPopover mini auto-hide e2e', () => {
       expectMiniCapturePhase('idle', '');
       await emitTauriEvent('recording:capture-readiness', { ...warm, revision: 9, generation: 5,
         reason: 'starting-capture' });
-      expectMiniCapturePhase('starting', 'Starting');
+      expectMiniCapturePhase('idle', '');
+      await emitTauriEvent('recording:capture-readiness', { ...warm, revision: 9, generation: 6,
+        state: 'buffering', reason: 'connecting-provider', captureReady: true });
+      expectMiniCapturePhase('recording', 'Listening');
       wrapper.unmount();
     },
   );
