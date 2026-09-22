@@ -1032,6 +1032,8 @@ export function validateResult(envelope) {
     const cycles = report.cycles;
     const latencies = fixture?.firstPcmLatenciesMs;
     const continuationGenerations = Array.from({ length: 51 }, (_, index) => index + 1);
+    const authoritativeControls = fixture?.controlResults;
+    const retainedLogicalRunId = report.logicalRunId;
     const validCycles = Array.isArray(cycles) && cycles.length === 50 && cycles.every((cycle, index) =>
       cycle?.cycle === index && cycle.captureGeneration === index + 2 &&
       Number.isSafeInteger(cycle.windowEpoch) && cycle.windowEpoch > 0 &&
@@ -1040,10 +1042,19 @@ export function validateResult(envelope) {
       Array.isArray(cycle.controls) && cycle.controls.length === 2 &&
       cycle.controls[0]?.operation === 'pause' && cycle.controls[1]?.operation === 'continue' &&
       cycle.controls[0].logicalRunId === cycle.controls[1].logicalRunId &&
-      Number.isSafeInteger(cycle.controls[0].logicalRunId) && cycle.controls[0].logicalRunId > 0 &&
+      cycle.controls[0].logicalRunId === retainedLogicalRunId &&
+      Number.isSafeInteger(retainedLogicalRunId) && retainedLogicalRunId > 0 &&
       cycle.controls[0].result?.decision === 'accepted' && cycle.controls[1].result?.decision === 'accepted' &&
       cycle.controls[0].result.pause_epoch === cycle.controls[1].result.pause_epoch &&
-      Number.isSafeInteger(cycle.controls[0].result.pause_epoch) && cycle.controls[0].result.pause_epoch > 0);
+      cycle.controls[0].result.pause_epoch === index + 1);
+    const flattenedControls = Array.isArray(cycles) ? cycles.flatMap(cycle => cycle.controls ?? []) : [];
+    const terminalControl = Array.isArray(authoritativeControls) ? authoritativeControls.at(-1) : null;
+    const validAuthoritativeControls = Array.isArray(authoritativeControls) &&
+      authoritativeControls.length === 101 && flattenedControls.length === 100 &&
+      flattenedControls.every((control, index) => isDeepStrictEqual(control, authoritativeControls[index])) &&
+      terminalControl?.operation === 'pause' && terminalControl.logicalRunId === retainedLogicalRunId &&
+      terminalControl.delivered === true && terminalControl.result?.decision === 'accepted' &&
+      terminalControl.result.pause_epoch === 51;
     const latencyValues = Array.isArray(latencies) ? latencies.map(row => row?.elapsedMs) : [];
     const sortedLatencies = latencyValues.every(value => Number.isFinite(value) && value >= 0)
       ? [...latencyValues].sort((left, right) => left - right) : [];
@@ -1071,17 +1082,31 @@ export function validateResult(envelope) {
       ? [...providerMarkers.values()][0].providerSessionId : null;
     const expectedTranscript = expectedProviderSessionId === null
       ? null : `Native fixture session ${expectedProviderSessionId}`;
+    const validControlProviderOwner = expectedProviderSessionId !== null &&
+      authoritativeControls?.every(control =>
+        control.result?.provider_session_id === `p4-${expectedProviderSessionId}`);
     const stableDelivery = Array.isArray(report.stableDeliveries) && report.stableDeliveries.length === 1
       ? report.stableDeliveries[0] : null;
     const terminal = Array.isArray(report.terminals) && report.terminals.length === 1
       ? report.terminals[0] : null;
+    const transcriptEvents = report.transcriptEvents;
     const validTranscriptEvidence = stableDelivery?.sessionId === expectedProviderSessionId &&
       positiveSafeInteger(stableDelivery?.deliverySeq) && stableDelivery?.text === expectedTranscript &&
       terminal?.sessionId === expectedProviderSessionId && terminal?.complete === true &&
-      terminal?.stableSnapshot === expectedTranscript;
+      terminal?.stableSnapshot === expectedTranscript && Array.isArray(transcriptEvents) &&
+      transcriptEvents.length === 2 && transcriptEvents[0]?.event === 'final' &&
+      transcriptEvents[0]?.sessionId === expectedProviderSessionId &&
+      transcriptEvents[0]?.deliverySeq === stableDelivery.deliverySeq &&
+      transcriptEvents[0]?.text === expectedTranscript && transcriptEvents[0]?.complete === null &&
+      transcriptEvents[1]?.event === 'terminal' &&
+      transcriptEvents[1]?.sessionId === expectedProviderSessionId &&
+      transcriptEvents[1]?.deliverySeq === null && transcriptEvents[1]?.text === expectedTranscript &&
+      transcriptEvents[1]?.complete === true;
     if (envelope.marker !== marker || envelope.passed !== true || report.passed !== true ||
         report.terminalCount !== 1 || !validTranscriptEvidence || report.final?.historyEntryCount !== 1 ||
-        report.completedCycles !== 50 || !validCycles || !validLatencies || !validContinuationPcm ||
+        report.completedCycles !== 50 || !validCycles || !validAuthoritativeControls ||
+        !validControlProviderOwner ||
+        !validLatencies || !validContinuationPcm ||
         !validateTerminalFixture(fixture, true) || fixture?.observationOverflow !== false ||
         !Array.isArray(report.errors) || report.errors.length ||
         !Number.isFinite(report.p95FirstPcmMs) || report.p95FirstPcmMs < 0 || report.p95FirstPcmMs > 250 ||
@@ -1430,7 +1455,7 @@ export async function main(args = process.argv.slice(2)) {
         Object.assign(verification,
           verifyWarmProviderFinalFixtureAgreement(report.final.fixture, envelope.fixture));
         Object.assign(verification, verifyWarmProviderCanary(trial, report));
-        Object.assign(verification, verifyWarmProviderTransport(proxyEvents, report.final.fixture));
+        Object.assign(verification, verifyWarmProviderTransport(proxyEvents, report.final.fixture, report));
         if (verification.clientAudioBytes !== verification.transmittedPcmBytes) {
           throw new Error('Warm provider route and transport byte evidence disagree');
         }

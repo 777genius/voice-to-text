@@ -7,6 +7,7 @@ import { useAppConfigStore } from '@/stores/appConfig';
 type Control = { operation: string; logicalRunId: number; cumulativeBytes: number;
   result: { decision: string; pause_epoch: number; provider_session_id: string } };
 type Snapshot = { historyEntryCount: number; status: string; sessionId: number; windowEpoch: number; visible: boolean;
+  logicalProviderRunId: number;
   preparedCaptureTokenCount: number; fixture: {
     captureStarts: number; captureStops: number; activeCaptures: number; activeProviders: number;
     providerStarts: number; providerResumes: number; maxActiveProviders: number; providerAudioChunks: number;
@@ -31,7 +32,10 @@ export async function runNativeContinuationScenarios(pinia: Pinia) {
   const report = { mode: 'continuation-fake', passed: false, completedCycles: 0,
     errors: [] as string[], stableDeliveries: [] as Array<{ sessionId: number; deliverySeq: number;
       text: string }>, terminals: [] as Array<{ sessionId: number; complete: boolean;
-      stableSnapshot: string }>, terminalCount: 0, cycles: [] as unknown[], elapsedMs: 0, p95FirstPcmMs: -1,
+      stableSnapshot: string }>, transcriptEvents: [] as Array<{ event: 'final' | 'terminal';
+      sessionId: number; deliverySeq: number | null; text: string; complete: boolean | null }>,
+    terminalCount: 0, logicalRunId: null as number | null,
+    cycles: [] as unknown[], elapsedMs: 0, p95FirstPcmMs: -1,
     final: null as Snapshot | null };
   const unlisten = await listen('transcription:error', event => {
     report.errors.push(JSON.stringify(event.payload));
@@ -43,14 +47,27 @@ export async function runNativeContinuationScenarios(pinia: Pinia) {
     if (name === 'transcription:terminal') {
       report.terminalCount++;
       const complete = !payload.error && payload.delivery_complete === true;
-      report.terminals.push({ sessionId, complete,
-        stableSnapshot: typeof payload.stable_snapshot === 'string' ? payload.stable_snapshot : '' });
-      if (!complete) report.errors.push('Incomplete terminal');
+      const stableSnapshot = typeof payload.stable_snapshot === 'string' ? payload.stable_snapshot : '';
+      report.terminals.push({ sessionId, complete, stableSnapshot });
+      report.transcriptEvents.push({ event: 'terminal', sessionId, deliverySeq: null,
+        text: stableSnapshot, complete });
+      if (!Number.isSafeInteger(sessionId) || sessionId <= 0 || !complete || !stableSnapshot.trim()) {
+        report.errors.push('Incomplete terminal');
+      }
     } else if (typeof payload.delivery_seq === 'number' && (name === 'transcription:final' || payload.is_segment_final === true)) {
       const key = `${payload.session_id}:${payload.delivery_seq}`;
       if (stableKeys.has(key)) report.errors.push('Duplicate stable delivery');
+      const text = typeof payload.text === 'string' ? payload.text : '';
       stableKeys.add(key); report.stableDeliveries.push({ sessionId,
-        deliverySeq: Number(payload.delivery_seq), text: typeof payload.text === 'string' ? payload.text : '' });
+        deliverySeq: Number(payload.delivery_seq), text });
+      report.transcriptEvents.push({ event: 'final', sessionId,
+        deliverySeq: Number(payload.delivery_seq), text, complete: null });
+      if (!Number.isSafeInteger(sessionId) || sessionId <= 0 || !Number.isSafeInteger(payload.delivery_seq) ||
+          Number(payload.delivery_seq) <= 0 || !text.trim()) report.errors.push('Malformed stable delivery');
+    } else if (name === 'transcription:final') {
+      report.transcriptEvents.push({ event: 'final', sessionId, deliverySeq: null,
+        text: typeof payload.text === 'string' ? payload.text : '', complete: null });
+      report.errors.push('Final delivery is missing identity');
     }
   })));
   try {
@@ -63,6 +80,10 @@ export async function runNativeContinuationScenarios(pinia: Pinia) {
     await invoke('native_e2e_configure', { config: { audioDelayMs: 0, stopDelayMs: 0, keepAlive: false } });
     await toggle();
     const initial = await poll(s => s.fixture.providerAudioChunks > 0, 'Initial source never reached provider');
+    check(Number.isSafeInteger(initial.logicalProviderRunId) && initial.logicalProviderRunId > 0,
+      'Initial logical provider owner is missing');
+    report.logicalRunId = initial.logicalProviderRunId;
+    let previousPauseEpoch = 0;
     for (let cycle = 0; cycle < 50; cycle++) {
       const before = await state();
       await toggle();
@@ -83,8 +104,12 @@ export async function runNativeContinuationScenarios(pinia: Pinia) {
         'Capture ownership or ordered marker evidence failed');
       const controls = continued.fixture.controlResults.slice(-2);
       check(controls.length === 2 && controls[0].logicalRunId === controls[1].logicalRunId &&
+        controls[0].logicalRunId === report.logicalRunId &&
         controls[0].result.pause_epoch === controls[1].result.pause_epoch,
       'Logical owner/epoch changed across Continue');
+      check(controls[0].result.pause_epoch > previousPauseEpoch,
+        'Pause epoch did not advance across Continue cycles');
+      previousPauseEpoch = controls[0].result.pause_epoch;
       report.cycles.push({ cycle, captureGeneration: continued.fixture.firstPcmLatenciesMs[continued.fixture.firstPcmLatenciesMs.length - 1]?.captureGeneration,
         windowEpoch: continued.windowEpoch, providerStarts: continued.fixture.providerStarts,
         micOffOnStop: paused.fixture.activeCaptures === 0, controls });
@@ -114,6 +139,8 @@ export async function runNativeContinuationScenarios(pinia: Pinia) {
     const expectedTranscript = stableDelivery
       ? `Native fixture session ${stableDelivery.sessionId}` : '';
     check(report.stableDeliveries.length === 1 && report.terminals.length === 1 &&
+      report.transcriptEvents.length === 2 && report.transcriptEvents[0]?.event === 'final' &&
+      report.transcriptEvents[1]?.event === 'terminal' &&
       Number.isSafeInteger(stableDelivery?.deliverySeq) && Number(stableDelivery?.deliverySeq) > 0 &&
       stableDelivery?.sessionId === terminal?.sessionId && terminal?.complete === true &&
       stableDelivery?.text === expectedTranscript && terminal?.stableSnapshot === expectedTranscript &&

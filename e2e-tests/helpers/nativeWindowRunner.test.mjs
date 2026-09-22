@@ -231,11 +231,17 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
 
 test('continuation qualification requires balanced and identical terminal lifecycle evidence', () => {
   const generations = Array.from({ length: 51 }, (_, index) => index + 1);
+  const controlResults = Array.from({ length: 50 }, (_, cycle) => ['pause', 'continue'].map(operation => ({
+    operation, logicalRunId: 1, delivered: true,
+    result: { decision: 'accepted', pause_epoch: cycle + 1, provider_session_id: 'p4-1' },
+  }))).flat();
+  controlResults.push({ operation: 'pause', logicalRunId: 1, delivered: true,
+    result: { decision: 'accepted', pause_epoch: 51, provider_session_id: 'p4-1' } });
   const fixture = { captureStarts: 51, captureStops: 51, activeCaptures: 0, maxActiveCaptures: 1,
     providerStarts: 1, providerStops: 1, providerResumes: 0, activeProviders: 0,
     maxActiveProviders: 1, finals: 1, providerFailures: 0,
     providerFailureCaptureGenerations: [], providerNoAudioStops: 0, warmTerminalCount: 0,
-    observationOverflow: false, markerViolations: [],
+    observationOverflow: false, markerViolations: [], controlResults,
     firstPcmLatenciesMs: generations.map(captureGeneration => ({ captureGeneration, elapsedMs: 10 })),
     captureRunAssociations: generations.map(captureGeneration => ({ captureGeneration,
       captureRunId: captureGeneration, captureFenceGeneration: captureGeneration })),
@@ -250,12 +256,15 @@ test('continuation qualification requires balanced and identical terminal lifecy
       chunks: 1, samples: 320, hash: '0123456789abcdef' })) };
   const cycles = Array.from({ length: 50 }, (_, cycle) => ({ cycle,
     captureGeneration: cycle + 2, windowEpoch: cycle + 1, providerStarts: 1,
-    micOffOnStop: true, controls: ['pause', 'continue'].map(operation => ({ operation,
-      logicalRunId: 1, result: { decision: 'accepted', pause_epoch: cycle + 1 } })) }));
+    micOffOnStop: true, controls: controlResults.slice(cycle * 2, cycle * 2 + 2) }));
   const valid = { marker, passed: true, fixture, report: { mode: 'continuation-fake',
-    passed: true, errors: [], completedCycles: 50, terminalCount: 1,
+    passed: true, errors: [], completedCycles: 50, terminalCount: 1, logicalRunId: 1,
     stableDeliveries: [{ sessionId: 1, deliverySeq: 1, text: 'Native fixture session 1' }],
     terminals: [{ sessionId: 1, complete: true, stableSnapshot: 'Native fixture session 1' }],
+    transcriptEvents: [
+      { event: 'final', sessionId: 1, deliverySeq: 1, text: 'Native fixture session 1', complete: null },
+      { event: 'terminal', sessionId: 1, deliverySeq: null, text: 'Native fixture session 1', complete: true },
+    ],
     p95FirstPcmMs: 10, cycles,
     final: { status: 'Idle', historyEntryCount: 1, preparedCaptureTokenCount: 0,
       fixture: structuredClone(fixture) } } };
@@ -288,6 +297,18 @@ test('continuation qualification requires balanced and identical terminal lifecy
     value => { value.report.stableDeliveries.push({ sessionId: 999, deliverySeq: 2, text: '' }); },
     value => { value.report.terminals.push({ sessionId: 888, complete: true, stableSnapshot: '' });
       value.report.terminalCount++; },
+    value => { value.report.transcriptEvents.unshift(
+      { event: 'final', sessionId: 999, deliverySeq: null, text: '', complete: null }); },
+    value => { value.report.transcriptEvents.reverse(); },
+    value => { value.report.cycles.forEach(cycle => cycle.controls.forEach(control => {
+      control.logicalRunId = 999;
+    })); },
+    value => { value.report.cycles.forEach(cycle => cycle.controls.forEach(control => {
+      control.result.pause_epoch = 1;
+    })); },
+    value => { value.report.logicalRunId = 999; },
+    value => { value.fixture.controlResults[0].logicalRunId = 999;
+      value.report.final.fixture.controlResults[0].logicalRunId = 999; },
     value => { value.fixture.providerNoAudioStops = 1; value.report.final.fixture.providerNoAudioStops = 1; },
     value => { value.fixture.warmTerminalCount = 1; value.report.final.fixture.warmTerminalCount = 1; },
   ]) {

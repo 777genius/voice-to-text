@@ -339,7 +339,7 @@ export function verifyQualificationRoute(trial, events) {
     postContinueAudioFrames: postContinueAudio.length, routeVerified: trial.route };
 }
 
-export function verifyWarmProviderTransport(events, fixture) {
+export function verifyWarmProviderTransport(events, fixture, report) {
   const frames = events.filter(event => event.event === 'client_binary');
   const ledgers = fixture?.providerPcmLedgers;
   if (!Array.isArray(ledgers) || !frames.length || frames.some(event =>
@@ -352,7 +352,8 @@ export function verifyWarmProviderTransport(events, fixture) {
   const segments = [];
   let segmentOrder = 0;
   const flush = state => {
-    if (state.bytes > 0) segments.push({ order: state.order, bytes: state.bytes, hash: state.hash });
+    if (state.bytes > 0) segments.push({ order: state.order, connectionId: state.connectionId,
+      bytes: state.bytes, hash: state.hash });
     state.bytes = 0;
     state.hash = null;
     state.order = null;
@@ -361,7 +362,8 @@ export function verifyWarmProviderTransport(events, fixture) {
     if (event.event === 'fault_proxy_connected') {
       if (!Number.isSafeInteger(event.connectionId) || event.connectionId <= 0 ||
           connections.has(event.connectionId)) throw new Error('Warm provider transport connection identity is invalid');
-      connections.set(event.connectionId, { open: true, paused: false, bytes: 0, hash: null, order: null });
+      connections.set(event.connectionId, { connectionId: event.connectionId,
+        open: true, paused: false, bytes: 0, hash: null, order: null });
       continue;
     }
     const state = connections.get(event.connectionId);
@@ -401,6 +403,33 @@ export function verifyWarmProviderTransport(events, fixture) {
     !Number.isSafeInteger(ledger.samples) || ledger.samples <= 0 ||
     orderedSegments[index]?.bytes !== ledger.samples * 2 || orderedSegments[index]?.hash !== ledger.hash)) {
     throw new Error('Warm provider PCM ledger does not match per-generation proxy transport intervals');
+  }
+  const ownershipRows = Array.isArray(report?.cycles) ? report.cycles.map(cycle => ({
+    captureGeneration: cycle?.captureGeneration, logicalRunId: cycle?.logicalRunId,
+  })) : [];
+  ownershipRows.push({ captureGeneration: report?.finalOwnership?.captureFenceGeneration,
+    logicalRunId: report?.finalOwnership?.logicalRunId });
+  const owners = new Map();
+  for (const row of ownershipRows) {
+    if (!Number.isSafeInteger(row.captureGeneration) || row.captureGeneration <= 0 ||
+        !Number.isSafeInteger(row.logicalRunId) || row.logicalRunId <= 0 ||
+        owners.has(row.captureGeneration)) {
+      throw new Error('Warm provider transport ownership evidence is malformed');
+    }
+    owners.set(row.captureGeneration, row.logicalRunId);
+  }
+  const connectionByOwner = new Map();
+  const ownerByConnection = new Map();
+  for (const [index, ledger] of orderedLedgers.entries()) {
+    const owner = owners.get(ledger.captureGeneration);
+    const connectionId = orderedSegments[index]?.connectionId;
+    if (!Number.isSafeInteger(owner) || !Number.isSafeInteger(connectionId) ||
+        (connectionByOwner.has(owner) && connectionByOwner.get(owner) !== connectionId) ||
+        (ownerByConnection.has(connectionId) && ownerByConnection.get(connectionId) !== owner)) {
+      throw new Error('Warm provider transport replaced or reused a logical provider owner');
+    }
+    connectionByOwner.set(owner, connectionId);
+    ownerByConnection.set(connectionId, owner);
   }
   const transmittedBytes = frames.reduce((sum, event) => sum + event.bytes, 0);
   const providerLedgerBytes = ledgers.reduce((sum, ledger) =>
@@ -485,6 +514,15 @@ export function verifyWarmProviderCanary(trial, report) {
   const providerLedgers = fixture.providerPcmLedgers ?? [];
   const callbackGenerations = fixture.providerCallbackGenerations ?? [];
   const expectedCallbackGenerations = expectedWarmProviderCallbackGenerations(trial);
+  const lifecycleCountersValid = Number.isSafeInteger(fixture.providerStarts) &&
+    fixture.providerStarts >= expected.minBackendConnections &&
+    fixture.providerStarts <= expected.maxBackendConnections && fixture.providerResumes === 0 &&
+    Number.isSafeInteger(fixture.providerStops) && fixture.providerStops >= 0 &&
+    fixture.activeProviders === 0 && fixture.maxActiveProviders === 1 &&
+    fixture.providerFailures === 0 && Number.isSafeInteger(fixture.providerNoAudioStops) &&
+    fixture.providerNoAudioStops >= 0 && fixture.providerNoAudioStops <= fixture.providerStops &&
+    Number.isSafeInteger(fixture.warmTerminalCount) && fixture.warmTerminalCount >= 0 &&
+    fixture.providerStops + fixture.warmTerminalCount === fixture.providerStarts;
   const normalizedEventText = event => typeof event?.text === 'string'
     ? event.text.toLocaleLowerCase('ru').replace(/ё/g, 'е').replace(/[.,!?]/g, '').replace(/\s+/g, ' ')
     : '';
@@ -567,6 +605,7 @@ export function verifyWarmProviderCanary(trial, report) {
     Number.isSafeInteger(row.captureFenceGeneration) && row.captureFenceGeneration > 0;
   if (fixture.captureStarts !== expected.captures || fixture.captureStops !== expected.captures ||
       fixture.activeCaptures !== 0 || fixture.maxActiveCaptures !== 1 ||
+      !lifecycleCountersValid ||
       fixture.observationOverflow !== false || fixture.markerViolations?.length !== 0 ||
       fixture.sourceEpisodes?.length !== expected.captures ||
       captureLedgers.length !== expected.captures || captureLedgers.some(row => !ledgerIsValid(row)) ||
@@ -685,7 +724,8 @@ export function verifyWarmProviderCanary(trial, report) {
         (index > 0 && (mustReusePrevious
           ? cycle.logicalRunId !== previousCycle.logicalRunId
           : cycle.logicalRunId === previousCycle.logicalRunId)) ||
-        cycleWindowEvents.some(event => !Number.isSafeInteger(event.cycleIndex) || event.cycleIndex > index) ||
+        cycleWindowEvents.some(event => !Number.isSafeInteger(event.cycleIndex) ||
+          event.cycleIndex < 0 || event.cycleIndex > index) ||
         cycleEvents.some(event => !Number.isSafeInteger(event.sessionId) || event.sessionId <= 0 ||
           event.sessionId !== cycle.logicalRunId)) {
       throw new Error(`Warm provider canary cycle ${index} evidence is contradictory`);
@@ -909,7 +949,7 @@ export function verifyWarmProviderCanary(trial, report) {
         const cycle = cycles[cycleIndex];
         const episode = trial.cycles[cycleIndex]?.episode;
         const provider = providerByGeneration.get(cycleIndex + 1);
-        const sameSourceInRun = cycles.filter(candidate =>
+        const sameSourceInRun = cycles.filter(candidate => candidate.index <= cycleIndex &&
           candidate.logicalRunId === event.sessionId && candidate.episode === episode).length;
         if (cycle == null || event.sessionId !== cycle.logicalRunId || episode == null ||
             !provider) return true;

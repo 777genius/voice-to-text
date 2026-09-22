@@ -265,6 +265,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     hash: source.emittedFrames > 0 ? '0123456789abcdef' : 'cbf29ce484222325',
   }));
   const fixture = { captureStarts: 21, captureStops: 21, activeCaptures: 0, maxActiveCaptures: 1,
+    providerStarts: 7, providerResumes: 0, providerStops: 7, activeProviders: 0,
+    maxActiveProviders: 1, providerFailures: 0, providerNoAudioStops: 5, warmTerminalCount: 0,
     observationOverflow: false, markerViolations: [], sourceEpisodes: sources,
     captureRunAssociations, capturePcmLedgers,
     providerPcmLedgers: capturePcmLedgers.filter(row => row.samples > 0).map(row => ({ ...row })),
@@ -391,33 +393,55 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   assert.throws(() => verifyWarmProviderFinalFixtureAgreement(fixture, contradictoryTerminalFixture),
     /contradicts terminal native fixture/);
   const ledgerBytes = fixture.providerPcmLedgers.reduce((sum, row) => sum + row.samples * 2, 0);
-  const transportEvents = [{ event: 'fault_proxy_connected', connectionId: 1 },
-    { event: 'backend_control', type: 'ready', connectionId: 1 }];
-  fixture.providerPcmLedgers.forEach((ledger, index) => {
-    if (index > 0) transportEvents.push({ event: 'backend_control', type: 'continue_result',
-      decision: 'accepted', eligible_now: true, connectionId: 1 });
-    transportEvents.push({ event: 'client_binary', connectionId: 1,
-      bytes: ledger.samples * 2, pcmHash: ledger.hash });
-    transportEvents.push({ event: 'backend_control', type: 'pause_accepted',
-      decision: 'accepted', connectionId: 1 });
-  });
-  transportEvents.push({ event: 'fault_proxy_close', connectionId: 1, direction: 'upstream', code: 1000 });
-  assert.equal(verifyWarmProviderTransport(transportEvents, fixture)
+  const ownerByGeneration = new Map(report.cycles.map(cycle =>
+    [cycle.captureGeneration, cycle.logicalRunId]));
+  ownerByGeneration.set(report.finalOwnership.captureFenceGeneration,
+    report.finalOwnership.logicalRunId);
+  const buildTransport = forcedSplitIndex => {
+    const result = [];
+    let connectionId = 0;
+    let previousOwner = null;
+    fixture.providerPcmLedgers.forEach((ledger, index) => {
+      const owner = ownerByGeneration.get(ledger.captureGeneration);
+      const opensConnection = owner !== previousOwner || index === forcedSplitIndex;
+      if (opensConnection) {
+        if (connectionId > 0) result.push({ event: 'fault_proxy_close', connectionId,
+          direction: 'upstream', code: 1000 });
+        connectionId++;
+        result.push({ event: 'fault_proxy_connected', connectionId },
+          { event: 'backend_control', type: 'ready', connectionId });
+      } else {
+        result.push({ event: 'backend_control', type: 'continue_result',
+          decision: 'accepted', eligible_now: true, connectionId });
+      }
+      result.push({ event: 'client_binary', connectionId,
+        bytes: ledger.samples * 2, pcmHash: ledger.hash },
+      { event: 'backend_control', type: 'pause_accepted', decision: 'accepted', connectionId });
+      previousOwner = owner;
+    });
+    result.push({ event: 'fault_proxy_close', connectionId, direction: 'upstream', code: 1000 });
+    return result;
+  };
+  const transportEvents = buildTransport(null);
+  assert.equal(verifyWarmProviderTransport(transportEvents, fixture, report)
     .transmittedPcmBytes, ledgerBytes);
   const wrongBytes = structuredClone(transportEvents);
   wrongBytes.find(event => event.event === 'client_binary').bytes -= 2;
-  assert.throws(() => verifyWarmProviderTransport(wrongBytes, fixture), /does not match/);
+  assert.throws(() => verifyWarmProviderTransport(wrongBytes, fixture, report), /does not match/);
   const wrongConnection = structuredClone(transportEvents);
   wrongConnection.find(event => event.event === 'client_binary').connectionId = 2;
-  assert.throws(() => verifyWarmProviderTransport(wrongConnection, fixture), /open connection/);
+  assert.throws(() => verifyWarmProviderTransport(wrongConnection, fixture, report), /open connection/);
   const wrongInterval = structuredClone(transportEvents);
   const transportFirstPause = wrongInterval.findIndex(event => event.type === 'pause_accepted');
   wrongInterval.splice(transportFirstPause + 1, 0, { event: 'client_binary', connectionId: 1,
     bytes: 2, pcmHash: '0123456789abcdef' });
   const wrongHash = structuredClone(transportEvents);
   wrongHash.find(event => event.event === 'client_binary').pcmHash = 'ffffffffffffffff';
-  assert.throws(() => verifyWarmProviderTransport(wrongHash, fixture), /does not match/);
-  assert.throws(() => verifyWarmProviderTransport(wrongInterval, fixture), /paused interval/);
+  assert.throws(() => verifyWarmProviderTransport(wrongHash, fixture, report), /does not match/);
+  assert.throws(() => verifyWarmProviderTransport(wrongInterval, fixture, report), /paused interval/);
+  const replacedProvider = buildTransport(5);
+  assert.throws(() => verifyWarmProviderTransport(replacedProvider, fixture, report),
+    /replaced or reused/, 'one logical owner cannot move to another provider connection');
   assert.equal(verifyWarmProviderTransport([
     { event: 'fault_proxy_connected', connectionId: 1 },
     { event: 'client_binary', connectionId: 1, bytes: 4, pcmHash: '0123456789abcdef' },
@@ -430,7 +454,13 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   ], { providerPcmLedgers: [
     { captureGeneration: 1, chunks: 1, samples: 2, hash: '0123456789abcdef' },
     { captureGeneration: 2, chunks: 1, samples: 3, hash: 'fedcba9876543210' },
-  ] }).transmittedPcmBytes, 10);
+  ] }, { cycles: [{ captureGeneration: 1, logicalRunId: 1 }],
+    finalOwnership: { captureFenceGeneration: 2, logicalRunId: 2 } }).transmittedPcmBytes, 10);
+  const contradictoryProviderLifecycle = structuredClone(report);
+  Object.assign(contradictoryProviderLifecycle.final.fixture,
+    { providerStarts: 9, providerStops: 0, activeProviders: 8, maxActiveProviders: 8 });
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial,
+    contradictoryProviderLifecycle), /capture lifecycle is incomplete/);
   const missingEarlyTerminal = structuredClone(report);
   missingEarlyTerminal.terminals.shift();
   assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, missingEarlyTerminal),
@@ -597,6 +627,34 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, missingTimedTerminalText),
     /Final warm provider proof is incomplete|terminal ownership is incomplete or duplicated/,
     'terminal reconciliation includes accepted timed Finals without delivery sequence IDs');
+  const firstOccurrenceStableTail = structuredClone(report);
+  const firstOccurrenceCycle = firstOccurrenceStableTail.cycles[5];
+  assert.notEqual(firstOccurrenceCycle.stopPhase, 'after-final');
+  const firstOccurrencePrefix = firstOccurrenceCycle.episode === 'episode-a.pcm' ? 'на' : 'за';
+  insertAfterStop(firstOccurrenceStableTail, firstOccurrenceCycle, {
+    event: 'transcription:final', cycleIndex: firstOccurrenceCycle.index,
+    sessionId: firstOccurrenceCycle.logicalRunId,
+    deliverySeq: firstOccurrenceCycle.triggerDeliverySeqFloor + 1, text: firstOccurrencePrefix,
+    markerIds: [], timingKnown: false, sourceStartSeconds: 0, sourceDurationSeconds: 0,
+  });
+  for (const cycle of firstOccurrenceStableTail.cycles.filter(row =>
+    row.index > firstOccurrenceCycle.index && row.logicalRunId === firstOccurrenceCycle.logicalRunId)) {
+    cycle.triggerDeliverySeqFloor = firstOccurrenceStableTail.events.slice(0, cycle.triggerEventStart)
+      .filter(event => event.sessionId === cycle.logicalRunId && Number.isSafeInteger(event.deliverySeq))
+      .reduce((maximum, event) => Math.max(maximum, event.deliverySeq), 0);
+  }
+  const firstOccurrenceTerminalEventIndex = firstOccurrenceStableTail.events.findIndex(event =>
+    event.event === 'transcription:terminal' &&
+    event.sessionId === firstOccurrenceCycle.logicalRunId);
+  firstOccurrenceStableTail.terminals.find(terminal =>
+    terminal.sessionId === firstOccurrenceCycle.logicalRunId).stableSnapshot =
+      firstOccurrenceStableTail.events.slice(0, firstOccurrenceTerminalEventIndex)
+        .filter(event => event.event === 'transcription:final' &&
+          event.sessionId === firstOccurrenceCycle.logicalRunId)
+        .map(event => event.text.trim()).filter(Boolean).join(' ');
+  assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial,
+    firstOccurrenceStableTail).churnCycles, 20,
+  'future source repetitions do not invalidate the first owned Stable tail');
   const firstPcmTail = structuredClone(report);
   const firstPcmTailCycle = firstPcmTail.cycles.find(row => row.stopPhase === 'after-first-pcm' &&
     row.index >= warmProviderCanaryTrial.readyGateFromIndex);
@@ -642,6 +700,12 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   firstPcmCycle.triggerEventStart += 1;
   assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, collapsedFirstPcm),
     /stop phase collapsed/);
+  const negativeOwnedPartial = structuredClone(collapsedFirstPcm);
+  negativeOwnedPartial.events.find(event => event.event === 'transcription:partial' &&
+    event.sessionId === firstPcmCycle.logicalRunId).cycleIndex = -1;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, negativeOwnedPartial),
+    /evidence is contradictory|stop phase collapsed/,
+  'negative cycle ownership cannot hide a pre-Stop transcript event');
   const duplicateFinal = structuredClone(report);
   const finalCycle = duplicateFinal.cycles.find(row => row.stopPhase === 'after-final');
   const firstFinal = duplicateFinal.events.slice(finalCycle.triggerEventStart, finalCycle.stopEventIndex)

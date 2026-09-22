@@ -648,7 +648,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       const row = report.cycles[cycleIndex];
       const provider = report.final?.fixture.providerPcmLedgers.find(ledger =>
         ledger.captureGeneration === Number(row?.captureGeneration));
-      const sameSourceInRun = report.cycles.filter(candidate =>
+      const sameSourceInRun = report.cycles.filter(candidate => Number(candidate.index) <= cycleIndex &&
         Number(candidate.logicalRunId) === event.sessionId && candidate.episode === cycle?.episode).length;
       if (cycle == null || provider == null) return false;
       const fence = { sessionId: Number(row?.logicalRunId), cycleIndex,
