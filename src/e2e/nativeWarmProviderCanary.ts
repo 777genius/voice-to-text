@@ -392,6 +392,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       .filter(event => event.sessionId === ready.logicalProviderRunId &&
         Number.isSafeInteger(event.deliverySeq))
       .reduce((maximum, event) => Math.max(maximum, Number(event.deliverySeq)), 0);
+    report.finalTextBeforeProof = store.finalText;
     await invoke('native_e2e_configure', { config: { sourceGateReady: true } });
     const finalGeneration = trial.finalEpisodeIndex + 1;
     await poll(value => (value.fixture.sourceEpisodes[trial.finalEpisodeIndex]?.emittedFrames ?? 0) > 0 &&
@@ -399,7 +400,6 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     'final provider callback ACK fence', 30_000);
     const finalEventStart = report.events.length;
     report.finalCallbackFence = { captureGeneration: finalGeneration, eventStart: finalEventStart };
-    report.finalTextBeforeProof = store.finalText;
     const complete = await poll(value => {
       const source = value.fixture.sourceEpisodes[trial.finalEpisodeIndex];
       return source?.emittedFrames === source?.sourceFrames && typeof source.nativeSourceEndMs === 'number';

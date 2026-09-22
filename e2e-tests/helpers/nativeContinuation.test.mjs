@@ -549,6 +549,15 @@ test('warm canary Stop samples transport and dispatches without a JS or async re
   assert.ok(boundaryBody.indexOf('boundary();') > boundaryBody.indexOf('transport.ready_seen'));
   assert.match(lib, /#\[cfg\(all\(debug_assertions, feature = "native-window-e2e"\)\)\]\s*presentation::native_e2e::native_e2e_stop_with_transport_boundary/);
 });
+test('warm canary captures the transcript baseline before releasing final PCM', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(new URL('../../src/e2e/nativeWarmProviderCanary.ts', import.meta.url), 'utf8');
+  const finalSection = source.slice(source.indexOf('const beforeFinal = await state();'));
+  const baseline = finalSection.indexOf('report.finalTextBeforeProof = store.finalText;');
+  const release = finalSection.indexOf("native_e2e_configure', { config: { sourceGateReady: true }");
+  const callbackFence = finalSection.indexOf('report.finalCallbackFence =');
+  assert.ok(baseline >= 0 && baseline < release && release < callbackFence);
+});
 
 test('normal baseline/cold reject continuation controls', async () => {
   const { verifyQualificationConnections } = await import('./nativeContinuation.mjs');
