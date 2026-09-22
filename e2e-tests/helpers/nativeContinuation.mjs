@@ -717,6 +717,10 @@ export function verifyWarmProviderCanary(trial, report) {
         return row.captureGeneration < index + 1 &&
           precedingCycle?.logicalRunId === cycle.logicalRunId ? sum + row.samples : sum;
       }, 0);
+      const independentlyMeasuredDeliveryFloor = events.slice(0, cycle.triggerEventStart)
+        .filter(event => event.sessionId === cycle.logicalRunId &&
+          Number.isSafeInteger(event.deliverySeq))
+        .reduce((maximum, event) => Math.max(maximum, event.deliverySeq), 0);
       if (!association || cycle.association?.captureGeneration !== index + 1 ||
           cycle.association.captureRunId !== cycle.captureRunId ||
           cycle.association.captureFenceGeneration !== cycle.captureFenceGeneration ||
@@ -724,6 +728,7 @@ export function verifyWarmProviderCanary(trial, report) {
           association.captureFenceGeneration !== cycle.captureFenceGeneration || source.emittedFrames <= 0 ||
           !Number.isSafeInteger(cycle.triggerProviderSamples) || cycle.triggerProviderSamples <= 0 ||
           !Number.isSafeInteger(cycle.triggerDeliverySeqFloor) || cycle.triggerDeliverySeqFloor < 0 ||
+          cycle.triggerDeliverySeqFloor !== independentlyMeasuredDeliveryFloor ||
           !Number.isSafeInteger(cycle.providerStartSamples) || cycle.providerStartSamples < 0 ||
           cycle.providerStartSamples !== independentlyMeasuredCycleStart ||
           cycle.triggerProviderSamples > providerByGeneration.get(index + 1)?.samples ||
@@ -789,7 +794,9 @@ export function verifyWarmProviderCanary(trial, report) {
   const allFinalEvents = events.filter(event => event.event === 'transcription:final');
   const timedFinalKeys = allFinalEvents.filter(event => event.timingKnown === true)
     .map(event => `${event.sessionId}:${event.cycleIndex}:${normalizedEventText(event).trim()}`);
-  const finalFenceEvents = events.slice(report.finalTranscriptFence?.eventStart);
+  const finalTranscriptEventStart = Number.isSafeInteger(report.finalTranscriptFence?.eventStart) &&
+    report.finalTranscriptFence.eventStart >= 0 ? report.finalTranscriptFence.eventStart : events.length + 1;
+  const finalFenceEvents = events.slice(finalTranscriptEventStart);
   const finalEvidence = attributedFinalEvidence(finalFenceEvents, null, finalIndex,
     ownership?.logicalRunId, report.finalTranscriptFence?.providerStartSamples,
     finalProviderLedger?.samples, report.finalTranscriptFence?.deliverySeqFloor, true);
@@ -801,7 +808,7 @@ export function verifyWarmProviderCanary(trial, report) {
       event.markerIds.every(markerId => markerId === 0 || markerId === 1));
   const finalTranscriptBeforeProof = stableTranscript(
     ownership?.logicalRunId,
-    report.finalTranscriptFence?.eventStart,
+    finalTranscriptEventStart,
   );
   const acceptedFinalText = acceptedFinalDeliveries.reduce((stable, delivery) =>
     appendStableText(stable, delivery.text), '');
@@ -811,6 +818,10 @@ export function verifyWarmProviderCanary(trial, report) {
     cycle.logicalRunId === ownership?.logicalRunId).map(cycle => cycle.captureGeneration));
   const independentlyMeasuredFinalStart = providerLedgers.reduce((sum, row) =>
     sum + (finalRunGenerations.has(row.captureGeneration) ? row.samples : 0), 0);
+  const independentlyMeasuredFinalDeliveryFloor = events.slice(0, finalTranscriptEventStart)
+    .filter(event => event.sessionId === ownership?.logicalRunId &&
+      Number.isSafeInteger(event.deliverySeq))
+    .reduce((maximum, event) => Math.max(maximum, event.deliverySeq), 0);
   if (finalSource?.name !== trial.episodes[finalIndex] ||
       finalSource.bytes !== finalBytes || finalSource.sourceFrames !== finalBytes / 2 ||
       finalSource.sourceDurationMs !== finalBytes / 32 || finalSource.cadenceMs !== 20 ||
@@ -830,9 +841,11 @@ export function verifyWarmProviderCanary(trial, report) {
       !finalProviderLedger || finalProviderLedger.samples <= 0 ||
       callbackFence?.captureGeneration !== finalIndex + 1 ||
       !Number.isSafeInteger(report.finalTranscriptFence?.eventStart) ||
+      report.finalTranscriptFence.eventStart < cycles.at(-1).eventEnd ||
       report.finalTranscriptFence.eventStart > callbackFence.eventStart ||
       report.finalTranscriptFence.eventStart > events.length ||
       report.finalTranscriptFence.providerSamples !== finalSource.sourceFrames ||
+      report.finalTranscriptFence.deliverySeqFloor !== independentlyMeasuredFinalDeliveryFloor ||
       !Number.isSafeInteger(report.finalTranscriptFence.providerStartSamples) ||
       report.finalTranscriptFence.providerStartSamples < 0 ||
       report.finalTranscriptFence.providerStartSamples !== independentlyMeasuredFinalStart ||
@@ -846,11 +859,11 @@ export function verifyWarmProviderCanary(trial, report) {
         jitterEvidenceUpperBoundMs(cycles.at(-1).jitterMs) ||
       !Number.isSafeInteger(callbackFence?.eventStart) || callbackFence.eventStart < cycles.at(-1).eventEnd ||
       callbackFence.eventStart > events.length ||
-      events.slice(cycles.at(-1).eventEnd, report.finalTranscriptFence.eventStart)
+      events.slice(cycles.at(-1).eventEnd, finalTranscriptEventStart)
         .some(event => Number.isSafeInteger(event.cycleIndex) && event.cycleIndex >= finalIndex) ||
-      events.slice(report.finalTranscriptFence.eventStart, callbackFence.eventStart)
+      events.slice(finalTranscriptEventStart, callbackFence.eventStart)
         .some(event => event.event === 'transcription:terminal') ||
-      events.slice(report.finalTranscriptFence.eventStart).some(event => event.cycleIndex !== finalIndex) ||
+      events.slice(finalTranscriptEventStart).some(event => event.cycleIndex !== finalIndex) ||
       typeof report.finalTextBeforeProof !== 'string' ||
       report.finalTextBeforeProof !== finalTranscriptBeforeProof ||
       typeof report.expectedInsertion !== 'string' || !report.expectedInsertion.trim() ||
@@ -863,7 +876,7 @@ export function verifyWarmProviderCanary(trial, report) {
       acceptedMarkerIds.filter(markerId => markerId === 0).length !== 1 ||
       acceptedMarkerIds.filter(markerId => markerId === 1).length !== 1 ||
       report.expectedInsertion !== expectedFinalTranscript ||
-      !events.slice(report.finalTranscriptFence.eventStart).some(finalTranscriptMatchesCallbackGeneration) ||
+      !events.slice(finalTranscriptEventStart).some(finalTranscriptMatchesCallbackGeneration) ||
       finalEvents.some(event => ['transcription:partial', 'transcription:final'].includes(event.event) &&
         event.sessionId !== ownership.logicalRunId) ||
       !Array.isArray(terminals) || terminals.length !== terminalEvents.length ||

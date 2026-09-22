@@ -1044,13 +1044,13 @@ export function validateResult(envelope) {
       cycle.controls[0].result?.decision === 'accepted' && cycle.controls[1].result?.decision === 'accepted' &&
       cycle.controls[0].result.pause_epoch === cycle.controls[1].result.pause_epoch &&
       Number.isSafeInteger(cycle.controls[0].result.pause_epoch) && cycle.controls[0].result.pause_epoch > 0);
-    const latencyValues = Array.isArray(latencies) ? latencies.slice(0, 51).map(row => row?.elapsedMs) : [];
+    const latencyValues = Array.isArray(latencies) ? latencies.map(row => row?.elapsedMs) : [];
     const sortedLatencies = latencyValues.every(value => Number.isFinite(value) && value >= 0)
       ? [...latencyValues].sort((left, right) => left - right) : [];
     const measuredP95 = sortedLatencies.length === 51
       ? sortedLatencies[Math.ceil(sortedLatencies.length * .95) - 1] : null;
-    const validLatencies = Array.isArray(latencies) && latencies.length >= 51 &&
-      latencies.slice(0, 51).every((row, index) => row?.captureGeneration === index + 1) &&
+    const validLatencies = Array.isArray(latencies) && latencies.length === 51 &&
+      latencies.every((row, index) => row?.captureGeneration === index + 1) &&
       measuredP95 !== null && measuredP95 <= 250 && report.p95FirstPcmMs === measuredP95;
     const captureLedgers = generationMap(fixture?.capturePcmLedgers, ledger =>
       positiveSafeInteger(ledger.chunks) && positiveSafeInteger(ledger.samples) &&
@@ -1067,10 +1067,22 @@ export function validateResult(envelope) {
       providerMarkers?.size === 51 && continuationGenerations.every(generation =>
         captureLedgers.has(generation) && providerLedgers.has(generation) && providerMarkers.has(generation)) &&
       new Set([...providerMarkers.values()].map(row => row.providerSessionId)).size === 1;
+    const expectedProviderSessionId = validContinuationPcm
+      ? [...providerMarkers.values()][0].providerSessionId : null;
+    const expectedTranscript = expectedProviderSessionId === null
+      ? null : `Native fixture session ${expectedProviderSessionId}`;
+    const stableDelivery = Array.isArray(report.stableDeliveries) && report.stableDeliveries.length === 1
+      ? report.stableDeliveries[0] : null;
+    const terminal = Array.isArray(report.terminals) && report.terminals.length === 1
+      ? report.terminals[0] : null;
+    const validTranscriptEvidence = stableDelivery?.sessionId === expectedProviderSessionId &&
+      positiveSafeInteger(stableDelivery?.deliverySeq) && stableDelivery?.text === expectedTranscript &&
+      terminal?.sessionId === expectedProviderSessionId && terminal?.complete === true &&
+      terminal?.stableSnapshot === expectedTranscript;
     if (envelope.marker !== marker || envelope.passed !== true || report.passed !== true ||
-        report.terminalCount !== 1 || report.stableDeliveries?.length !== 1 || report.final?.historyEntryCount !== 1 ||
+        report.terminalCount !== 1 || !validTranscriptEvidence || report.final?.historyEntryCount !== 1 ||
         report.completedCycles !== 50 || !validCycles || !validLatencies || !validContinuationPcm ||
-        !validateExactPcmEvidence(fixture, true, false) || fixture?.observationOverflow !== false ||
+        !validateTerminalFixture(fixture, true) || fixture?.observationOverflow !== false ||
         !Array.isArray(report.errors) || report.errors.length ||
         !Number.isFinite(report.p95FirstPcmMs) || report.p95FirstPcmMs < 0 || report.p95FirstPcmMs > 250 ||
         !isDeepStrictEqual(fixture, report.final?.fixture) || report.final?.status !== 'Idle' ||
@@ -1078,6 +1090,8 @@ export function validateResult(envelope) {
         fixture?.maxActiveCaptures !== 1 || fixture?.maxActiveProviders !== 1 ||
         fixture?.captureStarts !== 51 || fixture?.captureStops !== 51 || fixture?.providerStarts !== 1 ||
         fixture?.providerStops !== 1 || fixture?.providerResumes !== 0 || fixture?.finals !== 1 ||
+        fixture?.providerFailures !== 0 || fixture?.providerNoAudioStops !== 0 ||
+        fixture?.warmTerminalCount !== 0 ||
         fixture?.markerViolations?.length !== 0 ||
         report.final?.preparedCaptureTokenCount !== 0) throw new Error('Incomplete native continuation qualification');
     return report;

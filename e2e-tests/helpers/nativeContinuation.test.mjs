@@ -490,6 +490,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     value => { value.finalCallbackFence.captureGeneration = 20; },
     value => { value.finalCallbackFence.eventStart = value.events.length; },
     value => { value.finalTranscriptFence.eventStart = value.events.length - 1; },
+    value => { value.finalTranscriptFence.eventStart = -2; },
     value => { value.finalTranscriptFence.deliverySeqFloor = 99; },
     value => { const cycle = value.cycles.find(row => row.stopPhase === 'after-final');
       cycle.triggerEventStart += 1; },
@@ -573,7 +574,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     timingKnown: false, sourceStartSeconds: 0, sourceDurationSeconds: 0,
   });
   assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, lateRetainedFinal),
-    /Final warm provider proof is incomplete/,
+    /lost capture\/provider ownership|Final warm provider proof is incomplete/,
     'an unpaired untimed Stable cannot be attributed by receipt ownership');
   const postStopTimedFinal = structuredClone(report);
   const timedCycle = postStopTimedFinal.cycles.find(row => row.stopPhase === 'during-partial');

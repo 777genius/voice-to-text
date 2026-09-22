@@ -254,7 +254,9 @@ test('continuation qualification requires balanced and identical terminal lifecy
       logicalRunId: 1, result: { decision: 'accepted', pause_epoch: cycle + 1 } })) }));
   const valid = { marker, passed: true, fixture, report: { mode: 'continuation-fake',
     passed: true, errors: [], completedCycles: 50, terminalCount: 1,
-    stableDeliveries: ['1:1'], p95FirstPcmMs: 10, cycles,
+    stableDeliveries: [{ sessionId: 1, deliverySeq: 1, text: 'Native fixture session 1' }],
+    terminals: [{ sessionId: 1, complete: true, stableSnapshot: 'Native fixture session 1' }],
+    p95FirstPcmMs: 10, cycles,
     final: { status: 'Idle', historyEntryCount: 1, preparedCaptureTokenCount: 0,
       fixture: structuredClone(fixture) } } };
   assert.equal(validateResult(valid), valid.report);
@@ -281,6 +283,13 @@ test('continuation qualification requires balanced and identical terminal lifecy
       value.report.final.fixture = structuredClone(value.fixture);
     },
     value => { value.report.p95FirstPcmMs = 11; },
+    value => { value.fixture.firstPcmLatenciesMs.push({ captureGeneration: 52, elapsedMs: 1000 });
+      value.report.final.fixture = structuredClone(value.fixture); },
+    value => { value.report.stableDeliveries.push({ sessionId: 999, deliverySeq: 2, text: '' }); },
+    value => { value.report.terminals.push({ sessionId: 888, complete: true, stableSnapshot: '' });
+      value.report.terminalCount++; },
+    value => { value.fixture.providerNoAudioStops = 1; value.report.final.fixture.providerNoAudioStops = 1; },
+    value => { value.fixture.warmTerminalCount = 1; value.report.final.fixture.warmTerminalCount = 1; },
   ]) {
     const invalid = structuredClone(valid); mutate(invalid);
     assert.throws(() => validateResult(invalid), /Incomplete native continuation qualification/);

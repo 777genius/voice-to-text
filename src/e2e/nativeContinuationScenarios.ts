@@ -29,7 +29,9 @@ async function toggle() {
 export async function runNativeContinuationScenarios(pinia: Pinia) {
   const started = performance.now();
   const report = { mode: 'continuation-fake', passed: false, completedCycles: 0,
-    errors: [] as string[], stableDeliveries: [] as string[], terminalCount: 0, cycles: [] as unknown[], elapsedMs: 0, p95FirstPcmMs: -1,
+    errors: [] as string[], stableDeliveries: [] as Array<{ sessionId: number; deliverySeq: number;
+      text: string }>, terminals: [] as Array<{ sessionId: number; complete: boolean;
+      stableSnapshot: string }>, terminalCount: 0, cycles: [] as unknown[], elapsedMs: 0, p95FirstPcmMs: -1,
     final: null as Snapshot | null };
   const unlisten = await listen('transcription:error', event => {
     report.errors.push(JSON.stringify(event.payload));
@@ -37,13 +39,18 @@ export async function runNativeContinuationScenarios(pinia: Pinia) {
   const stableKeys = new Set<string>();
   const listeners = await Promise.all(['transcription:partial', 'transcription:final', 'transcription:terminal'].map(name => listen(name, event => {
     const payload = event.payload as Record<string, unknown>;
+    const sessionId = Number(payload.session_id);
     if (name === 'transcription:terminal') {
       report.terminalCount++;
-      if (payload.error || payload.delivery_complete !== true) report.errors.push('Incomplete terminal');
+      const complete = !payload.error && payload.delivery_complete === true;
+      report.terminals.push({ sessionId, complete,
+        stableSnapshot: typeof payload.stable_snapshot === 'string' ? payload.stable_snapshot : '' });
+      if (!complete) report.errors.push('Incomplete terminal');
     } else if (typeof payload.delivery_seq === 'number' && (name === 'transcription:final' || payload.is_segment_final === true)) {
       const key = `${payload.session_id}:${payload.delivery_seq}`;
       if (stableKeys.has(key)) report.errors.push('Duplicate stable delivery');
-      stableKeys.add(key); report.stableDeliveries.push(key);
+      stableKeys.add(key); report.stableDeliveries.push({ sessionId,
+        deliverySeq: Number(payload.delivery_seq), text: typeof payload.text === 'string' ? payload.text : '' });
     }
   })));
   try {
@@ -102,7 +109,16 @@ export async function runNativeContinuationScenarios(pinia: Pinia) {
     const latencies = final.fixture.firstPcmLatenciesMs.map(x => x.elapsedMs).sort((a,b) => a-b);
     report.p95FirstPcmMs = latencies[Math.ceil(latencies.length * .95) - 1];
     check(latencies.length >= 51 && report.p95FirstPcmMs <= 250, 'Native Start-to-firstPCM gate failed');
-    check(report.stableDeliveries.length === 1 && final.historyEntryCount === 1, 'Stable delivery/history must occur once');
+    const stableDelivery = report.stableDeliveries[0];
+    const terminal = report.terminals[0];
+    const expectedTranscript = stableDelivery
+      ? `Native fixture session ${stableDelivery.sessionId}` : '';
+    check(report.stableDeliveries.length === 1 && report.terminals.length === 1 &&
+      Number.isSafeInteger(stableDelivery?.deliverySeq) && Number(stableDelivery?.deliverySeq) > 0 &&
+      stableDelivery?.sessionId === terminal?.sessionId && terminal?.complete === true &&
+      stableDelivery?.text === expectedTranscript && terminal?.stableSnapshot === expectedTranscript &&
+      final.historyEntryCount === 1,
+    'Stable delivery/history ownership must occur once');
     check(report.errors.length === 0, 'Error evidence prevents passing');
     report.passed = true;
   } catch (error) { report.errors.push(String(error)); report.passed = false; }
