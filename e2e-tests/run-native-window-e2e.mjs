@@ -186,6 +186,8 @@ export function validateMiniUxResult(envelope) {
     nativeWindowEpochs.length === 10 && nativeWindowEpochs.every((row, index) => {
       const ready = readyFrames?.[index];
       return row?.attempt === index + 1 && Number.isSafeInteger(row.windowEpoch) && row.windowEpoch > 0 &&
+        (row.baselineRevision === null ||
+          (Number.isSafeInteger(row.baselineRevision) && row.baselineRevision > 0)) &&
         ready?.runId === row.runId && ready?.revision === row.revision &&
         visibleFrames?.some(frame => frame.attempt === index + 1 && frame.windowEpoch === row.windowEpoch) &&
         report.trace.some(sample => sample?.native?.visible === true &&
@@ -221,6 +223,7 @@ export function validateMiniUxResult(envelope) {
         const candidateNeutral = neutralAdmissionFrame(candidate);
         const candidateOwnershipValid = candidateNeutral
           ? ((candidate.runId === null && candidate.revision === null) ||
+            (candidate.runId === null && candidate.revision === nativeWindow?.baselineRevision) ||
             (candidate.runId === null && candidate.revision === ready?.revision) ||
             (candidate.runId === ready?.runId && candidate.revision === ready?.revision))
           : candidate.runId === ready?.runId && candidate.revision === ready?.revision;
@@ -231,6 +234,7 @@ export function validateMiniUxResult(envelope) {
       });
       const firstOwnershipValid = neutralActivation
         ? ((frame.runId === null && frame.revision === null) ||
+          (frame.runId === null && frame.revision === nativeWindow?.baselineRevision) ||
           (frame.runId === null && frame.revision === ready?.revision) ||
           (frame.runId === ready?.runId && frame.revision === ready?.revision))
         : frame.runId === ready?.runId && frame.revision === ready?.revision;
@@ -1036,6 +1040,7 @@ export function validateResult(envelope) {
     const retainedLogicalRunId = report.logicalRunId;
     const validCycles = Array.isArray(cycles) && cycles.length === 50 && cycles.every((cycle, index) =>
       cycle?.cycle === index && cycle.captureGeneration === index + 2 &&
+      positiveSafeInteger(cycle.captureRunId) && positiveSafeInteger(cycle.captureFenceGeneration) &&
       Number.isSafeInteger(cycle.windowEpoch) && cycle.windowEpoch > 0 &&
       (index === 0 || cycle.windowEpoch > cycles[index - 1].windowEpoch) &&
       cycle.providerStarts === 1 && cycle.micOffOnStop === true &&
@@ -1046,13 +1051,20 @@ export function validateResult(envelope) {
       Number.isSafeInteger(retainedLogicalRunId) && retainedLogicalRunId > 0 &&
       cycle.controls[0].delivered === true && cycle.controls[1].delivered === true &&
       cycle.controls[0].result?.decision === 'accepted' && cycle.controls[1].result?.decision === 'accepted' &&
+      cycle.controls[1].result.eligible_now === true &&
       cycle.controls[0].result.pause_epoch === cycle.controls[1].result.pause_epoch &&
       cycle.controls[0].result.pause_epoch === index + 1);
     const flattenedControls = Array.isArray(cycles) ? cycles.flatMap(cycle => cycle.controls ?? []) : [];
     const terminalControl = Array.isArray(authoritativeControls) ? authoritativeControls.at(-1) : null;
+    const controlRequestIds = Array.isArray(authoritativeControls)
+      ? authoritativeControls.map(control => control?.result?.request_id) : [];
     const validAuthoritativeControls = Array.isArray(authoritativeControls) &&
       authoritativeControls.length === 101 && flattenedControls.length === 100 &&
       flattenedControls.every((control, index) => isDeepStrictEqual(control, authoritativeControls[index])) &&
+      controlRequestIds.every(requestId => typeof requestId === 'string' && requestId.length > 0) &&
+      new Set(controlRequestIds).size === authoritativeControls.length &&
+      authoritativeControls.filter(control => control.operation === 'continue')
+        .every(control => control.result?.eligible_now === true) &&
       terminalControl?.operation === 'pause' && terminalControl.logicalRunId === retainedLogicalRunId &&
       terminalControl.delivered === true && terminalControl.result?.decision === 'accepted' &&
       terminalControl.result.pause_epoch === 51;
@@ -1075,10 +1087,27 @@ export function validateResult(envelope) {
       positiveSafeInteger(row.lastSequence) && row.firstSequence <= row.lastSequence &&
       positiveSafeInteger(row.captureRunId) && positiveSafeInteger(row.captureFenceGeneration) &&
       positiveSafeInteger(row.providerSessionId));
+    const captureAssociations = generationMap(fixture?.captureRunAssociations, row =>
+      positiveSafeInteger(row.captureRunId) && positiveSafeInteger(row.captureFenceGeneration));
+    const orderedCaptureOwnership = captureAssociations?.size === 51 &&
+      continuationGenerations.every((generation, index) => {
+        const association = captureAssociations.get(generation);
+        const previous = index === 0 ? null : captureAssociations.get(generation - 1);
+        const cycle = index === 0 ? null : cycles[index - 1];
+        return association && (!previous || (association.captureRunId > previous.captureRunId &&
+          association.captureFenceGeneration > previous.captureFenceGeneration)) &&
+          (!cycle || (cycle.captureGeneration === generation &&
+            cycle.captureRunId === association.captureRunId &&
+            cycle.captureFenceGeneration === association.captureFenceGeneration)) &&
+          providerMarkers?.get(generation)?.captureRunId === association.captureRunId &&
+          providerMarkers?.get(generation)?.captureFenceGeneration ===
+            association.captureFenceGeneration;
+      });
     const validContinuationPcm = captureLedgers?.size === 51 && providerLedgers?.size === 51 &&
       providerMarkers?.size === 51 && continuationGenerations.every(generation =>
         captureLedgers.has(generation) && providerLedgers.has(generation) && providerMarkers.has(generation)) &&
-      new Set([...providerMarkers.values()].map(row => row.providerSessionId)).size === 1;
+      new Set([...providerMarkers.values()].map(row => row.providerSessionId)).size === 1 &&
+      orderedCaptureOwnership;
     const expectedProviderSessionId = validContinuationPcm
       ? [...providerMarkers.values()][0].providerSessionId : null;
     const expectedTranscript = expectedProviderSessionId === null
@@ -1164,6 +1193,8 @@ export function validateResult(envelope) {
   const cycleFinalDeliveries = report.cycleFinalDeliveries;
   const allFinalDeliveries = report.allFinalDeliveries;
   const expectedFinalSessionIds = report.expectedFinalSessionIds;
+  const independentlyExpectedFinalSessionIds = Array.isArray(cycles)
+    ? [...cycles.map(row => row?.sessionId), report.hiddenIdleEvidence?.wakeSessionId] : [];
   const expectedTranscriptForSession = sessionId => {
     const providerSessionIds = [...new Set((fixture.providerMarkers ?? [])
       .filter(markerRow => markerRow.captureRunId === sessionId)
@@ -1179,6 +1210,7 @@ export function validateResult(envelope) {
     allFinalDeliveries.length !== expectedFinalSessionIds.length ||
     allFinalDeliveries.length !== fixture.finals ||
     new Set(expectedFinalSessionIds).size !== expectedFinalSessionIds.length ||
+    !isDeepStrictEqual(expectedFinalSessionIds, independentlyExpectedFinalSessionIds) ||
     expectedFinalSessionIds.some((sessionId, index) =>
       allFinalDeliveries[index]?.sessionId !== sessionId) ||
     expectedFinalSessionIds.some(sessionId => !positiveSafeInteger(sessionId) ||

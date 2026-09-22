@@ -269,7 +269,6 @@ export function verifyQualificationRoute(trial, events) {
       event.type === 'pause_accepted' && event.decision === 'accepted');
     const continues = events.filter(event => event.event === 'backend_control' &&
       event.type === 'continue_result' && event.decision === 'accepted' && event.eligible_now === true);
-    const requestIds = new Set();
     if (ready.length < expected.providerHandshakes.min || ready.length > expected.providerHandshakes.max ||
         new Set(ready.map(event => event.connectionId)).size !== ready.length ||
         new Set(ready.map(event => event.session_id)).size !== ready.length ||
@@ -280,6 +279,7 @@ export function verifyQualificationRoute(trial, events) {
       throw new Error('Warm canary provider session counts are contradictory');
     }
     for (const handshake of ready) {
+      const requestIds = new Set();
       const start = events.indexOf(handshake) + 1;
       const endOffset = events.slice(start).findIndex(event => event.event === 'fault_proxy_close' &&
         event.direction === 'upstream' && event.connectionId === handshake.connectionId);
@@ -805,10 +805,16 @@ export function verifyWarmProviderCanary(trial, report) {
           index, cycle.logicalRunId, cycle.providerStartSamples, cycle.triggerProviderSamples,
           cycle.triggerDeliverySeqFloor));
       const triggerDelivery = triggerMatches.at(-1);
+      const unattributedPartials = expectedEvent === 'transcription:partial'
+        ? cycleEvents.filter(event => event.event === 'transcription:partial' &&
+          !eventMatchesCapture(event, plan.episode, 'transcription:partial', index,
+            cycle.logicalRunId, cycle.providerStartSamples, cycle.triggerProviderSamples,
+            cycle.triggerDeliverySeqFloor)) : [];
       if (expectedEvent && (!triggerDelivery || cycle.trigger?.episode !== plan.episode ||
           cycle.trigger?.deliverySeq !== triggerDelivery?.deliverySeq ||
           (expectedEvent === 'transcription:final' &&
-            !aggregateMatchesEpisode(triggerMatches, plan.episode)))) {
+            !aggregateMatchesEpisode(triggerMatches, plan.episode))) ||
+          unattributedPartials.length !== 0) {
         throw new Error(`Cycle ${index} missed ${expectedEvent} evidence`);
       }
       const transcriptBeforeStop = events.slice(cycle.eventStart, cycle.stopEventIndex).filter(event =>

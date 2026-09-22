@@ -8,7 +8,7 @@ import { bindWarmVisibleFrameAfterNative, bindWarmVisibleFrameEvidence,
 describe('warm mini-window first-visible evidence', () => {
   it('coalesces identical render proofs without dropping a distinct status frame', () => {
     const reopen: WarmReopenEvidence = { attempt: 1, baselineWindowEpoch: 1,
-      windowEpoch: 2, closed: false };
+      baselineRevision: null, windowEpoch: 2, closed: false };
     const frame = { source: 'render' as const, revision: 3, runId: 4, captureReady: false,
       readinessReason: 'activating-warm-capture', phase: 'mini-status-dot', statusText: '' };
     expect(reserveWarmVisibleFrameObservation(reopen, frame, 2)).toBe(true);
@@ -19,7 +19,7 @@ describe('warm mini-window first-visible evidence', () => {
 
   it('lets an identical native sample drain render frames queued since its prior proof', () => {
     const reopen: WarmReopenEvidence = { attempt: 1, baselineWindowEpoch: 1,
-      windowEpoch: 2, closed: false };
+      baselineRevision: null, windowEpoch: 2, closed: false };
     const sample = { source: 'sample' as const, revision: 3, runId: 4, captureReady: true,
       readinessReason: 'recording', phase: 'mini-status-dot recording', statusText: 'Recording' };
     expect(reserveWarmVisibleFrameObservation(reopen, sample, 2)).toBe(true);
@@ -30,7 +30,7 @@ describe('warm mini-window first-visible evidence', () => {
 
   it('binds frames only to an authoritative visible native epoch', () => {
     const reopen: WarmReopenEvidence = { attempt: 3, baselineWindowEpoch: 16,
-      windowEpoch: null, closed: false };
+      baselineRevision: null, windowEpoch: null, closed: false };
     const stale = { source: 'render' as const, revision: 8, runId: 21, captureReady: false,
       readinessReason: 'activating-warm-capture', phase: 'mini-status-dot starting', statusText: 'Starting' };
     expect(bindWarmVisibleFrameEvidence(reopen, stale, { visible: false, windowEpoch: 16 })).toEqual([]);
@@ -46,7 +46,7 @@ describe('warm mini-window first-visible evidence', () => {
 
   it('preserves the callback-time bad frame while delayed native reads prove its epoch', async () => {
     const reopen: WarmReopenEvidence = { attempt: 4, baselineWindowEpoch: 20,
-      windowEpoch: null, closed: false };
+      baselineRevision: null, windowEpoch: null, closed: false };
     let statusText = 'Starting';
     let resolveAfter!: (value: { visible: boolean; windowEpoch: number }) => void;
     const after = new Promise<{ visible: boolean; windowEpoch: number }>(resolve => { resolveAfter = resolve; });
@@ -84,7 +84,7 @@ describe('warm mini-window first-visible evidence', () => {
 
   it('retains an unproven non-neutral frame and never adopts a later mutable epoch', async () => {
     const reopen: WarmReopenEvidence = { attempt: 5, baselineWindowEpoch: 21,
-      windowEpoch: null, closed: false };
+      baselineRevision: null, windowEpoch: null, closed: false };
     let nativeReads = 0;
     await expect(bindWarmVisibleFrameAfterNative(reopen,
       async () => { nativeReads += 1; return { visible: true, windowEpoch: 22 }; }, () => ({
@@ -103,7 +103,7 @@ describe('warm mini-window first-visible evidence', () => {
     ]);
 
     const delayed: WarmReopenEvidence = { attempt: 6, baselineWindowEpoch: 21,
-      windowEpoch: 22, closed: false };
+      baselineRevision: null, windowEpoch: 22, closed: false };
     let resolveNative!: (value: { visible: boolean; windowEpoch: number }) => void;
     const firstRead = new Promise<{ visible: boolean; windowEpoch: number }>(resolve => {
       resolveNative = resolve;
@@ -120,7 +120,7 @@ describe('warm mini-window first-visible evidence', () => {
 
   it('removes pending frames by identity when epoch proofs complete concurrently', async () => {
     const reopen: WarmReopenEvidence = { attempt: 7, baselineWindowEpoch: 21,
-      windowEpoch: null, closed: false };
+      baselineRevision: null, windowEpoch: null, closed: false };
     const frame = (source: 'render' | 'shown' | 'sample', statusText: string) => ({
       source, revision: 12, runId: 25, captureReady: statusText === 'Recording',
       readinessReason: statusText === 'Recording' ? 'recording' : 'activating-warm-capture',
@@ -174,7 +174,8 @@ describe('warm mini-window first-visible evidence', () => {
   });
 
   it('closes admission with the final sample and still drains admitted native proofs', async () => {
-    const reopen = { attempt: 1, baselineWindowEpoch: 1, windowEpoch: 2, closed: false,
+    const reopen = { attempt: 1, baselineWindowEpoch: 1, baselineRevision: null,
+      windowEpoch: 2, closed: false,
       acceptingObservations: true };
     const pending = new Set<Promise<void>>();
     let release!: () => void;
@@ -192,7 +193,8 @@ describe('warm mini-window first-visible evidence', () => {
   });
 
   it('seals atomically when the final pending set becomes empty', async () => {
-    const reopen = { attempt: 1, baselineWindowEpoch: 1, windowEpoch: 2, closed: false,
+    const reopen = { attempt: 1, baselineWindowEpoch: 1, baselineRevision: null,
+      windowEpoch: 2, closed: false,
       acceptingObservations: true };
     let armLateAdmission = false;
     let lateAdmissionAttempted = false;

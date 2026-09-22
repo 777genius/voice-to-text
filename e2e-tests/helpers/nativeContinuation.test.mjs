@@ -138,6 +138,18 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     routeEvents).retainedProviderSessionIds,
   ['provider-1', 'provider-2', 'provider-3', 'provider-4', 'provider-5', 'provider-6',
     'provider-7']);
+  const productionRequestIds = structuredClone(routeEvents);
+  for (const connectionId of [1, 2, 3, 4, 5, 6, 7]) {
+    let controlSequence = 0;
+    productionRequestIds.filter(event => event.connectionId === connectionId &&
+      event.event === 'backend_control' && event.request_id).forEach(event => {
+      controlSequence += 1;
+      event.request_id = `1-${controlSequence}`;
+    });
+  }
+  assert.equal(verifyQualificationRoute(warmProviderCanaryTrial,
+    productionRequestIds).maximumActiveProviderSessions, 1,
+  'request IDs are instance-local and may repeat across distinct provider sessions');
   const replayedContinue = structuredClone(routeEvents);
   const firstContinue = replayedContinue.find(event => event.type === 'continue_result');
   replayedContinue.filter(event => event.type === 'continue_result').slice(1).forEach(event => {
@@ -294,6 +306,30 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     terminals, final: { status: 'Idle', preparedCaptureTokenCount: 0,
       providerTransport: { connectionRetained: false }, fixture } };
   assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, report).churnCycles, 20);
+  const mixedStalePartial = structuredClone(report);
+  const mixedPartialCycle = mixedStalePartial.cycles[12];
+  const validPartial = mixedStalePartial.events.find(event =>
+    event.cycleIndex === 12 && event.event === 'transcription:partial');
+  const stalePartialIndex = mixedPartialCycle.stopEventIndex;
+  mixedStalePartial.events.splice(stalePartialIndex, 0, {
+    ...validPartial, sourceStartSeconds: 0, sourceDurationSeconds: 0.02,
+  });
+  for (const cycle of mixedStalePartial.cycles) {
+    if (cycle.index === 12) {
+      cycle.stopEventIndex += 1;
+      cycle.eventEnd += 1;
+    } else if (cycle.index > 12) {
+      cycle.eventStart += 1;
+      cycle.triggerEventStart += 1;
+      cycle.stopEventIndex += 1;
+      cycle.eventEnd += 1;
+    }
+  }
+  mixedStalePartial.finalTranscriptFence.eventStart += 1;
+  mixedStalePartial.finalCallbackFence.eventStart += 1;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial,
+    mixedStalePartial), /Cycle 12 missed transcription:partial evidence/,
+  'a valid trigger cannot hide a stale partial outside the current source interval');
   const foreignStartupTranscript = structuredClone(report);
   const startupEventIndex = foreignStartupTranscript.finalTranscriptFence.eventStart;
   foreignStartupTranscript.events.splice(startupEventIndex, 0, {

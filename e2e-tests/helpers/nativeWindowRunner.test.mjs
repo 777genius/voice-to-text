@@ -224,6 +224,10 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
       v.report.allFinalDeliveries.push(v.report.allFinalDeliveries.shift());
       v.report.cycleFinalDeliveries.push(v.report.cycleFinalDeliveries.shift());
     },
+    v => {
+      v.report.expectedFinalSessionIds.reverse();
+      v.report.allFinalDeliveries.reverse();
+    },
     v => { v.report.hiddenIdleEvidence.webviewElapsedMs = 179999; },
     v => { v.report.hiddenIdleEvidence.wakeCaptureGeneration = 50; },
     v => { v.fixture.captureRunAssociations.find(row => row.captureGeneration === 51).captureRunId = 1051;
@@ -237,10 +241,12 @@ test('continuation qualification requires balanced and identical terminal lifecy
   const generations = Array.from({ length: 51 }, (_, index) => index + 1);
   const controlResults = Array.from({ length: 50 }, (_, cycle) => ['pause', 'continue'].map(operation => ({
     operation, logicalRunId: 1, delivered: true,
-    result: { decision: 'accepted', pause_epoch: cycle + 1, provider_session_id: 'p4-1' },
+    result: { decision: 'accepted', pause_epoch: cycle + 1, provider_session_id: 'p4-1',
+      request_id: `${operation}-${cycle + 1}`, eligible_now: true },
   }))).flat();
   controlResults.push({ operation: 'pause', logicalRunId: 1, delivered: true,
-    result: { decision: 'accepted', pause_epoch: 51, provider_session_id: 'p4-1' } });
+    result: { decision: 'accepted', pause_epoch: 51, provider_session_id: 'p4-1',
+      request_id: 'pause-51', eligible_now: true } });
   const fixture = { captureStarts: 51, captureStops: 51, activeCaptures: 0, maxActiveCaptures: 1,
     providerStarts: 1, providerStops: 1, providerResumes: 0, activeProviders: 0,
     maxActiveProviders: 1, finals: 1, providerFailures: 0,
@@ -259,7 +265,8 @@ test('continuation qualification requires balanced and identical terminal lifecy
     providerPcmLedgers: generations.map(captureGeneration => ({ captureGeneration,
       chunks: 1, samples: 320, hash: '0123456789abcdef' })) };
   const cycles = Array.from({ length: 50 }, (_, cycle) => ({ cycle,
-    captureGeneration: cycle + 2, windowEpoch: cycle + 1, providerStarts: 1,
+    captureGeneration: cycle + 2, captureRunId: cycle + 2,
+    captureFenceGeneration: cycle + 2, windowEpoch: cycle + 1, providerStarts: 1,
     micOffOnStop: true, controls: controlResults.slice(cycle * 2, cycle * 2 + 2) }));
   const valid = { marker, passed: true, fixture, report: { mode: 'continuation-fake',
     passed: true, errors: [], completedCycles: 50, terminalCount: 1, logicalRunId: 1,
@@ -311,6 +318,34 @@ test('continuation qualification requires balanced and identical terminal lifecy
       control.result.pause_epoch = 1;
     })); },
     value => { value.report.logicalRunId = 999; },
+    value => {
+      value.fixture.controlResults.forEach(control => { control.result.request_id = 'replayed'; });
+      value.report.cycles.forEach(cycle => cycle.controls.forEach(control => {
+        control.result.request_id = 'replayed';
+      }));
+      value.report.final.fixture.controlResults.forEach(control => {
+        control.result.request_id = 'replayed';
+      });
+    },
+    value => {
+      value.fixture.controlResults.filter(control => control.operation === 'continue')
+        .forEach(control => { control.result.eligible_now = false; });
+      value.report.cycles.forEach(cycle => { cycle.controls[1].result.eligible_now = false; });
+      value.report.final.fixture.controlResults.filter(control => control.operation === 'continue')
+        .forEach(control => { control.result.eligible_now = false; });
+    },
+    value => {
+      value.fixture.captureRunAssociations.forEach(row => {
+        row.captureRunId = 1; row.captureFenceGeneration = 1;
+      });
+      value.fixture.providerMarkers.forEach(row => {
+        row.captureRunId = 1; row.captureFenceGeneration = 1;
+      });
+      value.report.cycles.forEach(cycle => {
+        cycle.captureRunId = 1; cycle.captureFenceGeneration = 1;
+      });
+      value.report.final.fixture = structuredClone(value.fixture);
+    },
     value => {
       value.fixture.controlResults[1].delivered = false;
       value.report.cycles[0].controls[1].delivered = false;
@@ -426,6 +461,7 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
   warm.report.warmReadyFrames = Array.from({ length: 10 }, (_, i) => ({ runId: i + 1, revision: i + 1, phase: 'mini-status-dot recording' }));
   warm.report.warmWindowEpochs = Array.from({ length: 10 }, (_, i) => ({
     attempt: i + 1, windowEpoch: i + 1, runId: i + 1, revision: i + 1,
+    baselineRevision: i === 0 ? null : i,
   }));
   warm.report.warmVisibleFrames = Array.from({ length: 10 }, (_, i) => ({
     attempt: i + 1, source: 'shown', windowEpoch: i + 1, revision: i + 1, runId: i + 1,
@@ -471,6 +507,15 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
   neutralRevisionBeforeRun.report.warmVisibleFrames[0].runId = null;
   assert.equal(validateResult(neutralRevisionBeforeRun), neutralRevisionBeforeRun.report,
     'intent revision may be visible before readiness assigns its run id');
+  const neutralBaselineRevision = structuredClone(warm);
+  neutralBaselineRevision.report.warmVisibleFrames[1].runId = null;
+  neutralBaselineRevision.report.warmVisibleFrames[1].revision =
+    neutralBaselineRevision.report.warmWindowEpochs[1].baselineRevision;
+  assert.equal(validateResult(neutralBaselineRevision), neutralBaselineRevision.report,
+    'a neutral admission frame may retain the baseline intent revision');
+  const foreignNeutralRevision = structuredClone(neutralBaselineRevision);
+  foreignNeutralRevision.report.warmVisibleFrames[1].revision = 999;
+  assert.throws(() => validateResult(foreignNeutralRevision), /physical warm input evidence/);
   const rebatched = structuredClone(warm);
   rebatched.report.final.fixture.providerPcmLedgers[0].chunks = 3;
   rebatched.fixture.providerPcmLedgers[0].chunks = 3;
@@ -535,6 +580,7 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
     e => { e.report.warmVisibleFrames[1].windowEpoch = e.report.warmVisibleFrames[0].windowEpoch - 1; },
     e => { e.report.warmVisibleFrames[0].windowEpoch = 1001; },
     e => { e.report.warmWindowEpochs[0].windowEpoch = 1001; },
+    e => { e.report.warmWindowEpochs[0].baselineRevision = 0; },
   ]) {
     const broken = structuredClone(warm);
     mutate(broken);

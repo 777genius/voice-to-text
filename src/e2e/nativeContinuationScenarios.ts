@@ -5,7 +5,8 @@ import { listen } from '@tauri-apps/api/event';
 import { useAppConfigStore } from '@/stores/appConfig';
 
 type Control = { operation: string; logicalRunId: number; cumulativeBytes: number;
-  result: { decision: string; pause_epoch: number; provider_session_id: string } };
+  delivered: boolean; result: { decision: string; pause_epoch: number; provider_session_id: string;
+    request_id: string; eligible_now: boolean } };
 type Snapshot = { historyEntryCount: number; status: string; sessionId: number; windowEpoch: number; visible: boolean;
   logicalProviderRunId: number;
   preparedCaptureTokenCount: number; fixture: {
@@ -13,6 +14,8 @@ type Snapshot = { historyEntryCount: number; status: string; sessionId: number; 
     providerStarts: number; providerResumes: number; maxActiveProviders: number; providerAudioChunks: number;
     markerViolations: string[]; controlResults: Control[]; finals: number;
     firstPcmLatenciesMs: Array<{ captureGeneration: number; elapsedMs: number }>;
+    captureRunAssociations: Array<{ captureGeneration: number; captureRunId: number;
+      captureFenceGeneration: number }>;
   } };
 const state = () => invoke<Snapshot>('native_e2e_state');
 const sleep = (durationMs: number) => invoke('native_e2e_delay', { durationMs });
@@ -84,6 +87,7 @@ export async function runNativeContinuationScenarios(pinia: Pinia) {
       'Initial logical provider owner is missing');
     report.logicalRunId = initial.logicalProviderRunId;
     let previousPauseEpoch = 0;
+    const controlRequestIds = new Set<string>();
     for (let cycle = 0; cycle < 50; cycle++) {
       const before = await state();
       await toggle();
@@ -105,12 +109,25 @@ export async function runNativeContinuationScenarios(pinia: Pinia) {
       const controls = continued.fixture.controlResults.slice(-2);
       check(controls.length === 2 && controls[0].logicalRunId === controls[1].logicalRunId &&
         controls[0].logicalRunId === report.logicalRunId &&
-        controls[0].result.pause_epoch === controls[1].result.pause_epoch,
+        controls[0].result.pause_epoch === controls[1].result.pause_epoch &&
+        controls[1].result.eligible_now === true &&
+        controls.every(control => control.delivered === true &&
+          typeof control.result.request_id === 'string' && control.result.request_id.length > 0 &&
+          !controlRequestIds.has(control.result.request_id)),
       'Logical owner/epoch changed across Continue');
+      controls.forEach(control => controlRequestIds.add(control.result.request_id));
       check(controls[0].result.pause_epoch > previousPauseEpoch,
         'Pause epoch did not advance across Continue cycles');
       previousPauseEpoch = controls[0].result.pause_epoch;
-      report.cycles.push({ cycle, captureGeneration: continued.fixture.firstPcmLatenciesMs[continued.fixture.firstPcmLatenciesMs.length - 1]?.captureGeneration,
+      const captureGeneration = continued.fixture.firstPcmLatenciesMs[
+        continued.fixture.firstPcmLatenciesMs.length - 1]?.captureGeneration;
+      const association = continued.fixture.captureRunAssociations.find(row =>
+        row.captureGeneration === captureGeneration);
+      check(association && association.captureRunId > 0 && association.captureFenceGeneration > 0,
+        'Continued capture identity/fence is missing');
+      report.cycles.push({ cycle, captureGeneration,
+        captureRunId: association.captureRunId,
+        captureFenceGeneration: association.captureFenceGeneration,
         windowEpoch: continued.windowEpoch, providerStarts: continued.fixture.providerStarts,
         micOffOnStop: paused.fixture.activeCaptures === 0, controls });
       report.completedCycles++;
@@ -129,6 +146,13 @@ export async function runNativeContinuationScenarios(pinia: Pinia) {
     const final = await poll(s => s.fixture.activeCaptures === 0 && s.fixture.activeProviders === 0 &&
       s.preparedCaptureTokenCount === 0 && s.historyEntryCount === 1 && report.terminalCount === 1, 'Terminal cleanup did not release resources');
     report.final = final;
+    check(final.fixture.controlResults.length === 101 &&
+      final.fixture.controlResults.every(control => control.delivered === true &&
+        typeof control.result.request_id === 'string' && control.result.request_id.length > 0) &&
+      new Set(final.fixture.controlResults.map(control => control.result.request_id)).size === 101 &&
+      final.fixture.controlResults.filter(control => control.operation === 'continue')
+        .every(control => control.result.eligible_now === true),
+    'Continuation control identities or eligibility are incomplete');
     check(final.fixture.captureStarts === final.fixture.captureStops && final.fixture.finals === 1,
       'Logical run did not finalize exactly once');
     const latencies = final.fixture.firstPcmLatenciesMs.map(x => x.elapsedMs).sort((a,b) => a-b);

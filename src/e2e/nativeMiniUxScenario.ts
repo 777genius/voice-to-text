@@ -28,7 +28,8 @@ export type WarmVisibleFrame = {
   readinessReason: string | undefined; phase: string; statusText: string;
 };
 export type WarmReopenEvidence = {
-  attempt: number; baselineWindowEpoch: number; windowEpoch: number | null; closed: boolean;
+  attempt: number; baselineWindowEpoch: number; baselineRevision: number | null;
+  windowEpoch: number | null; closed: boolean;
   acceptingObservations?: boolean;
   pendingFrames?: Array<Omit<WarmVisibleFrame, 'attempt' | 'windowEpoch'>>;
   observedFrameSignatures?: Set<string>;
@@ -160,7 +161,7 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
   const report = { mode: 'mini-ux', warmMode: false, warmReopens: 0, idleAcceptedDelta: 0,
     warmReadyFrames: [] as Array<{ runId: number | null; revision: number | null; phase: string }>,
     warmWindowEpochs: [] as Array<{ attempt: number; windowEpoch: number;
-      runId: number | null; revision: number | null }>,
+      runId: number | null; revision: number | null; baselineRevision: number | null }>,
     warmReuseOpenCount: 0, lifecycle: null as null | {
       sleepClosed: boolean; wakeOpenedOnce: boolean; terminalCount: number; recoveryOpenedOnce: boolean;
       physical: {
@@ -440,6 +441,7 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
         check(report.idleAcceptedDelta === 0, 'Idle native PCM escaped production gate');
         const visibleFrameStart = report.warmVisibleFrames.length;
         activeWarmReopen = { attempt: attempt + 1, baselineWindowEpoch: idle.windowEpoch,
+          baselineRevision: store.recordingIntentRevision,
           windowEpoch: null, closed: false, acceptingObservations: true };
         await toggle();
         const recording = await until(`warm reopen ${attempt + 1}`, s => s.visible && store.isCaptureReady &&
@@ -475,7 +477,8 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
           'Admitted warm input failed to render ready recording phase');
         report.warmReadyFrames.push({ runId: recordingRunId, revision: store.recordingIntentRevision, phase });
         report.warmWindowEpochs.push({ attempt: attempt + 1, windowEpoch: recording.windowEpoch,
-          runId: recordingRunId, revision: store.recordingIntentRevision });
+          runId: recordingRunId, revision: store.recordingIntentRevision,
+          baselineRevision: activeWarmReopen.baselineRevision });
         check(!generations.has(generation), 'Warm reopen reused logical lease identity');
         generations.add(generation);
         check(recording.fixture.physicalOpenCount === 1, 'Warm reopen physically reopened input');
