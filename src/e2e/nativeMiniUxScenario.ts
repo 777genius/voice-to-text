@@ -219,6 +219,19 @@ export async function runNativeMiniUxScenario(pinia: Pinia): Promise<void> {
     };
     const frame = readFrame();
     if (!frame || !reserveWarmVisibleFrameObservation(reopen, frame, expectedWindowEpoch)) return;
+    // MutationObserver can emit a burst while the WebView resumes. Preserve
+    // each distinct synchronous DOM frame, but let the next shown/sample
+    // observation provide the native epoch proof instead of flooding IPC with
+    // two state reads per mutation.
+    if (source === 'render' && native === undefined && expectedWindowEpoch === undefined) {
+      reopen.pendingFrames ??= [];
+      if (reopen.pendingFrames.length >= 16) {
+        report.errors.push('Pending first-visible frame evidence overflow');
+      } else {
+        reopen.pendingFrames.push(frame);
+      }
+      return;
+    }
     const observation = bindWarmVisibleFrameAfterNative(
       reopen, state, () => frame, expectedWindowEpoch, native)
       .then(frames => { report.warmVisibleFrames.push(...frames); }).catch(error => {
