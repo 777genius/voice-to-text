@@ -164,7 +164,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       .reduce((maximum, event) => Math.max(maximum, event.deliverySeq), 0);
     const providerStartSamples = index < warmProviderCanaryTrial.readyGateFromIndex
       ? null : index < 15 ? (index - warmProviderCanaryTrial.readyGateFromIndex) * 320 : 0;
-    if (plan.stopPhase === 'during-partial') events.push({ event: 'transcription:partial', text: phrase,
+    const partialText = markerId === 0 ? 'на столе уже' : 'за окном уже';
+    if (plan.stopPhase === 'during-partial') events.push({ event: 'transcription:partial', text: partialText,
       cycleIndex: index, sessionId: logicalRunId, deliverySeq: null, markerIds: [markerId],
       timingKnown: true, sourceStartSeconds: providerStartSamples / 16000, sourceDurationSeconds: 0.02 });
     if (plan.stopPhase === 'after-final') events.push(
@@ -283,6 +284,12 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     terminals, final: { status: 'Idle', preparedCaptureTokenCount: 0,
       providerTransport: { connectionRetained: false }, fixture } };
   assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, report).churnCycles, 20);
+  const slowFinalReset = structuredClone(report);
+  const lastCycle = slowFinalReset.cycles.at(-1);
+  lastCycle.providerResetSettledAtMs = lastCycle.settledAtMs + 700;
+  slowFinalReset.finalStartedAtMs = lastCycle.providerResetSettledAtMs + lastCycle.jitterMs;
+  assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, slowFinalReset).churnCycles, 20,
+    'final jitter starts after the prescribed provider retirement completes');
   const segmentedFinal = structuredClone(report);
   const finalEventIndex = segmentedFinal.events.findIndex(event =>
     event.cycleIndex === 20 && event.event === 'transcription:final');
@@ -303,6 +310,32 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   phraseSegmentedFinal.finalCallbackFence.eventStart += 1;
   assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, phraseSegmentedFinal).churnCycles, 20,
     'markers are derived from the aggregate when a provider segments inside a phrase');
+  const duplicateFragmentFinal = structuredClone(report);
+  const duplicateFragmentIndex = duplicateFragmentFinal.events.findIndex(event =>
+    event.cycleIndex === 20 && event.event === 'transcription:final');
+  const duplicateFragmentTemplate = duplicateFragmentFinal.events[duplicateFragmentIndex];
+  duplicateFragmentFinal.events.splice(duplicateFragmentIndex, 1,
+    { ...duplicateFragmentTemplate, text: 'на', markerIds: [], deliverySeq: 99 },
+    { ...duplicateFragmentTemplate, text: 'на', markerIds: [], deliverySeq: 100 },
+    { ...duplicateFragmentTemplate, text: 'столе лежит книга', markerIds: [], deliverySeq: 101 },
+    { ...duplicateFragmentTemplate, text: 'за окном растет береза', markerIds: [1], deliverySeq: 102 });
+  duplicateFragmentFinal.finalCallbackFence.eventStart += 3;
+  duplicateFragmentFinal.expectedInsertion = 'на на столе лежит книга за окном растет береза';
+  duplicateFragmentFinal.terminals.find(terminal => terminal.cycleIndex === 20).stableSnapshot =
+    duplicateFragmentFinal.expectedInsertion;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial,
+    duplicateFragmentFinal), /Final warm provider proof is incomplete/,
+  'duplicate Stable fragments cannot hide outside complete-phrase occurrence counts');
+  const duplicateTimedFinal = structuredClone(report);
+  const timedTemplate = { ...duplicateTimedFinal.events[finalTranscriptEventStart],
+    deliverySeq: null, text: 'на столе лежит книга', markerIds: [0], timingKnown: true,
+    sourceStartSeconds: 0, sourceDurationSeconds: 0.5 };
+  duplicateTimedFinal.events.splice(finalTranscriptEventStart, 0,
+    { ...timedTemplate }, { ...timedTemplate });
+  duplicateTimedFinal.finalCallbackFence.eventStart += 2;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial,
+    duplicateTimedFinal), /Final warm provider proof is incomplete/,
+  'duplicate contained timed Finals are rejected independently of Stable evidence');
   const staleMixedFinal = structuredClone(segmentedFinal);
   const stalePhrase = staleMixedFinal.events.find(event => event.cycleIndex === 20 &&
     event.event === 'transcription:final' && event.markerIds.includes(1) &&
@@ -542,6 +575,19 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, lateRetainedFinal),
     /Final warm provider proof is incomplete/,
     'an unpaired untimed Stable cannot be attributed by receipt ownership');
+  const postStopTimedFinal = structuredClone(report);
+  const timedCycle = postStopTimedFinal.cycles.find(row => row.stopPhase === 'during-partial');
+  const timedPhrase = timedCycle.episode === 'episode-a.pcm'
+    ? 'на столе лежит книга' : 'за окном растет береза';
+  insertAfterStop(postStopTimedFinal, timedCycle, {
+    event: 'transcription:final', cycleIndex: timedCycle.index,
+    sessionId: timedCycle.logicalRunId, deliverySeq: null, text: timedPhrase,
+    markerIds: [timedCycle.episode === 'episode-a.pcm' ? 0 : 1], timingKnown: true,
+    sourceStartSeconds: timedCycle.providerStartSamples / 16000,
+    sourceDurationSeconds: timedCycle.triggerProviderSamples / 16000,
+  });
+  assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, postStopTimedFinal).churnCycles, 20,
+    'a contained provider tail before the next generation remains owned by the stopped cycle');
   const collapsedPartial = structuredClone(report);
   const partialCycle = collapsedPartial.cycles.find(row => row.stopPhase === 'during-partial');
   insertBeforeStop(collapsedPartial, partialCycle, { event: 'transcription:final',
@@ -568,7 +614,24 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   duplicateFinal.terminals.find(terminal => terminal.sessionId === finalCycle.logicalRunId)
     .stableSnapshot = `${firstFinal.text} ${firstFinal.text}`;
   assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, duplicateFinal),
-    /Final warm provider proof is incomplete/);
+    /missed transcription:final evidence|Final warm provider proof is incomplete/);
+  const segmentedChurnFinal = structuredClone(report);
+  const segmentedCycle = segmentedChurnFinal.cycles.find(row => row.stopPhase === 'after-final');
+  const segmentedEvent = segmentedChurnFinal.events.slice(
+    segmentedCycle.triggerEventStart, segmentedCycle.stopEventIndex)
+    .find(row => row.event === 'transcription:final');
+  const markerPrefix = segmentedCycle.episode === 'episode-a.pcm' ? 'на столе' : 'за окном';
+  const markerSuffix = segmentedCycle.episode === 'episode-a.pcm' ? 'лежит книга' : 'растет береза';
+  segmentedEvent.text = markerPrefix;
+  segmentedEvent.markerIds = [];
+  insertBeforeStop(segmentedChurnFinal, segmentedCycle, {
+    ...segmentedEvent, text: markerSuffix, deliverySeq: 702,
+  });
+  segmentedCycle.trigger.deliverySeq = 702;
+  segmentedChurnFinal.terminals.find(terminal => terminal.sessionId === segmentedCycle.logicalRunId)
+    .stableSnapshot = `${markerPrefix} ${markerSuffix}`;
+  assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, segmentedChurnFinal).churnCycles, 20,
+    'after-final trigger evidence may be split across sequential Stable deliveries');
   const incompleteFinalPhrases = structuredClone(report);
   const finalDelivery = incompleteFinalPhrases.events.find(event =>
     event.cycleIndex === 20 && event.event === 'transcription:final');

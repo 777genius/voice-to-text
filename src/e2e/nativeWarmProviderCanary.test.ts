@@ -3,7 +3,8 @@ import { expectedWarmProviderCallbackGenerations,
   validateWarmProviderCanaryPlan } from './nativeWarmProviderCanaryPlan';
 import { releaseWarmCanarySourceBeforeAck, requireWarmProviderCanaryReader,
   warmCanaryBeforeReadyStopEvidence, warmCanaryEventMatchesCapture,
-  warmCanaryAttributedFinalEvidence, warmCanaryEventMatchesEpisode } from './nativeWarmProviderCanary';
+  warmCanaryAggregateMatchesEpisode, warmCanaryAttributedFinalEvidence,
+  warmCanaryEventMatchesEpisode } from './nativeWarmProviderCanary';
 
 const phases = ['before-ready', 'after-first-pcm', 'during-partial', 'after-final'] as const;
 const jitters = [0, 25, 100, 250, 500] as const;
@@ -148,5 +149,17 @@ describe('warm provider paid canary plan', () => {
     expect(warmCanaryAttributedFinalEvidence([
       { ...timed, sourceStartSeconds: 1.9999375 },
     ], fence, false).timedDeliveries).toEqual([]);
+  });
+
+  it('accepts segmented episode text but rejects duplicate fragments', () => {
+    const event = (text: string, deliverySeq: number) => ({ event: 'transcription:final', text,
+      markerIds: [], sessionId: 9, cycleIndex: 16, deliverySeq, atMs: 1000 + deliverySeq,
+      timingKnown: false, sourceStartSeconds: 0, sourceDurationSeconds: 0 });
+    expect(warmCanaryAggregateMatchesEpisode([
+      event('За окном', 1), event('растет береза', 2),
+    ], 'episode-b.pcm')).toBe(true);
+    expect(warmCanaryAggregateMatchesEpisode([
+      event('За окном', 1), event('За окном', 2), event('растет береза', 3),
+    ], 'episode-b.pcm')).toBe(false);
   });
 });

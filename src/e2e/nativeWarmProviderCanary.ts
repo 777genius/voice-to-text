@@ -63,6 +63,26 @@ const providerTimingSampleRange = (event: ProviderEvent) => {
 const normalizedProviderText = (value: string | null) =>
   typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
 
+const normalizedSyntheticTranscript = (value: string | null) =>
+  normalizedProviderText(value).toLocaleLowerCase('ru').replace(/ё/g, 'е')
+    .replace(/[.,!?]/g, '').replace(/\s+/g, ' ').trim();
+
+const expectedEpisodeTranscript = (episode: string) => episode === 'episode-a.pcm'
+  ? 'на столе лежит книга'
+  : episode === 'episode-b.pcm' ? 'за окном растет береза' : '';
+
+export function warmCanaryAggregateMatchesEpisode(events: ProviderEvent[], episode: string) {
+  const aggregate = events.reduce((stable, delivery) =>
+    appendTranscriptText(stable, delivery.text ?? ''), '');
+  const expected = expectedEpisodeTranscript(episode);
+  return events.length > 0 && expected.length > 0 &&
+    normalizedSyntheticTranscript(aggregate) === expected;
+}
+
+const warmCanaryFinalAggregateIsExact = (text: string) =>
+  normalizedSyntheticTranscript(text) ===
+    'на столе лежит книга за окном растет береза';
+
 const eventOwnsCaptureFence = (event: ProviderEvent, fence: WarmCanaryCaptureFence) =>
   event.event === 'transcription:final' && event.sessionId === fence.sessionId &&
   event.cycleIndex === fence.cycleIndex;
@@ -342,12 +362,16 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
             providerStartSamples: triggerProviderStartSamples,
             providerSamples: triggerProviderSamples, deliverySeqFloor: triggerDeliverySeqFloor };
           const triggerEvents = report.events.slice(triggerEventStart);
-          triggerEvent = wanted === 'transcription:final'
-            ? warmCanaryAttributedFinalEvidence(triggerEvents, fence,
-              cycle.resetProviderBefore === true).stableDeliveries.find(event =>
-              warmCanaryEventMatchesEpisode(event, cycle.episode, wanted))
-            : triggerEvents.find(event =>
+          if (wanted === 'transcription:final') {
+            const deliveries = warmCanaryAttributedFinalEvidence(triggerEvents, fence,
+              cycle.resetProviderBefore === true).stableDeliveries;
+            if (warmCanaryAggregateMatchesEpisode(deliveries, cycle.episode)) {
+              triggerEvent = deliveries[deliveries.length - 1];
+            }
+          } else {
+            triggerEvent = triggerEvents.find(event =>
               warmCanaryEventMatchesCapture(event, cycle.episode, wanted, fence));
+          }
           if (!triggerEvent) await wait(20);
         }
         check(triggerEvent,
@@ -440,6 +464,10 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       await invoke('native_e2e_progress', { report: { scenario: 'warm-provider-churn',
         completedCycles: cycle.index + 1, stopPhase: cycle.stopPhase } });
       await wait(cycle.jitterMs);
+      // Any provider tail delivered after Stop but before the next generation
+      // still belongs to this cycle. The independent validator uses this
+      // window while retaining timing/sequence ownership fences.
+      cycleReport.eventEnd = report.events.length;
     }
 
     const beforeFinal = await state();
@@ -531,6 +559,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       const occurrences = syntheticPhraseOccurrences(acceptedFinalText);
       return acceptedFinalDeliveries.length > 0 && occurrences.length === 2 &&
         new Set(occurrences.map(marker => marker.markerId)).size === 2 &&
+        warmCanaryFinalAggregateIsExact(acceptedFinalText) &&
         store.finalText !== report.finalTextBeforeProof &&
         store.finalText === appendTranscriptText(
           report.finalTextBeforeProof,
@@ -605,6 +634,8 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       finalTerminalEvents.length === 1 && finalTerminalEvents[0].cycleIndex === trial.finalEpisodeIndex,
     'Warm provider canary terminal ownership is incomplete or duplicated');
     const finalEvents = report.events.filter(event => event.event === 'transcription:final');
+    const timedFinalKeys = finalEvents.filter(event => event.timingKnown === true)
+      .map(event => `${event.sessionId}:${event.cycleIndex}:${normalizedSyntheticTranscript(event.text)}`);
     check(finalEvents.every(event => {
       const cycleIndex = event.cycleIndex;
       if (typeof cycleIndex !== 'number' || !Number.isSafeInteger(cycleIndex) ||
@@ -623,10 +654,11 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         providerStartSamples: Number(row?.providerStartSamples), providerSamples: provider.samples,
         deliverySeqFloor: Number(row?.triggerDeliverySeqFloor) };
       const evidence = warmCanaryAttributedFinalEvidence(
-        report.events.slice(Number(row?.triggerEventStart), Number(row?.stopEventIndex)), fence,
+        report.events.slice(Number(row?.triggerEventStart), Number(row?.eventEnd)), fence,
         sameSourceInRun === 1);
       return evidence.stableDeliveries.includes(event) || evidence.timedDeliveries.includes(event);
     }) &&
+      new Set(timedFinalKeys).size === timedFinalKeys.length &&
       !report.cycles.some((_row, cycleIndex) => {
         const aggregate = report.events.filter(event => event.cycleIndex === cycleIndex &&
           event.event === 'transcription:final').reduce((stable, delivery) =>
@@ -637,7 +669,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         return markers.length !== 1 || markers[0] !== expectedMarkerId;
       }) &&
       finalEvidence().stableDeliveries.length === acceptedFinalDeliveries.length &&
-      acceptedFinalDeliveries.length > 0,
+      acceptedFinalDeliveries.length > 0 && warmCanaryFinalAggregateIsExact(acceptedFinalText),
     'Warm provider canary retained a late, duplicate, stale, or misowned final');
     const generations = report.final.fixture.capturePcmLedgers.map(row => row.captureGeneration);
     check(generations.length === 21 && new Set(generations).size === 21 &&

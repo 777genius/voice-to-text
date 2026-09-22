@@ -488,6 +488,15 @@ export function verifyWarmProviderCanary(trial, report) {
   const normalizedEventText = event => typeof event?.text === 'string'
     ? event.text.toLocaleLowerCase('ru').replace(/ё/g, 'е').replace(/[.,!?]/g, '').replace(/\s+/g, ' ')
     : '';
+  const expectedEpisodeTranscript = episode => episode === 'episode-a.pcm'
+    ? 'на столе лежит книга'
+    : episode === 'episode-b.pcm' ? 'за окном растет береза' : '';
+  const aggregateDeliveries = deliveries => deliveries.reduce((stable, delivery) =>
+    [stable, delivery?.text].map(value => typeof value === 'string'
+      ? value.replace(/\s+/g, ' ').trim() : '').filter(Boolean).join(' '), '');
+  const aggregateMatchesEpisode = (deliveries, episode) => deliveries.length > 0 &&
+    normalizedEventText({ text: aggregateDeliveries(deliveries) }).trim() ===
+      expectedEpisodeTranscript(episode);
   const completeSyntheticPhraseIds = text => {
     const normalized = normalizedEventText({ text });
     return [...normalized.matchAll(/на столе лежит книга|за окном растет береза/g)]
@@ -495,10 +504,16 @@ export function verifyWarmProviderCanary(trial, report) {
   };
   const eventMatchesEpisode = (event, episode, expectedEvent) => {
     const markerId = episode === 'episode-a.pcm' ? 0 : episode === 'episode-b.pcm' ? 1 : -1;
+    const prefix = markerId === 0 ? 'на столе' : markerId === 1 ? 'за окном' : '';
+    const oppositePrefix = markerId === 0 ? 'за окном' : markerId === 1 ? 'на столе' : '';
+    const normalized = normalizedEventText(event);
+    const expectedCount = prefix === '' ? 0 : normalized.split(prefix).length - 1;
+    const oppositeCount = oppositePrefix === '' ? 0 : normalized.split(oppositePrefix).length - 1;
+    if (event?.event !== expectedEvent || expectedCount !== 1 || oppositeCount !== 0) return false;
+    if (expectedEvent !== 'transcription:final') return true;
     const phraseIds = completeSyntheticPhraseIds(event?.text);
-    return event?.event === expectedEvent && phraseIds.length === 1 && phraseIds[0] === markerId &&
-      (expectedEvent !== 'transcription:final' ||
-        Array.isArray(event.markerIds) && event.markerIds.includes(markerId));
+    return phraseIds.length === 1 && phraseIds[0] === markerId &&
+      Array.isArray(event.markerIds) && event.markerIds.includes(markerId);
   };
   const eventMatchesCapture = (event, episode, expectedEvent, cycleIndex, sessionId,
     providerStartSamples, providerSamples, deliverySeqFloor) => {
@@ -527,8 +542,7 @@ export function verifyWarmProviderCanary(trial, report) {
       Number.isSafeInteger(deliverySeqFloor) && deliverySeqFloor >= 0 &&
       Number.isSafeInteger(providerStartSamples) && providerStartSamples >= 0 &&
       Number.isSafeInteger(providerSamples) && providerSamples > 0 &&
-      (episode == null ? normalizedEventText(event).length > 0 :
-        eventMatchesEpisode(event, episode, 'transcription:final'));
+      normalizedEventText(event).trim().length > 0;
     const timedDeliveries = candidateEvents.filter(event => {
       const start = Math.round(event?.sourceStartSeconds * 16000);
       const duration = Math.round(event?.sourceDurationSeconds * 16000);
@@ -726,8 +740,11 @@ export function verifyWarmProviderCanary(trial, report) {
         : triggerEvents.filter(event => eventMatchesCapture(event, plan.episode, expectedEvent,
           index, cycle.logicalRunId, cycle.providerStartSamples, cycle.triggerProviderSamples,
           cycle.triggerDeliverySeqFloor));
-      if (expectedEvent && !triggerMatches.some(event =>
-        cycle.trigger?.episode === plan.episode && cycle.trigger?.deliverySeq === event.deliverySeq)) {
+      const triggerDelivery = triggerMatches.at(-1);
+      if (expectedEvent && (cycle.trigger?.episode !== plan.episode ||
+          cycle.trigger?.deliverySeq !== triggerDelivery?.deliverySeq ||
+          (expectedEvent === 'transcription:final' &&
+            !aggregateMatchesEpisode(triggerMatches, plan.episode)))) {
         throw new Error(`Cycle ${index} missed ${expectedEvent} evidence`);
       }
       const transcriptBeforeStop = events.slice(cycle.eventStart, cycle.stopEventIndex).filter(event =>
@@ -767,6 +784,8 @@ export function verifyWarmProviderCanary(trial, report) {
     return terminal.stableSnapshot === stableTranscript(terminal.sessionId, terminalIndex);
   });
   const allFinalEvents = events.filter(event => event.event === 'transcription:final');
+  const timedFinalKeys = allFinalEvents.filter(event => event.timingKnown === true)
+    .map(event => `${event.sessionId}:${event.cycleIndex}:${normalizedEventText(event).trim()}`);
   const finalFenceEvents = events.slice(report.finalTranscriptFence?.eventStart);
   const finalEvidence = attributedFinalEvidence(finalFenceEvents, null, finalIndex,
     ownership?.logicalRunId, report.finalTranscriptFence?.providerStartSamples,
@@ -817,8 +836,10 @@ export function verifyWarmProviderCanary(trial, report) {
       !Number.isFinite(report.finalStartedAtMs) ||
       !Number.isFinite(report.finalReadyElapsedMs) || report.finalReadyElapsedMs < 0 ||
       report.finalReadyElapsedMs > trial.readyGateTimeoutMs ||
-      report.finalStartedAtMs - cycles.at(-1).settledAtMs < cycles.at(-1).jitterMs ||
-      report.finalStartedAtMs - cycles.at(-1).settledAtMs >=
+      report.finalStartedAtMs - (cycles.at(-1).providerResetSettledAtMs ??
+        cycles.at(-1).settledAtMs) < cycles.at(-1).jitterMs ||
+      report.finalStartedAtMs - (cycles.at(-1).providerResetSettledAtMs ??
+        cycles.at(-1).settledAtMs) >=
         jitterEvidenceUpperBoundMs(cycles.at(-1).jitterMs) ||
       !Number.isSafeInteger(callbackFence?.eventStart) || callbackFence.eventStart < cycles.at(-1).eventEnd ||
       callbackFence.eventStart > events.length ||
@@ -832,6 +853,8 @@ export function verifyWarmProviderCanary(trial, report) {
       typeof report.expectedInsertion !== 'string' || !report.expectedInsertion.trim() ||
       report.expectedInsertion === report.finalTextBeforeProof ||
       acceptedFinalDeliveries.length < 1 ||
+      normalizedEventText({ text: acceptedFinalText }).trim() !==
+        'на столе лежит книга за окном растет береза' ||
       new Set(acceptedMarkerIds).size !== 2 || !acceptedMarkerIds.includes(0) ||
       !acceptedMarkerIds.includes(1) ||
       acceptedMarkerIds.filter(markerId => markerId === 0).length !== 1 ||
@@ -874,11 +897,12 @@ export function verifyWarmProviderCanary(trial, report) {
           candidate.logicalRunId === event.sessionId && candidate.episode === episode).length;
         if (cycle == null || event.sessionId !== cycle.logicalRunId || episode == null ||
             !provider) return true;
-        const evidence = attributedFinalEvidence(events.slice(cycle.triggerEventStart, cycle.stopEventIndex),
+        const evidence = attributedFinalEvidence(events.slice(cycle.triggerEventStart, cycle.eventEnd),
           episode, cycleIndex, cycle.logicalRunId, cycle.providerStartSamples, provider.samples,
           cycle.triggerDeliverySeqFloor, sameSourceInRun === 1);
         return !evidence.stableDeliveries.includes(event) && !evidence.timedDeliveries.includes(event);
       }) ||
+      new Set(timedFinalKeys).size !== timedFinalKeys.length ||
       cycles.some((cycle, cycleIndex) => {
         const finalText = events.filter(event => event.cycleIndex === cycleIndex &&
           event.event === 'transcription:final').reduce((stable, delivery) =>
