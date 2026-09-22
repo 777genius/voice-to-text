@@ -583,6 +583,24 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('bounds the opening reset when a throttled WebView never runs animation frames', async () => {
+    vi.mocked(window.requestAnimationFrame).mockImplementation(() => 42);
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:window-shown', 1);
+
+    await emitTauriEvent('recording:window-shown', {});
+    expect(document.querySelector('.mini-animation-reset')).not.toBeNull();
+
+    await vi.advanceTimersByTimeAsync(800);
+    await nextTick();
+    expect(document.querySelector('.mini-animation-reset')).toBeNull();
+    expect(document.querySelector('.mini-opening')).toBeNull();
+    expect(window.cancelAnimationFrame).toHaveBeenCalledWith(42);
+
+    wrapper.unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('disposes recording listener if listen resolves after unmount', async () => {
     const pendingListen = deferred<() => void>();
     const unlisten = vi.fn();

@@ -375,6 +375,8 @@ const MINI_WINDOW_WIDTH = MINI_CONTENT_WIDTH + MINI_ANIMATION_GUTTER_X * 2;
 const MINI_WINDOW_HEIGHT = MINI_CONTENT_HEIGHT + MINI_ANIMATION_GUTTER_Y * 2;
 const UPDATE_DIALOG_WINDOW_HEIGHT = 430;
 const MINI_CLOSE_ANIMATION_MS = 220;
+const MINI_OPEN_ANIMATION_MS = 520;
+const MINI_OPEN_RAF_FALLBACK_MS = 800;
 const MINI_CURSOR_POLL_INTERVAL_MS = 80;
 const TEXT_THRESHOLD_PX = 128;
 const MAX_WINDOW_HEIGHT = 700;
@@ -435,6 +437,7 @@ function applyRecordingWindowSize() {
 
 let hideRecordingWindowTimeout: number | null = null;
 let miniOpeningRaf: number | null = null;
+let miniOpeningRafFallbackTimer: number | null = null;
 let miniOpeningTimer: number | null = null;
 let miniCloseResetTimer: number | null = null;
 let miniCursorPollTimer: number | null = null;
@@ -525,6 +528,10 @@ function clearMiniOpeningAnimation() {
   if (miniOpeningRaf !== null) {
     window.cancelAnimationFrame(miniOpeningRaf);
     miniOpeningRaf = null;
+  }
+  if (miniOpeningRafFallbackTimer !== null) {
+    window.clearTimeout(miniOpeningRafFallbackTimer);
+    miniOpeningRafFallbackTimer = null;
   }
   if (miniOpeningTimer !== null) {
     window.clearTimeout(miniOpeningTimer);
@@ -658,15 +665,29 @@ async function playMiniOpenAnimation() {
   if (!useMiniLayout.value || isComponentUnmounted || generation !== animationGeneration) return;
 
   void document.querySelector<HTMLElement>('.popover.mini')?.offsetHeight;
+  miniOpeningRafFallbackTimer = window.setTimeout(() => {
+    miniOpeningRafFallbackTimer = null;
+    if (!useMiniLayout.value || isComponentUnmounted || generation !== animationGeneration) return;
+    if (miniOpeningRaf !== null) {
+      window.cancelAnimationFrame(miniOpeningRaf);
+      miniOpeningRaf = null;
+    }
+    isMiniAnimationReset.value = false;
+    isMiniOpening.value = false;
+  }, MINI_OPEN_RAF_FALLBACK_MS);
   miniOpeningRaf = window.requestAnimationFrame(() => {
     miniOpeningRaf = null;
     if (!useMiniLayout.value || isComponentUnmounted || generation !== animationGeneration) return;
+    if (miniOpeningRafFallbackTimer !== null) {
+      window.clearTimeout(miniOpeningRafFallbackTimer);
+      miniOpeningRafFallbackTimer = null;
+    }
     isMiniAnimationReset.value = false;
     isMiniOpening.value = true;
     miniOpeningTimer = window.setTimeout(() => {
       isMiniOpening.value = false;
       miniOpeningTimer = null;
-    }, 520);
+    }, MINI_OPEN_ANIMATION_MS);
   });
 }
 
