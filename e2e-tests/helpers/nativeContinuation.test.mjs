@@ -548,7 +548,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     value.finalTranscriptFence.eventStart += 1;
   };
   const insertAfterStop = (value, cycle, event) => {
-    const at = cycle.eventEnd;
+    const at = cycle.stopEventIndex;
     value.events.splice(at, 0, event);
     cycle.eventEnd += 1;
     for (const row of value.cycles) {
@@ -577,8 +577,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     'an unpaired untimed Stable cannot be attributed by receipt ownership');
   const postStopTimedFinal = structuredClone(report);
   const timedCycle = postStopTimedFinal.cycles.find(row => row.stopPhase === 'during-partial');
-  const timedPhrase = timedCycle.episode === 'episode-a.pcm'
-    ? 'на столе лежит книга' : 'за окном растет береза';
+  const timedPhrase = timedCycle.episode === 'episode-a.pcm' ? 'на столе' : 'за окном';
   insertAfterStop(postStopTimedFinal, timedCycle, {
     event: 'transcription:final', cycleIndex: timedCycle.index,
     sessionId: timedCycle.logicalRunId, deliverySeq: null, text: timedPhrase,
@@ -587,7 +586,30 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     sourceDurationSeconds: timedCycle.triggerProviderSamples / 16000,
   });
   assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, postStopTimedFinal).churnCycles, 20,
-    'a contained provider tail before the next generation remains owned by the stopped cycle');
+    'a contained truncated provider tail remains owned by an early-stopped cycle');
+  const firstPcmTail = structuredClone(report);
+  const firstPcmTailCycle = firstPcmTail.cycles.find(row => row.stopPhase === 'after-first-pcm' &&
+    row.index >= warmProviderCanaryTrial.readyGateFromIndex);
+  const firstPcmPrefix = firstPcmTailCycle.episode === 'episode-a.pcm' ? 'на' : 'за';
+  insertAfterStop(firstPcmTail, firstPcmTailCycle, {
+    event: 'transcription:final', cycleIndex: firstPcmTailCycle.index,
+    sessionId: firstPcmTailCycle.logicalRunId, deliverySeq: null, text: firstPcmPrefix,
+    markerIds: [], timingKnown: true,
+    sourceStartSeconds: firstPcmTailCycle.providerStartSamples / 16000,
+    sourceDurationSeconds: firstPcmTailCycle.triggerProviderSamples / 16000,
+  });
+  assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, firstPcmTail).churnCycles, 20,
+    'first-PCM cycles retain a sequence floor for owned post-Stop tails');
+  const missingPartial = structuredClone(report);
+  const missingPartialCycle = missingPartial.cycles.find(row => row.stopPhase === 'during-partial');
+  const partialEvent = missingPartial.events.slice(
+    missingPartialCycle.triggerEventStart, missingPartialCycle.stopEventIndex)
+    .find(event => event.event === 'transcription:partial');
+  partialEvent.text = 'unrelated text';
+  delete missingPartialCycle.trigger.deliverySeq;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, missingPartial),
+    /missed transcription:partial evidence/,
+    'an omitted trigger sequence cannot make a missing partial compare equal');
   const collapsedPartial = structuredClone(report);
   const partialCycle = collapsedPartial.cycles.find(row => row.stopPhase === 'during-partial');
   insertBeforeStop(collapsedPartial, partialCycle, { event: 'transcription:final',
@@ -632,6 +654,18 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     .stableSnapshot = `${markerPrefix} ${markerSuffix}`;
   assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, segmentedChurnFinal).churnCycles, 20,
     'after-final trigger evidence may be split across sequential Stable deliveries');
+  const duplicatePostStopFragment = structuredClone(report);
+  const postStopCycle = duplicatePostStopFragment.cycles.find(row => row.stopPhase === 'after-final');
+  insertAfterStop(duplicatePostStopFragment, postStopCycle, {
+    event: 'transcription:final', cycleIndex: postStopCycle.index,
+    sessionId: postStopCycle.logicalRunId, deliverySeq: 703, text: 'береза',
+    markerIds: [], timingKnown: false, sourceStartSeconds: 0, sourceDurationSeconds: 0,
+  });
+  duplicatePostStopFragment.terminals.find(terminal => terminal.sessionId === postStopCycle.logicalRunId)
+    .stableSnapshot += ' береза';
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial,
+    duplicatePostStopFragment), /Final warm provider proof is incomplete/,
+  'exact episode aggregation rejects duplicate Stable fragments after Stop');
   const incompleteFinalPhrases = structuredClone(report);
   const finalDelivery = incompleteFinalPhrases.events.find(event =>
     event.cycleIndex === 20 && event.event === 'transcription:final');

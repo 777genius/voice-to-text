@@ -721,11 +721,12 @@ export function verifyWarmProviderCanary(trial, report) {
           association.captureRunId !== cycle.captureRunId ||
           association.captureFenceGeneration !== cycle.captureFenceGeneration || source.emittedFrames <= 0 ||
           !Number.isSafeInteger(cycle.triggerProviderSamples) || cycle.triggerProviderSamples <= 0 ||
+          !Number.isSafeInteger(cycle.triggerDeliverySeqFloor) || cycle.triggerDeliverySeqFloor < 0 ||
           !Number.isSafeInteger(cycle.providerStartSamples) || cycle.providerStartSamples < 0 ||
           cycle.providerStartSamples !== independentlyMeasuredCycleStart ||
           cycle.triggerProviderSamples > providerByGeneration.get(index + 1)?.samples ||
           (resumed ? cycle.callbackFenceGeneration !== index + 1 :
-            cycle.callbackFenceGeneration !== null || cycle.triggerEventStart !== cycle.eventStart) ||
+            cycle.callbackFenceGeneration !== null) ||
           cycleEvents.some(event => ['transcription:partial', 'transcription:final'].includes(event.event) &&
             event.sessionId !== cycle.logicalRunId)) {
         throw new Error(`Cycle ${index} lost capture/provider ownership`);
@@ -741,7 +742,7 @@ export function verifyWarmProviderCanary(trial, report) {
           index, cycle.logicalRunId, cycle.providerStartSamples, cycle.triggerProviderSamples,
           cycle.triggerDeliverySeqFloor));
       const triggerDelivery = triggerMatches.at(-1);
-      if (expectedEvent && (cycle.trigger?.episode !== plan.episode ||
+      if (expectedEvent && (!triggerDelivery || cycle.trigger?.episode !== plan.episode ||
           cycle.trigger?.deliverySeq !== triggerDelivery?.deliverySeq ||
           (expectedEvent === 'transcription:final' &&
             !aggregateMatchesEpisode(triggerMatches, plan.episode)))) {
@@ -908,9 +909,13 @@ export function verifyWarmProviderCanary(trial, report) {
           event.event === 'transcription:final').reduce((stable, delivery) =>
           appendStableText(stable, delivery.text), '');
         if (!finalText) return false;
-        const markerId = trial.cycles[cycleIndex]?.episode === 'episode-a.pcm' ? 0 : 1;
-        const phraseIds = completeSyntheticPhraseIds(finalText);
-        return phraseIds.length !== 1 || phraseIds[0] !== markerId;
+        const plan = trial.cycles[cycleIndex];
+        const normalized = normalizedEventText({ text: finalText }).trim();
+        const expected = expectedEpisodeTranscript(plan?.episode);
+        if (!expected || plan?.stopPhase === 'before-ready') return true;
+        return plan.stopPhase === 'after-final'
+          ? normalized !== expected
+          : !expected.startsWith(normalized);
       }) ||
       finalEvidence.stableDeliveries.length !== acceptedFinalDeliveries.length ||
       report.final.status !== 'Idle' || report.final.preparedCaptureTokenCount !== 0 ||

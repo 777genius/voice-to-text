@@ -311,15 +311,13 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         // start. Bind the Ready-confirmed owner before releasing PCM so an
         // immediate partial/final callback is attributed to this exact cycle.
         sessionCycles.set(ready.logicalProviderRunId, cycle.index);
-        if (cycle.stopPhase === 'during-partial' || cycle.stopPhase === 'after-final') {
-          // Snapshot the delivery boundary before releasing the first PCM. A
-          // fresh provider may emit its only Stable while the retained-session
-          // callback ACK or the PCM ledger is still being observed.
-          triggerEventStart = report.events.length;
-          triggerDeliverySeqFloor = report.events.slice(0, triggerEventStart)
-            .filter(event => event.sessionId === triggerLogicalRunId && Number.isSafeInteger(event.deliverySeq))
-            .reduce((maximum, event) => Math.max(maximum, Number(event.deliverySeq)), 0);
-        }
+        // Snapshot the delivery boundary before releasing the first PCM for
+        // every audio-bearing phase. A tail may arrive after an early Stop and
+        // still needs the same independently recorded sequence floor.
+        triggerEventStart = report.events.length;
+        triggerDeliverySeqFloor = report.events.slice(0, triggerEventStart)
+          .filter(event => event.sessionId === triggerLogicalRunId && Number.isSafeInteger(event.deliverySeq))
+          .reduce((maximum, event) => Math.max(maximum, Number(event.deliverySeq)), 0);
         const requiresCallbackFence = callbackFenceGenerations.has(generation);
         await releaseWarmCanarySourceBeforeAck(
           () => invoke('native_e2e_configure', { config: { sourceGateReady: true } }),
@@ -664,9 +662,13 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
           event.event === 'transcription:final').reduce((stable, delivery) =>
           appendTranscriptText(stable, delivery.text ?? ''), '');
         if (!aggregate) return false;
-        const expectedMarkerId = trial.cycles[cycleIndex]?.episode === 'episode-a.pcm' ? 0 : 1;
-        const markers = syntheticPhraseOccurrences(aggregate).map(marker => marker.markerId);
-        return markers.length !== 1 || markers[0] !== expectedMarkerId;
+        const cycle = trial.cycles[cycleIndex];
+        const normalized = normalizedSyntheticTranscript(aggregate);
+        const expected = expectedEpisodeTranscript(cycle?.episode ?? '');
+        if (!expected || cycle?.stopPhase === 'before-ready') return true;
+        return cycle.stopPhase === 'after-final'
+          ? normalized !== expected
+          : !expected.startsWith(normalized);
       }) &&
       finalEvidence().stableDeliveries.length === acceptedFinalDeliveries.length &&
       acceptedFinalDeliveries.length > 0 && warmCanaryFinalAggregateIsExact(acceptedFinalText),

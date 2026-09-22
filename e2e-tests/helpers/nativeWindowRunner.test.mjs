@@ -229,6 +229,45 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
   }
 });
 
+test('continuation qualification requires balanced and identical terminal lifecycle evidence', () => {
+  const generations = Array.from({ length: 51 }, (_, index) => index + 1);
+  const fixture = { captureStarts: 51, captureStops: 51, activeCaptures: 0, maxActiveCaptures: 1,
+    providerStarts: 1, providerStops: 1, providerResumes: 0, activeProviders: 0,
+    maxActiveProviders: 1, finals: 1, providerFailures: 0,
+    providerFailureCaptureGenerations: [], providerNoAudioStops: 0, warmTerminalCount: 0,
+    observationOverflow: false, markerViolations: [],
+    firstPcmLatenciesMs: generations.map(captureGeneration => ({ captureGeneration, elapsedMs: 10 })),
+    captureRunAssociations: generations.map(captureGeneration => ({ captureGeneration,
+      captureRunId: captureGeneration, captureFenceGeneration: captureGeneration })),
+    captureMarkers: generations.map(captureGeneration => ({ captureGeneration,
+      count: 1, firstSequence: 1, lastSequence: 1 })),
+    providerMarkers: generations.map(captureGeneration => ({ captureGeneration,
+      captureRunId: captureGeneration, captureFenceGeneration: captureGeneration,
+      providerSessionId: 1, count: 1, firstSequence: 1, lastSequence: 1 })),
+    capturePcmLedgers: generations.map(captureGeneration => ({ captureGeneration,
+      chunks: 1, samples: 320, hash: '0123456789abcdef' })),
+    providerPcmLedgers: generations.map(captureGeneration => ({ captureGeneration,
+      chunks: 1, samples: 320, hash: '0123456789abcdef' })) };
+  const cycles = Array.from({ length: 50 }, (_, cycle) => ({ cycle,
+    captureGeneration: cycle + 2, windowEpoch: cycle + 1, providerStarts: 1,
+    micOffOnStop: true, controls: ['pause', 'continue'].map(operation => ({ operation,
+      logicalRunId: 1, result: { decision: 'accepted', pause_epoch: cycle + 1 } })) }));
+  const valid = { marker, passed: true, fixture, report: { mode: 'continuation-fake',
+    passed: true, errors: [], completedCycles: 50, terminalCount: 1,
+    stableDeliveries: ['1:1'], p95FirstPcmMs: 10, cycles,
+    final: { status: 'Idle', historyEntryCount: 1, preparedCaptureTokenCount: 0,
+      fixture: structuredClone(fixture) } } };
+  assert.equal(validateResult(valid), valid.report);
+  for (const mutate of [
+    value => { value.fixture.maxActiveCaptures = 2; value.report.final.fixture.maxActiveCaptures = 2; },
+    value => { value.fixture.providerStops = 0; value.report.final.fixture.providerStops = 0; },
+    value => { value.report.final.fixture.activeCaptures = 1; },
+  ]) {
+    const invalid = structuredClone(valid); mutate(invalid);
+    assert.throws(() => validateResult(invalid), /Incomplete native continuation qualification/);
+  }
+});
+
 test('owned native cleanup requires confirmed process-group disappearance', () => {
   assert.doesNotThrow(() => assertOwnedProcessGroupGone(true));
   assert.throws(() => assertOwnedProcessGroupGone(false), /process group did not terminate/);

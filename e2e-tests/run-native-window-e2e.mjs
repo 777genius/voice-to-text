@@ -1052,9 +1052,12 @@ export function validateResult(envelope) {
         !validateExactPcmEvidence(fixture, true, false) || fixture?.observationOverflow !== false ||
         !Array.isArray(report.errors) || report.errors.length ||
         !Number.isFinite(report.p95FirstPcmMs) || report.p95FirstPcmMs < 0 || report.p95FirstPcmMs > 250 ||
-        fixture?.activeCaptures !== 0 || fixture?.activeProviders !== 0 || fixture?.maxActiveProviders !== 1 ||
+        !isDeepStrictEqual(fixture, report.final?.fixture) || report.final?.status !== 'Idle' ||
+        fixture?.activeCaptures !== 0 || fixture?.activeProviders !== 0 ||
+        fixture?.maxActiveCaptures !== 1 || fixture?.maxActiveProviders !== 1 ||
         fixture?.captureStarts !== 51 || fixture?.captureStops !== 51 || fixture?.providerStarts !== 1 ||
-        fixture?.providerResumes !== 0 || fixture?.finals !== 1 || fixture?.markerViolations?.length !== 0 ||
+        fixture?.providerStops !== 1 || fixture?.providerResumes !== 0 || fixture?.finals !== 1 ||
+        fixture?.markerViolations?.length !== 0 ||
         report.final?.preparedCaptureTokenCount !== 0) throw new Error('Incomplete native continuation qualification');
     return report;
   }
