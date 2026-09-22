@@ -2,7 +2,7 @@ import type { Pinia } from 'pinia';
 import { invoke } from '@tauri-apps/api/core';
 import { boundedSyntheticText, syntheticPhraseOccurrences } from './nativeContinuationMetrics';
 import { nativeLivePreflight } from './nativeContinuationLive';
-import { validateWarmProviderCanaryPlan,
+import { expectedWarmProviderCallbackGenerations, validateWarmProviderCanaryPlan,
   type WarmProviderCanaryTrial as Trial } from './nativeWarmProviderCanaryPlan';
 
 type SourceEpisode = { name: string; bytes: number; captureGeneration: number; sourceFrames: number;
@@ -163,7 +163,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     const initial = await state();
     const trial = initial.qualificationTrial;
     validateWarmProviderCanaryPlan(trial);
-    const readyGateFromIndex = trial.readyGateFromIndex ?? -1;
+    const callbackFenceGenerations = new Set(expectedWarmProviderCallbackGenerations(trial));
     report.trialId = trial.id;
     const seenDeliveries = new Set<string>();
     const providerStartSamples = (snapshot: NativeState, logicalRunId: number) => {
@@ -241,7 +241,7 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         check(ready.fixture.sourceEpisodes[cycle.index].sourceGateRequired === true,
           `cycle ${cycle.index} source was not held behind provider Ready`);
         triggerLogicalRunId = ready.logicalProviderRunId;
-        const requiresCallbackFence = generation > readyGateFromIndex + 1;
+        const requiresCallbackFence = callbackFenceGenerations.has(generation);
         await releaseWarmCanarySourceBeforeAck(
           () => invoke('native_e2e_configure', { config: { sourceGateReady: true } }),
           requiresCallbackFence ? () => poll(value =>

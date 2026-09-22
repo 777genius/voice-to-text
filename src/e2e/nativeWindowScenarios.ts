@@ -117,6 +117,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
       wakeSessionId: number; wakeWindowEpoch: number; wakeTranscript: string;
       firstVisibleMs: number; wakeSampleCount: number; lastVisibleElapsedMs: number;
       visibilityTransitionCount: number },
+    final: null as NativeState | null,
     scenarios: [] as string[], observations: [] as unknown[], error: '' };
   try {
     await until(async () => {
@@ -934,6 +935,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
     await stop();
     report.scenarios.push('real-hidden-idle-180s-and-fresh-audio');
     const final = await state();
+    report.final = final;
     assertMarkerEvidence(final);
     check(final.preparedCaptureTokenCount === 0,
       'Prepared capture token registry retained entries after full teardown');
@@ -949,7 +951,8 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
       `Queued native hotkey-to-capture-start p95 exceeded 250ms: ${queuedCaptureLatencyP95}ms`);
     check(final.fixture.captureStarts - baseline.fixture.captureStarts === final.fixture.captureStops - baseline.fixture.captureStops,
       'Capture start/stop counters do not balance');
-    check(final.fixture.activeCaptures === 0, 'Capture remained active after final stop');
+    check(final.fixture.activeCaptures === 0 && final.fixture.activeProviders === 0,
+      'Capture or provider remained active after final stop');
     check(final.fixture.finals - baseline.fixture.finals === successfulStarts + sealedPendingStarts,
       'Completed provider sessions/finals differ from visible and sealed recordings');
     check(transcripts.size === successfulStarts && sessions.size === successfulStarts, 'Unique session/transcript count mismatch');

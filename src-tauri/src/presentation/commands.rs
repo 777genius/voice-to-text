@@ -1086,6 +1086,11 @@ fn warm_activation_matches(
         && snapshot.reason == RecordingCaptureReadinessReason::ActivatingWarmCapture
 }
 
+fn warm_activation_run_matches(snapshot: &RecordingCaptureReadinessPayload, run_id: u64) -> bool {
+    snapshot.run_id == Some(run_id)
+        && snapshot.reason == RecordingCaptureReadinessReason::ActivatingWarmCapture
+}
+
 #[cfg(test)]
 mod warm_activation_tests {
     use super::*;
@@ -1131,9 +1136,28 @@ mod warm_activation_tests {
             assert!(!warm_activation_matches(&snapshot, 7, 9));
         }
     }
+
+    #[test]
+    fn activation_deadline_survives_duplicate_start_revision() {
+        let snapshot = RecordingCaptureReadinessPayload {
+            capture_generation: None,
+            logical_run_id: None,
+            capture_episode_id: None,
+            capture_ready: Some(false),
+            transport_ready: Some(false),
+            generation: 1,
+            run_id: Some(7),
+            revision: Some(10),
+            state: RecordingCaptureReadinessState::Unavailable,
+            reason: RecordingCaptureReadinessReason::ActivatingWarmCapture,
+        };
+        assert!(!warm_activation_matches(&snapshot, 7, 9));
+        assert!(warm_activation_run_matches(&snapshot, 7));
+        assert!(!warm_activation_run_matches(&snapshot, 8));
+    }
 }
 
-fn expire_warm_capture_activation(app_handle: &AppHandle, run_id: u64, revision: u64) {
+fn expire_warm_capture_activation(app_handle: &AppHandle, run_id: u64) {
     let Some(state) = app_handle.try_state::<AppState>() else {
         return;
     };
@@ -1142,7 +1166,7 @@ fn expire_warm_capture_activation(app_handle: &AppHandle, run_id: u64, revision:
             .recording_capture_readiness
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !warm_activation_matches(&snapshot, run_id, revision) {
+        if !warm_activation_run_matches(&snapshot, run_id) {
             return;
         }
         snapshot.reason = RecordingCaptureReadinessReason::StartingCapture;
@@ -1339,11 +1363,7 @@ fn execute_recording_coordinator_effect(
             let admission_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(250)).await;
-                expire_warm_capture_activation(
-                    &admission_handle,
-                    run.run_id.get(),
-                    run.revision.get(),
-                );
+                expire_warm_capture_activation(&admission_handle, run.run_id.get());
             });
             let Some(state) = app_handle.try_state::<AppState>() else {
                 return;
@@ -1408,11 +1428,7 @@ fn execute_recording_coordinator_effect(
                         return Err("Microphone test is active".to_string());
                     }
                     if !state.warm_capture_is_ready() {
-                        expire_warm_capture_activation(
-                            &app_handle,
-                            run.run_id.get(),
-                            run.revision.get(),
-                        );
+                        expire_warm_capture_activation(&app_handle, run.run_id.get());
                     }
                     state
                         .ensure_audio_capture_with_policy(

@@ -133,6 +133,18 @@ export function expectedWarmProviderContinues(trial) {
   if (retained) continues += 1; // final full-PCM recovery capture
   return continues;
 }
+export function expectedWarmProviderCallbackGenerations(trial) {
+  if (trial?.kind !== 'warm-provider-canary') throw new Error('Warm provider canary plan required');
+  let retained = false;
+  const generations = [];
+  for (const cycle of trial.cycles) {
+    if (cycle.resetProviderBefore === true) retained = false;
+    if (retained && cycle.stopPhase !== 'before-ready') generations.push(cycle.index + 1);
+    retained = cycle.stopPhase !== 'before-ready';
+  }
+  if (retained) generations.push(trial.finalEpisodeIndex + 1);
+  return generations;
+}
 export function verifyWarmProviderFinalFixtureAgreement(reportFixture, envelopeFixture) {
   const keys = [
     'captureStarts', 'captureStops', 'activeCaptures', 'maxActiveCaptures',
@@ -441,10 +453,7 @@ export function verifyWarmProviderCanary(trial, report) {
   const captureLedgers = fixture.capturePcmLedgers ?? [];
   const providerLedgers = fixture.providerPcmLedgers ?? [];
   const callbackGenerations = fixture.providerCallbackGenerations ?? [];
-  const expectedCallbackGenerations = Array.from(
-    { length: finalIndex - trial.readyGateFromIndex },
-    (_, index) => trial.readyGateFromIndex + index + 2,
-  );
+  const expectedCallbackGenerations = expectedWarmProviderCallbackGenerations(trial);
   const normalizedEventText = event => typeof event?.text === 'string'
     ? event.text.toLocaleLowerCase('ru').replace(/ё/g, 'е').replace(/[.,!?]/g, '').replace(/\s+/g, ' ')
     : '';
@@ -609,7 +618,7 @@ export function verifyWarmProviderCanary(trial, report) {
       }
     } else {
       const association = associations.get(index + 1);
-      const resumed = index > trial.readyGateFromIndex;
+      const resumed = expectedCallbackGenerations.includes(index + 1);
       if (!association || cycle.association?.captureGeneration !== index + 1 ||
           cycle.association.captureRunId !== cycle.captureRunId ||
           cycle.association.captureFenceGeneration !== cycle.captureFenceGeneration ||

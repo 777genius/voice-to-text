@@ -5,6 +5,18 @@ export type WarmProviderCanaryTrial = { id: string; kind: 'warm-provider-canary'
   cycles: WarmProviderCyclePlan[]; episodes: string[]; readyGateFromIndex?: number;
   finalEpisodeIndex: number };
 
+export function expectedWarmProviderCallbackGenerations(trial: WarmProviderCanaryTrial) {
+  let retained = false;
+  const generations: number[] = [];
+  for (const cycle of trial.cycles) {
+    if (cycle.resetProviderBefore === true) retained = false;
+    if (retained && cycle.stopPhase !== 'before-ready') generations.push(cycle.index + 1);
+    retained = cycle.stopPhase !== 'before-ready';
+  }
+  if (retained) generations.push(trial.finalEpisodeIndex + 1);
+  return generations;
+}
+
 export function validateWarmProviderCanaryPlan(trial: WarmProviderCanaryTrial) {
   const phases: WarmProviderStopPhase[] = ['before-ready', 'after-first-pcm', 'during-partial', 'after-final'];
   const jitters = [0, 25, 100, 250, 500];

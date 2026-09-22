@@ -17,6 +17,17 @@ describe('warm mini-window first-visible evidence', () => {
       { ...frame, statusText: 'Starting' }, 2)).toBe(true);
   });
 
+  it('lets an identical native sample drain render frames queued since its prior proof', () => {
+    const reopen: WarmReopenEvidence = { attempt: 1, baselineWindowEpoch: 1,
+      windowEpoch: 2, closed: false };
+    const sample = { source: 'sample' as const, revision: 3, runId: 4, captureReady: true,
+      readinessReason: 'recording', phase: 'mini-status-dot recording', statusText: 'Recording' };
+    expect(reserveWarmVisibleFrameObservation(reopen, sample, 2)).toBe(true);
+    expect(reserveWarmVisibleFrameObservation(reopen, sample, 2)).toBe(false);
+    reopen.pendingFrames = [{ ...sample, source: 'render' }];
+    expect(reserveWarmVisibleFrameObservation(reopen, sample, 2)).toBe(true);
+  });
+
   it('binds frames only to an authoritative visible native epoch', () => {
     const reopen: WarmReopenEvidence = { attempt: 3, baselineWindowEpoch: 16,
       windowEpoch: null, closed: false };

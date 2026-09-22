@@ -57,11 +57,11 @@ impl<T> Lease<T> {
     /// Must be obtained immediately before delivery, outside the owner lock.
     /// A snapshot alone never authorizes downstream enqueue.
     pub fn permit(self: &Arc<Self>) -> Result<Option<DeliveryPermit<T>>, GateError> {
-        let mut state = match self.delivery.try_lock() {
-            Ok(state) => state,
-            Err(TryLockError::WouldBlock) => return Err(GateError::Busy),
-            Err(TryLockError::Poisoned(_)) => return Err(GateError::Poisoned),
-        };
+        // Control-side stop/reap checks hold this tiny bookkeeping lock only
+        // long enough to inspect counters. Waiting for them is not a capture
+        // failure: treating routine contention as Busy would revoke a healthy
+        // microphone between raw admission and downstream delivery.
+        let mut state = self.delivery.lock().map_err(|_| GateError::Poisoned)?;
         if state.revoked {
             return Ok(None);
         }
@@ -526,6 +526,37 @@ mod tests {
         drop(permit);
         gate.release(&a, Duration::ZERO).unwrap();
         assert!(gate.attach(2, 2, (), NOW, FRESH).is_ok());
+    }
+
+    #[test]
+    fn permit_waits_for_control_bookkeeping_contention() {
+        let (gate, _) = ready();
+        let lease = gate.attach(1, 1, (), NOW, FRESH).unwrap();
+        let held = lease.clone();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = held.delivery.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        locked_rx.recv().unwrap();
+
+        let admitted = lease.clone();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            result_tx
+                .send(admitted.permit().map(|permit| permit.is_some()))
+                .unwrap();
+        });
+        assert!(result_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            result_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Ok(true)
+        );
+        holder.join().unwrap();
+        waiter.join().unwrap();
     }
 
     #[test]

@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { approvedFixtures, maxProxyEvidenceEvents, validatePcm, readApprovedFixtures, liveTrials,
   warmProviderCanaryJittersMs, warmProviderCanaryPhases, warmProviderCanaryTrial,
-  validateHarnessConfig, exactInsertionEvidence, expectedWarmProviderContinues,
+  validateHarnessConfig, exactInsertionEvidence, expectedWarmProviderCallbackGenerations,
+  expectedWarmProviderContinues,
   verifyWarmProviderFinalFixtureAgreement } from './nativeContinuation.mjs';
 import { parseArguments, sanitizedEnvironment, validateResult } from '../run-native-window-e2e.mjs';
 test('qualification requires explicit opt in and inherits no feature flags', () => {
@@ -87,6 +88,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   assert.equal(expected.captures, 21);
   assert.deepEqual([expected.minBackendConnections, expected.maxBackendConnections], [6, 12]);
   assert.equal(expectedWarmProviderContinues(warmProviderCanaryTrial), 10);
+  assert.deepEqual(expectedWarmProviderCallbackGenerations(warmProviderCanaryTrial),
+    [7, 8, 9, 10, 11, 12, 13, 14, 15, 21]);
   const connection = (connectionId, captures) => {
     const providerSessionId = `provider-${connectionId}`;
     const rows = [
@@ -168,7 +171,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       captureFenceGeneration: index + 1,
       triggerEventStart: eventStart,
       stopEventIndex,
-      callbackFenceGeneration: index > warmProviderCanaryTrial.readyGateFromIndex ? index + 1 : null,
+      callbackFenceGeneration: expectedWarmProviderCallbackGenerations(warmProviderCanaryTrial)
+        .includes(index + 1) ? index + 1 : null,
       triggerProviderSamples: plan.stopPhase === 'before-ready' ? null : 320,
       providerStartSamples, triggerDeliverySeqFloor: plan.stopPhase === 'before-ready'
         ? null : triggerDeliverySeqFloor,
@@ -240,7 +244,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     observationOverflow: false, markerViolations: [], sourceEpisodes: sources,
     captureRunAssociations, capturePcmLedgers,
     providerPcmLedgers: capturePcmLedgers.filter(row => row.samples > 0).map(row => ({ ...row })),
-    providerCallbackGenerations: Array.from({ length: 15 }, (_, index) => index + 7) };
+    providerCallbackGenerations: expectedWarmProviderCallbackGenerations(warmProviderCanaryTrial) };
   const report = { mode: 'warm-provider-canary', passed: true, trialId: warmProviderCanaryTrial.id,
     errors: [], duplicateDeliveries: [], cycles, events, finalTextBeforeProof: 'stale transcript',
     expectedInsertion: 'stable transcript',

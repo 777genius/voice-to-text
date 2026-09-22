@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { validateWarmProviderCanaryPlan } from './nativeWarmProviderCanaryPlan';
+import { expectedWarmProviderCallbackGenerations,
+  validateWarmProviderCanaryPlan } from './nativeWarmProviderCanaryPlan';
 import { releaseWarmCanarySourceBeforeAck, requireWarmProviderCanaryReader,
   warmCanaryBeforeReadyStopEvidence, warmCanaryEventMatchesCapture,
   warmCanaryEventMatchesEpisode } from './nativeWarmProviderCanary';
@@ -38,6 +39,12 @@ describe('warm provider paid canary plan', () => {
       mutate(invalid);
       expect(() => validateWarmProviderCanaryPlan(invalid)).toThrow();
     }
+  });
+
+  it('requires callback fences only for retained provider generations', () => {
+    expect(expectedWarmProviderCallbackGenerations(plan())).toEqual([
+      7, 8, 9, 10, 11, 12, 13, 14, 15, 21,
+    ]);
   });
 
   it('refuses capture when the owned OS reader is not ready after preparation', () => {

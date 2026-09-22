@@ -5622,6 +5622,37 @@ describe('transcription connect-retry reliability', () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it('does not suppress a runtime fault after Recording while start IPC is unresolved', async () => {
+    const pending = deferred<string>();
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'start_recording') return pending.promise;
+      return null;
+    });
+    const { handlers, store } = await initializeStoreWithHandlers();
+    const start = store.startRecording();
+    await flushMicrotasks();
+    await handlers.get('recording:intent-projection')({ payload: {
+      runId: 71, intentRevision: 1, status: 'Starting', desiredOn: true,
+      pendingStart: false, processingJobs: 0, shutdownRequested: false,
+    } });
+    await handlers.get('recording:status')({ payload: {
+      session_id: 71, status: 'Recording', stopped_via_hotkey: false,
+    } });
+    await handlers.get('recording:intent-projection')({ payload: {
+      runId: null, faultRunId: 71, intentRevision: 2, status: 'Error', desiredOn: false,
+      pendingStart: false, processingJobs: 0, shutdownRequested: false,
+      fault: 'runtimeFailed',
+    } });
+
+    expect(store.status).toBe('Error');
+    expect(store.sessionId).toBeNull();
+    expect(store.error).toBeTruthy();
+    pending.resolve('Recording start requested');
+    await start;
+    expect(store.status).toBe('Error');
+    expect(store.sessionId).toBeNull();
+  });
+
   it('cancels a UI retry when a newer native Off supersedes failed-intent cleanup', async () => {
     vi.useFakeTimers();
     try {

@@ -2148,6 +2148,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             );
             const preservesConnectRetry =
               (event.payload.fault === 'startFailed' || event.payload.fault === 'runtimeFailed') &&
+              status.value !== RecordingStatus.Recording &&
               connectOperation !== null &&
               faultOwnerRunId !== null &&
               connectOperation.sessionId === faultOwnerRunId;

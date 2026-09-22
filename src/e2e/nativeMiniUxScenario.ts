@@ -50,7 +50,12 @@ export function reserveWarmVisibleFrameObservation(
     frame.phase,
     frame.statusText,
   ]);
-  if (reopen.observedFrameSignatures.has(signature)) return false;
+  if (reopen.observedFrameSignatures.has(signature)) {
+    // A repeated shown/sample is still the native proof carrier for render
+    // frames queued since its previous occurrence. Do not let signature
+    // coalescing strand those newly admitted DOM observations.
+    return frame.source !== 'render' && (reopen.pendingFrames?.length ?? 0) > 0;
+  }
   reopen.observedFrameSignatures.add(signature);
   return true;
 }

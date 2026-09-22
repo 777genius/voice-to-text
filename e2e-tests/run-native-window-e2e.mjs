@@ -1044,6 +1044,8 @@ export function validateResult(envelope) {
       !Array.isArray(report.scenarios) || new Set(report.scenarios).size !== report.scenarios.length ||
       report.scenarios.some((name) => typeof name !== 'string' || !name) || report.scenarios.length < 12 ||
       report.passed !== true || report.completedCycles !== 50 ||
+      report.final?.fixture?.activeCaptures !== 0 || report.final?.fixture?.activeProviders !== 0 ||
+      report.final?.preparedCaptureTokenCount !== 0 ||
       !Number.isFinite(report.hiddenIdleMs) || report.hiddenIdleMs < 180_000 || report.skipped) {
     throw new Error(`Native result is incomplete: ${JSON.stringify(envelope)}`);
   }

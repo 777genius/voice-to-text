@@ -144,6 +144,7 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
     ...association, providerSessionId: index + 1, count: 1, firstSequence: 1, lastSequence: 1 }));
   const valid = { marker, passed: true, fixture, report: { passed: true, completedCycles: 50,
     hiddenIdleMs: 180000, elapsedMs: 220000, cycleEvidence,
+    final: { preparedCaptureTokenCount: 0, fixture: structuredClone(fixture) },
     hiddenIdleEvidence: { nativeHiddenIdleMs: 180000, webviewElapsedMs: 180001,
       baselineCaptureStarts: 50, baselineCaptureStops: 50, baselineActiveCaptures: 0,
       baselineActiveProviders: 0, baselineCaptureGeneration: 50, wakeCaptureGeneration: 51,
@@ -157,6 +158,7 @@ test('passing envelope requires full non-skipped wall time, distinct cases, bala
     v => { v.report.hiddenIdleMs = 179999; }, v => { v.report.elapsedMs = Infinity; },
     v => { v.report.completedCycles = 49; }, v => { v.fixture.captureStops--; },
     v => { v.fixture.activeCaptures = 1; }, v => { v.fixture.activeProviders = 1; },
+    v => { v.report.final.fixture.activeProviders = 1; },
     v => { v.fixture.markerViolations.push('gap'); },
     v => { v.fixture.providerStops = -1; }, v => { v.fixture.providerStops = '1'; },
     v => { v.fixture.providerFailures = 1; },
