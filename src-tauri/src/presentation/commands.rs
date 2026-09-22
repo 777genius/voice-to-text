@@ -5877,6 +5877,13 @@ mod snapshot_contract_tests {
     }
 
     #[test]
+    fn delayed_takeover_cleanup_cannot_resume_a_newer_owner() {
+        assert!(super::warm_takeover_cleanup_is_current(7, 7, true));
+        assert!(!super::warm_takeover_cleanup_is_current(7, 8, true));
+        assert!(!super::warm_takeover_cleanup_is_current(7, 7, false));
+    }
+
+    #[test]
     fn live_translation_health_check_blocks_orphaned_service_session() {
         assert!(!live_translation_health_check_blocks_service_status(
             RecordingStatus::Idle,
@@ -7948,6 +7955,56 @@ async fn restore_warm_after_takeover(state: &AppState, takeover_revision: u64) {
     }
 }
 
+fn warm_takeover_cleanup_is_current(
+    captured_takeover_revision: u64,
+    current_takeover_revision: u64,
+    takeover_suspended: bool,
+) -> bool {
+    captured_takeover_revision == current_takeover_revision && takeover_suspended
+}
+
+fn restore_warm_after_delayed_close(app_handle: AppHandle, takeover_revision: u64) {
+    tauri::async_runtime::spawn(async move {
+        let mut failed_attempts = 0_u64;
+        loop {
+            let state = app_handle.state::<AppState>();
+            if !warm_takeover_cleanup_is_current(
+                takeover_revision,
+                state.warm_takeover_revision(),
+                state.warm_input_is_suspended(super::state::WarmInputSuspension::Takeover),
+            ) {
+                return;
+            }
+
+            let audio_start_guard = state.audio_start_guard.lock().await;
+            if !warm_takeover_cleanup_is_current(
+                takeover_revision,
+                state.warm_takeover_revision(),
+                state.warm_input_is_suspended(super::state::WarmInputSuspension::Takeover),
+            ) {
+                return;
+            }
+
+            match state.close_warm_input().await {
+                Ok(()) => {
+                    restore_warm_after_takeover(state.inner(), takeover_revision).await;
+                    return;
+                }
+                Err(error) => {
+                    failed_attempts = failed_attempts.saturating_add(1);
+                    if failed_attempts == 1 || failed_attempts % 15 == 0 {
+                        log::warn!(
+                            "Warm microphone delayed takeover cleanup is still waiting for close acknowledgement (attempt {failed_attempts}): {error}"
+                        );
+                    }
+                }
+            }
+            drop(audio_start_guard);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+}
+
 async fn live_startup_capture_cleanup_pending(state: &AppState) -> bool {
     let service = state.live_translation_service.read().await.clone();
     service.is_some_and(|service| !service.startup_capture_cleanup_confirmed())
@@ -8029,7 +8086,10 @@ pub async fn start_microphone_test(
 
     state.suspend_warm_input(super::state::WarmInputSuspension::Takeover);
     let takeover_revision = state.warm_takeover_revision();
-    state.close_warm_input().await?;
+    if let Err(error) = state.close_warm_input().await {
+        restore_warm_after_delayed_close(app_handle.clone(), takeover_revision);
+        return Err(error);
+    }
 
     // Создаем новый audio capture для теста с выбранным устройством
     let mut external_close_confirmed = true;
