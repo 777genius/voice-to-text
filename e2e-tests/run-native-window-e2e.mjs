@@ -208,7 +208,7 @@ export function validateMiniUxResult(envelope) {
       Number.isSafeInteger(frame.windowEpoch) && frame.windowEpoch > 0 &&
       ((frame.revision === null && frame.runId === null) ||
         (Number.isSafeInteger(frame.revision) && frame.revision > 0 &&
-          Number.isSafeInteger(frame.runId) && frame.runId > 0)) &&
+          (frame.runId === null || (Number.isSafeInteger(frame.runId) && frame.runId > 0)))) &&
       typeof frame.captureReady === 'boolean' && typeof frame.phase === 'string' &&
       typeof frame.statusText === 'string') &&
     firstVisibleFrames.every((frame, index) => {
@@ -221,6 +221,7 @@ export function validateMiniUxResult(envelope) {
         const candidateNeutral = neutralAdmissionFrame(candidate);
         const candidateOwnershipValid = candidateNeutral
           ? ((candidate.runId === null && candidate.revision === null) ||
+            (candidate.runId === null && candidate.revision === ready?.revision) ||
             (candidate.runId === ready?.runId && candidate.revision === ready?.revision))
           : candidate.runId === ready?.runId && candidate.revision === ready?.revision;
         return (candidateNeutral || captureReadyRecording(candidate)) && candidateOwnershipValid &&
@@ -230,6 +231,7 @@ export function validateMiniUxResult(envelope) {
       });
       const firstOwnershipValid = neutralActivation
         ? ((frame.runId === null && frame.revision === null) ||
+          (frame.runId === null && frame.revision === ready?.revision) ||
           (frame.runId === ready?.runId && frame.revision === ready?.revision))
         : frame.runId === ready?.runId && frame.revision === ready?.revision;
       return (neutralActivation || captureReadyRecording(frame)) && firstOwnershipValid &&

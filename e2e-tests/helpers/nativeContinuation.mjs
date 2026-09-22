@@ -465,7 +465,8 @@ export function verifyWarmProviderCanary(trial, report) {
       !events.some(event => event.event === 'transcription:terminal') ||
       events.some(event => event.event === 'transcription:error') ||
       events.some(event => event.event === 'transcription:final' &&
-        (!Number.isSafeInteger(event.deliverySeq) || event.deliverySeq <= 0)) ||
+        (!Number.isSafeInteger(event.deliverySeq) || event.deliverySeq <= 0) &&
+        event.timingKnown !== true) ||
       trial.cycles.some(cycle => cycle.episode === trial.episodes[finalIndex])) {
     throw new Error('Warm provider event order, identity, or final source exclusivity is invalid');
   }
@@ -500,15 +501,37 @@ export function verifyWarmProviderCanary(trial, report) {
       event?.sessionId !== sessionId || !Number.isSafeInteger(deliverySeqFloor) || deliverySeqFloor < 0 ||
       !Number.isSafeInteger(providerStartSamples) || providerStartSamples < 0 ||
       !Number.isSafeInteger(providerSamples) || providerSamples <= 0) return false;
-    if (expectedEvent === 'transcription:final' &&
-        (!Number.isSafeInteger(event?.deliverySeq) || event.deliverySeq <= deliverySeqFloor)) return false;
-    if (event?.timingKnown !== true) return expectedEvent === 'transcription:final';
+    if (expectedEvent === 'transcription:final' && event?.timingKnown !== true) {
+      return Number.isSafeInteger(event?.deliverySeq) && event.deliverySeq > deliverySeqFloor;
+    }
+    if (event?.timingKnown !== true) return false;
     return Number.isSafeInteger(providerStartSamples) && providerStartSamples >= 0 &&
       Number.isSafeInteger(providerSamples) && providerSamples > 0 &&
       Number.isSafeInteger(eventStartSamples) && Number.isSafeInteger(eventDurationSamples) &&
       eventDurationSamples > 0 &&
-      eventStartSamples < fenceEndSamples && eventEndSamples > providerStartSamples &&
-      eventEndSamples <= fenceEndSamples;
+      eventStartSamples >= providerStartSamples && eventEndSamples <= fenceEndSamples;
+  };
+  const attributedFinalEvidence = (candidateEvents, episode, cycleIndex, sessionId,
+    providerStartSamples, providerSamples, deliverySeqFloor, allowUntimedStable) => {
+    const baseMatches = event => event?.event === 'transcription:final' &&
+      event.cycleIndex === cycleIndex && event.sessionId === sessionId &&
+      Number.isSafeInteger(deliverySeqFloor) && deliverySeqFloor >= 0 &&
+      Number.isSafeInteger(providerStartSamples) && providerStartSamples >= 0 &&
+      Number.isSafeInteger(providerSamples) && providerSamples > 0 &&
+      (episode == null ? normalizedEventText(event).length > 0 :
+        eventMatchesEpisode(event, episode, 'transcription:final'));
+    const timedDeliveries = candidateEvents.filter(event => {
+      const start = Math.round(event?.sourceStartSeconds * 16000);
+      const duration = Math.round(event?.sourceDurationSeconds * 16000);
+      return baseMatches(event) && event.timingKnown === true && Number.isSafeInteger(start) &&
+        Number.isSafeInteger(duration) && duration > 0 && start >= providerStartSamples &&
+        start + duration <= providerStartSamples + providerSamples;
+    });
+    const stableDeliveries = allowUntimedStable
+      ? candidateEvents.filter(event => baseMatches(event) && event.timingKnown !== true &&
+        Number.isSafeInteger(event.deliverySeq) && event.deliverySeq > deliverySeqFloor)
+      : [];
+    return { stableDeliveries, timedDeliveries };
   };
   const ledgerIsValid = row => Number.isSafeInteger(row?.captureGeneration) && row.captureGeneration > 0 &&
     Number.isSafeInteger(row.chunks) && row.chunks >= 0 && Number.isSafeInteger(row.samples) && row.samples >= 0 &&
@@ -680,9 +703,14 @@ export function verifyWarmProviderCanary(trial, report) {
       const expectedEvent = plan.stopPhase === 'during-partial' ? 'transcription:partial' :
         plan.stopPhase === 'after-final' ? 'transcription:final' : null;
       const triggerEvents = events.slice(cycle.triggerEventStart, cycle.stopEventIndex);
-      if (expectedEvent && !triggerEvents.some(event =>
-        eventMatchesCapture(event, plan.episode, expectedEvent, index, cycle.logicalRunId,
-          cycle.providerStartSamples, cycle.triggerProviderSamples, cycle.triggerDeliverySeqFloor) &&
+      const triggerMatches = expectedEvent === 'transcription:final'
+        ? attributedFinalEvidence(triggerEvents, plan.episode, index, cycle.logicalRunId,
+          cycle.providerStartSamples, cycle.triggerProviderSamples,
+          cycle.triggerDeliverySeqFloor, plan.resetProviderBefore === true).stableDeliveries
+        : triggerEvents.filter(event => eventMatchesCapture(event, plan.episode, expectedEvent,
+          index, cycle.logicalRunId, cycle.providerStartSamples, cycle.triggerProviderSamples,
+          cycle.triggerDeliverySeqFloor));
+      if (expectedEvent && !triggerMatches.some(event =>
         cycle.trigger?.episode === plan.episode && cycle.trigger?.deliverySeq === event.deliverySeq)) {
         throw new Error(`Cycle ${index} missed ${expectedEvent} evidence`);
       }
@@ -713,7 +741,8 @@ export function verifyWarmProviderCanary(trial, report) {
     .map(value => typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '')
     .filter(Boolean).join(' ');
   const stableTranscript = (sessionId, endIndex) => events.slice(0, endIndex)
-    .filter(event => event.event === 'transcription:final' && event.sessionId === sessionId)
+    .filter(event => event.event === 'transcription:final' && event.sessionId === sessionId &&
+      Number.isSafeInteger(event.deliverySeq))
     .reduce((stable, delivery) => appendStableText(stable, delivery.text), '');
   const terminalSnapshotsAgree = terminals.every(terminal => {
     const terminalIndex = events.findIndex(event => event.event === 'transcription:terminal' &&
@@ -721,29 +750,17 @@ export function verifyWarmProviderCanary(trial, report) {
     if (terminalIndex < 0) return false;
     return terminal.stableSnapshot === stableTranscript(terminal.sessionId, terminalIndex);
   });
-  const finalTranscriptMatchesCallbackGeneration = event => {
-    const eventStartSamples = Math.round(event?.sourceStartSeconds * 16000);
-    const eventDurationSamples = Math.round(event?.sourceDurationSeconds * 16000);
-    const eventEndSamples = eventStartSamples + eventDurationSamples;
-    return event.event === 'transcription:final' && event.cycleIndex === finalIndex &&
-      event.sessionId === ownership?.logicalRunId && Number.isSafeInteger(event.deliverySeq) &&
-      Number.isSafeInteger(report.finalTranscriptFence?.deliverySeqFloor) &&
-      report.finalTranscriptFence.deliverySeqFloor >= 0 &&
-      event.deliverySeq > report.finalTranscriptFence.deliverySeqFloor &&
-      typeof event.text === 'string' && event.text.trim().length > 0 &&
-      Number.isSafeInteger(report.finalTranscriptFence?.providerStartSamples) &&
-      report.finalTranscriptFence.providerStartSamples >= 0 &&
-      event.timingKnown === true &&
-      Number.isSafeInteger(eventStartSamples) && Number.isSafeInteger(eventDurationSamples) &&
-      eventDurationSamples > 0 &&
-      eventStartSamples < report.finalTranscriptFence.providerStartSamples + finalProviderLedger?.samples &&
-      eventEndSamples > report.finalTranscriptFence.providerStartSamples &&
-      eventEndSamples <= report.finalTranscriptFence.providerStartSamples + finalProviderLedger?.samples &&
-      Array.isArray(event.markerIds) && event.markerIds.every(markerId => markerId === 0 || markerId === 1);
-  };
   const allFinalEvents = events.filter(event => event.event === 'transcription:final');
-  const acceptedFinalDeliveries = events.slice(report.finalTranscriptFence?.eventStart)
-    .filter(finalTranscriptMatchesCallbackGeneration);
+  const finalFenceEvents = events.slice(report.finalTranscriptFence?.eventStart);
+  const finalEvidence = attributedFinalEvidence(finalFenceEvents, null, finalIndex,
+    ownership?.logicalRunId, report.finalTranscriptFence?.providerStartSamples,
+    finalProviderLedger?.samples, report.finalTranscriptFence?.deliverySeqFloor, true);
+  const finalTranscriptMatchesCallbackGeneration = event =>
+    (finalEvidence.stableDeliveries.includes(event) || finalEvidence.timedDeliveries.includes(event)) &&
+    Array.isArray(event.markerIds) && event.markerIds.every(markerId => markerId === 0 || markerId === 1);
+  const acceptedFinalDeliveries = finalEvidence.stableDeliveries
+    .filter(event => Array.isArray(event.markerIds) &&
+      event.markerIds.every(markerId => markerId === 0 || markerId === 1));
   const finalTranscriptBeforeProof = stableTranscript(
     ownership?.logicalRunId,
     report.finalTranscriptFence?.eventStart,
@@ -754,6 +771,10 @@ export function verifyWarmProviderCanary(trial, report) {
   const acceptedMarkerIds = [...acceptedNormalizedText.matchAll(/(?:на столе|за окном)/g)]
     .map(match => match[0] === 'на столе' ? 0 : 1);
   const expectedFinalTranscript = appendStableText(finalTranscriptBeforeProof, acceptedFinalText);
+  const finalRunGenerations = new Set(cycles.filter(cycle =>
+    cycle.logicalRunId === ownership?.logicalRunId).map(cycle => cycle.captureGeneration));
+  const independentlyMeasuredFinalStart = providerLedgers.reduce((sum, row) =>
+    sum + (finalRunGenerations.has(row.captureGeneration) ? row.samples : 0), 0);
   if (finalSource?.name !== trial.episodes[finalIndex] ||
       finalSource.bytes !== finalBytes || finalSource.sourceFrames !== finalBytes / 2 ||
       finalSource.sourceDurationMs !== finalBytes / 32 || finalSource.cadenceMs !== 20 ||
@@ -778,6 +799,7 @@ export function verifyWarmProviderCanary(trial, report) {
       report.finalTranscriptFence.providerSamples !== finalSource.sourceFrames ||
       !Number.isSafeInteger(report.finalTranscriptFence.providerStartSamples) ||
       report.finalTranscriptFence.providerStartSamples < 0 ||
+      report.finalTranscriptFence.providerStartSamples !== independentlyMeasuredFinalStart ||
       !Number.isFinite(report.finalStartedAtMs) ||
       !Number.isFinite(report.finalReadyElapsedMs) || report.finalReadyElapsedMs < 0 ||
       report.finalReadyElapsedMs > trial.readyGateTimeoutMs ||
@@ -833,21 +855,16 @@ export function verifyWarmProviderCanary(trial, report) {
         const cycle = cycles[cycleIndex];
         const episode = trial.cycles[cycleIndex]?.episode;
         const provider = providerByGeneration.get(cycleIndex + 1);
-        const logicalRunCycleCount = cycles.filter(candidate =>
-          candidate.logicalRunId === event.sessionId).length;
-        const eventIndex = events.indexOf(event);
-        return cycle == null || event.sessionId !== cycle.logicalRunId || episode == null ||
-          !provider || (event.timingKnown !== true && logicalRunCycleCount > 1 &&
-            !(eventIndex >= cycle.eventStart && eventIndex < cycle.eventEnd)) ||
-          !eventMatchesCapture(event, episode, 'transcription:final', cycleIndex,
-            cycle.logicalRunId, cycle.providerStartSamples, provider.samples,
-            cycle.triggerDeliverySeqFloor);
+        const sameSourceInRun = cycles.filter(candidate =>
+          candidate.logicalRunId === event.sessionId && candidate.episode === episode).length;
+        if (cycle == null || event.sessionId !== cycle.logicalRunId || episode == null ||
+            !provider) return true;
+        const evidence = attributedFinalEvidence(events.slice(cycle.triggerEventStart, cycle.stopEventIndex),
+          episode, cycleIndex, cycle.logicalRunId, cycle.providerStartSamples, provider.samples,
+          cycle.triggerDeliverySeqFloor, sameSourceInRun === 1);
+        return !evidence.stableDeliveries.includes(event) && !evidence.timedDeliveries.includes(event);
       }) ||
-      allFinalEvents.some(event => event.cycleIndex !== finalIndex &&
-        allFinalEvents.filter(candidate => candidate.sessionId === event.sessionId &&
-          candidate.cycleIndex === event.cycleIndex).length !== 1) ||
-      allFinalEvents.filter(event => event.sessionId === ownership.logicalRunId &&
-        event.cycleIndex === finalIndex).length !== acceptedFinalDeliveries.length ||
+      finalEvidence.stableDeliveries.length !== acceptedFinalDeliveries.length ||
       report.final.status !== 'Idle' || report.final.preparedCaptureTokenCount !== 0 ||
       report.final.providerTransport?.connectionRetained !== false) {
     throw new Error('Final warm provider proof is incomplete');

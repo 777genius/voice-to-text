@@ -29,7 +29,7 @@ type NativeState = { status: string; logicalProviderRunId: number; preparedCaptu
     capturePcmLedgers: Array<{ captureGeneration: number; chunks: number; samples: number; hash: string }>;
     providerPcmLedgers: Array<{ captureGeneration: number; chunks: number; samples: number; hash: string }>;
     providerCallbackGenerations: number[] } };
-type ProviderEvent = { event: string; atMs: number; cycleIndex: number | null; sessionId: number;
+export type ProviderEvent = { event: string; atMs: number; cycleIndex: number | null; sessionId: number;
   deliverySeq: number | null; text: string | null; markerIds: number[]; timingKnown: boolean;
   sourceStartSeconds: number; sourceDurationSeconds: number };
 type ProviderTerminal = { sessionId: number; cycleIndex: number | null; complete: boolean;
@@ -59,6 +59,42 @@ const providerTimingSampleRange = (event: ProviderEvent) => {
   const duration = Math.round(event.sourceDurationSeconds * 16_000);
   return { start, duration, end: start + duration };
 };
+
+const normalizedProviderText = (value: string | null) =>
+  typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+
+const eventOwnsCaptureFence = (event: ProviderEvent, fence: WarmCanaryCaptureFence) =>
+  event.event === 'transcription:final' && event.sessionId === fence.sessionId &&
+  event.cycleIndex === fence.cycleIndex;
+
+const eventTimingContainedByFence = (event: ProviderEvent, fence: WarmCanaryCaptureFence) => {
+  if (event.timingKnown !== true || !Number.isFinite(event.sourceStartSeconds) ||
+      !Number.isFinite(event.sourceDurationSeconds) || event.sourceStartSeconds < 0 ||
+      event.sourceDurationSeconds <= 0) return false;
+  const timing = providerTimingSampleRange(event);
+  const fenceEndSamples = fence.providerStartSamples + fence.providerSamples;
+  return Number.isSafeInteger(timing.start) && Number.isSafeInteger(timing.duration) &&
+    timing.duration > 0 && timing.start >= fence.providerStartSamples &&
+    timing.end <= fenceEndSamples;
+};
+
+const eventIsFreshStable = (event: ProviderEvent, fence: WarmCanaryCaptureFence) =>
+  eventOwnsCaptureFence(event, fence) && Number.isSafeInteger(event.deliverySeq) &&
+  Number(event.deliverySeq) > fence.deliverySeqFloor &&
+  normalizedProviderText(event.text).length > 0;
+
+export function warmCanaryAttributedFinalEvidence(
+  events: ProviderEvent[],
+  fence: WarmCanaryCaptureFence,
+  allowUntimedStable: boolean,
+) {
+  const stableDeliveries = allowUntimedStable
+    ? events.filter(event => eventIsFreshStable(event, fence))
+    : [];
+  const timedDeliveries = events.filter(event => eventOwnsCaptureFence(event, fence) &&
+    eventTimingContainedByFence(event, fence) && normalizedProviderText(event.text).length > 0);
+  return { stableDeliveries, timedDeliveries };
+}
 
 const state = (stopReadback = false) => invoke<NativeState>('native_e2e_state', { stopReadback });
 const wait = (durationMs: number) => invoke('native_e2e_delay', { durationMs });
@@ -115,24 +151,17 @@ export function warmCanaryEventMatchesCapture(
       !Number.isSafeInteger(fence.providerStartSamples) ||
       !Number.isSafeInteger(fence.providerSamples) || fence.providerStartSamples < 0 ||
       fence.providerSamples <= 0) return false;
-  // Production Backend Stable deliveries intentionally carry no source timing.
-  // Their causal proof is a fresh monotonic delivery identity after this
-  // generation's callback/PCM fence plus the exact episode phrase. Partials
-  // and timed finals retain the stricter sample-overlap proof below.
-  if (expectedEvent === 'transcription:final' &&
-      (!Number.isSafeInteger(event.deliverySeq) || Number(event.deliverySeq) <= fence.deliverySeqFloor)) return false;
-  if (event.timingKnown !== true) return expectedEvent === 'transcription:final';
+  // The production Stable shape has a monotonic delivery sequence but no
+  // source timing. This predicate validates the shape; callers may accept it
+  // only when the spoken source is unique in that logical provider run.
+  if (expectedEvent === 'transcription:final' && event.timingKnown !== true) {
+    return eventIsFreshStable(event, fence);
+  }
+  if (event.timingKnown !== true) return false;
   if (!Number.isFinite(event.sourceStartSeconds) ||
       !Number.isFinite(event.sourceDurationSeconds) || event.sourceStartSeconds < 0 ||
       event.sourceDurationSeconds <= 0) return false;
-  const timing = providerTimingSampleRange(event);
-  const fenceEndSamples = fence.providerStartSamples + fence.providerSamples;
-  // A delivery from the preceding capture can arrive with a fresh delivery
-  // sequence after Continue. Its provider timing still ends at or before this
-  // generation's first sample, so require causal overlap with current PCM.
-  return Number.isSafeInteger(timing.start) && Number.isSafeInteger(timing.duration) &&
-    timing.duration > 0 && timing.start < fenceEndSamples &&
-    timing.end > fence.providerStartSamples && timing.end <= fenceEndSamples;
+  return eventTimingContainedByFence(event, fence);
 }
 
 export async function runNativeWarmProviderCanary(pinia: Pinia) {
@@ -186,8 +215,9 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         if (!Number.isSafeInteger(eventCycle)) report.errors.push(`Provider event has unknown run ownership: ${sessionId}:${name}`);
         const deliverySeq = typeof payload.delivery_seq === 'number' ? payload.delivery_seq : null;
         if (name === 'transcription:final' &&
-            (!Number.isSafeInteger(deliverySeq) || Number(deliverySeq) <= 0)) {
-          report.errors.push('Provider final is missing a valid delivery identity');
+            (!Number.isSafeInteger(deliverySeq) || Number(deliverySeq) <= 0) &&
+            payload.timing_known !== true) {
+          report.errors.push('Provider final has neither delivery identity nor source timing');
         }
         const bounded = boundedSyntheticText(payload.text);
         if (!bounded.syntheticTextValid) report.errors.push('Provider text evidence overflow');
@@ -311,8 +341,13 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
           const fence = { sessionId: triggerLogicalRunId, cycleIndex: cycle.index,
             providerStartSamples: triggerProviderStartSamples,
             providerSamples: triggerProviderSamples, deliverySeqFloor: triggerDeliverySeqFloor };
-          triggerEvent = report.events.slice(triggerEventStart).find(event =>
-            warmCanaryEventMatchesCapture(event, cycle.episode, wanted, fence));
+          const triggerEvents = report.events.slice(triggerEventStart);
+          triggerEvent = wanted === 'transcription:final'
+            ? warmCanaryAttributedFinalEvidence(triggerEvents, fence,
+              cycle.resetProviderBefore === true).stableDeliveries.find(event =>
+              warmCanaryEventMatchesEpisode(event, cycle.episode, wanted))
+            : triggerEvents.find(event =>
+              warmCanaryEventMatchesCapture(event, cycle.episode, wanted, fence));
           if (!triggerEvent) await wait(20);
         }
         check(triggerEvent,
@@ -465,17 +500,14 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     report.finalTranscriptFence = { eventStart: finalTranscriptEventStart,
       providerSamples: finalProviderLedger.samples, providerStartSamples: finalProviderStartSamples,
       deliverySeqFloor: finalDeliverySeqFloor };
+    const finalFence = { sessionId: complete.logicalProviderRunId,
+      cycleIndex: trial.finalEpisodeIndex, providerStartSamples: finalProviderStartSamples,
+      providerSamples: finalProviderLedger.samples, deliverySeqFloor: finalDeliverySeqFloor };
+    const finalEvidence = () => warmCanaryAttributedFinalEvidence(
+      report.events.slice(finalTranscriptEventStart), finalFence, true);
     const belongsToFinalCallbackGeneration = (event: ProviderEvent) => {
-      const timing = providerTimingSampleRange(event);
-      return event.event === 'transcription:final' && event.sessionId === complete.logicalProviderRunId &&
-        event.cycleIndex === trial.finalEpisodeIndex && Number.isSafeInteger(event.deliverySeq) &&
-        Number(event.deliverySeq) > finalDeliverySeqFloor &&
-        event.timingKnown === true &&
-        Number.isSafeInteger(timing.start) && Number.isSafeInteger(timing.duration) && timing.duration > 0 &&
-        timing.start < finalProviderStartSamples + finalProviderLedger.samples &&
-        timing.end > finalProviderStartSamples &&
-        timing.end <= finalProviderStartSamples + finalProviderLedger.samples &&
-        typeof event.text === 'string' && event.text.trim().length > 0 &&
+      const evidence = finalEvidence();
+      return (evidence.stableDeliveries.includes(event) || evidence.timedDeliveries.includes(event)) &&
         event.markerIds.every(markerId => markerId === 0 || markerId === 1);
     };
     await toggle();
@@ -486,8 +518,8 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     let acceptedFinalDeliveries: ProviderEvent[] = [];
     let acceptedFinalText = '';
     await poll(() => {
-      acceptedFinalDeliveries = report.events.slice(finalTranscriptEventStart)
-        .filter(belongsToFinalCallbackGeneration);
+      acceptedFinalDeliveries = finalEvidence().stableDeliveries
+        .filter(event => event.markerIds.every(markerId => markerId === 0 || markerId === 1));
       acceptedFinalText = acceptedFinalDeliveries.reduce((stable, delivery) =>
         appendTranscriptText(stable, delivery.text ?? ''), '');
       const occurrences = syntheticPhraseOccurrences(acceptedFinalText);
@@ -541,7 +573,8 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         event.sessionId === terminal.sessionId && event.cycleIndex === terminal.cycleIndex);
       if (terminalIndex < 0) return false;
       const deliveredFinals = report.events.slice(0, terminalIndex).filter(event =>
-        event.event === 'transcription:final' && event.sessionId === terminal.sessionId);
+        event.event === 'transcription:final' && event.sessionId === terminal.sessionId &&
+        Number.isSafeInteger(event.deliverySeq));
       const expectedStableSnapshot = deliveredFinals.reduce((stable, delivery) =>
         appendTranscriptText(stable, delivery.text ?? ''), '');
       return terminal.stableSnapshot === expectedStableSnapshot;
@@ -576,22 +609,18 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       const row = report.cycles[cycleIndex];
       const provider = report.final?.fixture.providerPcmLedgers.find(ledger =>
         ledger.captureGeneration === Number(row?.captureGeneration));
-      const logicalRunCycleCount = report.cycles.filter(candidate =>
-        Number(candidate.logicalRunId) === event.sessionId).length;
-      const eventIndex = report.events.indexOf(event);
-      return cycle != null && provider != null &&
-        (event.timingKnown === true || logicalRunCycleCount === 1 ||
-          (eventIndex >= Number(row?.eventStart) && eventIndex < Number(row?.eventEnd))) &&
-        warmCanaryEventMatchesCapture(event, cycle.episode, 'transcription:final', {
-          sessionId: Number(row?.logicalRunId), cycleIndex,
-          providerStartSamples: Number(row?.providerStartSamples), providerSamples: provider.samples,
-          deliverySeqFloor: Number(row?.triggerDeliverySeqFloor),
-        });
-    }) && finalEvents.every(event => event.cycleIndex === trial.finalEpisodeIndex ||
-      finalEvents.filter(candidate => candidate.sessionId === event.sessionId &&
-        candidate.cycleIndex === event.cycleIndex).length === 1) &&
-      finalEvents.filter(event => event.sessionId === report.finalOwnership?.logicalRunId &&
-        event.cycleIndex === trial.finalEpisodeIndex).length === acceptedFinalDeliveries.length &&
+      const sameSourceInRun = report.cycles.filter(candidate =>
+        Number(candidate.logicalRunId) === event.sessionId && candidate.episode === cycle?.episode).length;
+      if (cycle == null || provider == null) return false;
+      const fence = { sessionId: Number(row?.logicalRunId), cycleIndex,
+        providerStartSamples: Number(row?.providerStartSamples), providerSamples: provider.samples,
+        deliverySeqFloor: Number(row?.triggerDeliverySeqFloor) };
+      const evidence = warmCanaryAttributedFinalEvidence(
+        report.events.slice(Number(row?.triggerEventStart), Number(row?.stopEventIndex)), fence,
+        sameSourceInRun === 1);
+      return evidence.stableDeliveries.includes(event) || evidence.timedDeliveries.includes(event);
+    }) &&
+      finalEvidence().stableDeliveries.length === acceptedFinalDeliveries.length &&
       acceptedFinalDeliveries.length > 0,
     'Warm provider canary retained a late, duplicate, stale, or misowned final');
     const generations = report.final.fixture.capturePcmLedgers.map(row => row.captureGeneration);

@@ -166,9 +166,10 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     if (plan.stopPhase === 'during-partial') events.push({ event: 'transcription:partial', text: phrase,
       cycleIndex: index, sessionId: logicalRunId, deliverySeq: null, markerIds: [markerId],
       timingKnown: true, sourceStartSeconds: providerStartSamples / 16000, sourceDurationSeconds: 0.02 });
-    if (plan.stopPhase === 'after-final') events.push({ event: 'transcription:final', text: phrase,
-      cycleIndex: index, sessionId: logicalRunId, deliverySeq: index + 1, markerIds: [markerId],
-      timingKnown: false, sourceStartSeconds: 0, sourceDurationSeconds: 0 });
+    if (plan.stopPhase === 'after-final') events.push(
+      { event: 'transcription:final', text: phrase, cycleIndex: index, sessionId: logicalRunId,
+        deliverySeq: index + 1, markerIds: [markerId], timingKnown: false,
+        sourceStartSeconds: 0, sourceDurationSeconds: 0 });
     const stopEventIndex = events.length;
     if (plan.stopPhase === 'before-ready') {
       events.push({ event: 'transcription:terminal', cycleIndex: index, sessionId: logicalRunId,
@@ -220,10 +221,10 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   const finalDeliverySeqFloor = events.filter(event => event.sessionId === finalLogicalRunId &&
     Number.isSafeInteger(event.deliverySeq))
     .reduce((maximum, event) => Math.max(maximum, event.deliverySeq), 0);
-  events.push({ event: 'transcription:final', cycleIndex: 20, sessionId: finalLogicalRunId,
-    deliverySeq: 99, text: 'на столе лежит книга за окном растет береза', markerIds: [0, 1],
-    timingKnown: true, sourceStartSeconds: finalProviderStartSamples / 16000,
-    sourceDurationSeconds: 1 });
+  events.push(
+    { event: 'transcription:final', cycleIndex: 20, sessionId: finalLogicalRunId,
+      deliverySeq: 99, text: 'на столе лежит книга за окном растет береза', markerIds: [0, 1],
+      timingKnown: false, sourceStartSeconds: 0, sourceDurationSeconds: 0 });
   // Model the real race: the final is delivered before the state poll observes
   // the native callback generation. The earlier source-release fence must keep
   // this valid delivery eligible.
@@ -281,34 +282,48 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   const segmentedFinal = structuredClone(report);
   const finalEventIndex = segmentedFinal.events.findIndex(event =>
     event.cycleIndex === 20 && event.event === 'transcription:final');
+  const stableTemplate = segmentedFinal.events[finalEventIndex];
   segmentedFinal.events.splice(finalEventIndex, 1,
-    { ...segmentedFinal.events[finalEventIndex], deliverySeq: 99,
-      text: 'на столе лежит книга', markerIds: [0] },
-    { ...segmentedFinal.events[finalEventIndex], deliverySeq: 100,
-      text: 'за окном растет береза', markerIds: [1] });
+    { ...stableTemplate, deliverySeq: 99, text: 'на столе лежит книга', markerIds: [0] },
+    { ...stableTemplate, deliverySeq: 100, text: 'за окном растет береза', markerIds: [1] });
   segmentedFinal.finalCallbackFence.eventStart += 1;
   assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, segmentedFinal).churnCycles, 20);
   const phraseSegmentedFinal = structuredClone(segmentedFinal);
   const firstFinalIndex = phraseSegmentedFinal.events.findIndex(event =>
     event.cycleIndex === 20 && event.event === 'transcription:final');
+  const firstStable = phraseSegmentedFinal.events[firstFinalIndex];
   phraseSegmentedFinal.events.splice(firstFinalIndex, 1,
-    { ...phraseSegmentedFinal.events[firstFinalIndex], text: 'на', markerIds: [] },
-    { ...phraseSegmentedFinal.events[firstFinalIndex], deliverySeq: 100,
-      text: 'столе лежит книга', markerIds: [] });
+    { ...firstStable, text: 'на', markerIds: [], deliverySeq: 99 },
+    { ...firstStable, text: 'столе лежит книга', markerIds: [], deliverySeq: 100 });
   phraseSegmentedFinal.events[firstFinalIndex + 2].deliverySeq = 101;
   phraseSegmentedFinal.finalCallbackFence.eventStart += 1;
   assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, phraseSegmentedFinal).churnCycles, 20,
     'markers are derived from the aggregate when a provider segments inside a phrase');
   const staleMixedFinal = structuredClone(segmentedFinal);
   const stalePhrase = staleMixedFinal.events.find(event => event.cycleIndex === 20 &&
-    event.event === 'transcription:final' && event.markerIds.includes(1));
-  stalePhrase.timingKnown = false;
-  stalePhrase.sourceStartSeconds = 0;
-  stalePhrase.sourceDurationSeconds = 0;
+    event.event === 'transcription:final' && event.markerIds.includes(1) &&
+    Number.isSafeInteger(event.deliverySeq));
+  stalePhrase.text = 'на столе лежит книга';
   stalePhrase.deliverySeq = 1_000;
   assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, staleMixedFinal),
     /Final warm provider proof is incomplete/,
     'a fresh-sequence stale phrase cannot complete the current final generation');
+  const crossingFinal = structuredClone(report);
+  crossingFinal.events.splice(crossingFinal.finalCallbackFence.eventStart, 0, {
+    event: 'transcription:final', cycleIndex: 20, sessionId: finalLogicalRunId,
+    deliverySeq: null, text: 'на столе лежит книга за окном растет береза', markerIds: [0, 1],
+    timingKnown: true, sourceStartSeconds: (finalProviderStartSamples - 1) / 16000,
+    sourceDurationSeconds: 1,
+  });
+  crossingFinal.finalCallbackFence.eventStart += 1;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, crossingFinal),
+    /Final warm provider proof is incomplete/,
+    'a timed final crossing the generation lower boundary is rejected');
+  const contradictoryOffset = structuredClone(report);
+  contradictoryOffset.finalTranscriptFence.providerStartSamples = 0;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, contradictoryOffset),
+    /Final warm provider proof is incomplete/,
+    'the reported final offset must equal preceding same-session PCM ledgers');
   assert.equal(verifyWarmProviderFinalFixtureAgreement(fixture, structuredClone(fixture))
     .finalNativeFixtureAgreement, true);
   const collapsedJitters = structuredClone(report);
@@ -458,7 +473,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
       cycle.triggerDeliverySeqFloor = event.deliverySeq; },
     value => { value.cycles[1].previousSettleToStartMs = 5_000; },
     value => { value.cycles[6].logicalRunId = 500; },
-    value => { delete value.events.find(event => event.event === 'transcription:final').deliverySeq; },
+    value => { delete value.events.find(event => event.event === 'transcription:final' &&
+      Number.isSafeInteger(event.deliverySeq)).deliverySeq; },
     value => { value.events.find(event => event.cycleIndex === 20 && event.event === 'transcription:final').event = 'transcription:partial'; },
     value => { value.finalOwnership.logicalRunId = value.finalOwnership.captureRunId; },
     value => value.terminals.push({ sessionId: finalLogicalRunId, cycleIndex: 20, complete: true }),
@@ -513,10 +529,9 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     markerIds: [retainedCycle.episode === 'episode-a.pcm' ? 0 : 1],
     timingKnown: false, sourceStartSeconds: 0, sourceDurationSeconds: 0,
   });
-  lateRetainedFinal.terminals.find(terminal =>
-    terminal.sessionId === retainedCycle.logicalRunId).stableSnapshot = retainedPhrase;
-  assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, lateRetainedFinal).churnCycles, 20,
-    'an untimed Stable settled inside its owned cycle remains valid on a retained provider run');
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, lateRetainedFinal),
+    /Final warm provider proof is incomplete/,
+    'an unpaired untimed Stable cannot be attributed by receipt ownership');
   const collapsedPartial = structuredClone(report);
   const partialCycle = collapsedPartial.cycles.find(row => row.stopPhase === 'during-partial');
   insertBeforeStop(collapsedPartial, partialCycle, { event: 'transcription:final',

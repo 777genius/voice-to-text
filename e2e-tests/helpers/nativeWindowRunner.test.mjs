@@ -361,6 +361,10 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
   const neutralIdleReason = structuredClone(neutralBeforeOwnership);
   neutralIdleReason.report.warmVisibleFrames[0].readinessReason = 'idle';
   assert.equal(validateResult(neutralIdleReason), neutralIdleReason.report);
+  const neutralRevisionBeforeRun = structuredClone(warm);
+  neutralRevisionBeforeRun.report.warmVisibleFrames[0].runId = null;
+  assert.equal(validateResult(neutralRevisionBeforeRun), neutralRevisionBeforeRun.report,
+    'intent revision may be visible before readiness assigns its run id');
   const rebatched = structuredClone(warm);
   rebatched.report.final.fixture.providerPcmLedgers[0].chunks = 3;
   rebatched.fixture.providerPcmLedgers[0].chunks = 3;

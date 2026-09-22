@@ -3,7 +3,7 @@ import { expectedWarmProviderCallbackGenerations,
   validateWarmProviderCanaryPlan } from './nativeWarmProviderCanaryPlan';
 import { releaseWarmCanarySourceBeforeAck, requireWarmProviderCanaryReader,
   warmCanaryBeforeReadyStopEvidence, warmCanaryEventMatchesCapture,
-  warmCanaryEventMatchesEpisode } from './nativeWarmProviderCanary';
+  warmCanaryAttributedFinalEvidence, warmCanaryEventMatchesEpisode } from './nativeWarmProviderCanary';
 
 const phases = ['before-ready', 'after-first-pcm', 'during-partial', 'after-final'] as const;
 const jitters = [0, 25, 100, 250, 500] as const;
@@ -124,5 +124,24 @@ describe('warm provider paid canary plan', () => {
       providerSamples: 320, deliverySeqFloor: 88 };
     expect(warmCanaryEventMatchesCapture(stale, 'episode-b.pcm',
       'transcription:final', fence)).toBe(false);
+  });
+
+  it('accepts the production Stable shape only with unique-source attribution', () => {
+    const fence = { sessionId: 9, cycleIndex: 16, providerStartSamples: 32_000,
+      providerSamples: 8_000, deliverySeqFloor: 87 };
+    const stable = { event: 'transcription:final', text: 'За окном растет береза', markerIds: [1],
+      sessionId: 9, cycleIndex: 16, deliverySeq: 88, atMs: 1001, timingKnown: false,
+      sourceStartSeconds: 0, sourceDurationSeconds: 0 };
+    const timed = { ...stable, deliverySeq: null, atMs: 1000, timingKnown: true,
+      sourceStartSeconds: 2, sourceDurationSeconds: 0.5 };
+    expect(warmCanaryAttributedFinalEvidence([stable], fence, true).stableDeliveries)
+      .toEqual([stable]);
+    expect(warmCanaryAttributedFinalEvidence([stable], fence, false).stableDeliveries)
+      .toEqual([]);
+    expect(warmCanaryAttributedFinalEvidence([timed], fence, false).timedDeliveries)
+      .toEqual([timed]);
+    expect(warmCanaryAttributedFinalEvidence([
+      { ...timed, sourceStartSeconds: 1.9999375 },
+    ], fence, false).timedDeliveries).toEqual([]);
   });
 });
