@@ -16,7 +16,7 @@ use crate::domain::{
 };
 
 use super::frame_assembler::Pcm16FrameAssembler;
-use super::{start_owned_capture, StartupCaptureError};
+use super::{start_owned_capture, StartupCaptureError, StartupCleanup};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RealtimeInterpretationError {
@@ -72,8 +72,11 @@ pub enum RealtimeInterpretationShutdown {
 pub enum RealtimeInterpretationStartError {
     #[error("capture start: {0}")]
     Capture(AudioError),
-    #[error("startup timeout: {0}")]
-    Timeout(String),
+    #[error("startup timeout: {message}")]
+    Timeout {
+        message: String,
+        pending_cleanup: Option<StartupCleanup>,
+    },
 }
 
 pub type RealtimeTextCallback = Arc<dyn Fn(String) + Send + Sync>;
@@ -673,7 +676,7 @@ impl RealtimeInterpretationSession {
                     .await;
                 return Err(RealtimeInterpretationStartError::Capture(error));
             }
-            Err(StartupCaptureError::Timeout) => {
+            Err(StartupCaptureError::Timeout(pending_cleanup)) => {
                 let message = format!(
                     "{} capture start timed out after {} ms",
                     session.policy.input_source_name,
@@ -682,7 +685,10 @@ impl RealtimeInterpretationSession {
                 session
                     .shutdown(RealtimeInterpretationShutdown::Abort)
                     .await;
-                return Err(RealtimeInterpretationStartError::Timeout(message));
+                return Err(RealtimeInterpretationStartError::Timeout {
+                    message,
+                    pending_cleanup,
+                });
             }
             Err(StartupCaptureError::Worker(message)) => {
                 session
@@ -3257,7 +3263,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            RealtimeInterpretationStartError::Timeout(message)
+            RealtimeInterpretationStartError::Timeout { message, .. }
                 if message.contains("timed out")
         ));
         assert!(state.capture_start_entered.load(Ordering::SeqCst));

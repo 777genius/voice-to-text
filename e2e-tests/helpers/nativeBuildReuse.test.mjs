@@ -403,7 +403,9 @@ test('unknown empty checkout directory is rejected by full union', async t => {
 // sentinel with literal paths, never an app/native binary or a provider client.
 async function launchFixture(t) {
   const f = await fixture(t);
-  for (const name of ['run-native-window-e2e.mjs', 'helpers/nativeContinuation.mjs', 'helpers/nativeContinuationProxy.mjs', 'helpers/nativeOwnedDocument.mjs']) {
+  for (const name of ['run-native-window-e2e.mjs', 'helpers/nativeContinuation.mjs',
+    'helpers/nativeContinuationProxy.mjs', 'helpers/nativeOwnedDocument.mjs',
+    'helpers/nativeRestartCrash.mjs']) {
     const target = path.join(f.checkout, 'e2e-tests', name);
     await mkdir(path.dirname(target), { recursive: true });
     await cp(new URL('../' + name, import.meta.url), target);

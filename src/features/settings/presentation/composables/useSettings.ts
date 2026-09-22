@@ -135,6 +135,11 @@ export function useSettings() {
     set: (value: boolean) => store.setKeepRecordingUntilManualStop(value),
   });
 
+  const keepMicrophoneReady = computed({
+    get: () => store.keepMicrophoneReady,
+    set: (value: boolean) => store.setKeepMicrophoneReady(value),
+  });
+
   const holdToRecord = computed({
     get: () => store.holdToRecord,
     set: (value: boolean) => store.setHoldToRecord(value),
@@ -202,6 +207,7 @@ export function useSettings() {
           store.setHideRecordingWindowOnHotkey(appConfigStoreInstance.hideRecordingWindowOnHotkey);
           store.setShowMiniRecordingWindow(appConfigStoreInstance.showMiniRecordingWindow);
           store.setKeepRecordingUntilManualStop(appConfigStoreInstance.keepRecordingUntilManualStop);
+          store.setKeepMicrophoneReady(appConfigStoreInstance.keepMicrophoneReady);
           store.setHoldToRecord(appConfigStoreInstance.holdToRecord);
           store.setDoubleSpaceHotkeyEnabled(appConfigStoreInstance.doubleSpaceHotkeyEnabled);
           store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
@@ -300,6 +306,7 @@ export function useSettings() {
         store.setHideRecordingWindowOnHotkey(appConfigStoreInstance.hideRecordingWindowOnHotkey);
         store.setShowMiniRecordingWindow(appConfigStoreInstance.showMiniRecordingWindow);
         store.setKeepRecordingUntilManualStop(appConfigStoreInstance.keepRecordingUntilManualStop);
+        store.setKeepMicrophoneReady(appConfigStoreInstance.keepMicrophoneReady);
         store.setHoldToRecord(appConfigStoreInstance.holdToRecord);
         store.setDoubleSpaceHotkeyEnabled(appConfigStoreInstance.doubleSpaceHotkeyEnabled);
         store.setSelectedAudioDevice(appConfigStoreInstance.selectedAudioDevice);
@@ -318,6 +325,7 @@ export function useSettings() {
           store.setHideRecordingWindowOnHotkey(appConfig.hide_recording_window_on_hotkey ?? false);
           store.setShowMiniRecordingWindow(appConfig.show_mini_recording_window ?? true);
           store.setKeepRecordingUntilManualStop(appConfig.keep_recording_until_manual_stop ?? false);
+          store.setKeepMicrophoneReady(appConfig.keep_microphone_ready ?? false);
           store.setHoldToRecord(appConfig.hold_to_record ?? false);
           store.setDoubleSpaceHotkeyEnabled(appConfig.double_space_hotkey_enabled ?? false);
           store.setSelectedAudioDevice(appConfig.selected_audio_device ?? '');
@@ -539,6 +547,14 @@ export function useSettings() {
         appUpdatePayload.keep_recording_until_manual_stop = store.keepRecordingUntilManualStop;
       }
 
+      const latestKeepReady = latestApp.keep_microphone_ready ?? false;
+      const hasKeepReadyChange = persistedState
+        ? persistedState.keepMicrophoneReady !== store.keepMicrophoneReady
+        : latestKeepReady !== store.keepMicrophoneReady;
+      if (hasKeepReadyChange && latestKeepReady !== store.keepMicrophoneReady) {
+        appUpdatePayload.keep_microphone_ready = store.keepMicrophoneReady;
+      }
+
       const hasHoldToRecordChange = persistedState
         ? persistedState.holdToRecord !== store.holdToRecord
         : latestApp.hold_to_record !== store.holdToRecord;
@@ -756,6 +772,7 @@ export function useSettings() {
     hideRecordingWindowOnHotkey,
     showMiniRecordingWindow,
     keepRecordingUntilManualStop,
+    keepMicrophoneReady,
     holdToRecord,
     doubleSpaceHotkeyEnabled,
     recordingMode,

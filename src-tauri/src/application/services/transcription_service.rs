@@ -350,6 +350,7 @@ fn abort_prestart_visualizer_task(
 /// abstractions (traits) rather than concrete implementations
 pub struct TranscriptionService {
     audio_capture: Arc<RwLock<Box<dyn AudioCapture>>>,
+    capture_recovery_policy: StdMutex<CaptureRecoveryPolicy>,
     stt_factory: Arc<dyn SttProviderFactory>,
     stt_provider: Arc<RwLock<Option<Box<dyn SttProvider>>>>,
     status: Arc<RwLock<RecordingStatus>>,
@@ -471,7 +472,16 @@ impl Drop for CaptureAttachLease {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CaptureRecoveryPolicy {
+    #[default]
+    LegacyRestart,
+    OwnerManaged,
+}
+
 struct PreparedCapture {
+    recovery_policy: CaptureRecoveryPolicy,
+    device_failure_notified: Arc<AtomicBool>,
     token: PreparedCaptureToken,
     config: SttConfig,
     rx: tokio::sync::mpsc::Receiver<AudioChunk>,
@@ -550,6 +560,21 @@ impl TranscriptionService {
         }
     }
 
+    #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+    pub async fn native_e2e_transport_observation_at_boundary(
+        &self,
+        mut boundary: impl FnMut(),
+    ) -> Option<(bool, bool)> {
+        let provider = self.stt_provider.read().await;
+        match provider.as_ref() {
+            Some(provider) => provider.native_e2e_transport_observation_at_boundary(&mut boundary),
+            None => {
+                boundary();
+                Some((false, false))
+            }
+        }
+    }
+
     /// Upper bound for the service-owned portion of a normal recording stop.
     /// The app shutdown gate adds a small grace period for reducer finalization
     /// and transcript delivery after this work completes.
@@ -592,6 +617,7 @@ impl TranscriptionService {
     ) -> Self {
         Self {
             audio_capture: Arc::new(RwLock::new(audio_capture)),
+            capture_recovery_policy: StdMutex::new(CaptureRecoveryPolicy::LegacyRestart),
             stt_factory,
             stt_provider: Arc::new(RwLock::new(None)),
             status: Arc::new(RwLock::new(RecordingStatus::Idle)),
@@ -820,6 +846,8 @@ impl TranscriptionService {
         });
 
         *prepared_slot = Some(PreparedCapture {
+            recovery_policy: *self.capture_recovery_policy.lock().unwrap(),
+            device_failure_notified,
             token,
             config,
             rx,
@@ -1368,7 +1396,16 @@ impl TranscriptionService {
             write
         };
         match write {
-            Ok(crate::domain::ContinuationFirstWrite::Written) => send_lease.submitted(),
+            Ok(crate::domain::ContinuationFirstWrite::Written) => {
+                #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+                crate::presentation::native_e2e::record_live_provider_pcm(
+                    paused.logical_run_id,
+                    token.run_id,
+                    token.generation,
+                    &first,
+                );
+                send_lease.submitted();
+            }
             Ok(crate::domain::ContinuationFirstWrite::NotStarted) => {
                 send_lease.not_started();
                 prepared.accounting.restore_read(raw_first.data.len() * 2);
@@ -2011,6 +2048,8 @@ impl TranscriptionService {
             slot.take().expect("prepared capture checked above")
         };
         let PreparedCapture {
+            recovery_policy,
+            device_failure_notified,
             token,
             config,
             rx,
@@ -2326,6 +2365,8 @@ impl TranscriptionService {
         // Запускаем обработчик чанков в async контексте
         self.attach_audio_processor(
             PreparedCapture {
+                recovery_policy,
+                device_failure_notified,
                 token,
                 config,
                 rx,
@@ -2371,6 +2412,8 @@ impl TranscriptionService {
         on_connection_quality: ConnectionQualityCallback,
     ) {
         let PreparedCapture {
+            recovery_policy,
+            device_failure_notified,
             token,
             mut rx,
             mut prefetched,
@@ -2451,6 +2494,18 @@ impl TranscriptionService {
 
                             if last_audio_at.elapsed() < AUDIO_STALL_TIMEOUT {
                                 continue;
+                            }
+
+                            if recovery_policy == CaptureRecoveryPolicy::OwnerManaged {
+                                if !processor_owner.owns_capture() || accounting.sealed.load(Ordering::Acquire) { break; }
+                                if !device_failure_notified.swap(true, Ordering::AcqRel) {
+                                    on_error_for_processor(SttError::Processing("Audio capture pipeline stalled".into()));
+                                }
+                                Self::cleanup_failed_processor_session(
+                                    &status_arc, &audio_capture, &stt_provider, &processor_owner,
+                                    "owner-managed audio pipeline stalled",
+                                ).await;
+                                break;
                             }
 
                             let Some(restart_attempt) =
@@ -2720,6 +2775,16 @@ impl TranscriptionService {
                     "STT send_audio",
                 )
                 .await;
+
+                #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+                if send_result.is_ok() {
+                    crate::presentation::native_e2e::record_live_provider_pcm(
+                        logical_run_id,
+                        token.run_id,
+                        token.generation,
+                        &amplified_chunk,
+                    );
+                }
 
                 if matches!(send_result, Err(SttError::ContinuationAudioNotStarted)) {
                     send_lease.not_started();
@@ -3476,6 +3541,23 @@ impl TranscriptionService {
     /// Replace audio capture device (only when not recording)
     /// Полезно для смены микрофона без перезапуска приложения
     pub async fn replace_audio_capture(&self, new_capture: Box<dyn AudioCapture>) -> Result<()> {
+        self.replace_audio_capture_with_policy(new_capture, CaptureRecoveryPolicy::LegacyRestart)
+            .await
+    }
+
+    pub fn uses_owner_managed_capture(&self) -> bool {
+        *self.capture_recovery_policy.lock().unwrap() == CaptureRecoveryPolicy::OwnerManaged
+    }
+
+    pub fn has_capture_owner(&self) -> bool {
+        self.capture_run_id.load(Ordering::Acquire) != 0
+    }
+
+    pub async fn replace_audio_capture_with_policy(
+        &self,
+        new_capture: Box<dyn AudioCapture>,
+        policy: CaptureRecoveryPolicy,
+    ) -> Result<()> {
         let mut capture = self.audio_capture.write().await;
         let capture_owner = self.capture_run_id.load(Ordering::Acquire);
         if capture_owner != 0 {
@@ -3487,6 +3569,7 @@ impl TranscriptionService {
 
         log::info!("Replacing audio capture device");
         *capture = new_capture;
+        *self.capture_recovery_policy.lock().unwrap() = policy;
         self.set_effective_capture_device(None);
         log::info!("Audio capture device replaced successfully");
 
@@ -3496,6 +3579,8 @@ impl TranscriptionService {
 
 #[cfg(test)]
 mod tests {
+    #[path = "warm_capture_tests.rs"]
+    mod warm_capture_tests;
     #[test]
     fn continue_window_negotiation_preserves_legacy_and_caps_untrusted_values() {
         assert_eq!(negotiated_continue_window(None), Duration::from_secs(2));

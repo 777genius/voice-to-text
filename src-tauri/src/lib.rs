@@ -188,6 +188,8 @@ pub fn run() {
             #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
             presentation::native_e2e::native_e2e_hotkey,
             #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            presentation::native_e2e::native_e2e_stop_with_transport_boundary,
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
             presentation::native_e2e::native_e2e_configure,
             #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
             presentation::native_e2e::native_e2e_close_recording,
@@ -732,6 +734,14 @@ pub fn run() {
 
                         log::info!("Loaded saved app configuration (sensitivity: {}%, device: {:?})",
                             saved_app_config.microphone_sensitivity, saved_app_config.selected_audio_device);
+
+                        // Authentication may finish before the persisted app config is loaded.
+                        // In that ordering set_authenticated() observes the default (disabled)
+                        // policy, so explicitly reconcile the warm-input policy after the real
+                        // config and selected route have both been installed.
+                        if let Err(error) = state.sync_warm_input_policy().await {
+                            log::warn!("Failed to apply warm microphone policy on startup: {error}");
+                        }
 
                         // Аналогично STT: после асинхронной загрузки пинаем invalidation.
                         let revision = AppState::bump_revision(&state.app_config_revision).await;

@@ -169,6 +169,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     id: string;
     controller: AbortController;
     sessionId: number | null;
+    reachedRecording: boolean;
     phase: 'preparing' | 'starting' | 'backoff';
     validations: Set<{ promise: Promise<void>; resolve: () => void }>;
   };
@@ -490,12 +491,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         id === undefined || id === null || (Number.isSafeInteger(id) && Number(id) > 0)) &&
       (payload.captureReady === undefined || typeof payload.captureReady === 'boolean') &&
       (payload.transportReady === undefined || typeof payload.transportReady === 'boolean') &&
+      (payload.reason !== 'activating-warm-capture' ||
+        (payload.revision != null && payload.runId != null && payload.state === 'unavailable' &&
+          payload.captureReady !== true && payload.transportReady !== true)) &&
       (payload.revision === null ||
         (Number.isSafeInteger(payload.revision) && Number(payload.revision) >= 0)) &&
       (payload.runId === null || (Number.isSafeInteger(payload.runId) && Number(payload.runId) > 0)) &&
       Number.isSafeInteger(payload.generation) && Number(payload.generation) >= 0 &&
       ['unavailable', 'buffering', 'streaming'].includes(String(payload.state)) &&
-      ['idle', 'starting-capture', 'finalizing-previous', 'connecting-provider', 'recording', 'cancelled', 'error']
+      ['idle', 'starting-capture', 'activating-warm-capture', 'finalizing-previous', 'connecting-provider', 'recording', 'cancelled', 'error']
         .includes(String(payload.reason));
   }
 
@@ -798,9 +802,32 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
   }
 
+  function recordAcceptedTextEvidence(payloadSessionId: number, source: string): void {
+    const isTranslationEvent = source.startsWith('translation:');
+    const isActiveSessionEvent = payloadSessionId === sessionId.value;
+    const isDictationTextEvent =
+      source === 'transcription:stable' ||
+      source === 'transcription:partial' ||
+      source === 'transcription:final';
+    const isTextEvent = isDictationTextEvent || source === 'translation:delta';
+    // While a successor is awaiting its native session identity, the retained
+    // predecessor may still deliver its final tail. Preserve that text without
+    // presenting it as evidence that the successor reached Recording.
+    if (isActiveSessionEvent && isTextEvent && !awaitingSessionStart.value &&
+        status.value === RecordingStatus.Starting) {
+      status.value = RecordingStatus.Recording;
+    }
+    if (isActiveSessionEvent && isDictationTextEvent && !awaitingSessionStart.value &&
+        connectOperation?.sessionId === payloadSessionId) {
+      connectOperation.reachedRecording = true;
+    }
+    if (isTranslationEvent && isActiveSessionEvent) {
+      activeRecordingMode.value = 'live_translation';
+    }
+  }
+
   function ensureActiveSessionForIncomingEvent(payloadSessionId: number, source: string): boolean {
     bumpLastSeenSessionId(payloadSessionId);
-    const isTranslationEvent = source.startsWith('translation:');
 
     if (payloadSessionId <= 0) {
       return false;
@@ -853,17 +880,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       if (connectOperation && connectOperation.sessionId === null) connectOperation.sessionId = payloadSessionId;
       awaitingSessionStart.value = false;
 
-      // Если мы "залипли" в Starting из-за пропущенного recording:status=Recording,
-      // но уже видим события transcription:* — значит запись реально идёт.
-      if (status.value === RecordingStatus.Starting) {
-        status.value = RecordingStatus.Recording;
-      }
     }
 
+    // Accepted dictation text is authoritative evidence that this session
+    // reached the provider even when Starting already established sessionId
+    // and the Recording status event was delayed or lost.
     const isActiveSessionEvent = payloadSessionId === sessionId.value;
-    if (isTranslationEvent && isActiveSessionEvent) {
-      activeRecordingMode.value = 'live_translation';
-    }
+    if (isActiveSessionEvent) recordAcceptedTextEvidence(payloadSessionId, source);
 
     return isActiveSessionEvent;
   }
@@ -976,6 +999,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           sessionId.value = null;
           awaitingSessionStart.value = false;
         }
+      }
+
+      if (backendStatus === RecordingStatus.Recording &&
+          status.value === RecordingStatus.Recording && connectOperation !== null) {
+        connectOperation.reachedRecording = true;
       }
 
       return backendStatus;
@@ -1307,6 +1335,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       deliveryRevision.value++;
       return Promise.resolve(true);
     }
+    recordAcceptedTextEvidence(payload.session_id, 'transcription:stable');
     ledger.stableSnapshot = appendTranscriptText(ledger.stableSnapshot, payload.text);
     ledger.interimSnapshot = '';
     deliveryRevision.value++;
@@ -2144,8 +2173,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
                 : null
             );
             const preservesConnectRetry =
-              event.payload.fault === 'startFailed' &&
+              (event.payload.fault === 'startFailed' || event.payload.fault === 'runtimeFailed') &&
+              status.value !== RecordingStatus.Recording &&
               connectOperation !== null &&
+              connectOperation.reachedRecording === false &&
               faultOwnerRunId !== null &&
               connectOperation.sessionId === faultOwnerRunId;
             recordingDesiredOn.value = event.payload.desiredOn;
@@ -2364,6 +2395,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               cancelConnectOperation();
             } else {
               connectOperation.sessionId = payloadSessionId;
+              if (nextStatus === RecordingStatus.Recording) {
+                connectOperation.reachedRecording = true;
+              }
             }
           }
           if (isStartLike && payloadSessionId !== prevSessionId) {
@@ -3441,6 +3475,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
   async function startRecordingOnce(operation: ConnectOperation): Promise<void> {
     operation.sessionId = null;
+    operation.reachedRecording = false;
     operation.phase = 'starting';
     // Начинаем новую сессию "с чистого листа": пока не получим Starting/Recording с новым session_id,
     // игнорируем любые поздние события от прошлых запусков.
@@ -3478,7 +3513,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
     const operation: ConnectOperation = {
       id: `${connectClientId}:${++connectSequence}`, controller: new AbortController(),
-      sessionId: null, phase: 'preparing', validations: new Set(),
+      sessionId: null, reachedRecording: false, phase: 'preparing', validations: new Set(),
     };
     connectOperation = operation;
     const isCurrent = () => connectOperation === operation && !operation.controller.signal.aborted;

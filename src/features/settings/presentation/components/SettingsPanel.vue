@@ -118,6 +118,7 @@ function snapshotSettingsState(): SettingsState {
     hideRecordingWindowOnHotkey: settingsStore.hideRecordingWindowOnHotkey,
     showMiniRecordingWindow: settingsStore.showMiniRecordingWindow,
     keepRecordingUntilManualStop: settingsStore.keepRecordingUntilManualStop,
+    keepMicrophoneReady: settingsStore.keepMicrophoneReady,
     holdToRecord: settingsStore.holdToRecord,
     doubleSpaceHotkeyEnabled: settingsStore.doubleSpaceHotkeyEnabled,
     streamingKeyterms: settingsStore.streamingKeyterms,

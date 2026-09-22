@@ -118,6 +118,7 @@ export type RecordingCaptureReadinessState = 'unavailable' | 'buffering' | 'stre
 export type RecordingCaptureReadinessReason =
   | 'idle'
   | 'starting-capture'
+  | 'activating-warm-capture'
   | 'finalizing-previous'
   | 'connecting-provider'
   | 'recording'

@@ -29,6 +29,11 @@ describe('TauriSettingsService', () => {
     });
   });
 
+  it.each([true, false])('preserves explicit keep-ready %s in camelCase updates', async (enabled) => {
+    await tauriSettingsService.updateAppConfig({ keep_microphone_ready: enabled });
+    expect(invokeMock).toHaveBeenCalledWith('update_app_config', { keepMicrophoneReady: enabled });
+  });
+
   it('checks Whisper model with camelCase modelName arg', async () => {
     invokeMock.mockResolvedValueOnce(true);
 

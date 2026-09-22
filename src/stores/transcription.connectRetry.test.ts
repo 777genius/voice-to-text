@@ -1264,6 +1264,31 @@ describe('transcription connect-retry reliability', () => {
     store.cleanup();
   });
 
+  it('accepts warm activation only as unavailable and rejects stale activation after stop', async () => {
+    invokeMock.mockResolvedValue(null);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    const intent = { intentRevision: 1, runId: 2, desiredOn: true, pendingStart: true, status: 'Starting' };
+    handlers.get('recording:intent-projection')({ payload: intent });
+    const warm = { revision: 1, runId: 2, state: 'unavailable',
+      reason: 'activating-warm-capture', generation: 1, captureReady: false, transportReady: false };
+    handlers.get('recording:capture-readiness')({ payload: warm });
+    expect(store.captureReadiness?.reason).toBe('activating-warm-capture');
+    expect(store.isCaptureReady).toBe(false);
+    for (const invalid of [{ captureReady: true }, { transportReady: true }, { state: 'buffering' },
+      { revision: null }, { runId: null }]) {
+      handlers.get('recording:capture-readiness')({ payload: { ...warm, generation: 2, ...invalid } });
+      expect(store.captureReadiness?.generation).toBe(1);
+      expect(store.isCaptureReady).toBe(false);
+    }
+    handlers.get('recording:intent-projection')({ payload: {
+      ...intent, intentRevision: 2, desiredOn: false, pendingStart: false, status: 'Idle',
+    } });
+    handlers.get('recording:capture-readiness')({ payload: { ...warm, generation: 3 } });
+    expect(store.captureReadiness).toBeNull();
+    expect(store.isCaptureReady).toBe(false);
+    store.cleanup();
+  });
+
   it('fences capture readiness by intent revision independently from transcript session', async () => {
     invokeMock.mockResolvedValue(null);
     const { handlers, store } = await initializeStoreWithHandlers();
@@ -1756,6 +1781,7 @@ describe('transcription connect-retry reliability', () => {
       },
     });
     expect(store.finalText).toContain('previous transcript tail');
+    expect(store.status).toBe('Starting');
 
     await handlers.get('recording:status')({
       payload: { session_id: 161, status: 'Starting', stopped_via_hotkey: false },
@@ -5509,7 +5535,8 @@ describe('transcription connect-retry reliability', () => {
     } finally { vi.useRealTimers(); }
   });
 
-  it('keeps a UI retry alive across the failed-intent cleanup projection', async () => {
+  it.each(['startFailed', 'runtimeFailed'] as const)(
+    'keeps a UI retry alive across the %s cleanup projection', async (fault) => {
     vi.useFakeTimers();
     try {
       invokeMock.mockResolvedValue(null);
@@ -5544,7 +5571,7 @@ describe('transcription connect-retry reliability', () => {
       });
       await handlers.get('recording:intent-projection')({ payload: {
         runId: null, faultRunId: 1, intentRevision: 1, status: 'Error', desiredOn: false,
-        pendingStart: false, processingJobs: 0, shutdownRequested: false, fault: 'startFailed',
+        pendingStart: false, processingJobs: 0, shutdownRequested: false, fault,
       } });
       expect(store.isConnecting).toBe(true);
       expect(store.error).toBeNull();
@@ -5592,6 +5619,110 @@ describe('transcription connect-retry reliability', () => {
       expect(store.status).toBe('Recording');
       expect(store.sessionId).toBe(2);
       expect(store.isConnecting).toBe(false);
+      store.cleanup();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('does not suppress a runtime fault after Recording while start IPC is unresolved', async () => {
+    const pending = deferred<string>();
+    invokeMock.mockImplementation(async (command) => {
+      if (command === 'start_recording') return pending.promise;
+      return null;
+    });
+    const { handlers, store } = await initializeStoreWithHandlers();
+    const start = store.startRecording();
+    await flushMicrotasks();
+    await handlers.get('recording:intent-projection')({ payload: {
+      runId: 71, intentRevision: 1, status: 'Starting', desiredOn: true,
+      pendingStart: false, processingJobs: 0, shutdownRequested: false,
+    } });
+    await handlers.get('recording:status')({ payload: {
+      session_id: 71, status: 'Recording', stopped_via_hotkey: false,
+    } });
+    await handlers.get('recording:intent-projection')({ payload: {
+      runId: null, faultRunId: 71, intentRevision: 2, status: 'Error', desiredOn: false,
+      pendingStart: false, processingJobs: 0, shutdownRequested: false,
+      fault: 'runtimeFailed',
+    } });
+
+    expect(store.status).toBe('Error');
+    expect(store.sessionId).toBeNull();
+    expect(store.error).toBeTruthy();
+    pending.resolve('Recording start requested');
+    await start;
+    expect(store.status).toBe('Error');
+    expect(store.sessionId).toBeNull();
+  });
+
+  it.each(['status', 'partial-adoption', 'partial-existing-session',
+    'sequenced-existing-session', 'reconcile'] as const)(
+    'does not retry a run that reached Recording through %s when a provider error arrives before runtimeFailed',
+    async (recordingEvidence) => {
+    vi.useFakeTimers();
+    try {
+      const pending = deferred<string>();
+      invokeMock.mockImplementation(async (command) => {
+        if (command === 'start_recording') return pending.promise;
+        if (command === 'get_recording_status') return 'Recording';
+        if (command === 'get_recording_capture_readiness') return {
+          revision: 1, runId: 71, captureEpisodeId: 71, captureGeneration: 1,
+          state: 'streaming', reason: 'recording', captureReady: true, generation: 1,
+        };
+        return null;
+      });
+      const { handlers, store } = await initializeStoreWithHandlers();
+      const start = store.startRecording();
+      await flushMicrotasks();
+      await handlers.get('recording:intent-projection')({ payload: {
+        runId: 71, intentRevision: 1, status: 'Starting', desiredOn: true,
+        pendingStart: false, processingJobs: 0, shutdownRequested: false,
+      } });
+      if (recordingEvidence === 'status') {
+        await handlers.get('recording:status')({ payload: {
+          session_id: 71, status: 'Recording', stopped_via_hotkey: false,
+        } });
+      } else if (recordingEvidence === 'partial-adoption') {
+        await handlers.get('transcription:partial')({ payload: {
+          session_id: 71, text: 'provider is active', is_segment_final: false,
+        } });
+      } else if (recordingEvidence === 'partial-existing-session') {
+        await handlers.get('recording:status')({ payload: {
+          session_id: 71, status: 'Starting', stopped_via_hotkey: false,
+        } });
+        await handlers.get('transcription:partial')({ payload: {
+          session_id: 71, text: 'provider is already active', is_segment_final: false,
+        } });
+      } else if (recordingEvidence === 'sequenced-existing-session') {
+        await handlers.get('recording:status')({ payload: {
+          session_id: 71, status: 'Starting', stopped_via_hotkey: false,
+        } });
+        await handlers.get('transcription:final')({ payload: {
+          session_id: 71, text: 'sequenced provider is already active',
+          delivery_seq: 1, continuation_delivery: true,
+        } });
+      } else {
+        expect(await store.reconcileBackendStatus('recording_recovery')).toBe('Recording');
+      }
+      expect(store.status).toBe('Recording');
+      await handlers.get('transcription:error')({ payload: {
+        session_id: 71, error: 'Provider quota exceeded', error_type: 'provider_quota_exceeded',
+        error_details: {
+          category: 'provider_quota_exceeded', serverCode: 'PROVIDER_QUOTA_EXCEEDED',
+        },
+      } });
+      await handlers.get('recording:intent-projection')({ payload: {
+        runId: null, faultRunId: 71, intentRevision: 2, status: 'Error', desiredOn: false,
+        pendingStart: false, processingJobs: 0, shutdownRequested: false,
+        fault: 'runtimeFailed',
+      } });
+
+      pending.resolve('Recording start requested');
+      await vi.advanceTimersByTimeAsync(40_000);
+      await start;
+      expect(invokeMock.mock.calls.filter(([command]) => command === 'start_recording')).toHaveLength(1);
+      expect(store.status).toBe('Error');
+      expect(store.sessionId).toBeNull();
+      expect(store.errorType).toBe('provider_quota_exceeded');
       store.cleanup();
     } finally { vi.useRealTimers(); }
   });

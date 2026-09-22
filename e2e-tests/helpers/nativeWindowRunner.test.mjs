@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
-import { snapshotDigest, isolatedTauriConfig, parseArguments, executionEnvironment, sanitizedEnvironment, validateArtifactDirectory, validateCachedBinary, validateResult } from '../run-native-window-e2e.mjs';
+import { assertOwnedProcessGroupGone, snapshotDigest, isolatedTauriConfig, parseArguments, executionEnvironment, sanitizedEnvironment, validateArtifactDirectory, validateCachedBinary, validateResult } from '../run-native-window-e2e.mjs';
 
 const marker = 'VOICETEXT_NATIVE_WINDOW_E2E_V1';
 
@@ -106,11 +106,289 @@ test('cached executable requires feature marker and matching checksum; no proces
 });
 
 test('passing envelope requires full non-skipped wall time, distinct cases, balanced capture', () => {
-  const valid = { marker, passed: true, fixture: { captureStarts: 35, captureStops: 35, activeCaptures: 0, activeProviders: 0 }, report: { passed: true, completedCycles: 22, hiddenIdleMs: 180000, elapsedMs: 220000, scenarios: Array.from({ length: 12 }, (_, i) => `scenario-${i}`) } };
+  const association = { captureGeneration: 1, captureRunId: 1, captureFenceGeneration: 1 };
+  const captureMarker = { captureGeneration: 1, count: 1, firstSequence: 1, lastSequence: 1 };
+  const fixture = { captureStarts: 35, captureStops: 35, providerStarts: 1, providerStops: 1, finals: 51,
+    providerFailures: 0, providerFailureCaptureGenerations: [],
+    providerResumes: 0, providerNoAudioStops: 0, warmTerminalCount: 0,
+    activeCaptures: 0, activeProviders: 0, maxActiveCaptures: 1,
+    maxActiveProviders: 1, observationOverflow: false, markerViolations: [],
+    captureRunAssociations: [association], captureMarkers: [captureMarker],
+    providerMarkers: [{ ...captureMarker, ...association, providerSessionId: 1 }],
+    capturePcmLedgers: [{ captureGeneration: 1, chunks: 2, samples: 800, hash: '0123456789abcdef' },
+      ...Array.from({ length: 34 }, (_, index) => ({ captureGeneration: index + 2, chunks: 0,
+        samples: 0, hash: 'cbf29ce484222325' }))],
+    providerPcmLedgers: [{ captureGeneration: 1, chunks: 2, samples: 800, hash: '0123456789abcdef' }] };
+  fixture.captureRunAssociations.push(...Array.from({ length: 34 }, (_, index) => ({
+    captureGeneration: index + 2, captureRunId: index + 2, captureFenceGeneration: index + 2 })));
+  const cycleEvidence = Array.from({ length: 50 }, (_, index) => ({ index,
+    captureStartsBefore: index, captureStartsAfter: index + 1,
+    captureStopsBefore: index, captureStopsAfter: index + 1,
+    sessionId: index + 1, windowEpoch: index + 1, captureGeneration: index + 1,
+    captureGenerations: [index + 1],
+    expectedTranscript: `Native fixture session ${index + 1}`,
+    finalSessionId: index + 1, finalText: `Native fixture session ${index + 1}`,
+    finalDeliverySeq: index + 1 }));
+  fixture.captureStarts = 51; fixture.captureStops = 51;
+  fixture.captureRunAssociations.push(...Array.from({ length: 15 }, (_, index) => ({
+    captureGeneration: index + 36, captureRunId: index + 36, captureFenceGeneration: index + 36 })));
+  fixture.capturePcmLedgers.push(...Array.from({ length: 15 }, (_, index) => ({
+    captureGeneration: index + 36, chunks: 0, samples: 0, hash: 'cbf29ce484222325' })));
+  fixture.capturePcmLedgers = fixture.capturePcmLedgers.map(row => ({ ...row,
+    chunks: 1, samples: 320, hash: '0123456789abcdef' }));
+  fixture.captureRunAssociations.push({ captureGeneration: 51, captureRunId: 51, captureFenceGeneration: 51 });
+  fixture.capturePcmLedgers.push({ captureGeneration: 51, chunks: 1, samples: 320,
+    hash: '0123456789abcdef' });
+  fixture.captureMarkers = Array.from({ length: 51 }, (_, index) => ({
+    captureGeneration: index + 1, count: 1, firstSequence: 1, lastSequence: 1 }));
+  fixture.providerPcmLedgers = fixture.capturePcmLedgers.map(row => ({ ...row }));
+  fixture.providerStops = 51;
+  fixture.providerResumes = 50;
+  fixture.providerMarkers = fixture.captureRunAssociations.map((association, index) => ({
+    ...association, providerSessionId: index + 1, count: 1, firstSequence: 1, lastSequence: 1 }));
+  const valid = { marker, passed: true, fixture, report: { passed: true, completedCycles: 50,
+    hiddenIdleMs: 180000, elapsedMs: 220000, cycleEvidence,
+    cycleFinalDeliveries: cycleEvidence.map(row => ({ sessionId: row.sessionId,
+      text: row.expectedTranscript, deliverySeq: row.finalDeliverySeq })),
+    allFinalDeliveries: cycleEvidence.map(row => ({ sessionId: row.sessionId,
+      text: row.expectedTranscript, deliverySeq: row.finalDeliverySeq }))
+      .concat({ sessionId: 51, text: 'Native fixture session 51', deliverySeq: 51 }),
+    expectedFinalSessionIds: Array.from({ length: 51 }, (_, index) => index + 1),
+    final: { preparedCaptureTokenCount: 0, fixture: structuredClone(fixture) },
+    hiddenIdleEvidence: { nativeHiddenIdleMs: 180000, webviewElapsedMs: 180001,
+      baselineCaptureStarts: 50, baselineCaptureStops: 50, baselineActiveCaptures: 0,
+      baselineActiveProviders: 0, baselineCaptureGeneration: 50, wakeCaptureGeneration: 51,
+      wakeSessionId: 51, wakeWindowEpoch: 51, wakeTranscript: 'Native fixture session 51',
+      firstVisibleMs: 10, wakeSampleCount: 3,
+      lastVisibleElapsedMs: 1210, visibilityTransitionCount: 1 },
+    scenarios: ['50-audio-transcript-stop-hide-reopen-cycles', 'real-hidden-idle-180s-and-fresh-audio',
+      ...Array.from({ length: 10 }, (_, i) => `scenario-${i}`)] } };
+  for (const sessionId of [52, 53]) {
+    const captureGeneration = sessionId;
+    const association = { captureGeneration, captureRunId: sessionId,
+      captureFenceGeneration: captureGeneration };
+    const markerRow = { captureGeneration, count: 1, firstSequence: 1, lastSequence: 1 };
+    const ledger = { captureGeneration, chunks: 1, samples: 320, hash: '0123456789abcdef' };
+    valid.fixture.captureStarts += 1;
+    valid.fixture.captureStops += 1;
+    valid.fixture.providerStarts += 1;
+    valid.fixture.providerStops += 1;
+    valid.fixture.finals += 1;
+    valid.fixture.captureRunAssociations.push(association);
+    valid.fixture.captureMarkers.push(markerRow);
+    valid.fixture.providerMarkers.push({ ...markerRow, ...association, providerSessionId: sessionId });
+    valid.fixture.capturePcmLedgers.push(ledger);
+    valid.fixture.providerPcmLedgers.push({ ...ledger });
+    valid.report.expectedFinalSessionIds.push(sessionId);
+    valid.report.allFinalDeliveries.push({ sessionId,
+      text: `Native fixture session ${sessionId}`, deliverySeq: sessionId });
+  }
+  valid.report.final.fixture = structuredClone(valid.fixture);
   assert.equal(validateResult(valid), valid.report);
-  for (const edit of [v => { v.marker = 'normal'; }, v => { v.report.skipped = true; }, v => { v.report.hiddenIdleMs = 179999; }, v => { v.report.elapsedMs = Infinity; }, v => { v.fixture.captureStops--; }, v => { v.fixture.activeCaptures = 1; }, v => { v.fixture.activeProviders = 1; }, v => { v.report.scenarios[1] = v.report.scenarios[0]; }]) {
+  const stallRestart = structuredClone(valid);
+  const wakeAssociation = stallRestart.fixture.captureRunAssociations.find(row =>
+    row.captureGeneration === stallRestart.report.hiddenIdleEvidence.wakeCaptureGeneration);
+  const restartGeneration = Math.max(...stallRestart.fixture.captureRunAssociations
+    .map(row => row.captureGeneration)) + 1;
+  stallRestart.fixture.captureStarts += 1;
+  stallRestart.fixture.captureStops += 1;
+  stallRestart.fixture.captureRunAssociations.push({ ...wakeAssociation,
+    captureGeneration: restartGeneration });
+  stallRestart.fixture.captureMarkers.push({ captureGeneration: restartGeneration, count: 1,
+    firstSequence: 1, lastSequence: 1 });
+  stallRestart.fixture.providerMarkers.push({ ...wakeAssociation, captureGeneration: restartGeneration,
+    providerSessionId: 51, count: 1, firstSequence: 1, lastSequence: 1 });
+  stallRestart.fixture.capturePcmLedgers.push({ captureGeneration: restartGeneration, chunks: 1,
+    samples: 320, hash: 'fedcba9876543210' });
+  stallRestart.fixture.providerPcmLedgers.push({ captureGeneration: restartGeneration, chunks: 1,
+    samples: 320, hash: 'fedcba9876543210' });
+  stallRestart.report.final.fixture = structuredClone(stallRestart.fixture);
+  assert.equal(validateResult(stallRestart), stallRestart.report,
+    'a newer physical generation may retain the same logical provider session after a stall restart');
+  stallRestart.fixture.providerMarkers.at(-1).providerSessionId = 52;
+  stallRestart.report.final.fixture = structuredClone(stallRestart.fixture);
+  assert.throws(() => validateResult(stallRestart), /incomplete/,
+    'a new provider session still requires its own balanced stop');
+  for (const edit of [v => { v.marker = 'normal'; }, v => { v.report.skipped = true; },
+    v => { v.report.hiddenIdleMs = 179999; }, v => { v.report.elapsedMs = Infinity; },
+    v => { v.report.elapsedMs = 900001; },
+    v => { v.report.completedCycles = 49; }, v => { v.fixture.captureStops--; },
+    v => { v.fixture.activeCaptures = 1; }, v => { v.fixture.activeProviders = 1; },
+    v => { v.report.final.fixture.activeProviders = 1; },
+    v => { v.fixture.markerViolations.push('gap'); },
+    v => { v.fixture.providerStops = -1; }, v => { v.fixture.providerStops = '1'; },
+    v => { v.fixture.providerFailures = 1; },
+    v => { v.fixture.finals = 49; },
+    v => { v.fixture.providerNoAudioStops = 1; },
+    v => { v.fixture.captureMarkers[0].lastSequence = 2; },
+    v => { v.fixture.capturePcmLedgers.pop(); v.fixture.captureRunAssociations.pop(); },
+    v => { v.fixture.providerPcmLedgers = []; v.fixture.providerMarkers = []; },
+    v => { v.fixture.providerPcmLedgers[0].hash = 'fedcba9876543210'; },
+    v => { v.report.cycleEvidence.pop(); },
+    v => { v.report.cycleEvidence[12].captureGenerations = []; },
+    v => { v.report.cycleEvidence[12].captureGeneration = v.report.cycleEvidence[11].captureGeneration; },
+    v => { v.fixture.captureRunAssociations.find(row => row.captureGeneration === 13).captureRunId = 1013;
+      v.report.final.fixture = structuredClone(v.fixture); },
+    v => { v.report.cycleEvidence[12].finalSessionId = v.report.cycleEvidence[11].finalSessionId; },
+    v => { v.report.cycleEvidence[12].finalText = 'stale transcript'; },
+    v => { const row = v.report.cycleEvidence[12];
+      const stale = 'Native fixture session 12';
+      row.expectedTranscript = stale; row.finalText = stale;
+      v.report.cycleFinalDeliveries.find(delivery => delivery.sessionId === row.sessionId).text = stale;
+      v.report.allFinalDeliveries.find(delivery => delivery.sessionId === row.sessionId).text = stale; },
+    v => { const row = v.report.cycleEvidence[12];
+      v.fixture.providerMarkers.find(markerRow =>
+        markerRow.captureRunId === row.sessionId).providerSessionId = 12;
+      v.report.final.fixture = structuredClone(v.fixture); },
+    v => { v.report.cycleFinalDeliveries.push({ sessionId: 12, text: 'late stale transcript', deliverySeq: 99 }); },
+    v => { v.report.allFinalDeliveries.push({ sessionId: 999, text: 'foreign final', deliverySeq: 999 }); },
+    v => { v.report.allFinalDeliveries.find(delivery => delivery.sessionId === 51).text =
+      'Native fixture session 50'; },
+    v => {
+      v.report.allFinalDeliveries.push(v.report.allFinalDeliveries.shift());
+      v.report.cycleFinalDeliveries.push(v.report.cycleFinalDeliveries.shift());
+    },
+    v => {
+      v.report.expectedFinalSessionIds.reverse();
+      v.report.allFinalDeliveries.reverse();
+    },
+    v => { v.report.hiddenIdleEvidence.webviewElapsedMs = 179999; },
+    v => { v.report.hiddenIdleEvidence.wakeCaptureGeneration = 50; },
+    v => { v.fixture.captureRunAssociations.find(row => row.captureGeneration === 51).captureRunId = 1051;
+      v.report.final.fixture = structuredClone(v.fixture); },
+    v => { v.report.scenarios[1] = v.report.scenarios[0]; }]) {
     const invalid = structuredClone(valid); edit(invalid); assert.throws(() => validateResult(invalid), /incomplete/);
   }
+});
+
+test('continuation qualification requires balanced and identical terminal lifecycle evidence', () => {
+  const generations = Array.from({ length: 51 }, (_, index) => index + 1);
+  const controlResults = Array.from({ length: 50 }, (_, cycle) => ['pause', 'continue'].map(operation => ({
+    operation, logicalRunId: 1, delivered: true,
+    result: { decision: 'accepted', pause_epoch: cycle + 1, provider_session_id: 'p4-1',
+      request_id: `${operation}-${cycle + 1}`, eligible_now: true },
+  }))).flat();
+  controlResults.push({ operation: 'pause', logicalRunId: 1, delivered: true,
+    result: { decision: 'accepted', pause_epoch: 51, provider_session_id: 'p4-1',
+      request_id: 'pause-51', eligible_now: true } });
+  const fixture = { captureStarts: 51, captureStops: 51, activeCaptures: 0, maxActiveCaptures: 1,
+    providerStarts: 1, providerStops: 1, providerResumes: 0, activeProviders: 0,
+    maxActiveProviders: 1, finals: 1, providerFailures: 0,
+    providerFailureCaptureGenerations: [], providerNoAudioStops: 0, warmTerminalCount: 0,
+    observationOverflow: false, markerViolations: [], controlResults,
+    firstPcmLatenciesMs: generations.map(captureGeneration => ({ captureGeneration, elapsedMs: 10 })),
+    captureRunAssociations: generations.map(captureGeneration => ({ captureGeneration,
+      captureRunId: captureGeneration, captureFenceGeneration: captureGeneration })),
+    captureMarkers: generations.map(captureGeneration => ({ captureGeneration,
+      count: 1, firstSequence: 1, lastSequence: 1 })),
+    providerMarkers: generations.map(captureGeneration => ({ captureGeneration,
+      captureRunId: captureGeneration, captureFenceGeneration: captureGeneration,
+      providerSessionId: 1, count: 1, firstSequence: 1, lastSequence: 1 })),
+    capturePcmLedgers: generations.map(captureGeneration => ({ captureGeneration,
+      chunks: 1, samples: 320, hash: '0123456789abcdef' })),
+    providerPcmLedgers: generations.map(captureGeneration => ({ captureGeneration,
+      chunks: 1, samples: 320, hash: '0123456789abcdef' })) };
+  const cycles = Array.from({ length: 50 }, (_, cycle) => ({ cycle,
+    captureGeneration: cycle + 2, captureRunId: cycle + 2,
+    captureFenceGeneration: cycle + 2, windowEpoch: cycle + 1, providerStarts: 1,
+    micOffOnStop: true, controls: controlResults.slice(cycle * 2, cycle * 2 + 2) }));
+  const valid = { marker, passed: true, fixture, report: { mode: 'continuation-fake',
+    passed: true, errors: [], completedCycles: 50, terminalCount: 1, logicalRunId: 1,
+    stableDeliveries: [{ sessionId: 1, deliverySeq: 1, text: 'Native fixture session 1' }],
+    terminals: [{ sessionId: 1, complete: true, stableSnapshot: 'Native fixture session 1' }],
+    transcriptEvents: [
+      { event: 'final', sessionId: 1, deliverySeq: 1, text: 'Native fixture session 1', complete: null },
+      { event: 'terminal', sessionId: 1, deliverySeq: null, text: 'Native fixture session 1', complete: true },
+    ],
+    p95FirstPcmMs: 10, cycles,
+    final: { status: 'Idle', historyEntryCount: 1, preparedCaptureTokenCount: 0,
+      fixture: structuredClone(fixture) } } };
+  assert.equal(validateResult(valid), valid.report);
+  const p95AllowsBoundedOutliers = structuredClone(valid);
+  p95AllowsBoundedOutliers.fixture.firstPcmLatenciesMs.at(-1).elapsedMs = 251;
+  p95AllowsBoundedOutliers.fixture.firstPcmLatenciesMs.at(-2).elapsedMs = 251;
+  p95AllowsBoundedOutliers.report.final.fixture = structuredClone(p95AllowsBoundedOutliers.fixture);
+  assert.equal(validateResult(p95AllowsBoundedOutliers), p95AllowsBoundedOutliers.report);
+  for (const mutate of [
+    value => { value.fixture.maxActiveCaptures = 2; value.report.final.fixture.maxActiveCaptures = 2; },
+    value => { value.fixture.providerStops = 0; value.report.final.fixture.providerStops = 0; },
+    value => { value.report.final.fixture.activeCaptures = 1; },
+    value => {
+      value.fixture.capturePcmLedgers.find(row => row.captureGeneration === 2).chunks = 0;
+      value.fixture.capturePcmLedgers.find(row => row.captureGeneration === 2).samples = 0;
+      value.fixture.capturePcmLedgers.find(row => row.captureGeneration === 2).hash = 'cbf29ce484222325';
+      value.fixture.captureMarkers = value.fixture.captureMarkers.filter(row => row.captureGeneration !== 2);
+      value.fixture.providerPcmLedgers = value.fixture.providerPcmLedgers.filter(row => row.captureGeneration !== 2);
+      value.fixture.providerMarkers = value.fixture.providerMarkers.filter(row => row.captureGeneration !== 2);
+      value.report.final.fixture = structuredClone(value.fixture);
+    },
+    value => {
+      value.fixture.providerMarkers.forEach(row => { row.providerSessionId = row.captureGeneration; });
+      value.report.final.fixture = structuredClone(value.fixture);
+    },
+    value => { value.report.p95FirstPcmMs = 11; },
+    value => { value.fixture.firstPcmLatenciesMs.push({ captureGeneration: 52, elapsedMs: 1000 });
+      value.report.final.fixture = structuredClone(value.fixture); },
+    value => { value.report.stableDeliveries.push({ sessionId: 999, deliverySeq: 2, text: '' }); },
+    value => { value.report.terminals.push({ sessionId: 888, complete: true, stableSnapshot: '' });
+      value.report.terminalCount++; },
+    value => { value.report.transcriptEvents.unshift(
+      { event: 'final', sessionId: 999, deliverySeq: null, text: '', complete: null }); },
+    value => { value.report.transcriptEvents.reverse(); },
+    value => { value.report.cycles.forEach(cycle => cycle.controls.forEach(control => {
+      control.logicalRunId = 999;
+    })); },
+    value => { value.report.cycles.forEach(cycle => cycle.controls.forEach(control => {
+      control.result.pause_epoch = 1;
+    })); },
+    value => { value.report.logicalRunId = 999; },
+    value => {
+      value.fixture.controlResults.forEach(control => { control.result.request_id = 'replayed'; });
+      value.report.cycles.forEach(cycle => cycle.controls.forEach(control => {
+        control.result.request_id = 'replayed';
+      }));
+      value.report.final.fixture.controlResults.forEach(control => {
+        control.result.request_id = 'replayed';
+      });
+    },
+    value => {
+      value.fixture.controlResults.filter(control => control.operation === 'continue')
+        .forEach(control => { control.result.eligible_now = false; });
+      value.report.cycles.forEach(cycle => { cycle.controls[1].result.eligible_now = false; });
+      value.report.final.fixture.controlResults.filter(control => control.operation === 'continue')
+        .forEach(control => { control.result.eligible_now = false; });
+    },
+    value => {
+      value.fixture.captureRunAssociations.forEach(row => {
+        row.captureRunId = 1; row.captureFenceGeneration = 1;
+      });
+      value.fixture.providerMarkers.forEach(row => {
+        row.captureRunId = 1; row.captureFenceGeneration = 1;
+      });
+      value.report.cycles.forEach(cycle => {
+        cycle.captureRunId = 1; cycle.captureFenceGeneration = 1;
+      });
+      value.report.final.fixture = structuredClone(value.fixture);
+    },
+    value => {
+      value.fixture.controlResults[1].delivered = false;
+      value.report.cycles[0].controls[1].delivered = false;
+      value.report.final.fixture.controlResults[1].delivered = false;
+    },
+    value => { value.fixture.controlResults[0].logicalRunId = 999;
+      value.report.final.fixture.controlResults[0].logicalRunId = 999; },
+    value => { value.fixture.providerNoAudioStops = 1; value.report.final.fixture.providerNoAudioStops = 1; },
+    value => { value.fixture.warmTerminalCount = 1; value.report.final.fixture.warmTerminalCount = 1; },
+  ]) {
+    const invalid = structuredClone(valid); mutate(invalid);
+    assert.throws(() => validateResult(invalid), /Incomplete native continuation qualification/);
+  }
+});
+
+test('owned native cleanup requires confirmed process-group disappearance', () => {
+  assert.doesNotThrow(() => assertOwnedProcessGroupGone(true));
+  assert.throws(() => assertOwnedProcessGroupGone(false), /process group did not terminate/);
+  assert.throws(() => assertOwnedProcessGroupGone(undefined), /process group did not terminate/);
 });
 
 // Exercise the real project bootstrap configuration instead of a duplicate toy shape.
@@ -169,20 +447,208 @@ test('mini UX mode stays isolated and validates close, successor and delivery ev
   assert.equal(env.VOICE_TO_TEXT_BACKEND_URL, 'ws://127.0.0.1:9');
   assert.equal(env.VOICETEXT_NATIVE_LIVE, undefined);
   const evidence = { marker, passed: true, report: { mode: 'mini-ux', passed: true, errors: [],
+    warmActivationFrames: [{ source: 'render', revision: 8, runId: 201,
+      captureReady: false, phase: 'mini-status-dot', statusText: '' }],
     cases: ['hotkey', 'native-close', 'background-start-during-hide'].map(stop => ({ stop, hideMs: 180, bufferedBeforeStop: true,
       oldProviderStillFinalizing: true, observations: 20, backgroundDidNotReopen: true,
       successorStayedVisible: true, markerDeliveryComplete: true, backgroundStartingBeforeHide: true })),
     final: { status: 'Idle', visible: false, preparedCaptureTokenCount: 0,
-      fixture: { activeCaptures: 0, activeProviders: 0, maxActiveProviders: 1, markerViolations: [] } } } };
-  assert.equal(validateResult(evidence), evidence.report);
+      fixture: { captureStarts: 10, captureStops: 10, providerStarts: 10, providerStops: 10,
+        providerFailures: 0, providerFailureCaptureGenerations: [],
+        providerResumes: 0, providerNoAudioStops: 0, warmTerminalCount: 0,
+        activeCaptures: 0, activeProviders: 0, maxActiveCaptures: 1,
+        maxActiveProviders: 1, observationOverflow: false, markerViolations: [],
+        captureRunAssociations: Array.from({ length: 10 }, (_, index) => ({
+          captureGeneration: index + 1, captureRunId: index + 1,
+          captureFenceGeneration: index + 1 })),
+        captureMarkers: Array.from({ length: 10 }, (_, index) => ({
+          captureGeneration: index + 1, count: 1, firstSequence: index + 1,
+          lastSequence: index + 1 })),
+        providerMarkers: Array.from({ length: 10 }, (_, index) => ({
+          captureGeneration: index + 1, captureRunId: index + 1,
+          captureFenceGeneration: index + 1, providerSessionId: index + 1,
+          count: 1, firstSequence: index + 1, lastSequence: index + 1 })),
+        capturePcmLedgers: Array.from({ length: 10 }, (_, index) => ({
+          captureGeneration: index + 1, chunks: 2, samples: 800,
+          hash: `${index.toString(16).padStart(15, '0')}1` })),
+        providerPcmLedgers: Array.from({ length: 10 }, (_, index) => ({
+          captureGeneration: index + 1, chunks: 2, samples: 800,
+          hash: `${index.toString(16).padStart(15, '0')}1` })) } } } };
+  evidence.fixture = structuredClone(evidence.report.final.fixture);
+  assert.throws(() => validateResult(evidence), /physical warm input evidence/);
+  const warm = structuredClone(evidence);
+  Object.assign(warm.report, { warmMode: true, warmReopens: 10, idleAcceptedDelta: 0 });
+  warm.report.warmForbiddenStatusTexts = ['Starting...', 'Processing...'];
+  warm.report.trace = Array.from({ length: 10 }, (_, i) => ({ label: `warm reopen ${i + 1}`,
+    native: { visible: true, windowEpoch: i + 1 }, captureReady: true,
+    captureRunId: i + 1, intentRevision: i + 1 }));
+  warm.report.warmReadyFrames = Array.from({ length: 10 }, (_, i) => ({ runId: i + 1, revision: i + 1, phase: 'mini-status-dot recording' }));
+  warm.report.warmWindowEpochs = Array.from({ length: 10 }, (_, i) => ({
+    attempt: i + 1, windowEpoch: i + 1, runId: i + 1, revision: i + 1,
+    baselineRevision: i === 0 ? null : i,
+  }));
+  warm.report.warmVisibleFrames = Array.from({ length: 10 }, (_, i) => ({
+    attempt: i + 1, source: 'shown', windowEpoch: i + 1, revision: i + 1, runId: i + 1,
+    captureReady: false, readinessReason: 'activating-warm-capture', phase: 'mini-status-dot', statusText: '',
+  }));
+  warm.report.warmReuseOpenCount = 2;
+  warm.report.lifecycle = { sleepClosed: true, wakeOpenedOnce: true, terminalCount: 1, recoveryOpenedOnce: true,
+    physical: {
+      warmReopenStart: { open: 1, close: 0 }, warmReopenEnd: { open: 1, close: 0 },
+      policyActive: { open: 1, close: 0 }, policyClosed: { open: 1, close: 1 },
+      policyColdActive: { open: 1, close: 1 }, policyColdStopped: { open: 1, close: 1 },
+      policyResumed: { open: 2, close: 1 }, sleepClosed: { open: 2, close: 2 },
+      wakeOpened: { open: 3, close: 2 }, terminalClosed: { open: 3, close: 3 },
+      recoveryOpened: { open: 4, close: 3 },
+    } };
+  warm.report.final.fixture.physicalOpenCount = 4;
+  warm.report.final.fixture.physicalCloseCount = 3;
+  warm.fixture.physicalOpenCount = 4;
+  warm.fixture.physicalCloseCount = 3;
+  assert.equal(validateResult(warm), warm.report);
+  const collapsedNativeCapture = structuredClone(warm);
+  collapsedNativeCapture.report.final.fixture.captureRunAssociations =
+    collapsedNativeCapture.report.final.fixture.captureRunAssociations.slice(0, 1);
+  collapsedNativeCapture.report.final.fixture.capturePcmLedgers =
+    collapsedNativeCapture.report.final.fixture.capturePcmLedgers.slice(0, 1);
+  collapsedNativeCapture.report.final.fixture.providerPcmLedgers =
+    collapsedNativeCapture.report.final.fixture.providerPcmLedgers.slice(0, 1);
+  collapsedNativeCapture.fixture = structuredClone(collapsedNativeCapture.report.final.fixture);
+  assert.throws(() => validateResult(collapsedNativeCapture),
+    /physical warm input evidence|mini UX window evidence/,
+    'ten UI reopen identities cannot be backed by one native PCM generation');
+  const neutralBeforeOwnership = structuredClone(warm);
+  neutralBeforeOwnership.report.warmVisibleFrames[0].runId = null;
+  neutralBeforeOwnership.report.warmVisibleFrames[0].revision = null;
+  assert.equal(validateResult(neutralBeforeOwnership), neutralBeforeOwnership.report);
+  const neutralWithoutReason = structuredClone(neutralBeforeOwnership);
+  delete neutralWithoutReason.report.warmVisibleFrames[0].readinessReason;
+  assert.equal(validateResult(neutralWithoutReason), neutralWithoutReason.report);
+  const neutralIdleReason = structuredClone(neutralBeforeOwnership);
+  neutralIdleReason.report.warmVisibleFrames[0].readinessReason = 'idle';
+  assert.equal(validateResult(neutralIdleReason), neutralIdleReason.report);
+  const neutralRevisionBeforeRun = structuredClone(warm);
+  neutralRevisionBeforeRun.report.warmVisibleFrames[0].runId = null;
+  assert.equal(validateResult(neutralRevisionBeforeRun), neutralRevisionBeforeRun.report,
+    'intent revision may be visible before readiness assigns its run id');
+  const neutralBaselineRevision = structuredClone(warm);
+  neutralBaselineRevision.report.warmVisibleFrames[1].runId = null;
+  neutralBaselineRevision.report.warmVisibleFrames[1].revision =
+    neutralBaselineRevision.report.warmWindowEpochs[1].baselineRevision;
+  assert.equal(validateResult(neutralBaselineRevision), neutralBaselineRevision.report,
+    'a neutral admission frame may retain the baseline intent revision');
+  const foreignNeutralRevision = structuredClone(neutralBaselineRevision);
+  foreignNeutralRevision.report.warmVisibleFrames[1].revision = 999;
+  assert.throws(() => validateResult(foreignNeutralRevision), /physical warm input evidence/);
+  const rebatched = structuredClone(warm);
+  rebatched.report.final.fixture.providerPcmLedgers[0].chunks = 3;
+  rebatched.fixture.providerPcmLedgers[0].chunks = 3;
+  assert.equal(validateResult(rebatched), rebatched.report);
+  const terminalStop = structuredClone(warm);
+  terminalStop.report.final.fixture.providerStops = 9;
+  terminalStop.report.final.fixture.warmTerminalCount = 1;
+  terminalStop.fixture.providerStops = 9;
+  terminalStop.fixture.warmTerminalCount = 1;
+  assert.equal(validateResult(terminalStop), terminalStop.report);
+  const readyFirstVisible = structuredClone(warm);
+  readyFirstVisible.report.warmVisibleFrames[0].captureReady = true;
+  readyFirstVisible.report.warmVisibleFrames[0].readinessReason = 'recording';
+  readyFirstVisible.report.warmVisibleFrames[0].phase = 'mini-status-dot recording';
+  readyFirstVisible.report.warmVisibleFrames[0].statusText = 'Recording';
+  assert.equal(validateResult(readyFirstVisible), readyFirstVisible.report);
+  const staleLateLabel = structuredClone(readyFirstVisible);
+  staleLateLabel.report.warmVisibleFrames.push({
+    ...staleLateLabel.report.warmVisibleFrames[0], source: 'render', statusText: 'Starting...',
+  });
+  assert.throws(() => validateResult(staleLateLabel), /physical warm input evidence/);
+  const providerConnecting = structuredClone(warm);
+  providerConnecting.report.warmVisibleFrames.push({
+    ...providerConnecting.report.warmVisibleFrames[0], source: 'render', captureReady: true,
+    readinessReason: 'connecting-provider', phase: 'mini-status-dot recording',
+    statusText: 'Recording - connecting',
+  });
+  assert.equal(validateResult(providerConnecting), providerConnecting.report);
+  const lateUnreadyRecording = structuredClone(warm);
+  lateUnreadyRecording.report.warmVisibleFrames.push({
+    ...lateUnreadyRecording.report.warmVisibleFrames[0], source: 'sample',
+    captureReady: false, readinessReason: 'starting-capture',
+    phase: 'mini-status-dot recording', statusText: 'Recording',
+  });
+  assert.throws(() => validateResult(lateUnreadyRecording), /physical warm input evidence/);
+  for (const mutate of [
+    e => { e.report.warmActivationFrames = []; },
+    e => { e.report.trace = []; },
+    e => { e.report.warmReopens = 9; },
+    e => { e.report.idleAcceptedDelta = 1; },
+    e => { e.report.lifecycle.physical.policyResumed.open = 3; },
+    e => { e.report.lifecycle.physical.policyColdActive.open = 2; },
+    e => { e.report.final.fixture.physicalOpenCount = 5; },
+    e => { e.report.final.fixture.physicalCloseCount = 2; },
+    e => { e.report.warmMode = false; },
+    e => { e.report.warmReadyFrames[0].phase = 'mini-status-dot starting'; },
+    e => { delete e.report.warmVisibleFrames; },
+    e => { e.report.warmVisibleFrames = []; },
+    e => { e.report.warmVisibleFrames[0].phase = 'mini-status-dot starting'; },
+    e => { e.report.warmVisibleFrames[0].phase = 'mini-status-dot recording'; },
+    e => { e.report.warmVisibleFrames[0].captureReady = true; },
+    e => { e.report.warmVisibleFrames[0].readinessReason = 'recording'; },
+    e => { e.report.warmVisibleFrames[0].runId = 999; },
+    e => { e.report.warmVisibleFrames[0].windowEpoch = 0; },
+    e => {
+      e.report.warmVisibleFrames[1].windowEpoch = e.report.warmVisibleFrames[0].windowEpoch;
+      e.report.warmVisibleFrames[1].runId = e.report.warmVisibleFrames[0].runId;
+      e.report.warmVisibleFrames[1].revision = e.report.warmVisibleFrames[0].revision;
+      e.report.warmReadyFrames[1].runId = e.report.warmReadyFrames[0].runId;
+      e.report.warmReadyFrames[1].revision = e.report.warmReadyFrames[0].revision;
+    },
+    e => { e.report.warmVisibleFrames[1].windowEpoch = e.report.warmVisibleFrames[0].windowEpoch - 1; },
+    e => { e.report.warmVisibleFrames[0].windowEpoch = 1001; },
+    e => { e.report.warmWindowEpochs[0].windowEpoch = 1001; },
+    e => { e.report.warmWindowEpochs[0].baselineRevision = 0; },
+  ]) {
+    const broken = structuredClone(warm);
+    mutate(broken);
+    assert.throws(() => validateResult(broken), /physical warm input evidence/);
+  }
+  const contradictoryTerminalLifecycle = structuredClone(warm);
+  contradictoryTerminalLifecycle.fixture.physicalOpenCount = 50;
+  contradictoryTerminalLifecycle.fixture.physicalCloseCount = 49;
+  assert.throws(() => validateResult(contradictoryTerminalLifecycle),
+    /Incomplete mini UX window evidence/);
   for (const mutate of [
     e => { e.report.cases[0].hideMs = 5000; },
     e => { e.report.cases[0].backgroundDidNotReopen = false; },
     e => { e.report.cases[1].successorStayedVisible = false; },
     e => { e.report.cases[1].markerDeliveryComplete = false; },
+    e => { delete e.report.cases[0].observations; },
     e => { e.report.final.fixture.activeCaptures = 1; },
+    e => { e.fixture.activeProviders = 1; },
+    e => { e.fixture.markerViolations.push('gap'); },
+    e => { e.fixture.captureStops = 0; },
+    e => { e.fixture.providerStops = 0; },
+    e => { e.fixture.providerStops = '1'; },
+    e => { e.fixture.captureMarkers[0].firstSequence = 100; },
+    e => { e.fixture.capturePcmLedgers = []; e.fixture.captureMarkers = []; },
+    e => { e.fixture.capturePcmLedgers[0].hash = 'fedcba9876543210'; },
+    e => { e.report.final.fixture.providerPcmLedgers[0].hash = 'fedcba9876543210'; },
+    e => { e.fixture.capturePcmLedgers[0].hash = 'fedcba9876543210'; },
+    e => {
+      e.report.final.fixture.capturePcmLedgers = [];
+      e.report.final.fixture.providerPcmLedgers = [];
+    },
+    e => {
+      e.report.final.fixture.capturePcmLedgers[0].captureGeneration = 999;
+      e.report.final.fixture.providerPcmLedgers[0].captureGeneration = 999;
+    },
+    e => { e.report.final.fixture.capturePcmLedgers.push({ captureGeneration: 2, chunks: 1,
+      samples: 400, hash: 'fedcba9876543210' }); },
+    e => { e.report.warmActivationFrames[0].captureReady = true; },
+    e => { e.report.warmActivationFrames[0].phase = 'mini-status-dot starting'; },
+    e => { e.report.warmActivationFrames[0].statusText = 'Listening'; },
+    e => { e.report.warmActivationFrames[0].revision = null; },
   ]) {
-    const broken = structuredClone(evidence); mutate(broken);
-    assert.throws(() => validateResult(broken), /mini UX window evidence/);
+    const broken = structuredClone(warm); mutate(broken);
+    assert.throws(() => validateResult(broken),
+      /physical warm input evidence|mini UX window evidence/);
   }
 });

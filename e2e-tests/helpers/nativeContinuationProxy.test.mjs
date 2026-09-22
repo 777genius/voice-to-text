@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { once } from 'node:events';
-import { startConfigDelayProxy } from './nativeContinuationProxy.mjs';
+import { hashPcm16Mono16k, startConfigDelayProxy } from './nativeContinuationProxy.mjs';
+import { warmProviderCanaryTrial } from './nativeContinuation.mjs';
 const require = createRequire(import.meta.url);
 const WebSocket = createRequire(require.resolve('jsdom'))('ws');
 
@@ -11,6 +12,12 @@ test('proxy rejects external endpoints and unplanned fault delays before opening
     await assert.rejects(startConfigDelayProxy(url, 0, () => {}));
   }
   await assert.rejects(startConfigDelayProxy('ws://127.0.0.1:51869', 1, () => {}));
+});
+test('proxy admits the exact paid warm-provider canary delay', async () => {
+  assert.equal(warmProviderCanaryTrial.configDelayMs, 1000);
+  const proxy = await startConfigDelayProxy(
+    'ws://127.0.0.1:51869', warmProviderCanaryTrial.configDelayMs, () => {});
+  await proxy.close();
 });
 test('bounded Config fault preserves text control frames and exact ordered PCM', { timeout: 8000 }, async () => {
   const server = new WebSocket.Server({ host: '127.0.0.1', port: 0 });
@@ -33,8 +40,9 @@ test('bounded Config fault preserves text control frames and exact ordered PCM',
     assert.deepEqual(received.map(x => x.binary), [false, true, false]);
     assert.deepEqual(received[1].data, Buffer.from([0, 1, 2, 3]));
     assert.equal(JSON.parse(received[2].data).type, 'pause');
-    assert.deepEqual(events.filter(x => x.name === 'client_binary').map(x => ({ connectionId: x.connectionId, bytes: x.bytes })),
-      [{ connectionId: 1, bytes: 4 }]);
+    assert.deepEqual(events.filter(x => x.name === 'client_binary').map(x => ({
+      connectionId: x.connectionId, bytes: x.bytes, pcmHash: x.pcmHash })),
+    [{ connectionId: 1, bytes: 4, pcmHash: hashPcm16Mono16k([Buffer.from([0, 1, 2, 3])]) }]);
     const begin = events.find(x => x.name === 'fault_config_received');
     const end = events.find(x => x.name === 'fault_config_forwarded');
     assert.ok(end.at - begin.at >= 3950);

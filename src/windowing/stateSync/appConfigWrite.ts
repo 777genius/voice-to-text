@@ -23,6 +23,7 @@ export type UpdateAppConfigInvokeArgs = Partial<{
   hideRecordingWindowOnHotkey: boolean;
   showMiniRecordingWindow: boolean;
   keepRecordingUntilManualStop: boolean;
+  keepMicrophoneReady: boolean;
   holdToRecord: boolean;
   doubleSpaceHotkeyEnabled: boolean;
   selectedAudioDevice: string | null;
@@ -41,6 +42,7 @@ const ALLOWED_KEYS = new Set([
   'hideRecordingWindowOnHotkey',
   'showMiniRecordingWindow',
   'keepRecordingUntilManualStop',
+  'keepMicrophoneReady',
   'holdToRecord',
   'doubleSpaceHotkeyEnabled',
   'selectedAudioDevice',
@@ -82,6 +84,7 @@ function assertValidUpdateAppConfigArgs(args: Record<string, unknown>): void {
       case 'hideRecordingWindowOnHotkey':
       case 'showMiniRecordingWindow':
       case 'keepRecordingUntilManualStop':
+      case 'keepMicrophoneReady':
       case 'holdToRecord':
       case 'doubleSpaceHotkeyEnabled':
         if (typeof v !== 'boolean') {

@@ -5,13 +5,17 @@ import { listen } from '@tauri-apps/api/event';
 import { useAppConfigStore } from '@/stores/appConfig';
 
 type Control = { operation: string; logicalRunId: number; cumulativeBytes: number;
-  result: { decision: string; pause_epoch: number; provider_session_id: string } };
+  delivered: boolean; result: { decision: string; pause_epoch: number; provider_session_id: string;
+    request_id: string; eligible_now: boolean } };
 type Snapshot = { historyEntryCount: number; status: string; sessionId: number; windowEpoch: number; visible: boolean;
+  logicalProviderRunId: number;
   preparedCaptureTokenCount: number; fixture: {
     captureStarts: number; captureStops: number; activeCaptures: number; activeProviders: number;
     providerStarts: number; providerResumes: number; maxActiveProviders: number; providerAudioChunks: number;
     markerViolations: string[]; controlResults: Control[]; finals: number;
     firstPcmLatenciesMs: Array<{ captureGeneration: number; elapsedMs: number }>;
+    captureRunAssociations: Array<{ captureGeneration: number; captureRunId: number;
+      captureFenceGeneration: number }>;
   } };
 const state = () => invoke<Snapshot>('native_e2e_state');
 const sleep = (durationMs: number) => invoke('native_e2e_delay', { durationMs });
@@ -29,7 +33,12 @@ async function toggle() {
 export async function runNativeContinuationScenarios(pinia: Pinia) {
   const started = performance.now();
   const report = { mode: 'continuation-fake', passed: false, completedCycles: 0,
-    errors: [] as string[], stableDeliveries: [] as string[], terminalCount: 0, cycles: [] as unknown[], elapsedMs: 0, p95FirstPcmMs: -1,
+    errors: [] as string[], stableDeliveries: [] as Array<{ sessionId: number; deliverySeq: number;
+      text: string }>, terminals: [] as Array<{ sessionId: number; complete: boolean;
+      stableSnapshot: string }>, transcriptEvents: [] as Array<{ event: 'final' | 'terminal';
+      sessionId: number; deliverySeq: number | null; text: string; complete: boolean | null }>,
+    terminalCount: 0, logicalRunId: null as number | null,
+    cycles: [] as unknown[], elapsedMs: 0, p95FirstPcmMs: -1,
     final: null as Snapshot | null };
   const unlisten = await listen('transcription:error', event => {
     report.errors.push(JSON.stringify(event.payload));
@@ -37,13 +46,31 @@ export async function runNativeContinuationScenarios(pinia: Pinia) {
   const stableKeys = new Set<string>();
   const listeners = await Promise.all(['transcription:partial', 'transcription:final', 'transcription:terminal'].map(name => listen(name, event => {
     const payload = event.payload as Record<string, unknown>;
+    const sessionId = Number(payload.session_id);
     if (name === 'transcription:terminal') {
       report.terminalCount++;
-      if (payload.error || payload.delivery_complete !== true) report.errors.push('Incomplete terminal');
+      const complete = !payload.error && payload.delivery_complete === true;
+      const stableSnapshot = typeof payload.stable_snapshot === 'string' ? payload.stable_snapshot : '';
+      report.terminals.push({ sessionId, complete, stableSnapshot });
+      report.transcriptEvents.push({ event: 'terminal', sessionId, deliverySeq: null,
+        text: stableSnapshot, complete });
+      if (!Number.isSafeInteger(sessionId) || sessionId <= 0 || !complete || !stableSnapshot.trim()) {
+        report.errors.push('Incomplete terminal');
+      }
     } else if (typeof payload.delivery_seq === 'number' && (name === 'transcription:final' || payload.is_segment_final === true)) {
       const key = `${payload.session_id}:${payload.delivery_seq}`;
       if (stableKeys.has(key)) report.errors.push('Duplicate stable delivery');
-      stableKeys.add(key); report.stableDeliveries.push(key);
+      const text = typeof payload.text === 'string' ? payload.text : '';
+      stableKeys.add(key); report.stableDeliveries.push({ sessionId,
+        deliverySeq: Number(payload.delivery_seq), text });
+      report.transcriptEvents.push({ event: 'final', sessionId,
+        deliverySeq: Number(payload.delivery_seq), text, complete: null });
+      if (!Number.isSafeInteger(sessionId) || sessionId <= 0 || !Number.isSafeInteger(payload.delivery_seq) ||
+          Number(payload.delivery_seq) <= 0 || !text.trim()) report.errors.push('Malformed stable delivery');
+    } else if (name === 'transcription:final') {
+      report.transcriptEvents.push({ event: 'final', sessionId, deliverySeq: null,
+        text: typeof payload.text === 'string' ? payload.text : '', complete: null });
+      report.errors.push('Final delivery is missing identity');
     }
   })));
   try {
@@ -56,6 +83,11 @@ export async function runNativeContinuationScenarios(pinia: Pinia) {
     await invoke('native_e2e_configure', { config: { audioDelayMs: 0, stopDelayMs: 0, keepAlive: false } });
     await toggle();
     const initial = await poll(s => s.fixture.providerAudioChunks > 0, 'Initial source never reached provider');
+    check(Number.isSafeInteger(initial.logicalProviderRunId) && initial.logicalProviderRunId > 0,
+      'Initial logical provider owner is missing');
+    report.logicalRunId = initial.logicalProviderRunId;
+    let previousPauseEpoch = 0;
+    const controlRequestIds = new Set<string>();
     for (let cycle = 0; cycle < 50; cycle++) {
       const before = await state();
       await toggle();
@@ -76,9 +108,26 @@ export async function runNativeContinuationScenarios(pinia: Pinia) {
         'Capture ownership or ordered marker evidence failed');
       const controls = continued.fixture.controlResults.slice(-2);
       check(controls.length === 2 && controls[0].logicalRunId === controls[1].logicalRunId &&
-        controls[0].result.pause_epoch === controls[1].result.pause_epoch,
+        controls[0].logicalRunId === report.logicalRunId &&
+        controls[0].result.pause_epoch === controls[1].result.pause_epoch &&
+        controls[1].result.eligible_now === true &&
+        controls.every(control => control.delivered === true &&
+          typeof control.result.request_id === 'string' && control.result.request_id.length > 0 &&
+          !controlRequestIds.has(control.result.request_id)),
       'Logical owner/epoch changed across Continue');
-      report.cycles.push({ cycle, captureGeneration: continued.fixture.firstPcmLatenciesMs[continued.fixture.firstPcmLatenciesMs.length - 1]?.captureGeneration,
+      controls.forEach(control => controlRequestIds.add(control.result.request_id));
+      check(controls[0].result.pause_epoch > previousPauseEpoch,
+        'Pause epoch did not advance across Continue cycles');
+      previousPauseEpoch = controls[0].result.pause_epoch;
+      const captureGeneration = continued.fixture.firstPcmLatenciesMs[
+        continued.fixture.firstPcmLatenciesMs.length - 1]?.captureGeneration;
+      const association = continued.fixture.captureRunAssociations.find(row =>
+        row.captureGeneration === captureGeneration);
+      check(association && association.captureRunId > 0 && association.captureFenceGeneration > 0,
+        'Continued capture identity/fence is missing');
+      report.cycles.push({ cycle, captureGeneration,
+        captureRunId: association.captureRunId,
+        captureFenceGeneration: association.captureFenceGeneration,
         windowEpoch: continued.windowEpoch, providerStarts: continued.fixture.providerStarts,
         micOffOnStop: paused.fixture.activeCaptures === 0, controls });
       report.completedCycles++;
@@ -97,12 +146,30 @@ export async function runNativeContinuationScenarios(pinia: Pinia) {
     const final = await poll(s => s.fixture.activeCaptures === 0 && s.fixture.activeProviders === 0 &&
       s.preparedCaptureTokenCount === 0 && s.historyEntryCount === 1 && report.terminalCount === 1, 'Terminal cleanup did not release resources');
     report.final = final;
+    check(final.fixture.controlResults.length === 101 &&
+      final.fixture.controlResults.every(control => control.delivered === true &&
+        typeof control.result.request_id === 'string' && control.result.request_id.length > 0) &&
+      new Set(final.fixture.controlResults.map(control => control.result.request_id)).size === 101 &&
+      final.fixture.controlResults.filter(control => control.operation === 'continue')
+        .every(control => control.result.eligible_now === true),
+    'Continuation control identities or eligibility are incomplete');
     check(final.fixture.captureStarts === final.fixture.captureStops && final.fixture.finals === 1,
       'Logical run did not finalize exactly once');
     const latencies = final.fixture.firstPcmLatenciesMs.map(x => x.elapsedMs).sort((a,b) => a-b);
     report.p95FirstPcmMs = latencies[Math.ceil(latencies.length * .95) - 1];
     check(latencies.length >= 51 && report.p95FirstPcmMs <= 250, 'Native Start-to-firstPCM gate failed');
-    check(report.stableDeliveries.length === 1 && final.historyEntryCount === 1, 'Stable delivery/history must occur once');
+    const stableDelivery = report.stableDeliveries[0];
+    const terminal = report.terminals[0];
+    const expectedTranscript = stableDelivery
+      ? `Native fixture session ${stableDelivery.sessionId}` : '';
+    check(report.stableDeliveries.length === 1 && report.terminals.length === 1 &&
+      report.transcriptEvents.length === 2 && report.transcriptEvents[0]?.event === 'final' &&
+      report.transcriptEvents[1]?.event === 'terminal' &&
+      Number.isSafeInteger(stableDelivery?.deliverySeq) && Number(stableDelivery?.deliverySeq) > 0 &&
+      stableDelivery?.sessionId === terminal?.sessionId && terminal?.complete === true &&
+      stableDelivery?.text === expectedTranscript && terminal?.stableSnapshot === expectedTranscript &&
+      final.historyEntryCount === 1,
+    'Stable delivery/history ownership must occur once');
     check(report.errors.length === 0, 'Error evidence prevents passing');
     report.passed = true;
   } catch (error) { report.errors.push(String(error)); report.passed = false; }

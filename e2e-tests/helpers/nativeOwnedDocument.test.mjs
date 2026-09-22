@@ -164,11 +164,14 @@ for (const outcome of ['success', 'failed-exit', 'timeout', 'spawn-error', 'grou
     const run = new Function('createWriteStream', 'spawn', 'process', 'path', 'writeFile', 'performance', `${runOwnedBody}; return runOwned;`)
       (() => output, spawn, parent, path, writeFile, performance);
     const promise = run('/TEST/app', [], {}, 5, '/TEST/log', undefined, undefined, '/TEST/termination');
-    if (['success', 'group-retained', 'group-eperm'].includes(outcome)) await promise;
+    if (outcome === 'success') await promise;
     else await assert.rejects(promise, error => {
       if (outcome === 'evidence-write-failure') {
         assert.match(error.cause.message, /app failed/);
         assert.match(error.errors[1].message, /evidence disk failed/);
+      }
+      if (['group-retained', 'group-eperm'].includes(outcome)) {
+        assert.match(error.message, /process group did not terminate/);
       }
       return true;
     });

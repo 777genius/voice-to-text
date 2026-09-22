@@ -255,6 +255,8 @@ pub struct AppConfig {
 
     /// Keep listening until the user stops recording manually; disables VAD silence auto-stop
     pub keep_recording_until_manual_stop: bool,
+    /// Opt-in macOS dictation input reuse; idle audio is never retained.
+    pub keep_microphone_ready: bool,
 
     /// Record only while the global hotkey is physically held down.
     pub hold_to_record: bool,
@@ -314,6 +316,7 @@ impl Default for AppConfig {
             show_mini_recording_window: true,
             recording_window_position: None,
             keep_recording_until_manual_stop: false,
+            keep_microphone_ready: false,
             hold_to_record: false,
             double_space_hotkey_enabled: false,
             auto_close_window: true,
@@ -525,6 +528,7 @@ mod tests {
         assert!(config.show_mini_recording_window);
         assert!(config.recording_window_position.is_none());
         assert!(!config.keep_recording_until_manual_stop);
+        assert!(!config.keep_microphone_ready);
         assert!(!config.hold_to_record);
         assert!(!config.double_space_hotkey_enabled);
         assert!(config.auto_close_window);
@@ -544,6 +548,22 @@ mod tests {
     #[test]
     fn test_recording_mode_default_is_dictation() {
         assert_eq!(RecordingMode::default(), RecordingMode::Dictation);
+    }
+
+    #[test]
+    fn keep_microphone_ready_is_opt_in_and_roundtrips() {
+        let legacy: AppConfig = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.keep_microphone_ready);
+        for enabled in [true, false] {
+            let config = AppConfig {
+                keep_microphone_ready: enabled,
+                ..AppConfig::default()
+            };
+            let json = serde_json::to_value(&config).unwrap();
+            assert_eq!(json["keep_microphone_ready"], enabled);
+            let decoded: AppConfig = serde_json::from_value(json).unwrap();
+            assert_eq!(decoded.keep_microphone_ready, enabled);
+        }
     }
 
     #[test]

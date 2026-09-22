@@ -28,6 +28,7 @@ export type AppConfigSnapshotData = {
   hide_recording_window_on_hotkey: boolean;
   show_mini_recording_window: boolean;
   keep_recording_until_manual_stop: boolean;
+  keep_microphone_ready?: boolean;
   hold_to_record: boolean;
   double_space_hotkey_enabled: boolean;
   selected_audio_device: string | null;

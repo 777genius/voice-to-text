@@ -31,6 +31,7 @@ const appConfigSeed = vi.hoisted(() => ({
   hideRecordingWindowOnHotkey: false,
   showMiniRecordingWindow: true,
   keepRecordingUntilManualStop: false,
+  keepMicrophoneReady: false,
   recordingHotkey: 'CmdOrCtrl+Shift+X',
   recordingMode: 'dictation' as 'dictation' | 'live_translation',
   startSync: vi.fn(),
@@ -260,7 +261,7 @@ function mountRecordingPopover(setupStore?: (store: ReturnType<typeof useTranscr
 }
 
 function expectMiniCapturePhase(
-  phase: 'recording' | 'starting' | 'processing' | 'error',
+  phase: 'idle' | 'recording' | 'starting' | 'processing' | 'error',
   text: string,
 ) {
   const statusDot = document.querySelector<HTMLElement>('.mini-status-dot');
@@ -326,6 +327,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     windowInnerSizeMock.width = 248;
     windowInnerSizeMock.height = 62;
     appConfigMock.playCompletionSound = false;
+    appConfigMock.keepMicrophoneReady = false;
     appConfigMock.recordingMode = 'dictation';
     appConfigMock.startSync.mockReset();
     appConfigMock.stopSync.mockReset();
@@ -578,6 +580,24 @@ describe('RecordingPopover mini auto-hide e2e', () => {
 
     expect(vi.getTimerCount()).toBe(0);
     await vi.advanceTimersByTimeAsync(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('bounds the opening reset when a throttled WebView never runs animation frames', async () => {
+    vi.mocked(window.requestAnimationFrame).mockImplementation(() => 42);
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:window-shown', 1);
+
+    await emitTauriEvent('recording:window-shown', {});
+    expect(document.querySelector('.mini-animation-reset')).not.toBeNull();
+
+    await vi.advanceTimersByTimeAsync(800);
+    await nextTick();
+    expect(document.querySelector('.mini-animation-reset')).toBeNull();
+    expect(document.querySelector('.mini-opening')).toBeNull();
+    expect(window.cancelAnimationFrame).toHaveBeenCalledWith(42);
+
+    wrapper.unmount();
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -1100,6 +1120,120 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     expect(document.querySelector('.mini-status-dot')?.getAttribute('title')).toContain('Processing');
     wrapper.unmount();
   });
+
+  it.each(['intent-first', 'readiness-first', 'idle-status'])(
+    'keeps warm activation neutral until admitted with %s, then preserves cold fallback', async (order) => {
+      const wrapper = mountRecordingPopover();
+      await waitForListenerCount('recording:intent-projection', 1);
+      await waitForListenerCount('recording:capture-readiness', 1);
+      const intent = { runId: 101, intentRevision: 8,
+        status: order === 'idle-status' ? RecordingStatus.Idle : RecordingStatus.Processing,
+        desiredOn: true, pendingStart: true, processingJobs: 1, shutdownRequested: false };
+      const warm = { revision: 8, runId: 201, state: 'unavailable',
+        reason: 'activating-warm-capture', generation: 1, captureReady: false, transportReady: false };
+      if (order === 'intent-first') {
+        await emitTauriEvent('recording:intent-projection', intent);
+        await emitTauriEvent('recording:capture-readiness', warm);
+      } else {
+        await emitTauriEvent('recording:capture-readiness', warm);
+        await emitTauriEvent('recording:intent-projection', intent);
+      }
+      expectMiniCapturePhase('idle', '');
+      expect(document.querySelector('.mini-status-dot')?.getAttribute('aria-label')).toBe('');
+      expect(document.querySelector('.mini-transcription-text-inner')?.textContent?.trim()).toBe('');
+      const store = useTranscriptionStore();
+      expect(store.isCaptureReady).toBe(false);
+      await emitTauriEvent('recording:capture-readiness', { ...warm, generation: 2,
+        state: 'buffering', reason: 'connecting-provider', captureReady: true });
+      expectMiniCapturePhase('recording', 'Listening');
+      // New revision cannot inherit the old warm/ready projection.
+      await emitTauriEvent('recording:intent-projection', { ...intent, intentRevision: 9 });
+      expectMiniCapturePhase('starting', 'Starting');
+      await emitTauriEvent('recording:capture-readiness', { ...warm, generation: 3 });
+      expectMiniCapturePhase('starting', 'Starting');
+      await emitTauriEvent('recording:capture-readiness', { ...warm, revision: 9, generation: 4 });
+      expectMiniCapturePhase('idle', '');
+      await emitTauriEvent('recording:capture-readiness', { ...warm, revision: 9, generation: 5,
+        reason: 'starting-capture' });
+      expectMiniCapturePhase('starting', 'Starting');
+      await emitTauriEvent('recording:capture-readiness', { ...warm, revision: 9, generation: 6,
+        state: 'buffering', reason: 'connecting-provider', captureReady: true });
+      expectMiniCapturePhase('recording', 'Listening');
+      wrapper.unmount();
+    },
+  );
+
+  it('does not flash Starting before warm readiness arrives, but exposes a cold fallback', async () => {
+    appConfigMock.keepMicrophoneReady = true;
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('recording:start-requested', 1);
+    await waitForListenerCount('recording:intent-projection', 1);
+    await waitForListenerCount('recording:capture-readiness', 1);
+
+    await emitTauriEvent('recording:start-requested', {
+      source: 'hotkey',
+      warmStartExpected: false,
+    });
+    expectMiniCapturePhase('idle', '');
+
+    await emitTauriEvent('recording:intent-projection', {
+      runId: 101,
+      intentRevision: 8,
+      status: RecordingStatus.Starting,
+      desiredOn: true,
+      pendingStart: true,
+      processingJobs: 0,
+      shutdownRequested: false,
+    });
+    expectMiniCapturePhase('idle', '');
+
+    await emitTauriEvent('recording:capture-readiness', {
+      revision: 8,
+      runId: 101,
+      state: 'unavailable',
+      reason: 'starting-capture',
+      generation: 1,
+      captureReady: false,
+      transportReady: false,
+    });
+    expectMiniCapturePhase('starting', 'Starting');
+    wrapper.unmount();
+  });
+
+  it.each([RecordingStatus.Starting, RecordingStatus.Processing] as const)(
+    'does not mask independent incoming translation %s during warm admission', async (status) => {
+      const wrapper = mountRecordingPopover();
+      const store = useTranscriptionStore();
+      await waitForListenerCount('recording:intent-projection', 1);
+      await waitForListenerCount('recording:capture-readiness', 1);
+
+      store.incomingTranslationStatus = status;
+      await emitTauriEvent('recording:intent-projection', {
+        runId: 101,
+        intentRevision: 8,
+        status: RecordingStatus.Starting,
+        desiredOn: true,
+        pendingStart: true,
+        processingJobs: 0,
+        shutdownRequested: false,
+      });
+      await emitTauriEvent('recording:capture-readiness', {
+        revision: 8,
+        runId: 101,
+        state: 'unavailable',
+        reason: 'activating-warm-capture',
+        generation: 1,
+        captureReady: false,
+        transportReady: false,
+      });
+
+      const phase = status === 'Starting' ? 'starting' : 'processing';
+      const statusDot = document.querySelector<HTMLElement>('.mini-status-dot');
+      expect(statusDot?.classList.contains(phase)).toBe(true);
+      expect(statusDot?.getAttribute('aria-label')).toContain(status);
+      wrapper.unmount();
+    },
+  );
 
   it.each([
     { order: 'intent before readiness', state: 'buffering' as const },

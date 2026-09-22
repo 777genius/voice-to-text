@@ -3,13 +3,26 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const WebSocket = createRequire(require.resolve('jsdom'))('ws');
 const { WebSocketServer } = WebSocket;
+const FNV1A_OFFSET_BASIS = 0xcbf29ce484222325n;
+const FNV1A_PRIME = 0x100000001b3n;
+const FNV1A_MASK = 0xffffffffffffffffn;
+const PCM_FORMAT = Buffer.from([0x80, 0x3e, 0x00, 0x00, 0x01, 0x00]);
+const updatePcmHash = (hash, bytes) => {
+  for (const byte of bytes) hash = ((hash ^ BigInt(byte)) * FNV1A_PRIME) & FNV1A_MASK;
+  return hash;
+};
+export function hashPcm16Mono16k(chunks) {
+  let hash = updatePcmHash(FNV1A_OFFSET_BASIS, PCM_FORMAT);
+  for (const chunk of chunks) hash = updatePcmHash(hash, chunk);
+  return hash.toString(16).padStart(16, '0');
+}
 
 // Delay forwarding Config, not merely displaying Ready. Audio queued behind Config
 // keeps the same order and bytes. This is an explicit test fault, never production code.
 export async function startConfigDelayProxy(upstreamUrl, delayMs, record) {
   const url = new URL(upstreamUrl);
   if (url.protocol !== 'ws:' || url.hostname !== '127.0.0.1' || !url.port || url.port === '51866' || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw new Error('Explicit TEST loopback required');
-  if (![0, 4000, 8000].includes(delayMs)) throw new Error('Unplanned Config delay');
+  if (![0, 1000, 4000, 8000].includes(delayMs)) throw new Error('Unplanned Config delay');
   const route = '/api/v1/transcribe/stream';
   url.pathname = route;
   const server = new WebSocketServer({ verifyClient: ({ req }) => req.url === route, host: '127.0.0.1', port: 0, maxPayload: 960_000, perMessageDeflate: false });
@@ -23,6 +36,7 @@ export async function startConfigDelayProxy(upstreamUrl, delayMs, record) {
     const upstream = new WebSocket(url, { headers: { Authorization: request.headers.authorization ?? '' }, maxPayload: 960_000, perMessageDeflate: false, handshakeTimeout: 15000 });
     sockets.add(client); sockets.add(upstream);
     const queue = []; let bytes = 0; let open = false; let released = false; let configSeen = false;
+    let intervalPcmHash = null;
     let deadline; let releaseTimer;
     const stop = () => { clearTimeout(deadline); timers.delete(deadline); clearTimeout(releaseTimer); timers.delete(releaseTimer); queue.length = 0; bytes = 0; client.terminate(); upstream.terminate(); };
     deadline = setTimeout(() => { timers.delete(deadline); record('fault_proxy_deadline'); stop(); }, 120000);
@@ -45,7 +59,8 @@ export async function startConfigDelayProxy(upstreamUrl, delayMs, record) {
             for (const key of ['type', 'session_id', 'provider_session_id', 'request_id', 'pause_epoch', 'decision', 'current_phase', 'eligible_now', 'accepted_capabilities', 'code', 'reason']) {
               if (message[key] !== undefined) details[key] = message[key];
             }
-            record('backend_control', details);
+            record('backend_control', { connectionId, ...details });
+            if (message.type === 'pause_accepted' && message.decision === 'accepted') intervalPcmHash = null;
           }
         } catch {}
       }
@@ -60,7 +75,12 @@ export async function startConfigDelayProxy(upstreamUrl, delayMs, record) {
         releaseTimer = setTimeout(() => { timers.delete(releaseTimer); released = true; flush(); }, delayMs);
         timers.add(releaseTimer);
       }
-      if (binary) record('client_binary', { connectionId, bytes: data.length });
+      if (binary) {
+        if (intervalPcmHash === null) intervalPcmHash = updatePcmHash(FNV1A_OFFSET_BASIS, PCM_FORMAT);
+        intervalPcmHash = updatePcmHash(intervalPcmHash, data);
+        record('client_binary', { connectionId, bytes: data.length,
+          pcmHash: intervalPcmHash.toString(16).padStart(16, '0') });
+      }
       bytes += data.length;
       if (bytes > 960_000 || queue.length >= 2048 || upstream.bufferedAmount > 960_000) { record('fault_proxy_overflow', { bytes }); stop(); return; }
       queue.push({ data, binary, config }); flush();

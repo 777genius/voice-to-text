@@ -1,7 +1,7 @@
 import { runRestartCrash } from './helpers/nativeRestartCrash.mjs';
 import { closeOwnedDocument, ownedDocumentMatches } from './helpers/nativeOwnedDocument.mjs';
 import { isDeepStrictEqual, promisify } from 'node:util';
-import { verifyQualificationTerminals, verifyQualificationSources, verifyQualificationConnections, verifyQualificationRoute, maxProxyEvidenceEvents, liveTrials, readApprovedFixtures, validateHarnessConfig, exactInsertionEvidence } from './helpers/nativeContinuation.mjs';
+import { verifyQualificationTerminals, verifyQualificationSources, verifyQualificationConnections, verifyQualificationRoute, verifyWarmProviderCanary, verifyWarmProviderTransport, verifyWarmProviderFinalFixtureAgreement, expectedWarmProviderContinues, maxProxyEvidenceEvents, liveTrials, readApprovedFixtures, validateHarnessConfig, exactInsertionEvidence } from './helpers/nativeContinuation.mjs';
 import { createWriteStream } from 'node:fs';
 import { spawn, execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -13,21 +13,266 @@ import { fileURLToPath } from 'node:url';
 const source = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const marker = 'VOICETEXT_NATIVE_WINDOW_E2E_V1';
 
+const positiveSafeInteger = value => Number.isSafeInteger(value) && value > 0;
+const nonnegativeSafeInteger = value => Number.isSafeInteger(value) && value >= 0;
+const emptyPcmHash = 'cbf29ce484222325';
+
+function generationMap(rows, validate) {
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  const generations = new Map();
+  for (const row of rows) {
+    if (!positiveSafeInteger(row?.captureGeneration) || !validate(row) ||
+        generations.has(row.captureGeneration)) return null;
+    generations.set(row.captureGeneration, row);
+  }
+  return generations;
+}
+
+function validateExactPcmEvidence(fixture, requireEveryCaptureDelivered, providerStopPerGeneration = true) {
+  const validLedger = ledger => nonnegativeSafeInteger(ledger.chunks) &&
+    nonnegativeSafeInteger(ledger.samples) && typeof ledger.hash === 'string' &&
+    /^[0-9a-f]{16}$/.test(ledger.hash) &&
+    (ledger.chunks === 0
+      ? ledger.samples === 0 && ledger.hash === emptyPcmHash
+      : ledger.samples > 0 && ledger.hash !== emptyPcmHash);
+  const validCaptureMarker = row => positiveSafeInteger(row.count) &&
+    positiveSafeInteger(row.firstSequence) && positiveSafeInteger(row.lastSequence) &&
+    row.firstSequence <= row.lastSequence;
+  const validProviderMarker = row => validCaptureMarker(row) &&
+    positiveSafeInteger(row.captureRunId) && positiveSafeInteger(row.captureFenceGeneration) &&
+    positiveSafeInteger(row.providerSessionId);
+  const validAssociation = row => positiveSafeInteger(row.captureRunId) &&
+    positiveSafeInteger(row.captureFenceGeneration);
+  const captures = generationMap(fixture?.capturePcmLedgers, validLedger);
+  const providers = generationMap(fixture?.providerPcmLedgers, validLedger);
+  const captureMarkers = generationMap(fixture?.captureMarkers, validCaptureMarker);
+  const providerMarkers = generationMap(fixture?.providerMarkers, validProviderMarker);
+  const providerSessionCount = providerMarkers ?
+    new Set([...providerMarkers.values()].map(row => row.providerSessionId)).size : 0;
+  const associations = generationMap(fixture?.captureRunAssociations, validAssociation);
+  const failureGenerations = fixture?.providerFailureCaptureGenerations;
+  if (!captures || !providers || !captureMarkers || !providerMarkers || !associations ||
+      captures.size !== associations.size || captures.size !== fixture.captureStarts ||
+      providers.size !== providerMarkers.size ||
+      !Array.isArray(failureGenerations) ||
+      failureGenerations.length !== fixture.providerFailures ||
+      failureGenerations.some(generation => !positiveSafeInteger(generation) || !captures.has(generation)) ||
+      (providerStopPerGeneration &&
+        (providerSessionCount + fixture.providerNoAudioStops < fixture.providerStops ||
+         providerSessionCount + fixture.providerNoAudioStops >
+           fixture.providerStops + fixture.warmTerminalCount))) return false;
+  const sameGenerations = (left, right) =>
+    left.size === right.size && [...left.keys()].every(generation => right.has(generation));
+  const capturesWithPcm = new Map([...captures].filter(([, ledger]) => ledger.chunks > 0));
+  const failed = new Set(failureGenerations);
+  const undelivered = [...capturesWithPcm.keys()].filter(generation => !providers.has(generation));
+  if (requireEveryCaptureDelivered ? undelivered.length !== 0 :
+    undelivered.some(generation => !failed.has(generation))) return false;
+  if (!sameGenerations(captures, associations) ||
+      !sameGenerations(capturesWithPcm, captureMarkers) ||
+      !sameGenerations(providers, providerMarkers)) return false;
+  for (const [generation, provider] of providers) {
+    const capture = captures.get(generation);
+    const captureMarker = captureMarkers.get(generation);
+    const marker = providerMarkers.get(generation);
+    const association = associations.get(generation);
+    if (!capture || !captureMarker || !marker || !association ||
+        capture.samples !== provider.samples || capture.hash !== provider.hash ||
+        marker.count !== captureMarker.count || marker.firstSequence !== captureMarker.firstSequence ||
+        marker.lastSequence !== captureMarker.lastSequence ||
+        marker.captureRunId !== association.captureRunId ||
+        marker.captureFenceGeneration !== association.captureFenceGeneration) return false;
+  }
+  return true;
+}
+
+function validateTerminalFixture(fixture, requireEveryCaptureDelivered) {
+  return fixture && Number.isSafeInteger(fixture.captureStarts) && fixture.captureStarts > 0 &&
+    fixture.captureStarts === fixture.captureStops && fixture.activeCaptures === 0 &&
+    fixture.activeProviders === 0 && fixture.maxActiveCaptures === 1 &&
+    fixture.maxActiveProviders === 1 && fixture.observationOverflow === false &&
+    positiveSafeInteger(fixture.providerStarts) &&
+    nonnegativeSafeInteger(fixture.providerResumes) &&
+    nonnegativeSafeInteger(fixture.providerFailures) &&
+    nonnegativeSafeInteger(fixture.providerStops) &&
+    nonnegativeSafeInteger(fixture.providerNoAudioStops) &&
+    nonnegativeSafeInteger(fixture.warmTerminalCount) &&
+    fixture.providerStops + fixture.warmTerminalCount ===
+      fixture.providerStarts + fixture.providerResumes &&
+    Array.isArray(fixture.markerViolations) && fixture.markerViolations.length === 0 &&
+    validateExactPcmEvidence(fixture, requireEveryCaptureDelivered);
+}
+
+function terminalEvidenceSignature(fixture) {
+  const keys = ['captureStarts', 'captureStops', 'providerStarts', 'providerResumes',
+    'providerFailures', 'providerFailureCaptureGenerations',
+    'providerStops', 'providerNoAudioStops', 'warmTerminalCount', 'activeCaptures',
+    'activeProviders', 'maxActiveCaptures', 'maxActiveProviders', 'physicalOpenCount',
+    'physicalCloseCount', 'observationOverflow',
+    'markerViolations', 'captureRunAssociations', 'captureMarkers', 'providerMarkers',
+    'capturePcmLedgers', 'providerPcmLedgers'];
+  return JSON.stringify(Object.fromEntries(keys.map(key => [key, fixture?.[key]])));
+}
+
 export function validateMiniUxResult(envelope) {
   const report = envelope.report;
   const final = report?.final;
   const cases = report?.cases;
+  const physical = report?.lifecycle?.physical;
+  const validCounts = counts => Number.isSafeInteger(counts?.open) && counts.open >= 0 &&
+    Number.isSafeInteger(counts?.close) && counts.close >= 0 && counts.close <= counts.open;
+  const sameCounts = (left, right) => left.open === right.open && left.close === right.close;
+  const oneOpen = (before, after) => after.open === before.open + 1 && after.close === before.close;
+  const oneClose = (before, after) => after.open === before.open && after.close === before.close + 1;
+  const physicalTransitionsValid = physical && Object.values(physical).every(validCounts) &&
+    sameCounts(physical.warmReopenStart, physical.warmReopenEnd) &&
+    sameCounts(physical.warmReopenEnd, physical.policyActive) &&
+    oneClose(physical.policyActive, physical.policyClosed) &&
+    sameCounts(physical.policyClosed, physical.policyColdActive) &&
+    sameCounts(physical.policyColdActive, physical.policyColdStopped) &&
+    oneOpen(physical.policyColdStopped, physical.policyResumed) &&
+    oneClose(physical.policyResumed, physical.sleepClosed) &&
+    oneOpen(physical.sleepClosed, physical.wakeOpened) &&
+    oneClose(physical.wakeOpened, physical.terminalClosed) &&
+    oneOpen(physical.terminalClosed, physical.recoveryOpened) &&
+    report.warmReuseOpenCount === physical.policyResumed.open &&
+    final?.fixture?.physicalOpenCount === physical.recoveryOpened.open &&
+    final?.fixture?.physicalCloseCount === physical.recoveryOpened.close &&
+    final.fixture.physicalOpenCount === final.fixture.physicalCloseCount + 1;
+  // Mini UX is an explicit warm acceptance run; cold bypass is not evidence.
+  const warmFrames = report?.warmActivationFrames;
+  const visibleFrames = report?.warmVisibleFrames;
+  const forbiddenStatusTexts = report?.warmForbiddenStatusTexts;
+  const readyFrames = report?.warmReadyFrames;
+  const nativeWindowEpochs = report?.warmWindowEpochs;
+  const exactPcmEvidenceValid = validateTerminalFixture(final?.fixture, true) &&
+    validateTerminalFixture(envelope.fixture, true) &&
+    terminalEvidenceSignature(final?.fixture) === terminalEvidenceSignature(envelope.fixture);
+  const firstVisibleFrames = Array.from({ length: 10 }, (_, index) =>
+    Array.isArray(visibleFrames)
+      ? visibleFrames.find(frame => frame?.attempt === index + 1)
+      : undefined);
+  const attemptIdentities = Array.isArray(readyFrames) ? readyFrames.map(frame => frame &&
+    `${frame.runId}:${frame.revision}`) : [];
+  const distinctAttemptIdentities = attemptIdentities.every(Boolean) &&
+    new Set(attemptIdentities).size === attemptIdentities.length;
+  const warmCaptureEvidenceValid = (() => {
+    const fixture = final?.fixture;
+    if (!Array.isArray(readyFrames) || !Array.isArray(fixture?.captureRunAssociations) ||
+        !Array.isArray(fixture?.capturePcmLedgers) || !Array.isArray(fixture?.providerPcmLedgers)) {
+      return false;
+    }
+    const generations = new Set();
+    return readyFrames.every(ready => {
+      const owned = fixture.captureRunAssociations.filter(row =>
+        row?.captureRunId === ready?.runId);
+      if (owned.length !== 1 || generations.has(owned[0].captureGeneration)) return false;
+      generations.add(owned[0].captureGeneration);
+      const capture = fixture.capturePcmLedgers.find(row =>
+        row.captureGeneration === owned[0].captureGeneration);
+      const provider = fixture.providerPcmLedgers.find(row =>
+        row.captureGeneration === owned[0].captureGeneration);
+      return positiveSafeInteger(owned[0].captureGeneration) &&
+        positiveSafeInteger(owned[0].captureFenceGeneration) &&
+        positiveSafeInteger(capture?.chunks) && positiveSafeInteger(capture?.samples) &&
+        positiveSafeInteger(provider?.chunks) && provider.samples === capture.samples &&
+        provider.hash === capture.hash;
+    });
+  })();
+  const advancingWindowEpochs = Array.isArray(nativeWindowEpochs) &&
+    nativeWindowEpochs.every((row, index) => index === 0 ||
+      row.windowEpoch > nativeWindowEpochs[index - 1].windowEpoch);
+  const nativeWindowEvidenceValid = Array.isArray(nativeWindowEpochs) &&
+    nativeWindowEpochs.length === 10 && nativeWindowEpochs.every((row, index) => {
+      const ready = readyFrames?.[index];
+      return row?.attempt === index + 1 && Number.isSafeInteger(row.windowEpoch) && row.windowEpoch > 0 &&
+        (row.baselineRevision === null ||
+          (Number.isSafeInteger(row.baselineRevision) && row.baselineRevision > 0)) &&
+        ready?.runId === row.runId && ready?.revision === row.revision &&
+        visibleFrames?.some(frame => frame.attempt === index + 1 && frame.windowEpoch === row.windowEpoch) &&
+        report.trace.some(sample => sample?.native?.visible === true &&
+          sample.native.windowEpoch === row.windowEpoch && sample.captureRunId === row.runId &&
+          sample.intentRevision === row.revision);
+    });
+  const captureReadyRecording = frame => frame.captureReady === true &&
+    ['finalizing-previous', 'connecting-provider', 'recording'].includes(frame.readinessReason) &&
+    /\brecording\b/.test(frame.phase) && !/\b(starting|processing)\b/.test(frame.phase);
+  const neutralAdmissionFrame = frame => frame.captureReady === false &&
+    [undefined, null, 'idle', 'activating-warm-capture'].includes(frame.readinessReason) &&
+    frame.statusText === '' && !/\b(recording|starting|processing)\b/.test(frame.phase);
+  const visibleFrameEvidenceValid = Array.isArray(forbiddenStatusTexts) &&
+    forbiddenStatusTexts.length === 2 && forbiddenStatusTexts.every(text =>
+      typeof text === 'string' && text.length > 0) && new Set(forbiddenStatusTexts).size === 2 &&
+    Array.isArray(visibleFrames) && visibleFrames.length >= 10 &&
+    visibleFrames.length <= 512 && visibleFrames.every(frame =>
+      Number.isSafeInteger(frame?.attempt) && frame.attempt >= 1 && frame.attempt <= 10 &&
+      ['render', 'shown', 'sample'].includes(frame.source) &&
+      Number.isSafeInteger(frame.windowEpoch) && frame.windowEpoch > 0 &&
+      ((frame.revision === null && frame.runId === null) ||
+        (Number.isSafeInteger(frame.revision) && frame.revision > 0 &&
+          (frame.runId === null || (Number.isSafeInteger(frame.runId) && frame.runId > 0)))) &&
+      typeof frame.captureReady === 'boolean' && typeof frame.phase === 'string' &&
+      typeof frame.statusText === 'string') &&
+    firstVisibleFrames.every((frame, index) => {
+      if (!frame) return false;
+      const ready = readyFrames?.[index];
+      const nativeWindow = nativeWindowEpochs?.[index];
+      const attemptFrames = visibleFrames.filter(candidate => candidate.attempt === index + 1);
+      const neutralActivation = neutralAdmissionFrame(frame);
+      const attemptFramesValid = attemptFrames.every(candidate => {
+        const candidateNeutral = neutralAdmissionFrame(candidate);
+        const candidateOwnershipValid = candidateNeutral
+          ? ((candidate.runId === null && candidate.revision === null) ||
+            (candidate.runId === null && candidate.revision === nativeWindow?.baselineRevision) ||
+            (candidate.runId === null && candidate.revision === ready?.revision) ||
+            (candidate.runId === ready?.runId && candidate.revision === ready?.revision))
+          : candidate.runId === ready?.runId && candidate.revision === ready?.revision;
+        return (candidateNeutral || captureReadyRecording(candidate)) && candidateOwnershipValid &&
+          !forbiddenStatusTexts.includes(candidate.statusText) &&
+          candidate.windowEpoch === frame.windowEpoch &&
+          candidate.windowEpoch === nativeWindow?.windowEpoch;
+      });
+      const firstOwnershipValid = neutralActivation
+        ? ((frame.runId === null && frame.revision === null) ||
+          (frame.runId === null && frame.revision === nativeWindow?.baselineRevision) ||
+          (frame.runId === null && frame.revision === ready?.revision) ||
+          (frame.runId === ready?.runId && frame.revision === ready?.revision))
+        : frame.runId === ready?.runId && frame.revision === ready?.revision;
+      return (neutralActivation || captureReadyRecording(frame)) && firstOwnershipValid &&
+        frame.windowEpoch === nativeWindow?.windowEpoch && attemptFramesValid;
+    }) && distinctAttemptIdentities && warmCaptureEvidenceValid &&
+    advancingWindowEpochs && nativeWindowEvidenceValid;
+  if (report?.warmMode !== true || report.warmReopens !== 10 || report.idleAcceptedDelta !== 0 ||
+       !Array.isArray(report.trace) || report.trace.length === 0 ||
+       !Array.isArray(readyFrames) || readyFrames.length !== 10 ||
+       readyFrames.some(frame => !Number.isSafeInteger(frame.runId) || frame.runId <= 0 ||
+         !Number.isSafeInteger(frame.revision) || !/\brecording\b/.test(frame.phase) || /\b(starting|processing)\b/.test(frame.phase)) ||
+       !visibleFrameEvidenceValid ||
+       !physicalTransitionsValid ||
+       report.lifecycle?.sleepClosed !== true || report.lifecycle?.wakeOpenedOnce !== true ||
+       report.lifecycle?.terminalCount !== 1 || report.lifecycle?.recoveryOpenedOnce !== true ||
+       !Array.isArray(warmFrames) || warmFrames.length === 0) {
+    throw new Error('Incomplete physical warm input evidence');
+  }
   if (envelope.marker !== marker || envelope.passed !== true || report?.passed !== true ||
       !Array.isArray(cases) || cases.length !== 3 ||
+      !Array.isArray(warmFrames) || warmFrames.length > 256 ||
+      warmFrames.some(frame => !['render', 'shown', 'sample'].includes(frame.source) ||
+        !Number.isSafeInteger(frame.revision) || frame.revision < 0 ||
+        !Number.isSafeInteger(frame.runId) || frame.runId <= 0 ||
+        frame.captureReady !== false || frame.statusText !== '' || typeof frame.phase !== 'string' ||
+        /\b(recording|starting|processing)\b/.test(frame.phase)) ||
       cases[0].stop !== 'hotkey' || cases[1].stop !== 'native-close' ||
       cases[2].stop !== 'background-start-during-hide' || cases[2].backgroundStartingBeforeHide !== true ||
       cases.some(c => !Number.isFinite(c.hideMs) || c.hideMs < 0 || c.hideMs > 1000 ||
-        c.bufferedBeforeStop !== true || c.oldProviderStillFinalizing !== true || c.observations < 2 ||
+        c.bufferedBeforeStop !== true || c.oldProviderStillFinalizing !== true ||
+        !Number.isSafeInteger(c.observations) || c.observations < 2 ||
         c.backgroundDidNotReopen !== true || c.markerDeliveryComplete !== true) ||
       cases[1].successorStayedVisible !== true || report.errors?.length !== 0 ||
       final?.visible !== false || final?.status !== 'Idle' || final?.preparedCaptureTokenCount !== 0 ||
       final?.fixture?.activeCaptures !== 0 || final?.fixture?.activeProviders !== 0 ||
-      final?.fixture?.maxActiveProviders !== 1 || final?.fixture?.markerViolations?.length !== 0) {
+      final?.fixture?.maxActiveProviders !== 1 || final?.fixture?.markerViolations?.length !== 0 ||
+      !exactPcmEvidenceValid) {
     throw new Error('Incomplete mini UX window evidence');
   }
   return report;
@@ -132,8 +377,11 @@ export function createQualificationCollector(trial, proxyEvents, readEnvelope, n
     catch (error) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return false; throw error; }
     const atMs = now();
     resultObservedMs ??= atMs;
+    const reportTrialId = trial.kind === 'warm-provider-canary'
+      ? pending.report?.trialId
+      : pending.report?.trial?.id;
     if (pending.marker !== marker || pending.passed !== true || pending.preTeardown?.normalStopReleased !== true ||
-        pending.preTeardown?.cleanupDeferredToRunner !== true || pending.report?.trial?.id !== trial.id)
+        pending.preTeardown?.cleanupDeferredToRunner !== true || reportTrialId !== trial.id)
       throw new Error('Missing successful pre-teardown native normal-Stop evidence');
     if (!isNativeAlive()) throw new Error('Native exited before normal-Stop closure collection');
     const boundary = { event: 'qualification_pre_teardown', atMs, clock: 'runner-performance-now', nativeProcessAlive: true };
@@ -142,6 +390,10 @@ export function createQualificationCollector(trial, proxyEvents, readEnvelope, n
     proxyEvents.push(boundary);
     return true;
   };
+}
+
+export function assertOwnedProcessGroupGone(groupGone) {
+  if (groupGone !== true) throw new Error('Owned native process group did not terminate');
 }
 
 export async function runOwned(command, args, options, timeoutMs, logPath, progressPath, collectBeforeTeardown, terminationPath, crashAfterCheckpoint = false) {
@@ -202,7 +454,11 @@ export async function runOwned(command, args, options, timeoutMs, logPath, progr
   const heartbeat = progressPath ? setInterval(async () => {
     try { const info = await stat(progressPath); lastProgress = Math.max(lastProgress, info.mtimeMs); } catch {}
     if (tearingDown) return;
-    const silenceLimit = lastProgress === started ? 45_000 : 60_000;
+    // The test process can be descheduled for over a minute on a loaded macOS
+    // GUI host even while its native/WebView work is still making bounded
+    // scenario progress. This watchdog only detects a dead harness; scenario
+    // polls and latency assertions below remain the product correctness gates.
+    const silenceLimit = lastProgress === started ? 120_000 : 180_000;
     if (!timedOut && Date.now() - lastProgress > silenceLimit) {
       timedOut = true;
       collectionError ??= new Error(`${path.basename(command)} failed: progress timeout`);
@@ -253,6 +509,7 @@ export async function runOwned(command, args, options, timeoutMs, logPath, progr
       await writeFile(terminationPath, JSON.stringify({ pid: child.pid,
         signal: child.signalCode, checkpointCollected: collected, failure: primaryFailure ? String(primaryFailure) : null,
         exited: child.exitCode !== null || child.signalCode !== null, groupGone }), { flag: 'wx' });
+      if (groupGone !== true) throw new Error('Owned native process group did not terminate');
     }
     } catch (error) {
       if (primaryFailure) throw new AggregateError([primaryFailure, error], `${primaryFailure.message}; process cleanup: ${error.message}`, { cause: primaryFailure });
@@ -776,14 +1033,121 @@ export function validateResult(envelope) {
     return report;
   }
   if (report?.mode === 'continuation-fake') {
+    const cycles = report.cycles;
+    const latencies = fixture?.firstPcmLatenciesMs;
+    const continuationGenerations = Array.from({ length: 51 }, (_, index) => index + 1);
+    const authoritativeControls = fixture?.controlResults;
+    const retainedLogicalRunId = report.logicalRunId;
+    const validCycles = Array.isArray(cycles) && cycles.length === 50 && cycles.every((cycle, index) =>
+      cycle?.cycle === index && cycle.captureGeneration === index + 2 &&
+      positiveSafeInteger(cycle.captureRunId) && positiveSafeInteger(cycle.captureFenceGeneration) &&
+      Number.isSafeInteger(cycle.windowEpoch) && cycle.windowEpoch > 0 &&
+      (index === 0 || cycle.windowEpoch > cycles[index - 1].windowEpoch) &&
+      cycle.providerStarts === 1 && cycle.micOffOnStop === true &&
+      Array.isArray(cycle.controls) && cycle.controls.length === 2 &&
+      cycle.controls[0]?.operation === 'pause' && cycle.controls[1]?.operation === 'continue' &&
+      cycle.controls[0].logicalRunId === cycle.controls[1].logicalRunId &&
+      cycle.controls[0].logicalRunId === retainedLogicalRunId &&
+      Number.isSafeInteger(retainedLogicalRunId) && retainedLogicalRunId > 0 &&
+      cycle.controls[0].delivered === true && cycle.controls[1].delivered === true &&
+      cycle.controls[0].result?.decision === 'accepted' && cycle.controls[1].result?.decision === 'accepted' &&
+      cycle.controls[1].result.eligible_now === true &&
+      cycle.controls[0].result.pause_epoch === cycle.controls[1].result.pause_epoch &&
+      cycle.controls[0].result.pause_epoch === index + 1);
+    const flattenedControls = Array.isArray(cycles) ? cycles.flatMap(cycle => cycle.controls ?? []) : [];
+    const terminalControl = Array.isArray(authoritativeControls) ? authoritativeControls.at(-1) : null;
+    const controlRequestIds = Array.isArray(authoritativeControls)
+      ? authoritativeControls.map(control => control?.result?.request_id) : [];
+    const validAuthoritativeControls = Array.isArray(authoritativeControls) &&
+      authoritativeControls.length === 101 && flattenedControls.length === 100 &&
+      flattenedControls.every((control, index) => isDeepStrictEqual(control, authoritativeControls[index])) &&
+      controlRequestIds.every(requestId => typeof requestId === 'string' && requestId.length > 0) &&
+      new Set(controlRequestIds).size === authoritativeControls.length &&
+      authoritativeControls.filter(control => control.operation === 'continue')
+        .every(control => control.result?.eligible_now === true) &&
+      terminalControl?.operation === 'pause' && terminalControl.logicalRunId === retainedLogicalRunId &&
+      terminalControl.delivered === true && terminalControl.result?.decision === 'accepted' &&
+      terminalControl.result.pause_epoch === 51;
+    const latencyValues = Array.isArray(latencies) ? latencies.map(row => row?.elapsedMs) : [];
+    const sortedLatencies = latencyValues.every(value => Number.isFinite(value) && value >= 0)
+      ? [...latencyValues].sort((left, right) => left - right) : [];
+    const measuredP95 = sortedLatencies.length === 51
+      ? sortedLatencies[Math.ceil(sortedLatencies.length * .95) - 1] : null;
+    const validLatencies = Array.isArray(latencies) && latencies.length === 51 &&
+      latencies.every((row, index) => row?.captureGeneration === index + 1) &&
+      measuredP95 !== null && measuredP95 <= 250 && report.p95FirstPcmMs === measuredP95;
+    const captureLedgers = generationMap(fixture?.capturePcmLedgers, ledger =>
+      positiveSafeInteger(ledger.chunks) && positiveSafeInteger(ledger.samples) &&
+      typeof ledger.hash === 'string' && /^[0-9a-f]{16}$/.test(ledger.hash) && ledger.hash !== emptyPcmHash);
+    const providerLedgers = generationMap(fixture?.providerPcmLedgers, ledger =>
+      positiveSafeInteger(ledger.chunks) && positiveSafeInteger(ledger.samples) &&
+      typeof ledger.hash === 'string' && /^[0-9a-f]{16}$/.test(ledger.hash) && ledger.hash !== emptyPcmHash);
+    const providerMarkers = generationMap(fixture?.providerMarkers, row =>
+      positiveSafeInteger(row.count) && positiveSafeInteger(row.firstSequence) &&
+      positiveSafeInteger(row.lastSequence) && row.firstSequence <= row.lastSequence &&
+      positiveSafeInteger(row.captureRunId) && positiveSafeInteger(row.captureFenceGeneration) &&
+      positiveSafeInteger(row.providerSessionId));
+    const captureAssociations = generationMap(fixture?.captureRunAssociations, row =>
+      positiveSafeInteger(row.captureRunId) && positiveSafeInteger(row.captureFenceGeneration));
+    const orderedCaptureOwnership = captureAssociations?.size === 51 &&
+      continuationGenerations.every((generation, index) => {
+        const association = captureAssociations.get(generation);
+        const previous = index === 0 ? null : captureAssociations.get(generation - 1);
+        const cycle = index === 0 ? null : cycles[index - 1];
+        return association && (!previous || (association.captureRunId > previous.captureRunId &&
+          association.captureFenceGeneration > previous.captureFenceGeneration)) &&
+          (!cycle || (cycle.captureGeneration === generation &&
+            cycle.captureRunId === association.captureRunId &&
+            cycle.captureFenceGeneration === association.captureFenceGeneration)) &&
+          providerMarkers?.get(generation)?.captureRunId === association.captureRunId &&
+          providerMarkers?.get(generation)?.captureFenceGeneration ===
+            association.captureFenceGeneration;
+      });
+    const validContinuationPcm = captureLedgers?.size === 51 && providerLedgers?.size === 51 &&
+      providerMarkers?.size === 51 && continuationGenerations.every(generation =>
+        captureLedgers.has(generation) && providerLedgers.has(generation) && providerMarkers.has(generation)) &&
+      new Set([...providerMarkers.values()].map(row => row.providerSessionId)).size === 1 &&
+      orderedCaptureOwnership;
+    const expectedProviderSessionId = validContinuationPcm
+      ? [...providerMarkers.values()][0].providerSessionId : null;
+    const expectedTranscript = expectedProviderSessionId === null
+      ? null : `Native fixture session ${expectedProviderSessionId}`;
+    const validControlProviderOwner = expectedProviderSessionId !== null &&
+      authoritativeControls?.every(control =>
+        control.result?.provider_session_id === `p4-${expectedProviderSessionId}`);
+    const stableDelivery = Array.isArray(report.stableDeliveries) && report.stableDeliveries.length === 1
+      ? report.stableDeliveries[0] : null;
+    const terminal = Array.isArray(report.terminals) && report.terminals.length === 1
+      ? report.terminals[0] : null;
+    const transcriptEvents = report.transcriptEvents;
+    const validTranscriptEvidence = stableDelivery?.sessionId === expectedProviderSessionId &&
+      positiveSafeInteger(stableDelivery?.deliverySeq) && stableDelivery?.text === expectedTranscript &&
+      terminal?.sessionId === expectedProviderSessionId && terminal?.complete === true &&
+      terminal?.stableSnapshot === expectedTranscript && Array.isArray(transcriptEvents) &&
+      transcriptEvents.length === 2 && transcriptEvents[0]?.event === 'final' &&
+      transcriptEvents[0]?.sessionId === expectedProviderSessionId &&
+      transcriptEvents[0]?.deliverySeq === stableDelivery.deliverySeq &&
+      transcriptEvents[0]?.text === expectedTranscript && transcriptEvents[0]?.complete === null &&
+      transcriptEvents[1]?.event === 'terminal' &&
+      transcriptEvents[1]?.sessionId === expectedProviderSessionId &&
+      transcriptEvents[1]?.deliverySeq === null && transcriptEvents[1]?.text === expectedTranscript &&
+      transcriptEvents[1]?.complete === true;
     if (envelope.marker !== marker || envelope.passed !== true || report.passed !== true ||
-        report.terminalCount !== 1 || report.stableDeliveries?.length !== 1 || report.final?.historyEntryCount !== 1 ||
-        report.completedCycles !== 50 || report.cycles?.length !== 50 ||
+        report.terminalCount !== 1 || !validTranscriptEvidence || report.final?.historyEntryCount !== 1 ||
+        report.completedCycles !== 50 || !validCycles || !validAuthoritativeControls ||
+        !validControlProviderOwner ||
+        !validLatencies || !validContinuationPcm ||
+        !validateTerminalFixture(fixture, true) || fixture?.observationOverflow !== false ||
         !Array.isArray(report.errors) || report.errors.length ||
         !Number.isFinite(report.p95FirstPcmMs) || report.p95FirstPcmMs < 0 || report.p95FirstPcmMs > 250 ||
-        fixture?.activeCaptures !== 0 || fixture?.activeProviders !== 0 || fixture?.maxActiveProviders !== 1 ||
+        !isDeepStrictEqual(fixture, report.final?.fixture) || report.final?.status !== 'Idle' ||
+        fixture?.activeCaptures !== 0 || fixture?.activeProviders !== 0 ||
+        fixture?.maxActiveCaptures !== 1 || fixture?.maxActiveProviders !== 1 ||
         fixture?.captureStarts !== 51 || fixture?.captureStops !== 51 || fixture?.providerStarts !== 1 ||
-        fixture?.providerResumes !== 0 || fixture?.finals !== 1 || fixture?.markerViolations?.length !== 0 ||
+        fixture?.providerStops !== 1 || fixture?.providerResumes !== 0 || fixture?.finals !== 1 ||
+        fixture?.providerFailures !== 0 || fixture?.providerNoAudioStops !== 0 ||
+        fixture?.warmTerminalCount !== 0 ||
+        fixture?.markerViolations?.length !== 0 ||
         report.final?.preparedCaptureTokenCount !== 0) throw new Error('Incomplete native continuation qualification');
     return report;
   }
@@ -808,14 +1172,131 @@ export function validateResult(envelope) {
     return report;
   }
   if (envelope?.marker !== marker || envelope.passed !== true || !report || !fixture ||
-      !Number.isFinite(report.elapsedMs) || report.elapsedMs < 180_000 || report.elapsedMs > 480_000 ||
+      !Number.isFinite(report.elapsedMs) || report.elapsedMs < 180_000 || report.elapsedMs > 900_000 ||
+      report.elapsedMs < report.hiddenIdleMs ||
       !Number.isSafeInteger(fixture.captureStarts) || fixture.captureStarts <= 0 ||
       fixture.activeCaptures !== 0 || fixture.activeProviders !== 0 || fixture.captureStarts !== fixture.captureStops ||
+      fixture.maxActiveCaptures !== 1 || fixture.maxActiveProviders !== 1 ||
+      fixture.observationOverflow !== false || !Array.isArray(fixture.markerViolations) ||
+      fixture.markerViolations.length !== 0 || !validateTerminalFixture(fixture, false) ||
       !Array.isArray(report.scenarios) || new Set(report.scenarios).size !== report.scenarios.length ||
       report.scenarios.some((name) => typeof name !== 'string' || !name) || report.scenarios.length < 12 ||
-      report.passed !== true || !Number.isSafeInteger(report.completedCycles) || report.completedCycles < 20 ||
+      report.passed !== true || report.completedCycles !== 50 ||
+      !Number.isSafeInteger(fixture.finals) || fixture.finals < 50 ||
+      report.final?.fixture?.activeCaptures !== 0 || report.final?.fixture?.activeProviders !== 0 ||
+      !isDeepStrictEqual(fixture, report.final?.fixture) ||
+      report.final?.preparedCaptureTokenCount !== 0 ||
       !Number.isFinite(report.hiddenIdleMs) || report.hiddenIdleMs < 180_000 || report.skipped) {
     throw new Error(`Native result is incomplete: ${JSON.stringify(envelope)}`);
+  }
+  const cycles = report.cycleEvidence;
+  const cycleFinalDeliveries = report.cycleFinalDeliveries;
+  const allFinalDeliveries = report.allFinalDeliveries;
+  const expectedFinalSessionIds = report.expectedFinalSessionIds;
+  const independentlyExpectedFinalSessionIds = [...new Set((fixture.providerMarkers ?? [])
+    .map(markerRow => markerRow?.captureRunId)
+    .filter(positiveSafeInteger))].sort((left, right) => left - right);
+  const expectedTranscriptForSession = sessionId => {
+    const providerSessionIds = [...new Set((fixture.providerMarkers ?? [])
+      .filter(markerRow => markerRow.captureRunId === sessionId)
+      .map(markerRow => markerRow.providerSessionId))];
+    return providerSessionIds.length === 1 && positiveSafeInteger(providerSessionIds[0])
+      ? `Native fixture session ${providerSessionIds[0]}` : null;
+  };
+  const requiredScenarios = ['50-audio-transcript-stop-hide-reopen-cycles',
+    'real-hidden-idle-180s-and-fresh-audio'];
+  if (!Array.isArray(cycles) || cycles.length !== 50 ||
+    !Array.isArray(cycleFinalDeliveries) || cycleFinalDeliveries.length !== cycles.length ||
+    !Array.isArray(allFinalDeliveries) || !Array.isArray(expectedFinalSessionIds) ||
+    allFinalDeliveries.length !== expectedFinalSessionIds.length ||
+    allFinalDeliveries.length !== fixture.finals ||
+    new Set(expectedFinalSessionIds).size !== expectedFinalSessionIds.length ||
+    !isDeepStrictEqual(expectedFinalSessionIds, independentlyExpectedFinalSessionIds) ||
+    expectedFinalSessionIds.some((sessionId, index) =>
+      allFinalDeliveries[index]?.sessionId !== sessionId) ||
+    expectedFinalSessionIds.some(sessionId => !positiveSafeInteger(sessionId) ||
+      allFinalDeliveries.filter(delivery => delivery.sessionId === sessionId).length !== 1) ||
+    allFinalDeliveries.some(delivery => !expectedFinalSessionIds.includes(delivery.sessionId) ||
+      typeof delivery.text !== 'string' || !delivery.text.trim() ||
+      delivery.text !== expectedTranscriptForSession(delivery.sessionId) ||
+      (delivery.deliverySeq !== null && !positiveSafeInteger(delivery.deliverySeq))) ||
+    cycleFinalDeliveries.some((delivery, index) =>
+      delivery.sessionId !== cycles[index]?.sessionId ||
+      delivery.text !== cycles[index]?.expectedTranscript ||
+      delivery.deliverySeq !== cycles[index]?.finalDeliverySeq ||
+      !allFinalDeliveries.some(candidate => candidate.sessionId === delivery.sessionId &&
+        candidate.text === delivery.text && candidate.deliverySeq === delivery.deliverySeq)) ||
+    cycles.some((row, index) =>
+    row?.index !== index || !Number.isSafeInteger(row.captureStartsBefore) ||
+    !Number.isSafeInteger(row.captureStartsAfter) || row.captureStartsAfter <= row.captureStartsBefore ||
+    !Number.isSafeInteger(row.captureStopsBefore) ||
+    row.captureStopsAfter - row.captureStopsBefore !== row.captureStartsAfter - row.captureStartsBefore ||
+    !Number.isSafeInteger(row.sessionId) || row.sessionId <= 0 ||
+    !Number.isSafeInteger(row.windowEpoch) || row.windowEpoch <= 0 ||
+    !Number.isSafeInteger(row.captureGeneration) || row.captureGeneration <= 0 ||
+    !Array.isArray(row.captureGenerations) ||
+    row.captureGenerations.length !== row.captureStartsAfter - row.captureStartsBefore ||
+    row.captureGenerations.at(-1) !== row.captureGeneration ||
+    row.captureGenerations.some((generation, generationIndex) =>
+      !positiveSafeInteger(generation) ||
+      (generationIndex > 0 && generation <= row.captureGenerations[generationIndex - 1])) ||
+    typeof row.expectedTranscript !== 'string' || !row.expectedTranscript.trim() ||
+    row.expectedTranscript !== expectedTranscriptForSession(row.sessionId) ||
+    row.finalSessionId !== row.sessionId || row.finalText !== row.expectedTranscript ||
+    (row.finalDeliverySeq !== null && (!Number.isSafeInteger(row.finalDeliverySeq) || row.finalDeliverySeq <= 0)) ||
+    (index > 0 && (row.captureStartsBefore !== cycles[index - 1].captureStartsAfter ||
+      row.captureStopsBefore !== cycles[index - 1].captureStopsAfter ||
+      row.sessionId <= cycles[index - 1].sessionId || row.windowEpoch <= cycles[index - 1].windowEpoch ||
+      row.captureGenerations[0] <= cycles[index - 1].captureGeneration ||
+      row.finalSessionId <= cycles[index - 1].finalSessionId))) ||
+    cycles.some(row => {
+      const deliveries = cycleFinalDeliveries.filter(delivery => delivery.sessionId === row.sessionId);
+      return deliveries.length !== 1 || deliveries[0].text !== row.expectedTranscript ||
+        deliveries[0].deliverySeq !== row.finalDeliverySeq;
+    }) ||
+    cycles[49].captureStartsAfter > fixture.captureStarts || cycles[49].captureStopsAfter > fixture.captureStops ||
+    cycles.some(row => {
+      const capture = fixture.capturePcmLedgers.find(ledger => ledger.captureGeneration === row.captureGeneration);
+      const provider = fixture.providerPcmLedgers.find(ledger => ledger.captureGeneration === row.captureGeneration);
+      const ownershipValid = row.captureGenerations.every(generation =>
+        fixture.captureRunAssociations.some(association =>
+          association.captureGeneration === generation && association.captureRunId === row.sessionId));
+      return !ownershipValid || !capture || capture.samples <= 0 || !provider || provider.chunks <= 0 ||
+        provider.samples !== capture.samples || provider.hash !== capture.hash;
+    }) || requiredScenarios.some(name => !report.scenarios.includes(name))) {
+    throw new Error(`Native result cycle evidence is incomplete: ${JSON.stringify(envelope)}`);
+  }
+  const idle = report.hiddenIdleEvidence;
+  if (!idle || idle.nativeHiddenIdleMs !== report.hiddenIdleMs ||
+      !Number.isFinite(idle.webviewElapsedMs) || idle.webviewElapsedMs < 180_000 ||
+      !Number.isSafeInteger(idle.baselineCaptureStarts) ||
+      idle.baselineCaptureStarts !== idle.baselineCaptureStops ||
+      idle.baselineActiveCaptures !== 0 || idle.baselineActiveProviders !== 0 ||
+      !Number.isSafeInteger(idle.baselineCaptureGeneration) || idle.baselineCaptureGeneration < 0 ||
+      !Number.isSafeInteger(idle.wakeCaptureGeneration) ||
+      idle.wakeCaptureGeneration <= idle.baselineCaptureGeneration ||
+      idle.wakeCaptureGeneration <= cycles[49].captureGeneration ||
+      !Number.isSafeInteger(idle.wakeSessionId) || idle.wakeSessionId <= cycles[49].sessionId ||
+      allFinalDeliveries.filter(delivery => delivery.sessionId === idle.wakeSessionId).length !== 1 ||
+      !allFinalDeliveries.some(delivery => delivery.sessionId === idle.wakeSessionId &&
+        delivery.text === idle.wakeTranscript) ||
+      !Number.isSafeInteger(idle.wakeWindowEpoch) || idle.wakeWindowEpoch <= cycles[49].windowEpoch ||
+      typeof idle.wakeTranscript !== 'string' || !idle.wakeTranscript.trim() ||
+      !fixture.captureRunAssociations.some(association =>
+        association.captureGeneration === idle.wakeCaptureGeneration &&
+        association.captureRunId === idle.wakeSessionId) ||
+      !fixture.capturePcmLedgers.some(capture => {
+        const provider = fixture.providerPcmLedgers.find(ledger =>
+          ledger.captureGeneration === idle.wakeCaptureGeneration);
+        return capture.captureGeneration === idle.wakeCaptureGeneration && capture.samples > 0 &&
+          provider?.chunks > 0 && provider.samples === capture.samples && provider.hash === capture.hash;
+      }) ||
+      !Number.isFinite(idle.firstVisibleMs) || idle.firstVisibleMs < 0 ||
+      !Number.isSafeInteger(idle.wakeSampleCount) || idle.wakeSampleCount < 2 ||
+      !Number.isFinite(idle.lastVisibleElapsedMs) ||
+      idle.lastVisibleElapsedMs - idle.firstVisibleMs < 1200 ||
+      !Number.isSafeInteger(idle.visibilityTransitionCount) || idle.visibilityTransitionCount < 1) {
+    throw new Error(`Native result hidden-idle evidence is incomplete: ${JSON.stringify(envelope)}`);
   }
   return report;
 }
@@ -933,8 +1414,8 @@ export async function main(args = process.argv.slice(2)) {
   const proxyStarted = performance.now();
   const { startConfigDelayProxy } = trial ? await import('./helpers/nativeContinuationProxy.mjs') : {};
   const proxy = trial ? await startConfigDelayProxy(provenance.endpoint, trial.configDelayMs, (event, details) => {
-    // The longest approved source is 49.3 s. At the native 30 ms audio cadence it
-    // produces fewer than 1,650 binary events, leaving bounded room for controls.
+    // The canary includes bounded churn plus one complete 49.3 s source. Keep
+    // even the all-sources-complete worst case for ownership and cleanup proof.
     if (proxyEvents.length < maxProxyEvidenceEvents) proxyEvents.push({ event, ...details, atMs: performance.now() - proxyStarted });
     else if (proxyEvents.length === maxProxyEvidenceEvents) proxyEvents.push({ event: 'fault_proxy_evidence_overflow' });
   }) : null;
@@ -955,7 +1436,13 @@ export async function main(args = process.argv.slice(2)) {
   try {
     if (interruption) throw interruption;
     // Event/preparation timeout: 30 seconds, then up to 5 seconds SIGTERM grace before SIGKILL.
-    await runOwned(binary, [], { cwd: directory, env }, options.miniUx ? 90_000 : options.readerPreparation || ['E04', 'E41', 'E42', 'after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle'].includes(options.continuationCase) ? 30_000 : 480_000, path.join(directory, `native-runtime-${randomUUID()}.log`), path.join(directory, 'native-progress.jsonl'), collectBeforeTeardown, path.join(directory, 'native-process-termination.json'));
+    const runtimeTimeoutMs = options.miniUx ? 480_000
+      : trial?.kind === 'warm-provider-canary' ? 900_000
+      : options.readerPreparation || ['E04', 'E41', 'E42'].includes(options.continuationCase) ? 30_000
+      : 900_000;
+    await runOwned(binary, [], { cwd: directory, env }, runtimeTimeoutMs,
+      path.join(directory, `native-runtime-${randomUUID()}.log`), path.join(directory, 'native-progress.jsonl'),
+      collectBeforeTeardown, path.join(directory, 'native-process-termination.json'));
   } catch (error) { runtimeFailure = error; }
   finally {
     if (proxy) {
@@ -990,19 +1477,40 @@ export async function main(args = process.argv.slice(2)) {
     const verification = { passed: false, qualificationPassed: false, trialId: trial.id, actualPasteVerified: false };
     try {
       const report = envelope.report;
-      if (envelope.marker !== marker || envelope.passed !== true || report?.passed !== true || report.errors?.length || report.trial?.id !== trial.id) throw new Error('Native live qualification failed');
+      const reportTrialId = trial.kind === 'warm-provider-canary' ? report?.trialId : report?.trial?.id;
+      if (envelope.marker !== marker || envelope.passed !== true || report?.passed !== true || report.errors?.length || reportTrialId !== trial.id) throw new Error('Native live qualification failed');
       const target = path.join(directory, 'p4-textedit-a.txt');
       const script = `tell application "TextEdit"\nset matches to ${ownedDocumentMatches(target)}\nif (count matches) is not 1 then error "TEST document identity missing or ambiguous"\nreturn text of item 1 of matches\nend tell`;
       const readbackStartMs = performance.now() - proxyStarted;
       const { stdout } = await promisify(execFile)('/usr/bin/osascript', ['-e', script], { timeout: 5000, maxBuffer: 1024 * 1024 });
       verification.readback = { clock: 'runner-performance-now', startMs: readbackStartMs, endMs: performance.now() - proxyStarted };
-      Object.assign(verification, exactInsertionEvidence(report.expectedInsertion, stdout.replace(/\n$/, ''), report.targetDocument));
       Object.assign(verification, verifyQualificationConnections(trial, proxyEvents));
       Object.assign(verification, verifyQualificationRoute(trial, proxyEvents));
-      verifyQualificationSources(trial, report.final?.fixture);
-      verifyQualificationTerminals(trial, report.episodes, report.terminals);
-      const accepted = proxyEvents.filter(e => e.event === 'backend_control' && e.type === 'continue_result' && e.decision === 'accepted' && e.eligible_now === true);
-      if (trial.continuation && accepted.length !== 1) throw new Error('Exactly one eligible Continue acceptance required');
+      if (trial.kind === 'warm-provider-canary') {
+        if (stdout.replace(/\n$/, '') !== '') {
+          throw new Error('Warm provider canary changed immutable delivery policy or pasted unexpectedly');
+        }
+        verification.noUnexpectedPaste = true;
+        Object.assign(verification,
+          verifyWarmProviderFinalFixtureAgreement(report.final.fixture, envelope.fixture));
+        Object.assign(verification, verifyWarmProviderCanary(trial, report));
+        Object.assign(verification, verifyWarmProviderTransport(proxyEvents, report.final.fixture, report));
+        if (verification.clientAudioBytes !== verification.transmittedPcmBytes) {
+          throw new Error('Warm provider route and transport byte evidence disagree');
+        }
+        const accepted = proxyEvents.filter(e => e.event === 'backend_control' &&
+          e.type === 'continue_result' && e.decision === 'accepted' && e.eligible_now === true);
+        const expectedContinues = expectedWarmProviderContinues(trial);
+        if (accepted.length !== expectedContinues) {
+          throw new Error('Warm provider canary did not retain every expected continuation');
+        }
+      } else {
+        Object.assign(verification, exactInsertionEvidence(report.expectedInsertion, stdout.replace(/\n$/, ''), report.targetDocument));
+        verifyQualificationSources(trial, report.final?.fixture);
+        verifyQualificationTerminals(trial, report.episodes, report.terminals);
+        const accepted = proxyEvents.filter(e => e.event === 'backend_control' && e.type === 'continue_result' && e.decision === 'accepted' && e.eligible_now === true);
+        if (trial.continuation && accepted.length !== 1) throw new Error('Exactly one eligible Continue acceptance required');
+      }
       verification.continueOutcomes = proxyEvents.filter(e => e.event === 'backend_control');
       // Upstream provider connect count must come from backend/native instrumentation, not socket inference.
       verification.limitations = ['Provider handshake/Continue eligibility and native insertion timing require parent instrumentation; this is pipeline evidence only.'];

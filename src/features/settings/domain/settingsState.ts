@@ -22,6 +22,7 @@ export function areSettingsStatesEqual(a: SettingsState | null, b: SettingsState
     a.hideRecordingWindowOnHotkey === b.hideRecordingWindowOnHotkey &&
     a.showMiniRecordingWindow === b.showMiniRecordingWindow &&
     a.keepRecordingUntilManualStop === b.keepRecordingUntilManualStop &&
+    a.keepMicrophoneReady === b.keepMicrophoneReady &&
     a.holdToRecord === b.holdToRecord &&
     a.doubleSpaceHotkeyEnabled === b.doubleSpaceHotkeyEnabled &&
     a.streamingKeyterms === b.streamingKeyterms &&

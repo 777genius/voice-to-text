@@ -1,20 +1,33 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { approvedFixtures, maxProxyEvidenceEvents, validatePcm, readApprovedFixtures, liveTrials, validateHarnessConfig, exactInsertionEvidence } from './nativeContinuation.mjs';
+import { approvedFixtures, maxProxyEvidenceEvents, validatePcm, readApprovedFixtures, liveTrials,
+  warmProviderCanaryJittersMs, warmProviderCanaryPhases, warmProviderCanaryTrial,
+  validateHarnessConfig, exactInsertionEvidence, expectedWarmProviderCallbackGenerations,
+  expectedWarmProviderContinues, expectedWarmProviderLogicalRuns,
+  verifyWarmProviderFinalFixtureAgreement } from './nativeContinuation.mjs';
 import { parseArguments, sanitizedEnvironment, validateResult } from '../run-native-window-e2e.mjs';
 test('qualification requires explicit opt in and inherits no feature flags', () => {
   assert.deepEqual(parseArguments(['--continuation-fake']), { continuationFake: true });
   assert.equal(sanitizedEnvironment('/tmp/example', { VOICETEXT_EL_PAUSE_CONTINUE_V1: 'true' }).VOICETEXT_EL_PAUSE_CONTINUE_V1, undefined);
 });
-test('fixed live budget includes all trials and full long clock', async () => {
-  assert.equal(liveTrials.length, 12);
+test('fixed live budget includes all trials and full long clock', async t => {
+  assert.equal(liveTrials.length, 13);
   assert.equal(liveTrials.filter(x => x.id.startsWith('warm-baseline')).length, 3);
   assert.equal(liveTrials.filter(x => x.id.startsWith('warm-continue')).length, 3);
-  assert.equal(new Set(liveTrials.map(x => x.id)).size, 12);
+  assert.equal(new Set(liveTrials.map(x => x.id)).size, 13);
   assert.equal(approvedFixtures['long-auto-commit.pcm'][0] / 32, 49268);
   const longestTwoEpisodeBytes = approvedFixtures['long-auto-commit.pcm'][0] + approvedFixtures['episode-b.pcm'][0];
   assert.ok(Math.ceil(longestTwoEpisodeBytes / 640) + 128 < maxProxyEvidenceEvents);
-  const rows = await readApprovedFixtures(new URL('../../../qualification-fixtures', import.meta.url).pathname);
+  let rows;
+  try {
+    rows = await readApprovedFixtures(new URL('../../../qualification-fixtures', import.meta.url).pathname);
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      t.diagnostic('external qualification PCM is unavailable; pinned identity checks remain covered offline');
+      return;
+    }
+    throw error;
+  }
   assert.equal(rows.length, 5);
   for (const row of rows) assert.equal(validatePcm(row.name, row.pcm).sourceFrames * 2, row.bytes);
 });
@@ -68,9 +81,784 @@ test('cold capture source outlasts every Config fault at the original sample clo
   }
 });
 
-test('mode counts and initial-only Ready gate preserve the twelve prescribed trials', async () => {
+test('paid warm provider canary fixes 20 churn cycles, four stop phases, five jitters and one full proof', async () => {
+  const { qualificationExpectations, verifyQualificationConnections, verifyQualificationRoute,
+    verifyWarmProviderCanary, verifyWarmProviderTransport } = await import('./nativeContinuation.mjs');
+  assert.equal(warmProviderCanaryTrial.cycles.length, 20);
+  assert.equal(warmProviderCanaryTrial.configDelayMs, 1000);
+  assert.equal(warmProviderCanaryTrial.readyGateTimeoutMs, 1800);
+  assert.ok(warmProviderCanaryTrial.configDelayMs < warmProviderCanaryTrial.readyGateTimeoutMs);
+  assert.ok(warmProviderCanaryTrial.readyGateTimeoutMs < 2200);
+  assert.deepEqual([...new Set(warmProviderCanaryTrial.cycles.map(cycle => cycle.stopPhase))], warmProviderCanaryPhases);
+  assert.deepEqual([...new Set(warmProviderCanaryTrial.cycles.map(cycle => cycle.jitterMs))], warmProviderCanaryJittersMs);
+  assert.equal(new Set(warmProviderCanaryTrial.cycles.map(cycle => cycle.episode)).size, 2);
+  assert.ok(!warmProviderCanaryTrial.cycles.some(cycle =>
+    cycle.episode === warmProviderCanaryTrial.episodes[warmProviderCanaryTrial.finalEpisodeIndex]));
+  const worstCaseFrames = warmProviderCanaryTrial.episodes.reduce((total, name) =>
+    total + Math.ceil(approvedFixtures[name][0] / 640), 0);
+  assert.ok(worstCaseFrames + 512 < maxProxyEvidenceEvents);
+  const expected = qualificationExpectations(warmProviderCanaryTrial);
+  assert.equal(expected.captures, 21);
+  assert.deepEqual([expected.minBackendConnections, expected.maxBackendConnections], [7, 13]);
+  assert.equal(expectedWarmProviderContinues(warmProviderCanaryTrial), 9);
+  assert.equal(expectedWarmProviderLogicalRuns(warmProviderCanaryTrial), 12);
+  assert.deepEqual(expectedWarmProviderCallbackGenerations(warmProviderCanaryTrial),
+    [7, 8, 9, 10, 11, 12, 13, 14, 15]);
+  const connection = (connectionId, captures) => {
+    const providerSessionId = `provider-${connectionId}`;
+    const rows = [
+      { event: 'fault_proxy_connected', connectionId },
+      { event: 'backend_control', type: 'ready', connectionId, session_id: providerSessionId },
+    ];
+    for (let index = 0; index < captures; index++) {
+      if (index > 0) rows.push({ event: 'backend_control', type: 'continue_result', connectionId,
+        provider_session_id: providerSessionId, decision: 'accepted', eligible_now: true,
+        request_id: `continue-${connectionId}-${index}`, pause_epoch: index });
+      rows.push({ event: 'client_binary', connectionId, bytes: 640 });
+      rows.push({ event: 'backend_control', type: 'pause_accepted', connectionId,
+        provider_session_id: providerSessionId, decision: 'accepted',
+        request_id: `pause-${connectionId}-${index}`, pause_epoch: index + 1 });
+    }
+    rows.push({ event: 'fault_proxy_close', connectionId, direction: 'upstream', code: 1000 });
+    return rows;
+  };
+  const routeEvents = [connection(1, 10), connection(2, 1), connection(3, 1),
+    connection(4, 1), connection(5, 1), connection(6, 1), connection(7, 1)].flat();
+  const boundary = { event: 'qualification_pre_teardown', atMs: 10,
+    clock: 'runner-performance-now', nativeProcessAlive: true };
+  assert.equal(verifyQualificationConnections(warmProviderCanaryTrial,
+    [...routeEvents, boundary]).backendConnections, 7);
+  const connected = routeEvents[0];
+  const closed = routeEvents.find(event => event.event === 'fault_proxy_close');
+  assert.throws(() => verifyQualificationConnections(warmProviderCanaryTrial,
+    [connected, { ...closed, connectionId: 999 }, boundary]), /Unmatched upstream close/);
+  assert.equal(verifyQualificationRoute(warmProviderCanaryTrial,
+    routeEvents).maximumActiveProviderSessions, 1);
+  assert.deepEqual(verifyQualificationRoute(warmProviderCanaryTrial,
+    routeEvents).retainedProviderSessionIds,
+  ['provider-1', 'provider-2', 'provider-3', 'provider-4', 'provider-5', 'provider-6',
+    'provider-7']);
+  const productionRequestIds = structuredClone(routeEvents);
+  for (const connectionId of [1, 2, 3, 4, 5, 6, 7]) {
+    let controlSequence = 0;
+    productionRequestIds.filter(event => event.connectionId === connectionId &&
+      event.event === 'backend_control' && event.request_id).forEach(event => {
+      controlSequence += 1;
+      event.request_id = `1-${controlSequence}`;
+    });
+  }
+  assert.equal(verifyQualificationRoute(warmProviderCanaryTrial,
+    productionRequestIds).maximumActiveProviderSessions, 1,
+  'request IDs are instance-local and may repeat across distinct provider sessions');
+  const replayedContinue = structuredClone(routeEvents);
+  const firstContinue = replayedContinue.find(event => event.type === 'continue_result');
+  replayedContinue.filter(event => event.type === 'continue_result').slice(1).forEach(event => {
+    event.request_id = firstContinue.request_id;
+    event.pause_epoch = firstContinue.pause_epoch;
+  });
+  assert.throws(() => verifyQualificationRoute(warmProviderCanaryTrial, replayedContinue),
+    /Continue acceptance is out of order/);
+  const audioWhilePaused = structuredClone(routeEvents);
+  const firstPause = audioWhilePaused.findIndex(event => event.type === 'pause_accepted');
+  audioWhilePaused.splice(firstPause + 1, 0,
+    { event: 'client_binary', connectionId: 1, bytes: 640 });
+  assert.throws(() => verifyQualificationRoute(warmProviderCanaryTrial, audioWhilePaused),
+    /audio while provider session was paused/);
+  assert.throws(() => verifyQualificationRoute(warmProviderCanaryTrial, [connected]));
+  const missingContinue = structuredClone(routeEvents);
+  missingContinue.splice(missingContinue.findIndex(event => event.type === 'continue_result'), 1);
+  assert.throws(() => verifyQualificationRoute(warmProviderCanaryTrial, missingContinue));
+
+  const events = [];
+  const terminals = [];
+  let cycleClock = 0;
+  const cycles = warmProviderCanaryTrial.cycles.map((plan, index) => {
+    const logicalRunId = index < warmProviderCanaryTrial.readyGateFromIndex
+      ? 100 + index : index < 15 ? 100 + warmProviderCanaryTrial.readyGateFromIndex : 100 + index;
+    const captureRunId = 100 + index;
+    const captureFenceGeneration = index * 2 + 1;
+    const eventStart = events.length;
+    const markerId = plan.episode === 'episode-a.pcm' ? 0 : 1;
+    const phrase = markerId === 0 ? 'на столе лежит книга' : 'за окном растет береза';
+    const triggerDeliverySeqFloor = events.filter(event => event.sessionId === logicalRunId &&
+      Number.isSafeInteger(event.deliverySeq))
+      .reduce((maximum, event) => Math.max(maximum, event.deliverySeq), 0);
+    const providerStartSamples = index < warmProviderCanaryTrial.readyGateFromIndex
+      ? null : index < 15 ? (index - warmProviderCanaryTrial.readyGateFromIndex) * 320 : 0;
+    const partialText = markerId === 0 ? 'на столе уже' : 'за окном уже';
+    if (plan.stopPhase === 'during-partial') events.push({ event: 'transcription:partial', text: partialText,
+      cycleIndex: index, sessionId: logicalRunId, deliverySeq: null, markerIds: [markerId],
+      timingKnown: true, sourceStartSeconds: providerStartSamples / 16000, sourceDurationSeconds: 0.02 });
+    if (plan.stopPhase === 'after-final') events.push(
+      { event: 'transcription:final', text: phrase, cycleIndex: index, sessionId: logicalRunId,
+        deliverySeq: index + 1, markerIds: [markerId], timingKnown: false,
+        sourceStartSeconds: 0, sourceDurationSeconds: 0 });
+    const stopEventIndex = events.length;
+    if (plan.stopPhase === 'before-ready') {
+      events.push({ event: 'transcription:terminal', cycleIndex: index, sessionId: logicalRunId,
+        deliverySeq: null, markerIds: [] });
+      terminals.push({ sessionId: logicalRunId, cycleIndex: index, complete: true,
+        stableSnapshot: '' });
+    }
+    const startedAtMs = cycleClock;
+    const previousSettleToStartMs = index === 0 ? null : warmProviderCanaryTrial.cycles[index - 1].jitterMs;
+    const resetAfter = warmProviderCanaryTrial.cycles[index + 1]?.resetProviderBefore === true ||
+      (index === warmProviderCanaryTrial.cycles.length - 1 &&
+        warmProviderCanaryTrial.resetProviderBeforeFinal === true);
+    const providerResetSettledAtMs = resetAfter ? startedAtMs + 150 : undefined;
+    const cycle = { ...plan, startedAtMs, previousSettleToStartMs, triggerAtMs: startedAtMs + 20,
+      captureStoppedAtMs: startedAtMs + 30, settledAtMs: startedAtMs + 50,
+      captureGeneration: index + 1, logicalRunId, captureRunId,
+      captureFenceGeneration,
+      triggerEventStart: eventStart,
+      stopEventIndex,
+      callbackFenceGeneration: expectedWarmProviderCallbackGenerations(warmProviderCanaryTrial)
+        .includes(index + 1) ? index + 1 : null,
+      triggerProviderSamples: plan.stopPhase === 'before-ready' ? null : 320,
+      providerStartSamples, triggerDeliverySeqFloor: plan.stopPhase === 'before-ready'
+        ? null : triggerDeliverySeqFloor,
+      readyGateElapsedMs: index >= warmProviderCanaryTrial.readyGateFromIndex ? 1200 : null,
+      association: plan.stopPhase === 'before-ready' ? null : {
+        captureGeneration: index + 1, captureRunId, captureFenceGeneration },
+      trigger: plan.stopPhase === 'before-ready' ? { readyBeforeStop: false,
+        providerTransportBeforeStop: { serverReady: false, connectionRetained: false },
+        statusBeforeStop: 'Starting', nativeBoundaryMs: index + 1 } :
+        plan.stopPhase === 'during-partial' ? { event: 'transcription:partial', episode: plan.episode,
+          deliverySeq: null } :
+        plan.stopPhase === 'after-final' ? { event: 'transcription:final', episode: plan.episode,
+          deliverySeq: index + 1 } : { emittedFrames: 320 },
+      eventStart, eventEnd: events.length, activeCapturesAfterStop: 0,
+      ...(resetAfter ? { providerResetSettledAtMs } : {}) };
+    if (resetAfter) {
+      events.push({ event: 'transcription:terminal', cycleIndex: index, sessionId: logicalRunId,
+        deliverySeq: null, markerIds: [] });
+      terminals.push({ sessionId: logicalRunId, cycleIndex: index, complete: true,
+        stableSnapshot: plan.stopPhase === 'after-final' ? phrase : '' });
+      cycle.eventEnd = events.length;
+    }
+    cycleClock = (providerResetSettledAtMs ?? cycle.settledAtMs) + plan.jitterMs;
+    return cycle;
+  });
+  const finalLogicalRunId = 120;
+  const finalProviderStartSamples = 0;
+  const finalSourceFrames = approvedFixtures['long-auto-commit.pcm'][0] / 2;
+  const finalTranscriptEventStart = events.length;
+  const finalDeliverySeqFloor = events.filter(event => event.sessionId === finalLogicalRunId &&
+    Number.isSafeInteger(event.deliverySeq))
+    .reduce((maximum, event) => Math.max(maximum, event.deliverySeq), 0);
+  events.push(
+    { event: 'transcription:final', cycleIndex: 20, sessionId: finalLogicalRunId,
+      deliverySeq: 99, text: 'на столе лежит книга за окном растет береза', markerIds: [0, 1],
+      timingKnown: false, sourceStartSeconds: 0, sourceDurationSeconds: 0 });
+  // Model the real race: the final is delivered before the state poll observes
+  // the native callback generation. The earlier source-release fence must keep
+  // this valid delivery eligible.
+  const finalCallbackEventStart = events.length;
+  events.push({ event: 'transcription:terminal', cycleIndex: 20, sessionId: finalLogicalRunId,
+    deliverySeq: null, markerIds: [] });
+  terminals.push({ sessionId: finalLogicalRunId, cycleIndex: 20, complete: true,
+    stableSnapshot: 'на столе лежит книга за окном растет береза' });
+  const sources = warmProviderCanaryTrial.episodes.map((name, index) => {
+    const bytes = approvedFixtures[name][0];
+    const sourceFrames = bytes / 2;
+    const sourceDurationMs = bytes / 32;
+    const emittedFrames = index === 20 ? sourceFrames :
+      warmProviderCanaryTrial.cycles[index].stopPhase === 'before-ready' ? 0 : 320;
+    const chunks = Math.ceil(emittedFrames / 320);
+    const nativeSourceStartMs = emittedFrames > 0 ? 1000 + index * 100_000 : null;
+    const lastSourceFrameElapsedMs = emittedFrames > 0 ? (chunks - 1) * 20 : null;
+    return { name, bytes, captureGeneration: index + 1, sourceFrames, sourceDurationMs, cadenceMs: 20,
+      emittedFrames, nativeSourceStartMs,
+      nativeLastSourceFrameMs: emittedFrames > 0 ? nativeSourceStartMs + lastSourceFrameElapsedMs : null,
+      lastSourceFrameElapsedMs, pacingIntervalsChecked: emittedFrames > 0 ? chunks - 1 : undefined,
+      pacingViolations: emittedFrames > 0 ? 0 : undefined,
+      nativeSourceEndMs: index === 20 ? nativeSourceStartMs + sourceDurationMs : null,
+      sourceGateRequired: index >= warmProviderCanaryTrial.readyGateFromIndex,
+      sourceGateReady: index >= warmProviderCanaryTrial.readyGateFromIndex ?
+        { serverReady: true, status: 'Processing', nativeReadyMs: 900, emittedFrames: 0 } : null };
+  });
+  const captureRunAssociations = cycles.flatMap((cycle, index) => cycle.association ? [cycle.association] : [])
+    .concat({ captureGeneration: 21, captureRunId: 999, captureFenceGeneration: 41 });
+  const capturePcmLedgers = sources.map((source, index) => ({
+    captureGeneration: index + 1,
+    chunks: Math.ceil(source.emittedFrames / 320),
+    samples: source.emittedFrames,
+    hash: source.emittedFrames > 0 ? '0123456789abcdef' : 'cbf29ce484222325',
+  }));
+  const fixture = { captureStarts: 21, captureStops: 21, activeCaptures: 0, maxActiveCaptures: 1,
+    providerStarts: 7, providerResumes: 0, providerStops: 7, activeProviders: 0,
+    maxActiveProviders: 1, providerFailures: 0, providerNoAudioStops: 5, warmTerminalCount: 0,
+    observationOverflow: false, markerViolations: [], sourceEpisodes: sources,
+    captureRunAssociations, capturePcmLedgers,
+    providerPcmLedgers: capturePcmLedgers.filter(row => row.samples > 0).map(row => ({ ...row })),
+    providerCallbackGenerations: expectedWarmProviderCallbackGenerations(warmProviderCanaryTrial) };
+  const report = { mode: 'warm-provider-canary', passed: true, trialId: warmProviderCanaryTrial.id,
+    errors: [], duplicateDeliveries: [], cycles, events,
+    finalTextBeforeProof: '',
+    expectedInsertion: 'на столе лежит книга за окном растет береза',
+    finalStartedAtMs: cycleClock,
+    finalReadyElapsedMs: 1200,
+    finalCallbackFence: { captureGeneration: 21, eventStart: finalCallbackEventStart },
+    finalTranscriptFence: { eventStart: finalTranscriptEventStart,
+      providerSamples: sources[20].sourceFrames, providerStartSamples: finalProviderStartSamples,
+      deliverySeqFloor: finalDeliverySeqFloor },
+    finalOwnership: { logicalRunId: finalLogicalRunId, captureRunId: 999,
+      captureFenceGeneration: 41 },
+    terminals, final: { status: 'Idle', preparedCaptureTokenCount: 0,
+      providerTransport: { connectionRetained: false }, fixture } };
+  assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, report).churnCycles, 20);
+  const mixedStalePartial = structuredClone(report);
+  const mixedPartialCycle = mixedStalePartial.cycles[12];
+  const validPartial = mixedStalePartial.events.find(event =>
+    event.cycleIndex === 12 && event.event === 'transcription:partial');
+  const stalePartialIndex = mixedPartialCycle.stopEventIndex;
+  mixedStalePartial.events.splice(stalePartialIndex, 0, {
+    ...validPartial, sourceStartSeconds: 0, sourceDurationSeconds: 0.02,
+  });
+  for (const cycle of mixedStalePartial.cycles) {
+    if (cycle.index === 12) {
+      cycle.stopEventIndex += 1;
+      cycle.eventEnd += 1;
+    } else if (cycle.index > 12) {
+      cycle.eventStart += 1;
+      cycle.triggerEventStart += 1;
+      cycle.stopEventIndex += 1;
+      cycle.eventEnd += 1;
+    }
+  }
+  mixedStalePartial.finalTranscriptFence.eventStart += 1;
+  mixedStalePartial.finalCallbackFence.eventStart += 1;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial,
+    mixedStalePartial), /Cycle 12 missed transcription:partial evidence/,
+  'a valid trigger cannot hide a stale partial outside the current source interval');
+  const foreignStartupTranscript = structuredClone(report);
+  const startupEventIndex = foreignStartupTranscript.finalTranscriptFence.eventStart;
+  foreignStartupTranscript.events.splice(startupEventIndex, 0, {
+    event: 'transcription:partial', cycleIndex: -1, sessionId: 9999,
+    text: 'stale foreign text', deliverySeq: null, markerIds: [],
+  });
+  foreignStartupTranscript.finalTranscriptFence.eventStart += 1;
+  foreignStartupTranscript.finalCallbackFence.eventStart += 1;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial,
+    foreignStartupTranscript), /Final warm provider proof is incomplete/);
+  const slowFinalReset = structuredClone(report);
+  const lastCycle = slowFinalReset.cycles.at(-1);
+  lastCycle.providerResetSettledAtMs = lastCycle.settledAtMs + 700;
+  slowFinalReset.finalStartedAtMs = lastCycle.providerResetSettledAtMs + lastCycle.jitterMs;
+  assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, slowFinalReset).churnCycles, 20,
+    'final jitter starts after the prescribed provider retirement completes');
+  const segmentedFinal = structuredClone(report);
+  const finalEventIndex = segmentedFinal.events.findIndex(event =>
+    event.cycleIndex === 20 && event.event === 'transcription:final');
+  const stableTemplate = segmentedFinal.events[finalEventIndex];
+  segmentedFinal.events.splice(finalEventIndex, 1,
+    { ...stableTemplate, deliverySeq: 99, text: 'на столе лежит книга', markerIds: [0] },
+    { ...stableTemplate, deliverySeq: 100, text: 'за окном растет береза', markerIds: [1] });
+  segmentedFinal.finalCallbackFence.eventStart += 1;
+  assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, segmentedFinal).churnCycles, 20);
+  const phraseSegmentedFinal = structuredClone(segmentedFinal);
+  const firstFinalIndex = phraseSegmentedFinal.events.findIndex(event =>
+    event.cycleIndex === 20 && event.event === 'transcription:final');
+  const firstStable = phraseSegmentedFinal.events[firstFinalIndex];
+  phraseSegmentedFinal.events.splice(firstFinalIndex, 1,
+    { ...firstStable, text: 'на', markerIds: [], deliverySeq: 99 },
+    { ...firstStable, text: 'столе лежит книга', markerIds: [], deliverySeq: 100 });
+  phraseSegmentedFinal.events[firstFinalIndex + 2].deliverySeq = 101;
+  phraseSegmentedFinal.finalCallbackFence.eventStart += 1;
+  assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, phraseSegmentedFinal).churnCycles, 20,
+    'markers are derived from the aggregate when a provider segments inside a phrase');
+  const duplicateFragmentFinal = structuredClone(report);
+  const duplicateFragmentIndex = duplicateFragmentFinal.events.findIndex(event =>
+    event.cycleIndex === 20 && event.event === 'transcription:final');
+  const duplicateFragmentTemplate = duplicateFragmentFinal.events[duplicateFragmentIndex];
+  duplicateFragmentFinal.events.splice(duplicateFragmentIndex, 1,
+    { ...duplicateFragmentTemplate, text: 'на', markerIds: [], deliverySeq: 99 },
+    { ...duplicateFragmentTemplate, text: 'на', markerIds: [], deliverySeq: 100 },
+    { ...duplicateFragmentTemplate, text: 'столе лежит книга', markerIds: [], deliverySeq: 101 },
+    { ...duplicateFragmentTemplate, text: 'за окном растет береза', markerIds: [1], deliverySeq: 102 });
+  duplicateFragmentFinal.finalCallbackFence.eventStart += 3;
+  duplicateFragmentFinal.expectedInsertion = 'на на столе лежит книга за окном растет береза';
+  duplicateFragmentFinal.terminals.find(terminal => terminal.cycleIndex === 20).stableSnapshot =
+    duplicateFragmentFinal.expectedInsertion;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial,
+    duplicateFragmentFinal), /Final warm provider proof is incomplete/,
+  'duplicate Stable fragments cannot hide outside complete-phrase occurrence counts');
+  const duplicateTimedFinal = structuredClone(report);
+  const timedTemplate = { ...duplicateTimedFinal.events[finalTranscriptEventStart],
+    deliverySeq: null, text: 'на столе лежит книга', markerIds: [0], timingKnown: true,
+    sourceStartSeconds: 0, sourceDurationSeconds: 0.5 };
+  duplicateTimedFinal.events.splice(finalTranscriptEventStart, 0,
+    { ...timedTemplate }, { ...timedTemplate });
+  duplicateTimedFinal.finalCallbackFence.eventStart += 2;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial,
+    duplicateTimedFinal), /Final warm provider proof is incomplete/,
+  'duplicate contained timed Finals are rejected independently of Stable evidence');
+  const staleMixedFinal = structuredClone(segmentedFinal);
+  const stalePhrase = staleMixedFinal.events.find(event => event.cycleIndex === 20 &&
+    event.event === 'transcription:final' && event.markerIds.includes(1) &&
+    Number.isSafeInteger(event.deliverySeq));
+  stalePhrase.text = 'на столе лежит книга';
+  stalePhrase.deliverySeq = 1_000;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, staleMixedFinal),
+    /Final warm provider proof is incomplete/,
+    'a fresh-sequence stale phrase cannot complete the current final generation');
+  const crossingFinal = structuredClone(report);
+  crossingFinal.events.splice(crossingFinal.finalCallbackFence.eventStart, 0, {
+    event: 'transcription:final', cycleIndex: 20, sessionId: finalLogicalRunId,
+    deliverySeq: null, text: 'на столе лежит книга за окном растет береза', markerIds: [0, 1],
+    timingKnown: true, sourceStartSeconds: (finalProviderStartSamples - 1) / 16000,
+    sourceDurationSeconds: 1,
+  });
+  crossingFinal.finalCallbackFence.eventStart += 1;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, crossingFinal),
+    /Final warm provider proof is incomplete/,
+    'a timed final crossing the generation lower boundary is rejected');
+  const contradictoryOffset = structuredClone(report);
+  contradictoryOffset.finalTranscriptFence.providerStartSamples = 320;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, contradictoryOffset),
+    /Final warm provider proof is incomplete/,
+    'the reported final offset must equal preceding same-session PCM ledgers');
+  const contradictoryCycleOffset = structuredClone(report);
+  contradictoryCycleOffset.cycles[12].providerStartSamples =
+    contradictoryCycleOffset.cycles[10].providerStartSamples;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial,
+    contradictoryCycleOffset), /Cycle 12 lost capture\/provider ownership/,
+  'every churn offset must equal preceding same-session PCM ledgers');
+  assert.equal(verifyWarmProviderFinalFixtureAgreement(fixture, structuredClone(fixture))
+    .finalNativeFixtureAgreement, true);
+  const collapsedJitters = structuredClone(report);
+  let previousSettlement = collapsedJitters.cycles[0].providerResetSettledAtMs ??
+    collapsedJitters.cycles[0].settledAtMs;
+  for (const cycle of collapsedJitters.cycles.slice(1)) {
+    const shiftedStart = previousSettlement + 500;
+    const shift = shiftedStart - cycle.startedAtMs;
+    for (const field of ['startedAtMs', 'triggerAtMs', 'captureStoppedAtMs', 'settledAtMs',
+      'providerResetSettledAtMs']) {
+      if (Number.isFinite(cycle[field])) cycle[field] += shift;
+    }
+    cycle.previousSettleToStartMs = 500;
+    previousSettlement = cycle.providerResetSettledAtMs ?? cycle.settledAtMs;
+  }
+  collapsedJitters.finalStartedAtMs = previousSettlement + 500;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, collapsedJitters),
+    /cycle 1 evidence is contradictory/,
+    'measured reopen intervals cannot collapse every requested jitter to 500ms');
+  const contradictoryTerminalFixture = structuredClone(fixture);
+  contradictoryTerminalFixture.providerPcmLedgers.at(-1).samples -= 320;
+  assert.throws(() => verifyWarmProviderFinalFixtureAgreement(fixture, contradictoryTerminalFixture),
+    /contradicts terminal native fixture/);
+  for (const field of ['providerFailures', 'providerNoAudioStops', 'warmTerminalCount']) {
+    const contradictoryLifecycle = structuredClone(fixture);
+    contradictoryLifecycle[field] += 1;
+    assert.throws(() => verifyWarmProviderFinalFixtureAgreement(fixture, contradictoryLifecycle),
+      /contradicts terminal native fixture/,
+      `terminal native ${field} cannot contradict the retained report`);
+  }
+  const ledgerBytes = fixture.providerPcmLedgers.reduce((sum, row) => sum + row.samples * 2, 0);
+  const ownerByGeneration = new Map(report.cycles.map(cycle =>
+    [cycle.captureGeneration, cycle.logicalRunId]));
+  ownerByGeneration.set(captureRunAssociations.at(-1).captureGeneration,
+    report.finalOwnership.logicalRunId);
+  const buildTransport = forcedSplitIndex => {
+    const result = [];
+    let connectionId = 0;
+    let previousOwner = null;
+    fixture.providerPcmLedgers.forEach((ledger, index) => {
+      const owner = ownerByGeneration.get(ledger.captureGeneration);
+      const opensConnection = owner !== previousOwner || index === forcedSplitIndex;
+      if (opensConnection) {
+        if (connectionId > 0) result.push({ event: 'fault_proxy_close', connectionId,
+          direction: 'upstream', code: 1000 });
+        connectionId++;
+        result.push({ event: 'fault_proxy_connected', connectionId },
+          { event: 'backend_control', type: 'ready', connectionId });
+      } else {
+        result.push({ event: 'backend_control', type: 'continue_result',
+          decision: 'accepted', eligible_now: true, connectionId });
+      }
+      result.push({ event: 'client_binary', connectionId,
+        bytes: ledger.samples * 2, pcmHash: ledger.hash },
+      { event: 'backend_control', type: 'pause_accepted', decision: 'accepted', connectionId });
+      previousOwner = owner;
+    });
+    result.push({ event: 'fault_proxy_close', connectionId, direction: 'upstream', code: 1000 });
+    return result;
+  };
+  const transportEvents = buildTransport(null);
+  assert.equal(verifyWarmProviderTransport(transportEvents, fixture, report)
+    .transmittedPcmBytes, ledgerBytes);
+  const wrongBytes = structuredClone(transportEvents);
+  wrongBytes.find(event => event.event === 'client_binary').bytes -= 2;
+  assert.throws(() => verifyWarmProviderTransport(wrongBytes, fixture, report), /does not match/);
+  const wrongConnection = structuredClone(transportEvents);
+  wrongConnection.find(event => event.event === 'client_binary').connectionId = 2;
+  assert.throws(() => verifyWarmProviderTransport(wrongConnection, fixture, report), /open connection/);
+  const wrongInterval = structuredClone(transportEvents);
+  const transportFirstPause = wrongInterval.findIndex(event => event.type === 'pause_accepted');
+  wrongInterval.splice(transportFirstPause + 1, 0, { event: 'client_binary', connectionId: 1,
+    bytes: 2, pcmHash: '0123456789abcdef' });
+  const wrongHash = structuredClone(transportEvents);
+  wrongHash.find(event => event.event === 'client_binary').pcmHash = 'ffffffffffffffff';
+  assert.throws(() => verifyWarmProviderTransport(wrongHash, fixture, report), /does not match/);
+  assert.throws(() => verifyWarmProviderTransport(wrongInterval, fixture, report), /paused interval/);
+  const replacedProvider = buildTransport(5);
+  assert.throws(() => verifyWarmProviderTransport(replacedProvider, fixture, report),
+    /replaced or reused/, 'one logical owner cannot move to another provider connection');
+  assert.equal(verifyWarmProviderTransport([
+    { event: 'fault_proxy_connected', connectionId: 1 },
+    { event: 'client_binary', connectionId: 1, bytes: 4, pcmHash: '0123456789abcdef' },
+    { event: 'fault_proxy_close', connectionId: 1, direction: 'upstream', code: 1000 },
+    { event: 'fault_proxy_connected', connectionId: 2 },
+    { event: 'backend_control', type: 'ready', connectionId: 2 },
+    { event: 'client_binary', connectionId: 2, bytes: 6, pcmHash: 'fedcba9876543210' },
+    { event: 'backend_control', type: 'pause_accepted', decision: 'accepted', connectionId: 2 },
+    { event: 'fault_proxy_close', connectionId: 2, direction: 'upstream', code: 1000 },
+  ], { providerPcmLedgers: [
+    { captureGeneration: 1, chunks: 1, samples: 2, hash: '0123456789abcdef' },
+    { captureGeneration: 2, chunks: 1, samples: 3, hash: 'fedcba9876543210' },
+  ], captureRunAssociations: [
+    { captureGeneration: 2, captureRunId: 20, captureFenceGeneration: 3 },
+  ] }, { cycles: [{ captureGeneration: 1, logicalRunId: 1 }],
+    finalOwnership: { captureRunId: 20, captureFenceGeneration: 3,
+      logicalRunId: 2 } }).transmittedPcmBytes, 10);
+  const contradictoryProviderLifecycle = structuredClone(report);
+  Object.assign(contradictoryProviderLifecycle.final.fixture,
+    { providerStarts: 9, providerStops: 0, activeProviders: 8, maxActiveProviders: 8 });
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial,
+    contradictoryProviderLifecycle), /capture lifecycle is incomplete/);
+  const missingEarlyTerminal = structuredClone(report);
+  missingEarlyTerminal.terminals.shift();
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, missingEarlyTerminal),
+    /Final warm provider proof is incomplete/);
+  const alreadyReadyAtEarlyStop = structuredClone(report);
+  const earlyCycle = alreadyReadyAtEarlyStop.cycles.find(row => row.stopPhase === 'before-ready');
+  earlyCycle.trigger.readyBeforeStop = true;
+  earlyCycle.trigger.providerTransportBeforeStop.serverReady = true;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, alreadyReadyAtEarlyStop),
+    /before-Ready proof/);
+  const missingNativeStopBoundary = structuredClone(report);
+  delete missingNativeStopBoundary.cycles.find(row => row.stopPhase === 'before-ready')
+    .trigger.nativeBoundaryMs;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, missingNativeStopBoundary),
+    /before-Ready proof/);
+  for (const [mutationIndex, mutate] of [
+    value => value.cycles.pop(),
+    value => { value.cycles[5].association.captureRunId = 9999; },
+    value => { value.cycles[15].logicalRunId = value.cycles[14].logicalRunId; },
+    value => { value.events.find(event => event.event === 'transcription:partial').cycleIndex = 99; },
+    value => { const cycle = value.cycles.find(row => row.stopPhase === 'during-partial');
+      const event = value.events.slice(cycle.triggerEventStart, cycle.eventEnd)
+        .find(row => row.event === 'transcription:partial');
+      event.text = cycle.episode === 'episode-a.pcm' ? 'за окном растет береза' : 'на столе лежит книга'; },
+    value => { value.final.fixture.sourceEpisodes[20].emittedFrames--; },
+    value => { value.final.fixture.capturePcmLedgers.pop(); },
+    value => { value.final.fixture.captureRunAssociations.push(
+      { ...value.final.fixture.captureRunAssociations[0] }); },
+    value => { value.final.fixture.captureRunAssociations.find(row => row.captureGeneration === 6)
+      .captureRunId = 99999; },
+    value => { const previous = value.cycles[5]; const cycle = value.cycles[6];
+      cycle.captureRunId = previous.captureRunId;
+      cycle.captureFenceGeneration = previous.captureFenceGeneration;
+      cycle.association.captureRunId = previous.captureRunId;
+      cycle.association.captureFenceGeneration = previous.captureFenceGeneration;
+      const association = value.final.fixture.captureRunAssociations
+        .find(row => row.captureGeneration === cycle.captureGeneration);
+      association.captureRunId = previous.captureRunId;
+      association.captureFenceGeneration = previous.captureFenceGeneration; },
+    value => { value.final.fixture.captureRunAssociations = value.final.fixture.captureRunAssociations
+      .filter(row => row.captureGeneration !== 6); },
+    value => { value.final.fixture.captureRunAssociations.push({ captureGeneration: 1,
+      captureRunId: 99999, captureFenceGeneration: 1 }); },
+    value => { value.final.fixture.providerPcmLedgers[0].hash = 'ffffffffffffffff'; },
+    value => { value.final.fixture.capturePcmLedgers.forEach(row => { row.chunks = 0; row.samples = 0; row.hash = 'cbf29ce484222325'; });
+      value.final.fixture.providerPcmLedgers = []; },
+    value => { const source = value.final.fixture.sourceEpisodes[20];
+      source.bytes = 640; source.sourceFrames = 320; source.emittedFrames = 320;
+      source.sourceDurationMs = 20; source.nativeSourceEndMs = source.nativeSourceStartMs; },
+    value => { value.final.fixture.sourceEpisodes[20].pacingIntervalsChecked = 0; },
+    value => { value.final.fixture.sourceEpisodes[20].lastSourceFrameElapsedMs = 0; },
+    value => { value.finalTextBeforeProof = value.expectedInsertion; },
+    value => { value.cycles[5].readyGateElapsedMs = 2200; },
+    value => { value.finalReadyElapsedMs = 2200; },
+    value => { value.expectedInsertion = 'unrelated junk'; },
+    value => { value.expectedInsertion = 'лишний текст на столе лежит книга за окном растет береза'; },
+    value => { value.events.splice(-1, 0, { event: 'transcription:error', cycleIndex: 20,
+      sessionId: 1019, deliverySeq: null, markerIds: [] }); },
+    value => { value.terminals.find(terminal => terminal.cycleIndex === 0).stableSnapshot = null; },
+    value => { value.terminals.at(-1).stableSnapshot = 'WRONG TERMINAL TEXT'; },
+    value => { value.terminals.find(terminal => terminal.cycleIndex === 15).stableSnapshot =
+      'WRONG EARLIER TERMINAL TEXT'; },
+    value => { value.events.find(event => event.cycleIndex === 20 &&
+      event.event === 'transcription:final').text += '!!!'; },
+    value => { value.final.fixture.providerCallbackGenerations.pop(); },
+    value => { value.finalCallbackFence.captureGeneration = 20; },
+    value => { value.finalCallbackFence.eventStart = value.events.length; },
+    value => { value.finalTranscriptFence.eventStart = value.events.length - 1; },
+    value => { value.finalTranscriptFence.eventStart = -2; },
+    value => { value.finalTranscriptFence.deliverySeqFloor = 99; },
+    value => { const cycle = value.cycles.find(row => row.stopPhase === 'after-final');
+      cycle.triggerEventStart += 1; },
+    value => { const cycle = value.cycles.find(row => row.stopPhase === 'after-final');
+      const event = value.events.slice(cycle.triggerEventStart, cycle.stopEventIndex)
+        .find(row => row.event === 'transcription:final');
+      event.text = cycle.episode === 'episode-a.pcm' ? 'за окном растет береза' : 'на столе лежит книга';
+      event.markerIds = [cycle.episode === 'episode-a.pcm' ? 1 : 0]; },
+    value => { const cycle = value.cycles.find(row => row.stopPhase === 'after-final');
+      const event = value.events.slice(cycle.triggerEventStart, cycle.stopEventIndex)
+        .find(row => row.event === 'transcription:final');
+      event.timingKnown = true;
+      event.sourceStartSeconds = (cycle.providerStartSamples + cycle.triggerProviderSamples) / 16000;
+      event.sourceDurationSeconds = 0.02; },
+    value => { const cycle = value.cycles.find(row => row.stopPhase === 'after-final');
+      const event = value.events.slice(cycle.triggerEventStart, cycle.stopEventIndex)
+        .find(row => row.event === 'transcription:final');
+      event.timingKnown = true;
+      event.sourceStartSeconds = 0.1;
+      event.sourceDurationSeconds = 0.14; },
+    value => { const cycle = value.cycles.find(row => row.stopPhase === 'after-final');
+      const event = value.events.slice(cycle.triggerEventStart, cycle.stopEventIndex)
+        .find(row => row.event === 'transcription:final');
+      cycle.triggerDeliverySeqFloor = event.deliverySeq; },
+    value => { value.cycles[1].previousSettleToStartMs = 5_000; },
+    value => { value.cycles[6].logicalRunId = 500; },
+    value => { delete value.events.find(event => event.event === 'transcription:final' &&
+      Number.isSafeInteger(event.deliverySeq)).deliverySeq; },
+    value => { value.events.find(event => event.cycleIndex === 20 && event.event === 'transcription:final').event = 'transcription:partial'; },
+    value => { value.finalOwnership.logicalRunId = value.finalOwnership.captureRunId; },
+    value => value.terminals.push({ sessionId: finalLogicalRunId, cycleIndex: 20, complete: true }),
+    value => { value.terminals[0].sessionId = 123; },
+    value => value.duplicateDeliveries.push('1:1:final'),
+    value => value.events.push({ event: 'transcription:final', cycleIndex: 19,
+      sessionId: 119, deliverySeq: 1000, markerIds: [] }),
+  ].entries()) {
+    const invalid = structuredClone(report); mutate(invalid);
+    assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, invalid),
+      `warm canary mutation ${mutationIndex} must be rejected`);
+  }
+  const insertBeforeStop = (value, cycle, event) => {
+    const at = cycle.stopEventIndex;
+    value.events.splice(at, 0, event);
+    for (const row of value.cycles) {
+      if (row.index === cycle.index) {
+        row.stopEventIndex += 1;
+        row.eventEnd += 1;
+      } else if (row.index > cycle.index) {
+        row.eventStart += 1;
+        row.triggerEventStart += 1;
+        row.stopEventIndex += 1;
+        row.eventEnd += 1;
+      }
+    }
+    value.finalCallbackFence.eventStart += 1;
+    value.finalTranscriptFence.eventStart += 1;
+  };
+  const insertAfterStop = (value, cycle, event) => {
+    const at = cycle.stopEventIndex;
+    value.events.splice(at, 0, event);
+    cycle.eventEnd += 1;
+    for (const row of value.cycles) {
+      if (row.index > cycle.index) {
+        row.eventStart += 1;
+        row.triggerEventStart += 1;
+        row.stopEventIndex += 1;
+        row.eventEnd += 1;
+      }
+    }
+    value.finalCallbackFence.eventStart += 1;
+    value.finalTranscriptFence.eventStart += 1;
+  };
+  const lateRetainedFinal = structuredClone(report);
+  const retainedCycle = lateRetainedFinal.cycles[12];
+  const retainedPhrase = retainedCycle.episode === 'episode-a.pcm'
+    ? 'на столе лежит книга' : 'за окном растет береза';
+  insertAfterStop(lateRetainedFinal, retainedCycle, {
+    event: 'transcription:final', cycleIndex: retainedCycle.index,
+    sessionId: retainedCycle.logicalRunId, deliverySeq: 700, text: retainedPhrase,
+    markerIds: [retainedCycle.episode === 'episode-a.pcm' ? 0 : 1],
+    timingKnown: false, sourceStartSeconds: 0, sourceDurationSeconds: 0,
+  });
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, lateRetainedFinal),
+    /lost capture\/provider ownership|Final warm provider proof is incomplete/,
+    'an unpaired untimed Stable cannot be attributed by receipt ownership');
+  const postStopTimedFinal = structuredClone(report);
+  const timedCycle = postStopTimedFinal.cycles.find(row => row.stopPhase === 'during-partial');
+  const timedPhrase = timedCycle.episode === 'episode-a.pcm' ? 'на столе' : 'за окном';
+  insertAfterStop(postStopTimedFinal, timedCycle, {
+    event: 'transcription:final', cycleIndex: timedCycle.index,
+    sessionId: timedCycle.logicalRunId, deliverySeq: null, text: timedPhrase,
+    markerIds: [timedCycle.episode === 'episode-a.pcm' ? 0 : 1], timingKnown: true,
+    sourceStartSeconds: timedCycle.providerStartSamples / 16000,
+    sourceDurationSeconds: timedCycle.triggerProviderSamples / 16000,
+  });
+  const timedTerminal = postStopTimedFinal.terminals.find(terminal =>
+    terminal.sessionId === timedCycle.logicalRunId);
+  timedTerminal.stableSnapshot = [timedTerminal.stableSnapshot, timedPhrase].filter(Boolean).join(' ');
+  assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, postStopTimedFinal).churnCycles, 20,
+    'a contained truncated provider tail remains owned by an early-stopped cycle');
+  const missingTimedTerminalText = structuredClone(postStopTimedFinal);
+  missingTimedTerminalText.terminals.find(terminal => terminal.sessionId === timedCycle.logicalRunId)
+    .stableSnapshot = '';
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, missingTimedTerminalText),
+    /Final warm provider proof is incomplete|terminal ownership is incomplete or duplicated/,
+    'terminal reconciliation includes accepted timed Finals without delivery sequence IDs');
+  const firstOccurrenceStableTail = structuredClone(report);
+  const firstOccurrenceCycle = firstOccurrenceStableTail.cycles[5];
+  assert.notEqual(firstOccurrenceCycle.stopPhase, 'after-final');
+  const firstOccurrencePrefix = firstOccurrenceCycle.episode === 'episode-a.pcm' ? 'на' : 'за';
+  insertAfterStop(firstOccurrenceStableTail, firstOccurrenceCycle, {
+    event: 'transcription:final', cycleIndex: firstOccurrenceCycle.index,
+    sessionId: firstOccurrenceCycle.logicalRunId,
+    deliverySeq: firstOccurrenceCycle.triggerDeliverySeqFloor + 1, text: firstOccurrencePrefix,
+    markerIds: [], timingKnown: false, sourceStartSeconds: 0, sourceDurationSeconds: 0,
+  });
+  for (const cycle of firstOccurrenceStableTail.cycles.filter(row =>
+    row.index > firstOccurrenceCycle.index && row.logicalRunId === firstOccurrenceCycle.logicalRunId)) {
+    cycle.triggerDeliverySeqFloor = firstOccurrenceStableTail.events.slice(0, cycle.triggerEventStart)
+      .filter(event => event.sessionId === cycle.logicalRunId && Number.isSafeInteger(event.deliverySeq))
+      .reduce((maximum, event) => Math.max(maximum, event.deliverySeq), 0);
+  }
+  const firstOccurrenceTerminalEventIndex = firstOccurrenceStableTail.events.findIndex(event =>
+    event.event === 'transcription:terminal' &&
+    event.sessionId === firstOccurrenceCycle.logicalRunId);
+  firstOccurrenceStableTail.terminals.find(terminal =>
+    terminal.sessionId === firstOccurrenceCycle.logicalRunId).stableSnapshot =
+      firstOccurrenceStableTail.events.slice(0, firstOccurrenceTerminalEventIndex)
+        .filter(event => event.event === 'transcription:final' &&
+          event.sessionId === firstOccurrenceCycle.logicalRunId)
+        .map(event => event.text.trim()).filter(Boolean).join(' ');
+  assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial,
+    firstOccurrenceStableTail).churnCycles, 20,
+  'future source repetitions do not invalidate the first owned Stable tail');
+  const firstPcmTail = structuredClone(report);
+  const firstPcmTailCycle = firstPcmTail.cycles.find(row => row.stopPhase === 'after-first-pcm' &&
+    row.index >= warmProviderCanaryTrial.readyGateFromIndex);
+  const firstPcmPrefix = firstPcmTailCycle.episode === 'episode-a.pcm' ? 'на' : 'за';
+  insertAfterStop(firstPcmTail, firstPcmTailCycle, {
+    event: 'transcription:final', cycleIndex: firstPcmTailCycle.index,
+    sessionId: firstPcmTailCycle.logicalRunId, deliverySeq: null, text: firstPcmPrefix,
+    markerIds: [], timingKnown: true,
+    sourceStartSeconds: firstPcmTailCycle.providerStartSamples / 16000,
+    sourceDurationSeconds: firstPcmTailCycle.triggerProviderSamples / 16000,
+  });
+  const firstPcmTerminal = firstPcmTail.terminals.find(terminal =>
+    terminal.sessionId === firstPcmTailCycle.logicalRunId);
+  firstPcmTerminal.stableSnapshot = [firstPcmTerminal.stableSnapshot, firstPcmPrefix]
+    .filter(Boolean).join(' ');
+  assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, firstPcmTail).churnCycles, 20,
+    'first-PCM cycles retain a sequence floor for owned post-Stop tails');
+  const missingPartial = structuredClone(report);
+  const missingPartialCycle = missingPartial.cycles.find(row => row.stopPhase === 'during-partial');
+  const partialEvent = missingPartial.events.slice(
+    missingPartialCycle.triggerEventStart, missingPartialCycle.stopEventIndex)
+    .find(event => event.event === 'transcription:partial');
+  partialEvent.text = 'unrelated text';
+  delete missingPartialCycle.trigger.deliverySeq;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, missingPartial),
+    /missed transcription:partial evidence/,
+    'an omitted trigger sequence cannot make a missing partial compare equal');
+  const collapsedPartial = structuredClone(report);
+  const partialCycle = collapsedPartial.cycles.find(row => row.stopPhase === 'during-partial');
+  insertBeforeStop(collapsedPartial, partialCycle, { event: 'transcription:final',
+    cycleIndex: partialCycle.index, sessionId: partialCycle.logicalRunId, deliverySeq: 700,
+    text: partialCycle.episode === 'episode-a.pcm' ? 'на столе лежит книга' : 'за окном растет береза',
+    markerIds: [partialCycle.episode === 'episode-a.pcm' ? 0 : 1] });
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, collapsedPartial),
+    /stop phase collapsed/);
+  const collapsedFirstPcm = structuredClone(report);
+  const firstPcmCycle = collapsedFirstPcm.cycles.find(row => row.stopPhase === 'after-first-pcm' &&
+    row.index > warmProviderCanaryTrial.readyGateFromIndex);
+  insertBeforeStop(collapsedFirstPcm, firstPcmCycle, { event: 'transcription:partial',
+    cycleIndex: firstPcmCycle.index, sessionId: firstPcmCycle.logicalRunId, deliverySeq: null,
+    text: firstPcmCycle.episode === 'episode-a.pcm' ? 'на столе' : 'за окном',
+    markerIds: [firstPcmCycle.episode === 'episode-a.pcm' ? 0 : 1] });
+  firstPcmCycle.triggerEventStart += 1;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, collapsedFirstPcm),
+    /stop phase collapsed/);
+  const negativeOwnedPartial = structuredClone(collapsedFirstPcm);
+  negativeOwnedPartial.events.find(event => event.event === 'transcription:partial' &&
+    event.sessionId === firstPcmCycle.logicalRunId).cycleIndex = -1;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, negativeOwnedPartial),
+    /evidence is contradictory|stop phase collapsed/,
+  'negative cycle ownership cannot hide a pre-Stop transcript event');
+  const duplicateFinal = structuredClone(report);
+  const finalCycle = duplicateFinal.cycles.find(row => row.stopPhase === 'after-final');
+  const firstFinal = duplicateFinal.events.slice(finalCycle.triggerEventStart, finalCycle.stopEventIndex)
+    .find(row => row.event === 'transcription:final');
+  insertBeforeStop(duplicateFinal, finalCycle, { ...firstFinal, deliverySeq: 701 });
+  duplicateFinal.terminals.find(terminal => terminal.sessionId === finalCycle.logicalRunId)
+    .stableSnapshot = `${firstFinal.text} ${firstFinal.text}`;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, duplicateFinal),
+    /missed transcription:final evidence|Final warm provider proof is incomplete/);
+  const segmentedChurnFinal = structuredClone(report);
+  const segmentedCycle = segmentedChurnFinal.cycles.find(row => row.stopPhase === 'after-final');
+  const segmentedEvent = segmentedChurnFinal.events.slice(
+    segmentedCycle.triggerEventStart, segmentedCycle.stopEventIndex)
+    .find(row => row.event === 'transcription:final');
+  const markerPrefix = segmentedCycle.episode === 'episode-a.pcm' ? 'на столе' : 'за окном';
+  const markerSuffix = segmentedCycle.episode === 'episode-a.pcm' ? 'лежит книга' : 'растет береза';
+  segmentedEvent.text = markerPrefix;
+  segmentedEvent.markerIds = [];
+  insertBeforeStop(segmentedChurnFinal, segmentedCycle, {
+    ...segmentedEvent, text: markerSuffix, deliverySeq: 702,
+  });
+  segmentedCycle.trigger.deliverySeq = 702;
+  segmentedChurnFinal.terminals.find(terminal => terminal.sessionId === segmentedCycle.logicalRunId)
+    .stableSnapshot = `${markerPrefix} ${markerSuffix}`;
+  assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, segmentedChurnFinal).churnCycles, 20,
+    'after-final trigger evidence may be split across sequential Stable deliveries');
+  const decreasingChurnFinal = structuredClone(segmentedChurnFinal);
+  const decreasingCycle = decreasingChurnFinal.cycles.find(row =>
+    row.index === segmentedCycle.index);
+  const decreasingFinals = decreasingChurnFinal.events.slice(
+    decreasingCycle.triggerEventStart, decreasingCycle.stopEventIndex)
+    .filter(row => row.event === 'transcription:final');
+  decreasingFinals[0].deliverySeq = 702;
+  decreasingFinals[1].deliverySeq = 701;
+  decreasingCycle.trigger.deliverySeq = 701;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, decreasingChurnFinal),
+    /missed transcription:final evidence|Final warm provider proof is incomplete/,
+  'Stable delivery sequences must increase within a provider session');
+  const duplicatePostStopFragment = structuredClone(report);
+  const postStopCycle = duplicatePostStopFragment.cycles.find(row => row.stopPhase === 'after-final');
+  insertAfterStop(duplicatePostStopFragment, postStopCycle, {
+    event: 'transcription:final', cycleIndex: postStopCycle.index,
+    sessionId: postStopCycle.logicalRunId, deliverySeq: 703, text: 'береза',
+    markerIds: [], timingKnown: false, sourceStartSeconds: 0, sourceDurationSeconds: 0,
+  });
+  duplicatePostStopFragment.terminals.find(terminal => terminal.sessionId === postStopCycle.logicalRunId)
+    .stableSnapshot += ' береза';
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial,
+    duplicatePostStopFragment), /Final warm provider proof is incomplete/,
+  'exact episode aggregation rejects duplicate Stable fragments after Stop');
+  const incompleteFinalPhrases = structuredClone(report);
+  const finalDelivery = incompleteFinalPhrases.events.find(event =>
+    event.cycleIndex === 20 && event.event === 'transcription:final');
+  finalDelivery.text = 'на столе за окном';
+  finalDelivery.markerIds = [];
+  incompleteFinalPhrases.expectedInsertion = finalDelivery.text;
+  incompleteFinalPhrases.terminals.find(terminal => terminal.cycleIndex === 20)
+    .stableSnapshot = finalDelivery.text;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial,
+    incompleteFinalPhrases), /Final warm provider proof is incomplete/,
+  'prefixes without both complete pinned phrases cannot satisfy the final proof');
+  for (const text of [
+    'на столе лежит книга за окном растет береза',
+    'на столе лежит книга на столе лежит книга',
+  ]) {
+    const contaminated = structuredClone(report);
+    const cycle = contaminated.cycles.find(row => row.stopPhase === 'after-final' &&
+      row.episode === 'episode-a.pcm');
+    const event = contaminated.events.slice(cycle.triggerEventStart, cycle.stopEventIndex)
+      .find(row => row.event === 'transcription:final');
+    event.text = text;
+    event.markerIds = text.includes('за окном') ? [0, 1] : [0];
+    assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, contaminated));
+  }
+});
+
+test('mode counts and initial-only Ready gate preserve the legacy prescribed trials', async () => {
   const { qualificationExpectations } = await import('./nativeContinuation.mjs');
-  for (const trial of liveTrials) {
+  for (const trial of liveTrials.filter(row => row.kind !== 'warm-provider-canary')) {
     const expected = qualificationExpectations(trial);
     assert.equal(expected.captures, trial.id.startsWith('warm-baseline-') ? 1 : 2);
     assert.equal(expected.backendConnections, trial.id.startsWith('cold-') ? 2 : 1);
@@ -81,22 +869,28 @@ test('mode counts and initial-only Ready gate preserve the twelve prescribed tri
 });
 test('connection verifier rejects overlap, retry, missing closes and every retained proxy failure', async () => {
   const { verifyQualificationConnections } = await import('./nativeContinuation.mjs');
-  const opened = { event: 'fault_proxy_connected' };
-  const closed = { event: 'fault_proxy_close', direction: 'upstream', code: 1000 };
+  const opened = connectionId => ({ event: 'fault_proxy_connected', connectionId });
+  const closed = connectionId => ({ event: 'fault_proxy_close', connectionId, direction: 'upstream', code: 1000 });
   const boundary = { event: 'qualification_pre_teardown', atMs: 10, clock: 'runner-performance-now', nativeProcessAlive: true };
   for (const trial of liveTrials) {
-    const events = trial.id.startsWith('cold-') ? [opened, closed, opened, closed] : [opened, closed];
+    const expectedConnections = trial.kind === 'warm-provider-canary'
+      ? 7
+      : trial.id.startsWith('cold-') ? 2 : 1;
+    const events = Array.from({ length: expectedConnections }, (_, index) => [
+      opened(index + 1), closed(index + 1),
+    ]).flat();
     assert.equal(verifyQualificationConnections(trial, [...events, boundary]).providerHandshakeVerification, 'pending-parent-logs');
-    assert.throws(() => verifyQualificationConnections(trial, [...events, opened, closed]));
+    assert.throws(() => verifyQualificationConnections(trial, [...events, opened(3), closed(3)]));
     assert.throws(() => verifyQualificationConnections(trial, events.slice(0, -1)));
     for (const event of ['fault_proxy_overflow', 'fault_proxy_transport_error', 'fault_proxy_deadline', 'fault_proxy_evidence_overflow'])
       assert.throws(() => verifyQualificationConnections(trial, [...events, { event }]));
   }
-  assert.throws(() => verifyQualificationConnections(liveTrials.find(t => t.id === 'cold-0'), [opened, opened, closed, closed]));
+  assert.throws(() => verifyQualificationConnections(liveTrials.find(t => t.id === 'cold-0'),
+    [opened(1), opened(2), closed(1), closed(2)]));
 });
 test('source verification requires native Ready, complete paced PCM and continuous baseline gap', async () => {
   const { verifyQualificationSources, qualificationExpectations } = await import('./nativeContinuation.mjs');
-  for (const trial of liveTrials) {
+  for (const trial of liveTrials.filter(row => row.kind !== 'warm-provider-canary')) {
     const expected = qualificationExpectations(trial);
     const sourceEpisodes = trial.episodes.map((name, index) => {
       const [bytes] = approvedFixtures[name];
@@ -147,13 +941,86 @@ test('seal-close TEST command invokes the product native close Stop path with is
   const cases = await readFile(new URL('../../src/e2e/nativeContinuationCases.ts', import.meta.url), 'utf8');
   const command = native.slice(native.indexOf('pub fn native_e2e_close_recording'), native.indexOf('pub struct FixtureConfig'));
   assert.match(command, /RESULT_PATH.get\(\).is_none\(\)/);
-  assert.match(command, /!continuation_mode\(\)/);
+  assert.match(command, /mini_ux_mode\(\)/);
+  assert.match(command, /continuation_mode\(\)/);
   assert.match(command, /Some\("seal-close"\)/);
   assert.match(command, /super::commands::stop_recording_on_native_close\(&app_handle\)/);
   assert.match(lib, /#\[cfg\(all\(debug_assertions, feature = "native-window-e2e"\)\)\]\s*presentation::native_e2e::native_e2e_close_recording/);
   assert.match(lib, /commands::stop_recording_on_native_close\(window_clone.app_handle\(\)\)/);
   assert.match(cases, /selected === 'seal-close'\) await invoke\('native_e2e_close_recording'\)/);
   assert.doesNotMatch(cases, /getCurrentWindow|hide_recording_window_if_current/);
+});
+
+test('warm canary Stop samples transport and dispatches without a JS or async readiness gap', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const native = await readFile(new URL('../../src-tauri/src/presentation/native_e2e.rs', import.meta.url), 'utf8');
+  const lib = await readFile(new URL('../../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+  const start = native.indexOf('pub async fn native_e2e_stop_with_transport_boundary');
+  const command = native.slice(start, native.indexOf('\nfn dispatch_hotkey', start));
+  assert.ok(start > 0);
+  assert.match(command, /trial\["kind"\] != "warm-provider-canary"/);
+  const observation = command.indexOf('.native_e2e_transport_observation_at_boundary(');
+  const press = command.indexOf('dispatch_hotkey(&app, true)');
+  assert.ok(observation > 0 && press > observation);
+  assert.match(command.slice(observation, press), /at_boundary\(\|\|/);
+  const provider = await readFile(new URL('../../src-tauri/src/infrastructure/stt/backend.rs', import.meta.url), 'utf8');
+  const boundary = provider.indexOf('fn native_e2e_transport_observation_at_boundary');
+  const boundaryBody = provider.slice(boundary, provider.indexOf('\n    fn is_online', boundary));
+  assert.ok(boundary > 0);
+  assert.match(boundaryBody, /continuation\.lock\(\)\.unwrap\(\)/);
+  assert.ok(boundaryBody.indexOf('boundary();') > boundaryBody.indexOf('transport.ready_seen'));
+  assert.match(lib, /#\[cfg\(all\(debug_assertions, feature = "native-window-e2e"\)\)\]\s*presentation::native_e2e::native_e2e_stop_with_transport_boundary/);
+});
+test('warm canary captures the transcript baseline before releasing final PCM', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(new URL('../../src/e2e/nativeWarmProviderCanary.ts', import.meta.url), 'utf8');
+  const finalSection = source.slice(source.indexOf('const beforeFinal = await state();'));
+  const baseline = finalSection.indexOf('report.finalTextBeforeProof = store.finalText;');
+  const release = finalSection.indexOf("native_e2e_configure', { config: { sourceGateReady: true }");
+  const callbackFence = finalSection.indexOf('report.finalCallbackFence =');
+  assert.ok(baseline >= 0 && baseline < callbackFence && callbackFence < release);
+});
+test('warm canary binds a fresh Ready provider owner before releasing gated PCM', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(new URL('../../src/e2e/nativeWarmProviderCanary.ts', import.meta.url), 'utf8');
+  const readySection = source.slice(source.indexOf('const ready = await poll(value =>'));
+  const bindOwner = readySection.indexOf('sessionCycles.set(ready.logicalProviderRunId, cycle.index);');
+  const release = readySection.indexOf('releaseWarmCanarySourceBeforeAck(');
+  assert.ok(bindOwner >= 0 && bindOwner < release);
+});
+
+test('continuation pending capture release reconciles a deferred warm microphone policy change', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(
+    new URL('../../src-tauri/src/presentation/commands/continuation.rs', import.meta.url), 'utf8');
+  const seal = source.slice(source.indexOf('Effect::SealPending {'),
+    source.indexOf('Effect::WaitForWindow {'));
+  assert.match(seal, /if !active \{\s*reconcile_warm_input_after_capture_release\(/);
+  assert.ok(seal.indexOf('reconcile_warm_input_after_capture_release(') <
+    seal.indexOf('Event::PendingCaptureStopped'));
+});
+
+test('paid live backend instruments real provider lifecycle counters', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const provider = await readFile(
+    new URL('../../src-tauri/src/infrastructure/stt/backend.rs', import.meta.url), 'utf8');
+  const native = await readFile(
+    new URL('../../src-tauri/src/presentation/native_e2e.rs', import.meta.url), 'utf8');
+  assert.match(provider, /native_e2e_lifecycle_active: bool/);
+  assert.match(provider, /record_native_e2e_stream_started\(\)/);
+  assert.match(provider, /record_native_e2e_stream_stopped\(\)/);
+  assert.match(native, /pub\(crate\) fn record_live_provider_started\(\)/);
+  assert.match(native, /pub\(crate\) fn record_live_provider_stopped\(no_audio: bool\)/);
+});
+
+test('E63 after-write diagnostics retain the full 900000 ms outer runtime contract', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(new URL('../run-native-window-e2e.mjs', import.meta.url), 'utf8');
+  const timeout = source.slice(source.indexOf('const runtimeTimeoutMs ='),
+    source.indexOf('await runOwned(', source.indexOf('const runtimeTimeoutMs =')));
+  assert.match(timeout, /trial\?\.kind === 'warm-provider-canary' \? 900_000/);
+  assert.doesNotMatch(timeout, /after-write-stop|after-write-hold|after-write-close|after-write-toggle/);
+  assert.match(timeout, /: 900_000;/);
 });
 
 test('normal baseline/cold reject continuation controls', async () => {
@@ -167,7 +1034,7 @@ test('normal baseline/cold reject continuation controls', async () => {
 
  test('terminal verifier rejects reviewer missing/duplicate/unexpected/incomplete terminals and collapsed cold owners', async () => {
   const { verifyQualificationTerminals, qualificationExpectations } = await import('./nativeContinuation.mjs');
-  for (const trial of liveTrials) {
+  for (const trial of liveTrials.filter(row => row.kind !== 'warm-provider-canary')) {
     const count = qualificationExpectations(trial).backendConnections;
     const episodes = [{ logicalRunId: 41 }, { logicalRunId: count === 1 ? 41 : 42 }];
     const terminals = [...new Set(episodes.map(e => e.logicalRunId))].map(sessionId => ({ sessionId, complete: true }));
@@ -180,8 +1047,8 @@ test('normal baseline/cold reject continuation controls', async () => {
 test('normal Stop closure must precede explicit live-process collector boundary, never finish/exit cleanup', async () => {
   const { verifyQualificationConnections } = await import('./nativeContinuation.mjs');
   const trial = liveTrials.find(t => t.id === 'warm-baseline-1');
-  const open = { event: 'fault_proxy_connected' };
-  const close = { event: 'fault_proxy_close', direction: 'upstream', code: 1000 };
+  const open = { event: 'fault_proxy_connected', connectionId: 1 };
+  const close = { event: 'fault_proxy_close', connectionId: 1, direction: 'upstream', code: 1000 };
   const boundary = { event: 'qualification_pre_teardown', atMs: 10, clock: 'runner-performance-now', nativeProcessAlive: true };
   verifyQualificationConnections(trial, [open, close, boundary]);
   assert.throws(() => verifyQualificationConnections(trial, [open, boundary, close]));
@@ -783,7 +1650,7 @@ test('E63 native submission precedes teardown and runner keeps the original inde
   assert.match(finish, /"preFinish":true/);
   assert.match(finish, /diagnostic::healthy\(\)/);
   const runner = await readFile(new URL('../run-native-window-e2e.mjs', import.meta.url), 'utf8');
-  assert.match(runner, /'after-write-toggle'\]\.includes\(options.continuationCase\) \? 30_000 : 480_000/);
+  assert.match(runner, /options\.readerPreparation \|\| \['E04', 'E41', 'E42'\]\.includes\(options\.continuationCase\) \? 30_000\s*: 900_000/);
   assert.ok(runner.indexOf('E63 native diagnostic failed') < runner.lastIndexOf('validateResult(envelope)'));
   const envelope = afterWriteEnvelope('after-write-stop');
   envelope.afterWriteServiceAfter.pausedContinuation = 9;

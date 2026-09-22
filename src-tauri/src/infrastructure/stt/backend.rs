@@ -205,6 +205,8 @@ pub struct BackendProvider {
     control_seq: u64,
     delivery: Arc<std::sync::Mutex<DeliveryLedger>>,
     ack_changed: Arc<tokio::sync::Notify>,
+    #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+    native_e2e_lifecycle_active: bool,
 }
 
 struct ControlWaiterLease {
@@ -235,6 +237,9 @@ struct CallbackState {
     // Защита от "поздних" ACK старой записи:
     // активируем pending только когда получили ACK с seq БОЛЬШЕ последнего отправленного seq на момент resume_stream.
     swap_after_seq: u64,
+    // Negotiated Pause/Continue retains its callbacks. Observe the next capture
+    // generation at the first ACK for audio issued after Continue instead.
+    generation_fence_after_seq: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -336,6 +341,7 @@ impl DeliveryLedger {
 
 impl Drop for BackendProvider {
     fn drop(&mut self) {
+        self.record_native_e2e_stream_stopped();
         self.is_closed.store(true, Ordering::SeqCst);
         super::abort_background_task(&mut self.keepalive_task);
         super::abort_background_task(&mut self.receiver_task);
@@ -449,6 +455,26 @@ impl BackendProvider {
             control_seq: 0,
             delivery: Arc::new(std::sync::Mutex::new(DeliveryLedger::default())),
             ack_changed: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+            native_e2e_lifecycle_active: false,
+        }
+    }
+
+    fn record_native_e2e_stream_started(&mut self) {
+        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+        if !self.native_e2e_lifecycle_active {
+            crate::presentation::native_e2e::record_live_provider_started();
+            self.native_e2e_lifecycle_active = true;
+        }
+    }
+
+    fn record_native_e2e_stream_stopped(&mut self) {
+        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+        if self.native_e2e_lifecycle_active {
+            crate::presentation::native_e2e::record_live_provider_stopped(
+                self.sent_chunks_count == 0,
+            );
+            self.native_e2e_lifecycle_active = false;
         }
     }
 
@@ -1089,6 +1115,10 @@ impl SttProvider for BackendProvider {
             }
             _ => ContinuationAudioGate::Paused,
         };
+        if matches!(gate, ContinuationAudioGate::First { .. }) {
+            self.callbacks.lock().await.generation_fence_after_seq =
+                Some(self.sent_chunks_count as u64);
+        }
         self.continuation.lock().unwrap().audio_gate = gate;
         if result.is_err() {
             // The retained session remains observable after local transport death.
@@ -1483,6 +1513,7 @@ impl SttProvider for BackendProvider {
             state.pending = None;
             state.swap_on_next_ack = false;
             state.swap_after_seq = 0;
+            state.generation_fence_after_seq = None;
         }
 
         // Отправляем Config message
@@ -1673,8 +1704,14 @@ impl SttProvider for BackendProvider {
                                         }
                                         // Если есть pending callbacks (новая UI-сессия) — активируем их на первом ACK.
                                         // Это даёт чёткую границу между "старыми" и "новыми" результатами.
-                                        let swapped = {
+                                        let (swapped, generation_fenced) = {
                                             let mut state = callbacks_state.lock().await;
+                                            let generation_fenced = state
+                                                .generation_fence_after_seq
+                                                .is_some_and(|after| seq > after);
+                                            if generation_fenced {
+                                                state.generation_fence_after_seq = None;
+                                            }
                                             if state.swap_on_next_ack && seq > state.swap_after_seq
                                             {
                                                 state.swap_on_next_ack = false;
@@ -1682,13 +1719,20 @@ impl SttProvider for BackendProvider {
                                                 if state.pending.is_some() {
                                                     state.active = state.pending.take();
                                                 }
-                                                true
+                                                (true, generation_fenced)
                                             } else {
-                                                false
+                                                (false, generation_fenced)
                                             }
                                         };
-                                        if swapped {
-                                            log::debug!("Callbacks switched after first ACK (new recording session)");
+                                        if swapped || generation_fenced {
+                                            #[cfg(all(
+                                                debug_assertions,
+                                                feature = "native-window-e2e"
+                                            ))]
+                                            crate::presentation::native_e2e::record_live_provider_callback_swap();
+                                            log::debug!(
+                                                "Provider generation fenced after first ACK (callbacks_swapped={swapped})"
+                                            );
                                         }
                                     }
 
@@ -2206,6 +2250,7 @@ impl SttProvider for BackendProvider {
         self.is_paused = false;
         self.sent_chunks_count = 0;
         self.sent_bytes_total = 0;
+        self.record_native_e2e_stream_started();
 
         log::info!("BackendProvider: Stream started");
         Ok(())
@@ -2410,6 +2455,7 @@ impl SttProvider for BackendProvider {
 
         if !self.is_streaming {
             self.is_closed.store(true, Ordering::SeqCst);
+            self.record_native_e2e_stream_stopped();
             return Ok(());
         }
 
@@ -2482,6 +2528,7 @@ impl SttProvider for BackendProvider {
         self.ws_write = None;
         self.is_streaming = false;
         self.is_paused = false;
+        self.record_native_e2e_stream_stopped();
         self.session_id = None;
         self.audio_batch.clear();
         self.next_send_at = None;
@@ -2492,6 +2539,7 @@ impl SttProvider for BackendProvider {
             state.pending = None;
             state.swap_on_next_ack = false;
             state.swap_after_seq = 0;
+            state.generation_fence_after_seq = None;
         }
 
         log::info!(
@@ -2526,6 +2574,7 @@ impl SttProvider for BackendProvider {
         self.ws_write = None;
         self.is_streaming = false;
         self.is_paused = false;
+        self.record_native_e2e_stream_stopped();
         self.session_id = None;
         self.audio_batch.clear();
         self.next_send_at = None;
@@ -2536,6 +2585,7 @@ impl SttProvider for BackendProvider {
             state.pending = None;
             state.swap_on_next_ack = false;
             state.swap_after_seq = 0;
+            state.generation_fence_after_seq = None;
         }
 
         Ok(())
@@ -2618,6 +2668,7 @@ impl SttProvider for BackendProvider {
             });
             state.swap_on_next_ack = true;
             state.swap_after_seq = self.sent_chunks_count as u64;
+            state.generation_fence_after_seq = None;
         }
 
         self.is_paused = false;
@@ -2705,6 +2756,29 @@ impl SttProvider for BackendProvider {
                 let transport = self.continuation.lock().unwrap();
                 transport.ready_seen && !transport.native_e2e_error_seen
             };
+        Some((ready, retained))
+    }
+
+    #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+    fn native_e2e_transport_observation_at_boundary(
+        &self,
+        boundary: &mut dyn FnMut(),
+    ) -> Option<(bool, bool)> {
+        // Ready is written under this same mutex by the receiver. Holding it
+        // across synchronous gesture acceptance makes the observed ordering
+        // authoritative even if gesture/fixture mutexes are briefly contended.
+        let transport = self.continuation.lock().unwrap();
+        let retained = self.ws_write.is_some();
+        let ready = retained
+            && self.is_streaming
+            && !self.is_closed.load(Ordering::SeqCst)
+            && self
+                .receiver_task
+                .as_ref()
+                .is_some_and(|task| !task.is_finished())
+            && transport.ready_seen
+            && !transport.native_e2e_error_seen;
+        boundary();
         Some((ready, retained))
     }
 
@@ -2801,6 +2875,15 @@ mod tests {
             provider.native_e2e_transport_observation(),
             Some((false, true))
         );
+        let mut boundary_held = false;
+        let mut boundary = || {
+            boundary_held = provider.continuation.try_lock().is_err();
+        };
+        assert_eq!(
+            provider.native_e2e_transport_observation_at_boundary(&mut boundary),
+            Some((false, true))
+        );
+        assert!(boundary_held);
         send.send(serde_json::json!({"type":"ready", "session_id":"r2-ready", "accepted_capabilities":[]})).await.unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
             while provider.native_e2e_transport_observation() != Some((true, true)) {
@@ -4424,6 +4507,7 @@ mod tests {
             pending: Some(callback_set(marker.clone(), 2)),
             swap_on_next_ack: true,
             swap_after_seq: 10,
+            generation_fence_after_seq: None,
         };
 
         let cb = state.error_callback().expect("error callback");
