@@ -99,11 +99,11 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   assert.ok(worstCaseFrames + 512 < maxProxyEvidenceEvents);
   const expected = qualificationExpectations(warmProviderCanaryTrial);
   assert.equal(expected.captures, 21);
-  assert.deepEqual([expected.minBackendConnections, expected.maxBackendConnections], [6, 12]);
-  assert.equal(expectedWarmProviderContinues(warmProviderCanaryTrial), 10);
-  assert.equal(expectedWarmProviderLogicalRuns(warmProviderCanaryTrial), 11);
+  assert.deepEqual([expected.minBackendConnections, expected.maxBackendConnections], [7, 13]);
+  assert.equal(expectedWarmProviderContinues(warmProviderCanaryTrial), 9);
+  assert.equal(expectedWarmProviderLogicalRuns(warmProviderCanaryTrial), 12);
   assert.deepEqual(expectedWarmProviderCallbackGenerations(warmProviderCanaryTrial),
-    [7, 8, 9, 10, 11, 12, 13, 14, 15, 21]);
+    [7, 8, 9, 10, 11, 12, 13, 14, 15]);
   const connection = (connectionId, captures) => {
     const providerSessionId = `provider-${connectionId}`;
     const rows = [
@@ -123,11 +123,11 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     return rows;
   };
   const routeEvents = [connection(1, 10), connection(2, 1), connection(3, 1),
-    connection(4, 1), connection(5, 1), connection(6, 2)].flat();
+    connection(4, 1), connection(5, 1), connection(6, 1), connection(7, 1)].flat();
   const boundary = { event: 'qualification_pre_teardown', atMs: 10,
     clock: 'runner-performance-now', nativeProcessAlive: true };
   assert.equal(verifyQualificationConnections(warmProviderCanaryTrial,
-    [...routeEvents, boundary]).backendConnections, 6);
+    [...routeEvents, boundary]).backendConnections, 7);
   const connected = routeEvents[0];
   const closed = routeEvents.find(event => event.event === 'fault_proxy_close');
   assert.throws(() => verifyQualificationConnections(warmProviderCanaryTrial,
@@ -136,7 +136,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     routeEvents).maximumActiveProviderSessions, 1);
   assert.deepEqual(verifyQualificationRoute(warmProviderCanaryTrial,
     routeEvents).retainedProviderSessionIds,
-  ['provider-1', 'provider-2', 'provider-3', 'provider-4', 'provider-5', 'provider-6']);
+  ['provider-1', 'provider-2', 'provider-3', 'provider-4', 'provider-5', 'provider-6',
+    'provider-7']);
   const audioWhilePaused = structuredClone(routeEvents);
   const firstPause = audioWhilePaused.findIndex(event => event.type === 'pause_accepted');
   audioWhilePaused.splice(firstPause + 1, 0,
@@ -179,7 +180,9 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     }
     const startedAtMs = cycleClock;
     const previousSettleToStartMs = index === 0 ? null : warmProviderCanaryTrial.cycles[index - 1].jitterMs;
-    const resetAfter = warmProviderCanaryTrial.cycles[index + 1]?.resetProviderBefore === true;
+    const resetAfter = warmProviderCanaryTrial.cycles[index + 1]?.resetProviderBefore === true ||
+      (index === warmProviderCanaryTrial.cycles.length - 1 &&
+        warmProviderCanaryTrial.resetProviderBeforeFinal === true);
     const providerResetSettledAtMs = resetAfter ? startedAtMs + 150 : undefined;
     const cycle = { ...plan, startedAtMs, previousSettleToStartMs, triggerAtMs: startedAtMs + 20,
       captureStoppedAtMs: startedAtMs + 30, settledAtMs: startedAtMs + 50,
@@ -214,8 +217,8 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     cycleClock = (providerResetSettledAtMs ?? cycle.settledAtMs) + plan.jitterMs;
     return cycle;
   });
-  const finalLogicalRunId = 100 + warmProviderCanaryTrial.cycles.length - 1;
-  const finalProviderStartSamples = 320;
+  const finalLogicalRunId = 120;
+  const finalProviderStartSamples = 0;
   const finalSourceFrames = approvedFixtures['long-auto-commit.pcm'][0] / 2;
   const finalTranscriptEventStart = events.length;
   const finalDeliverySeqFloor = events.filter(event => event.sessionId === finalLogicalRunId &&
@@ -232,7 +235,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   events.push({ event: 'transcription:terminal', cycleIndex: 20, sessionId: finalLogicalRunId,
     deliverySeq: null, markerIds: [] });
   terminals.push({ sessionId: finalLogicalRunId, cycleIndex: 20, complete: true,
-    stableSnapshot: 'за окном растет береза на столе лежит книга за окном растет береза' });
+    stableSnapshot: 'на столе лежит книга за окном растет береза' });
   const sources = warmProviderCanaryTrial.episodes.map((name, index) => {
     const bytes = approvedFixtures[name][0];
     const sourceFrames = bytes / 2;
@@ -267,15 +270,16 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     providerCallbackGenerations: expectedWarmProviderCallbackGenerations(warmProviderCanaryTrial) };
   const report = { mode: 'warm-provider-canary', passed: true, trialId: warmProviderCanaryTrial.id,
     errors: [], duplicateDeliveries: [], cycles, events,
-    finalTextBeforeProof: 'за окном растет береза',
-    expectedInsertion: 'за окном растет береза на столе лежит книга за окном растет береза',
+    finalTextBeforeProof: '',
+    expectedInsertion: 'на столе лежит книга за окном растет береза',
     finalStartedAtMs: cycleClock,
     finalReadyElapsedMs: 1200,
     finalCallbackFence: { captureGeneration: 21, eventStart: finalCallbackEventStart },
     finalTranscriptFence: { eventStart: finalTranscriptEventStart,
       providerSamples: sources[20].sourceFrames, providerStartSamples: finalProviderStartSamples,
       deliverySeqFloor: finalDeliverySeqFloor },
-    finalOwnership: { logicalRunId: finalLogicalRunId, captureRunId: 999, captureFenceGeneration: 21 },
+    finalOwnership: { logicalRunId: finalLogicalRunId, captureRunId: 999,
+      captureFenceGeneration: 21 },
     terminals, final: { status: 'Idle', preparedCaptureTokenCount: 0,
       providerTransport: { connectionRetained: false }, fixture } };
   assert.equal(verifyWarmProviderCanary(warmProviderCanaryTrial, report).churnCycles, 20);
@@ -320,10 +324,16 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     /Final warm provider proof is incomplete/,
     'a timed final crossing the generation lower boundary is rejected');
   const contradictoryOffset = structuredClone(report);
-  contradictoryOffset.finalTranscriptFence.providerStartSamples = 0;
+  contradictoryOffset.finalTranscriptFence.providerStartSamples = 320;
   assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, contradictoryOffset),
     /Final warm provider proof is incomplete/,
     'the reported final offset must equal preceding same-session PCM ledgers');
+  const contradictoryCycleOffset = structuredClone(report);
+  contradictoryCycleOffset.cycles[12].providerStartSamples =
+    contradictoryCycleOffset.cycles[10].providerStartSamples;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial,
+    contradictoryCycleOffset), /Cycle 12 lost capture\/provider ownership/,
+  'every churn offset must equal preceding same-session PCM ledgers');
   assert.equal(verifyWarmProviderFinalFixtureAgreement(fixture, structuredClone(fixture))
     .finalNativeFixtureAgreement, true);
   const collapsedJitters = structuredClone(report);
@@ -434,7 +444,7 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
     value => { value.cycles[5].readyGateElapsedMs = 2200; },
     value => { value.finalReadyElapsedMs = 2200; },
     value => { value.expectedInsertion = 'unrelated junk'; },
-    value => { value.expectedInsertion = 'на столе лежит книга за окном растет береза'; },
+    value => { value.expectedInsertion = 'лишний текст на столе лежит книга за окном растет береза'; },
     value => { value.events.splice(-1, 0, { event: 'transcription:error', cycleIndex: 20,
       sessionId: 1019, deliverySeq: null, markerIds: [] }); },
     value => { value.terminals.find(terminal => terminal.cycleIndex === 0).stableSnapshot = null; },
@@ -555,8 +565,21 @@ test('paid warm provider canary fixes 20 churn cycles, four stop phases, five ji
   const firstFinal = duplicateFinal.events.slice(finalCycle.triggerEventStart, finalCycle.stopEventIndex)
     .find(row => row.event === 'transcription:final');
   insertBeforeStop(duplicateFinal, finalCycle, { ...firstFinal, deliverySeq: 701 });
+  duplicateFinal.terminals.find(terminal => terminal.sessionId === finalCycle.logicalRunId)
+    .stableSnapshot = `${firstFinal.text} ${firstFinal.text}`;
   assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial, duplicateFinal),
     /Final warm provider proof is incomplete/);
+  const incompleteFinalPhrases = structuredClone(report);
+  const finalDelivery = incompleteFinalPhrases.events.find(event =>
+    event.cycleIndex === 20 && event.event === 'transcription:final');
+  finalDelivery.text = 'на столе за окном';
+  finalDelivery.markerIds = [];
+  incompleteFinalPhrases.expectedInsertion = finalDelivery.text;
+  incompleteFinalPhrases.terminals.find(terminal => terminal.cycleIndex === 20)
+    .stableSnapshot = finalDelivery.text;
+  assert.throws(() => verifyWarmProviderCanary(warmProviderCanaryTrial,
+    incompleteFinalPhrases), /Final warm provider proof is incomplete/,
+  'prefixes without both complete pinned phrases cannot satisfy the final proof');
   for (const text of [
     'на столе лежит книга за окном растет береза',
     'на столе лежит книга на столе лежит книга',
@@ -590,7 +613,7 @@ test('connection verifier rejects overlap, retry, missing closes and every retai
   const boundary = { event: 'qualification_pre_teardown', atMs: 10, clock: 'runner-performance-now', nativeProcessAlive: true };
   for (const trial of liveTrials) {
     const expectedConnections = trial.kind === 'warm-provider-canary'
-      ? 6
+      ? 7
       : trial.id.startsWith('cold-') ? 2 : 1;
     const events = Array.from({ length: expectedConnections }, (_, index) => [
       opened(index + 1), closed(index + 1),
@@ -694,7 +717,7 @@ test('warm canary captures the transcript baseline before releasing final PCM', 
   const baseline = finalSection.indexOf('report.finalTextBeforeProof = store.finalText;');
   const release = finalSection.indexOf("native_e2e_configure', { config: { sourceGateReady: true }");
   const callbackFence = finalSection.indexOf('report.finalCallbackFence =');
-  assert.ok(baseline >= 0 && baseline < release && release < callbackFence);
+  assert.ok(baseline >= 0 && baseline < callbackFence && callbackFence < release);
 });
 test('warm canary binds a fresh Ready provider owner before releasing gated PCM', async () => {
   const { readFile } = await import('node:fs/promises');

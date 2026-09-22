@@ -1100,6 +1100,7 @@ export function validateResult(envelope) {
   const cycleFinalDeliveries = report.cycleFinalDeliveries;
   const allFinalDeliveries = report.allFinalDeliveries;
   const expectedFinalSessionIds = report.expectedFinalSessionIds;
+  const expectedTranscriptForSession = sessionId => `Native fixture session ${sessionId}`;
   const requiredScenarios = ['50-audio-transcript-stop-hide-reopen-cycles',
     'real-hidden-idle-180s-and-fresh-audio'];
   if (!Array.isArray(cycles) || cycles.length !== 50 ||
@@ -1112,6 +1113,7 @@ export function validateResult(envelope) {
       allFinalDeliveries.filter(delivery => delivery.sessionId === sessionId).length !== 1) ||
     allFinalDeliveries.some(delivery => !expectedFinalSessionIds.includes(delivery.sessionId) ||
       typeof delivery.text !== 'string' || !delivery.text.trim() ||
+      delivery.text !== expectedTranscriptForSession(delivery.sessionId) ||
       (delivery.deliverySeq !== null && !positiveSafeInteger(delivery.deliverySeq))) ||
     cycleFinalDeliveries.some(delivery => !allFinalDeliveries.some(candidate =>
       candidate.sessionId === delivery.sessionId && candidate.text === delivery.text &&
@@ -1131,6 +1133,7 @@ export function validateResult(envelope) {
       !positiveSafeInteger(generation) ||
       (generationIndex > 0 && generation <= row.captureGenerations[generationIndex - 1])) ||
     typeof row.expectedTranscript !== 'string' || !row.expectedTranscript.trim() ||
+    row.expectedTranscript !== expectedTranscriptForSession(row.sessionId) ||
     row.finalSessionId !== row.sessionId || row.finalText !== row.expectedTranscript ||
     (row.finalDeliverySeq !== null && (!Number.isSafeInteger(row.finalDeliverySeq) || row.finalDeliverySeq <= 0)) ||
     (index > 0 && (row.captureStartsBefore !== cycles[index - 1].captureStartsAfter ||

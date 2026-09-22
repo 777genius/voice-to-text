@@ -52,6 +52,10 @@ export const warmProviderCanaryTrial = Object.freeze({
   cycles: warmProviderCanaryCycles,
   readyGateFromIndex: warmProviderCanaryJittersMs.length,
   finalEpisodeIndex: warmProviderCanaryCycles.length,
+  // Stable backend deliveries do not carry provider timing. Start the final
+  // multi-phrase proof on a fresh logical provider run so no delayed Stable
+  // from the last churn capture can be misattributed to generation 21.
+  resetProviderBeforeFinal: true,
   episodes: Object.freeze([
     ...warmProviderCanaryCycles.map(cycle => cycle.episode),
     // Reserve the only complete two-phrase source for the final proof. A late
@@ -121,7 +125,8 @@ export function qualificationExpectations(trial) {
   if (!liveTrials.some(row => JSON.stringify(row) === JSON.stringify(trial))) throw new Error('Unplanned qualification trial');
   if (trial.kind === 'warm-provider-canary') {
     const earlyStops = trial.cycles.filter(cycle => cycle.stopPhase === 'before-ready').length;
-    const providerResets = trial.cycles.filter(cycle => cycle.resetProviderBefore === true).length;
+    const providerResets = trial.cycles.filter(cycle => cycle.resetProviderBefore === true).length +
+      (trial.resetProviderBeforeFinal === true ? 1 : 0);
     return { warmProviderCanary: true, captures: trial.cycles.length + 1,
       minBackendConnections: providerResets + 1,
       maxBackendConnections: earlyStops + providerResets + 2,
@@ -143,7 +148,7 @@ export function expectedWarmProviderContinues(trial) {
     if (retained) continues += 1;
     retained = cycle.stopPhase !== 'before-ready';
   }
-  if (retained) continues += 1; // final full-PCM recovery capture
+  if (retained && trial.resetProviderBeforeFinal !== true) continues += 1;
   return continues;
 }
 export function expectedWarmProviderCallbackGenerations(trial) {
@@ -155,15 +160,18 @@ export function expectedWarmProviderCallbackGenerations(trial) {
     if (retained && cycle.stopPhase !== 'before-ready') generations.push(cycle.index + 1);
     retained = cycle.stopPhase !== 'before-ready';
   }
-  if (retained) generations.push(trial.finalEpisodeIndex + 1);
+  if (retained && trial.resetProviderBeforeFinal !== true) {
+    generations.push(trial.finalEpisodeIndex + 1);
+  }
   return generations;
 }
 export function expectedWarmProviderLogicalRuns(trial) {
   if (trial?.kind !== 'warm-provider-canary') throw new Error('Warm provider canary plan required');
-  return trial.cycles.reduce((count, cycle, index) => count + (
+  const cycleRuns = trial.cycles.reduce((count, cycle, index) => count + (
     index === 0 || cycle.resetProviderBefore === true ||
     trial.cycles[index - 1]?.stopPhase === 'before-ready' ? 1 : 0
   ), 0);
+  return cycleRuns + (trial.resetProviderBeforeFinal === true ? 1 : 0);
 }
 export function verifyWarmProviderFinalFixtureAgreement(reportFixture, envelopeFixture) {
   const keys = [
@@ -480,14 +488,15 @@ export function verifyWarmProviderCanary(trial, report) {
   const normalizedEventText = event => typeof event?.text === 'string'
     ? event.text.toLocaleLowerCase('ru').replace(/ё/g, 'е').replace(/[.,!?]/g, '').replace(/\s+/g, ' ')
     : '';
+  const completeSyntheticPhraseIds = text => {
+    const normalized = normalizedEventText({ text });
+    return [...normalized.matchAll(/на столе лежит книга|за окном растет береза/g)]
+      .map(match => match[0] === 'на столе лежит книга' ? 0 : 1);
+  };
   const eventMatchesEpisode = (event, episode, expectedEvent) => {
     const markerId = episode === 'episode-a.pcm' ? 0 : episode === 'episode-b.pcm' ? 1 : -1;
-    const prefix = markerId === 0 ? 'на столе' : markerId === 1 ? 'за окном' : '';
-    const oppositePrefix = markerId === 0 ? 'за окном' : markerId === 1 ? 'на столе' : '';
-    const normalized = normalizedEventText(event);
-    const expectedCount = prefix === '' ? 0 : normalized.split(prefix).length - 1;
-    const oppositeCount = oppositePrefix === '' ? 0 : normalized.split(oppositePrefix).length - 1;
-    return event?.event === expectedEvent && expectedCount === 1 && oppositeCount === 0 &&
+    const phraseIds = completeSyntheticPhraseIds(event?.text);
+    return event?.event === expectedEvent && phraseIds.length === 1 && phraseIds[0] === markerId &&
       (expectedEvent !== 'transcription:final' ||
         Array.isArray(event.markerIds) && event.markerIds.includes(markerId));
   };
@@ -609,7 +618,8 @@ export function verifyWarmProviderCanary(trial, report) {
     const gated = index >= trial.readyGateFromIndex;
     const previousSettlement = index === 0 ? null :
       (cycles[index - 1].providerResetSettledAtMs ?? cycles[index - 1].settledAtMs);
-    const resetAfter = trial.cycles[index + 1]?.resetProviderBefore === true;
+    const resetAfter = trial.cycles[index + 1]?.resetProviderBefore === true ||
+      (index === cycles.length - 1 && trial.resetProviderBeforeFinal === true);
     const previousCycle = cycles[index - 1];
     const mustReusePrevious = index > 0 && plan.resetProviderBefore !== true &&
       trial.cycles[index - 1]?.stopPhase !== 'before-ready';
@@ -686,6 +696,11 @@ export function verifyWarmProviderCanary(trial, report) {
     } else {
       const association = associations.get(index + 1);
       const resumed = expectedCallbackGenerations.includes(index + 1);
+      const independentlyMeasuredCycleStart = providerLedgers.reduce((sum, row) => {
+        const precedingCycle = cycles[row.captureGeneration - 1];
+        return row.captureGeneration < index + 1 &&
+          precedingCycle?.logicalRunId === cycle.logicalRunId ? sum + row.samples : sum;
+      }, 0);
       if (!association || cycle.association?.captureGeneration !== index + 1 ||
           cycle.association.captureRunId !== cycle.captureRunId ||
           cycle.association.captureFenceGeneration !== cycle.captureFenceGeneration ||
@@ -693,6 +708,7 @@ export function verifyWarmProviderCanary(trial, report) {
           association.captureFenceGeneration !== cycle.captureFenceGeneration || source.emittedFrames <= 0 ||
           !Number.isSafeInteger(cycle.triggerProviderSamples) || cycle.triggerProviderSamples <= 0 ||
           !Number.isSafeInteger(cycle.providerStartSamples) || cycle.providerStartSamples < 0 ||
+          cycle.providerStartSamples !== independentlyMeasuredCycleStart ||
           cycle.triggerProviderSamples > providerByGeneration.get(index + 1)?.samples ||
           (resumed ? cycle.callbackFenceGeneration !== index + 1 :
             cycle.callbackFenceGeneration !== null || cycle.triggerEventStart !== cycle.eventStart) ||
@@ -767,9 +783,7 @@ export function verifyWarmProviderCanary(trial, report) {
   );
   const acceptedFinalText = acceptedFinalDeliveries.reduce((stable, delivery) =>
     appendStableText(stable, delivery.text), '');
-  const acceptedNormalizedText = normalizedEventText({ text: acceptedFinalText });
-  const acceptedMarkerIds = [...acceptedNormalizedText.matchAll(/(?:на столе|за окном)/g)]
-    .map(match => match[0] === 'на столе' ? 0 : 1);
+  const acceptedMarkerIds = completeSyntheticPhraseIds(acceptedFinalText);
   const expectedFinalTranscript = appendStableText(finalTranscriptBeforeProof, acceptedFinalText);
   const finalRunGenerations = new Set(cycles.filter(cycle =>
     cycle.logicalRunId === ownership?.logicalRunId).map(cycle => cycle.captureGeneration));
@@ -820,15 +834,16 @@ export function verifyWarmProviderCanary(trial, report) {
       acceptedFinalDeliveries.length < 1 ||
       new Set(acceptedMarkerIds).size !== 2 || !acceptedMarkerIds.includes(0) ||
       !acceptedMarkerIds.includes(1) ||
-      (acceptedNormalizedText.split('на столе').length - 1) !== 1 ||
-      (acceptedNormalizedText.split('за окном').length - 1) !== 1 ||
+      acceptedMarkerIds.filter(markerId => markerId === 0).length !== 1 ||
+      acceptedMarkerIds.filter(markerId => markerId === 1).length !== 1 ||
       report.expectedInsertion !== expectedFinalTranscript ||
       !events.slice(report.finalTranscriptFence.eventStart).some(finalTranscriptMatchesCallbackGeneration) ||
       finalEvents.some(event => ['transcription:partial', 'transcription:final'].includes(event.event) &&
         event.sessionId !== ownership.logicalRunId) ||
       !Array.isArray(terminals) || terminals.length !== terminalEvents.length ||
       expectedTerminalCycles.size !== expectedWarmProviderLogicalRuns(trial) ||
-      ownership.logicalRunId !== cycles.at(-1)?.logicalRunId ||
+      (trial.resetProviderBeforeFinal === true && finalRunGenerations.size !== 0) ||
+      ownership.logicalRunId === cycles.at(-1)?.logicalRunId ||
       terminals.length !== expectedTerminalCycles.size ||
       terminals.some(terminal => terminal.complete !== true ||
         expectedTerminalCycles.get(terminal.sessionId) !== terminal.cycleIndex ||
@@ -863,6 +878,15 @@ export function verifyWarmProviderCanary(trial, report) {
           episode, cycleIndex, cycle.logicalRunId, cycle.providerStartSamples, provider.samples,
           cycle.triggerDeliverySeqFloor, sameSourceInRun === 1);
         return !evidence.stableDeliveries.includes(event) && !evidence.timedDeliveries.includes(event);
+      }) ||
+      cycles.some((cycle, cycleIndex) => {
+        const finalText = events.filter(event => event.cycleIndex === cycleIndex &&
+          event.event === 'transcription:final').reduce((stable, delivery) =>
+          appendStableText(stable, delivery.text), '');
+        if (!finalText) return false;
+        const markerId = trial.cycles[cycleIndex]?.episode === 'episode-a.pcm' ? 0 : 1;
+        const phraseIds = completeSyntheticPhraseIds(finalText);
+        return phraseIds.length !== 1 || phraseIds[0] !== markerId;
       }) ||
       finalEvidence.stableDeliveries.length !== acceptedFinalDeliveries.length ||
       report.final.status !== 'Idle' || report.final.preparedCaptureTokenCount !== 0 ||

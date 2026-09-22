@@ -17,7 +17,8 @@ function plan() {
   });
   return { id: 'warm-provider-churn-20', kind: 'warm-provider-canary' as const,
     cycles, episodes: [...cycles.map(cycle => cycle.episode), 'long-auto-commit.pcm'],
-    readyGateFromIndex: 5, readyGateTimeoutMs: 1800, finalEpisodeIndex: 20 };
+    readyGateFromIndex: 5, readyGateTimeoutMs: 1800, finalEpisodeIndex: 20,
+    resetProviderBeforeFinal: true as const };
 }
 
 describe('warm provider paid canary plan', () => {
@@ -33,6 +34,8 @@ describe('warm provider paid canary plan', () => {
       (value: ReturnType<typeof plan>) => { value.readyGateFromIndex = 4; },
       (value: ReturnType<typeof plan>) => { value.readyGateTimeoutMs = 2200; },
       (value: ReturnType<typeof plan>) => { value.finalEpisodeIndex = 19; },
+      (value: ReturnType<typeof plan>) => { delete (value as Partial<ReturnType<typeof plan>>)
+        .resetProviderBeforeFinal; },
       (value: ReturnType<typeof plan>) => { value.episodes[20] = 'episode-a.pcm'; },
     ];
     for (const mutate of mutations) {
@@ -44,7 +47,7 @@ describe('warm provider paid canary plan', () => {
 
   it('requires callback fences only for retained provider generations', () => {
     expect(expectedWarmProviderCallbackGenerations(plan())).toEqual([
-      7, 8, 9, 10, 11, 12, 13, 14, 15, 21,
+      7, 8, 9, 10, 11, 12, 13, 14, 15,
     ]);
   });
 
@@ -140,6 +143,8 @@ describe('warm provider paid canary plan', () => {
       .toEqual([]);
     expect(warmCanaryAttributedFinalEvidence([timed], fence, false).timedDeliveries)
       .toEqual([timed]);
+    expect(warmCanaryAttributedFinalEvidence([timed], fence, true).stableDeliveries)
+      .toEqual([]);
     expect(warmCanaryAttributedFinalEvidence([
       { ...timed, sourceStartSeconds: 1.9999375 },
     ], fence, false).timedDeliveries).toEqual([]);

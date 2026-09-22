@@ -114,7 +114,10 @@ The native qualification runner includes a separate opt-in paid canary for the
 production backend-to-ElevenLabs route. It executes the fixed cross-product of
 four stop boundaries (`before-ready`, `after-first-pcm`, `during-partial`, and
 `after-final`) and five reopen jitters (`0/25/100/250/500 ms`), then sends one
-complete multi-phrase source as a final health proof.
+complete multi-phrase source as a final health proof. The churn matrix proves
+retained Pause/Continue behavior; the final proof starts a fresh logical
+provider run because production Stable deliveries have no source timing and
+must not be attributable to delayed text from the last churn generation.
 
 It requires the existing canonical qualification PCM directory and a fresh
 disposable `p4-test-backend-v1` manifest. The manifest contains only loopback

@@ -14,7 +14,7 @@ const createQualificationCollector = new Function('verifyQualificationConnection
 const close = (code, connectionId = 1) => ({ event: 'fault_proxy_close', connectionId,
   direction: 'upstream', code });
 const eventsFor = trial => Array.from({
-  length: trial.kind === 'warm-provider-canary' ? 6 : trial.id.startsWith('cold-') ? 2 : 1,
+  length: trial.kind === 'warm-provider-canary' ? 7 : trial.id.startsWith('cold-') ? 2 : 1,
 },
   (_, index) => [{ event: 'fault_proxy_connected', connectionId: index + 1 },
     close(1000, index + 1)]).flat();

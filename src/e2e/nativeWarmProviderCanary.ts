@@ -80,7 +80,7 @@ const eventTimingContainedByFence = (event: ProviderEvent, fence: WarmCanaryCapt
 
 const eventIsFreshStable = (event: ProviderEvent, fence: WarmCanaryCaptureFence) =>
   eventOwnsCaptureFence(event, fence) && Number.isSafeInteger(event.deliverySeq) &&
-  Number(event.deliverySeq) > fence.deliverySeqFloor &&
+  event.timingKnown !== true && Number(event.deliverySeq) > fence.deliverySeqFloor &&
   normalizedProviderText(event.text).length > 0;
 
 export function warmCanaryAttributedFinalEvidence(
@@ -417,7 +417,9 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       }
       report.cycles.push(cycleReport);
       const nextCycle = trial.cycles[cycle.index + 1];
-      if (nextCycle?.resetProviderBefore === true) {
+      const resetProviderAfterCycle = nextCycle?.resetProviderBefore === true ||
+        (cycle.index === trial.cycles.length - 1 && trial.resetProviderBeforeFinal === true);
+      if (resetProviderAfterCycle) {
         // Repeated spoken fixtures are safe only across distinct provider
         // sessions. Retire the paused session before every after-final cycle;
         // the next cycle cannot consume a delayed Stable from its predecessor.
@@ -456,8 +458,8 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
     report.finalReadyElapsedMs = now() - report.finalStartedAtMs;
     check(report.finalReadyElapsedMs <= trial.readyGateTimeoutMs,
       'Final proof provider Ready exceeded the safe audio watchdog budget');
-    check(ready.logicalProviderRunId === Number(report.cycles[report.cycles.length - 1]?.logicalRunId),
-      'Final proof opened a new provider instead of continuing the retained session');
+    check(ready.logicalProviderRunId !== Number(report.cycles[report.cycles.length - 1]?.logicalRunId),
+      'Final proof reused a provider that can still deliver stale churn text');
     sessionCycles.set(ready.logicalProviderRunId, trial.finalEpisodeIndex);
     check(ready.fixture.sourceEpisodes[trial.finalEpisodeIndex].emittedFrames === 0,
       'Final source escaped the real provider Ready gate');
@@ -470,13 +472,17 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         Number.isSafeInteger(event.deliverySeq))
       .reduce((maximum, event) => Math.max(maximum, Number(event.deliverySeq)), 0);
     report.finalTextBeforeProof = store.finalText;
-    await invoke('native_e2e_configure', { config: { sourceGateReady: true } });
     const finalGeneration = trial.finalEpisodeIndex + 1;
-    await poll(value => (value.fixture.sourceEpisodes[trial.finalEpisodeIndex]?.emittedFrames ?? 0) > 0 &&
-      value.fixture.providerCallbackGenerations[value.fixture.providerCallbackGenerations.length - 1] === finalGeneration,
-    'final provider callback ACK fence', 30_000);
+    const requiresFinalCallbackFence = callbackFenceGenerations.has(finalGeneration);
     const finalEventStart = report.events.length;
     report.finalCallbackFence = { captureGeneration: finalGeneration, eventStart: finalEventStart };
+    await releaseWarmCanarySourceBeforeAck(
+      () => invoke('native_e2e_configure', { config: { sourceGateReady: true } }),
+      requiresFinalCallbackFence ? () => poll(value =>
+        value.fixture.providerCallbackGenerations[value.fixture.providerCallbackGenerations.length - 1] ===
+          finalGeneration,
+      'final provider callback ACK fence', 30_000) : null,
+    );
     const complete = await poll(value => {
       const source = value.fixture.sourceEpisodes[trial.finalEpisodeIndex];
       return source?.emittedFrames === source?.sourceFrames && typeof source.nativeSourceEndMs === 'number';
@@ -536,8 +542,8 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       .map(marker => marker.markerId));
     check(store.finalText.trim().length > 0 && finalMarkers.size >= 2,
       'Final full PCM did not produce the complete multi-phrase transcript proof');
-    // Retire the paused provider through the production configuration invalidation
-    // path, after proving that the final capture reused the warm connection.
+    // Retire the final provider through the production configuration
+    // invalidation path after the post-churn health proof completes.
     await invoke('update_stt_config', { provider: 'backend', language: 'en',
       backendStreamingProvider: 'elevenlabs' });
     await poll(value => value.status === 'Idle' &&
@@ -583,7 +589,8 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
       expectedTerminalCycles.set(report.finalOwnership.logicalRunId, trial.finalEpisodeIndex);
     }
     check(expectedTerminalCycles.size === expectedWarmProviderLogicalRuns(trial) &&
-      report.finalOwnership?.logicalRunId === Number(report.cycles[report.cycles.length - 1]?.logicalRunId) &&
+      report.finalOwnership?.logicalRunId !==
+        Number(report.cycles[report.cycles.length - 1]?.logicalRunId) &&
       report.terminals.length === expectedTerminalCycles.size &&
       terminalEvents.length === expectedTerminalCycles.size &&
       report.terminals.every(terminal => terminal.complete &&
@@ -620,6 +627,15 @@ export async function runNativeWarmProviderCanary(pinia: Pinia) {
         sameSourceInRun === 1);
       return evidence.stableDeliveries.includes(event) || evidence.timedDeliveries.includes(event);
     }) &&
+      !report.cycles.some((_row, cycleIndex) => {
+        const aggregate = report.events.filter(event => event.cycleIndex === cycleIndex &&
+          event.event === 'transcription:final').reduce((stable, delivery) =>
+          appendTranscriptText(stable, delivery.text ?? ''), '');
+        if (!aggregate) return false;
+        const expectedMarkerId = trial.cycles[cycleIndex]?.episode === 'episode-a.pcm' ? 0 : 1;
+        const markers = syntheticPhraseOccurrences(aggregate).map(marker => marker.markerId);
+        return markers.length !== 1 || markers[0] !== expectedMarkerId;
+      }) &&
       finalEvidence().stableDeliveries.length === acceptedFinalDeliveries.length &&
       acceptedFinalDeliveries.length > 0,
     'Warm provider canary retained a late, duplicate, stale, or misowned final');

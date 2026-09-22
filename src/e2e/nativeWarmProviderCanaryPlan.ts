@@ -3,7 +3,7 @@ export type WarmProviderCyclePlan = { index: number; jitterMs: number;
   stopPhase: WarmProviderStopPhase; episode: string; resetProviderBefore?: boolean };
 export type WarmProviderCanaryTrial = { id: string; kind: 'warm-provider-canary';
   cycles: WarmProviderCyclePlan[]; episodes: string[]; readyGateFromIndex?: number;
-  readyGateTimeoutMs: number; finalEpisodeIndex: number };
+  readyGateTimeoutMs: number; finalEpisodeIndex: number; resetProviderBeforeFinal: true };
 
 export function expectedWarmProviderCallbackGenerations(trial: WarmProviderCanaryTrial) {
   let retained = false;
@@ -13,15 +13,18 @@ export function expectedWarmProviderCallbackGenerations(trial: WarmProviderCanar
     if (retained && cycle.stopPhase !== 'before-ready') generations.push(cycle.index + 1);
     retained = cycle.stopPhase !== 'before-ready';
   }
-  if (retained) generations.push(trial.finalEpisodeIndex + 1);
+  if (retained && trial.resetProviderBeforeFinal !== true) {
+    generations.push(trial.finalEpisodeIndex + 1);
+  }
   return generations;
 }
 
 export function expectedWarmProviderLogicalRuns(trial: WarmProviderCanaryTrial) {
-  return trial.cycles.reduce((count, cycle, index) => count + (
+  const cycleRuns = trial.cycles.reduce((count, cycle, index) => count + (
     index === 0 || cycle.resetProviderBefore === true ||
     trial.cycles[index - 1]?.stopPhase === 'before-ready' ? 1 : 0
   ), 0);
+  return cycleRuns + (trial.resetProviderBeforeFinal === true ? 1 : 0);
 }
 
 export function validateWarmProviderCanaryPlan(trial: WarmProviderCanaryTrial) {
@@ -33,7 +36,7 @@ export function validateWarmProviderCanaryPlan(trial: WarmProviderCanaryTrial) {
   }
   if (trial.cycles.length !== 20 || trial.episodes.length !== 21 ||
       trial.readyGateFromIndex !== 5 || trial.readyGateTimeoutMs !== 1800 ||
-      trial.finalEpisodeIndex !== 20) {
+      trial.finalEpisodeIndex !== 20 || trial.resetProviderBeforeFinal !== true) {
     throw new Error('Warm canary must contain 20 churn cycles and one final proof');
   }
   for (const [index, cycle] of trial.cycles.entries()) {
