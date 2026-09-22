@@ -2930,7 +2930,10 @@ async fn start_live_translation_recording(
     }
     state.suspend_warm_input(super::state::WarmInputSuspension::Takeover);
     let takeover_revision = state.warm_takeover_revision();
-    state.close_warm_input().await?;
+    if let Err(error) = state.close_warm_input().await {
+        restore_warm_after_delayed_close(app_handle.clone(), takeover_revision);
+        return Err(error);
+    }
     let service = get_or_create_live_translation_service(state).await;
     *state.active_recording_mode.write().await = Some(RecordingMode::LiveTranslation);
 
@@ -3911,13 +3914,17 @@ async fn check_openai_key(api_key: String) -> LiveTranslationHealthCheckItem {
 
 async fn collect_live_translation_health_check(
     state: &AppState,
+    app_handle: &AppHandle,
 ) -> Result<LiveTranslationHealthCheck, String> {
     if let Some(message) = live_translation_health_check_busy_reason(state).await {
         return Ok(live_translation_health_check_busy(message));
     }
     state.suspend_warm_input(super::state::WarmInputSuspension::Takeover);
     let takeover_revision = state.warm_takeover_revision();
-    state.close_warm_input().await?;
+    if let Err(error) = state.close_warm_input().await {
+        restore_warm_after_delayed_close(app_handle.clone(), takeover_revision);
+        return Err(error);
+    }
 
     let app_config = state.config.read().await.clone();
     let selected_device = app_config
@@ -4062,9 +4069,10 @@ fn live_translation_health_check_busy(message: String) -> LiveTranslationHealthC
 #[tauri::command]
 pub async fn run_live_translation_health_check(
     state: State<'_, AppState>,
+    app_handle: AppHandle,
 ) -> Result<LiveTranslationHealthCheck, String> {
     let _audio_start_guard = state.audio_start_guard.lock().await;
-    collect_live_translation_health_check(state.inner()).await
+    collect_live_translation_health_check(state.inner(), &app_handle).await
 }
 
 /// Start recording voice
