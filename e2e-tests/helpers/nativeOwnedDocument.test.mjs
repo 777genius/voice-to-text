@@ -96,6 +96,10 @@ for (const mode of ['diagnostic', 'live']) for (const failure of ['none', 'setup
       exactInsertionEvidence: () => { if (failure === 'verification') throw Error('primary verification'); return {}; },
       verifyQualificationConnections: () => ({}), verifyQualificationRoute: () => ({}),
       verifyQualificationSources: () => {}, verifyQualificationTerminals: () => {},
+      writeNativeQualificationBinding: async (dir, result, id) => {
+        assert.equal(dir, directory); assert.equal(result, '/TEST/result'); assert.equal(id, trial.id);
+        assert.ok(calls.includes('qualification-verification.json')); calls.push('binding');
+      },
       ownedDocumentMatches,
       closeOwnedDocument: async () => { calls.push('close'); if (failure.includes('cleanup')) throw Error('cleanup failure'); },
       marker: 'test-marker', console: { log() {} },
@@ -112,6 +116,7 @@ for (const mode of ['diagnostic', 'live']) for (const failure of ['none', 'setup
     });
     assert.equal(calls.filter(c => c === 'close').length, 1);
     assert.equal(calls.at(-1), 'close');
+    if (mode === 'live' && failure === 'none') assert.ok(calls.includes('binding'));
     if (calls.includes('readback')) assert.ok(calls.indexOf('terminated') < calls.indexOf('readback'));
     if (mode === 'live' && ['none', 'cleanup', 'verification'].includes(failure)) assert.ok(calls.includes('readback'));
   });
@@ -139,6 +144,9 @@ test('parent live verification accepts each planned long Continue and rejects a 
       promisify: fn => fn, execFile: async () => ({ stdout: 'synthetic\n' }),
       exactInsertionEvidence: () => ({}), verifyQualificationConnections: () => ({}), verifyQualificationRoute: () => ({}),
       verifyQualificationSources: () => {}, verifyQualificationTerminals: () => {}, ownedDocumentMatches,
+      writeNativeQualificationBinding: async (_dir, _result, id) => {
+        assert.equal(id, trial.id); assert.ok(artifacts['qualification-verification.json']);
+      },
       closeOwnedDocument: async () => {}, marker: 'test-marker', console: { log() {} },
     };
     const run = new Function(...Object.keys(dependencies), `${mainBody}; return main;`)(...Object.values(dependencies));
