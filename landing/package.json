@@ -1,5 +1,6 @@
 {
   "name": "voice-to-text-landing",
+  "packageManager": "pnpm@9.15.9",
   "private": true,
   "type": "module",
   "scripts": {
