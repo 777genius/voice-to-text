@@ -99,6 +99,10 @@ const WS_SEND_TIMEOUT_SECS: u64 = 3;
 // provider-side contract so a valid stop tail is not mistaken for a dead
 // connection. Fast acknowledgements still return immediately.
 const FINALIZE_DRAIN_ACK_TIMEOUT: Duration = Duration::from_secs(12);
+// Config can be held before an ElevenLabs session becomes Ready. This phase is
+// separate from the provider's drain window after the one Finalize is sent.
+const EL_FINALIZE_READY_TIMEOUT: Duration = Duration::from_secs(12);
+const EL_FINALIZE_TOTAL_TIMEOUT: Duration = Duration::from_secs(26);
 const FINALIZE_POST_ACK_TEXT_GRACE_MS: u64 = 350;
 const MAX_AUDIO_DEBT_BYTES: u64 = 30 * 16_000 * 2;
 const CAPABILITY_FINALIZE_OUTCOME: &str = "finalize_outcome_v1";
@@ -197,6 +201,7 @@ pub struct BackendProvider {
     batch_started_at: Option<std::time::Instant>,
 
     finalize_drain_ack_timeout: Duration,
+    finalize_ready_timeout: Duration,
     finalize_report: Arc<std::sync::Mutex<Option<ProviderFinalizeReport>>>,
     outcome_negotiated: Arc<AtomicBool>,
     continuation: Arc<std::sync::Mutex<ContinuationTransport>>,
@@ -386,6 +391,17 @@ fn server_error_closes_stream(code: &str) -> bool {
     )
 }
 
+fn validated_el_terminal(status: &str, outcome: Option<&ProviderFinalizeReport>) -> bool {
+    matches!(status, "drained" | "flushed" | "no_audio" | "unconfirmed")
+        && outcome.is_some_and(|report| {
+            matches!(
+                report.reason,
+                FinalizeReason::Drained | FinalizeReason::NoAudio
+            ) && report.error.is_none()
+                && report.provider_release == crate::domain::ProviderRelease::Released
+        })
+}
+
 fn call_backend_callback(label: &str, callback: impl FnOnce()) {
     if catch_unwind(AssertUnwindSafe(callback)).is_err() {
         log::error!("Backend {} callback panicked", label);
@@ -447,6 +463,7 @@ impl BackendProvider {
             el_catchup_disabled: false,
             batch_started_at: None,
             finalize_drain_ack_timeout: FINALIZE_DRAIN_ACK_TIMEOUT,
+            finalize_ready_timeout: EL_FINALIZE_READY_TIMEOUT,
             finalize_report: Arc::new(std::sync::Mutex::new(None)),
             outcome_negotiated: Arc::new(AtomicBool::new(false)),
             continuation: Arc::new(std::sync::Mutex::new(ContinuationTransport::default())),
@@ -831,6 +848,65 @@ impl BackendProvider {
         }
     }
 
+    async fn wait_for_el_ready_before_finalize(
+        &self,
+        finalize_rx: &mut tokio::sync::oneshot::Receiver<FinalizeDrainComplete>,
+        total_deadline: Option<tokio::time::Instant>,
+    ) -> SttResult<()> {
+        if !self
+            .config
+            .as_ref()
+            .is_some_and(|config| backend_streaming_provider_name(config) == "elevenlabs")
+        {
+            return Ok(());
+        }
+        let deadline = (tokio::time::Instant::now() + self.finalize_ready_timeout)
+            .min(total_deadline.expect("ElevenLabs finalize has an outer deadline"));
+        let changed = self.continuation.lock().unwrap().changed.clone();
+        loop {
+            // Register before reading Ready so a concurrent receiver update
+            // cannot be lost between the check and the wait.
+            let notified = changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_closed.load(Ordering::SeqCst) {
+                return Err(SttError::Connection(SttConnectionError::with_category(
+                    "Backend closed before ElevenLabs Ready",
+                    SttConnectionCategory::Closed,
+                )));
+            }
+            match finalize_rx.try_recv() {
+                Ok(_) => {
+                    return Err(SttError::Processing(
+                        "Backend terminal arrived before ElevenLabs Ready".into(),
+                    ))
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    return Err(SttError::Connection(SttConnectionError::with_category(
+                        "Backend closed before ElevenLabs Ready",
+                        SttConnectionCategory::Closed,
+                    )))
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+            }
+            if self.continuation.lock().unwrap().ready_seen {
+                return Ok(());
+            }
+            tokio::select! {
+                _ = &mut notified => {},
+                _ = &mut *finalize_rx => return Err(SttError::Processing(
+                    "Backend terminal arrived before ElevenLabs Ready".into(),
+                )),
+                _ = tokio::time::sleep_until(deadline) => return Err(SttError::Connection(
+                    SttConnectionError::with_category(
+                        "Backend ElevenLabs Ready timed out before Finalize",
+                        SttConnectionCategory::Timeout,
+                    ),
+                )),
+            }
+        }
+    }
+
     async fn finalize_and_wait_for_drain(&self, context: &'static str) -> SttResult<()> {
         if self.continuation.lock().unwrap().session.is_some() {
             if let Some(report) = self.finalize_report.lock().unwrap().as_ref() {
@@ -863,11 +939,37 @@ impl BackendProvider {
             )));
         }
 
-        let finalize_rx = {
+        let mut finalize_rx = {
             let (tx, rx) = tokio::sync::oneshot::channel();
             *self.finalize_waiter.lock().await = Some(tx);
             rx
         };
+
+        let is_el = self
+            .config
+            .as_ref()
+            .is_some_and(|config| backend_streaming_provider_name(config) == "elevenlabs");
+        let total_deadline = is_el.then(|| tokio::time::Instant::now() + EL_FINALIZE_TOTAL_TIMEOUT);
+        if let Err(error) = self
+            .wait_for_el_ready_before_finalize(&mut finalize_rx, total_deadline)
+            .await
+        {
+            let _ = self.finalize_waiter.lock().await.take();
+            self.is_closed.store(true, Ordering::SeqCst);
+            return Err(error);
+        }
+        if is_el
+            && !matches!(
+                finalize_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            )
+        {
+            let _ = self.finalize_waiter.lock().await.take();
+            self.is_closed.store(true, Ordering::SeqCst);
+            return Err(SttError::Processing(
+                "Backend terminal arrived before Finalize".into(),
+            ));
+        }
 
         log::info!(
             "[ReconnectDiag] BackendProvider sending Finalize on {}: closed_before_finalize={}, sent_chunks={}",
@@ -875,12 +977,37 @@ impl BackendProvider {
             self.is_closed.load(Ordering::SeqCst),
             self.sent_chunks_count
         );
-        if let Err(e) = self.send_json(&ClientMessage::Finalize).await {
+        if self.is_closed.load(Ordering::SeqCst) {
             let _ = self.finalize_waiter.lock().await.take();
+            return Err(SttError::Connection(SttConnectionError::with_category(
+                "Backend closed before Finalize",
+                SttConnectionCategory::Closed,
+            )));
+        }
+        let send_result = if let Some(deadline) = total_deadline {
+            tokio::time::timeout_at(deadline, self.send_json(&ClientMessage::Finalize))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(SttError::Connection(SttConnectionError::with_category(
+                        "Backend ElevenLabs Finalize total deadline exceeded",
+                        SttConnectionCategory::Timeout,
+                    )))
+                })
+        } else {
+            self.send_json(&ClientMessage::Finalize).await
+        };
+        if let Err(e) = send_result {
+            let _ = self.finalize_waiter.lock().await.take();
+            if is_el {
+                self.is_closed.store(true, Ordering::SeqCst);
+            }
             return Err(e);
         }
 
-        match tokio::time::timeout(self.finalize_drain_ack_timeout, finalize_rx).await {
+        let drain_deadline = tokio::time::Instant::now() + self.finalize_drain_ack_timeout;
+        let drain_deadline =
+            total_deadline.map_or(drain_deadline, |outer| drain_deadline.min(outer));
+        match tokio::time::timeout_at(drain_deadline, finalize_rx).await {
             Ok(Ok(done)) => {
                 log::info!(
                     "[ReconnectDiag] BackendProvider finalize drain ack received on {}: status={}, saw_result={}, text_results_seen={}",
@@ -1588,6 +1715,7 @@ impl SttProvider for BackendProvider {
             let mut finalize_text_results_seen = 0usize;
             let mut last_delivery_seq = 0u64;
             let mut continuation_delivery = false;
+            let mut validated_terminal_before_normal_close = false;
 
             while let Some(msg_result) = read.next().await {
                 match msg_result {
@@ -1605,7 +1733,6 @@ impl SttProvider for BackendProvider {
                                                 continue;
                                             }
                                             negotiation.ready_seen = true;
-                                            negotiation.changed.notify_waiters();
                                             if offered_continuation
                                                 && accepted_capabilities
                                                     .iter()
@@ -1628,6 +1755,7 @@ impl SttProvider for BackendProvider {
                                                     .any(|c| c == CAPABILITY_FINALIZE_OUTCOME),
                                             Ordering::SeqCst,
                                         );
+                                        continuation.lock().unwrap().changed.notify_waiters();
                                         log::info!("Session ready: {}", session_id);
                                         // Уведомляем о хорошем качестве связи
                                         let cb = {
@@ -1941,6 +2069,21 @@ impl SttProvider for BackendProvider {
                                         }
                                         log::error!("Server error: {} - {}", code, message);
                                         server_error_reported = server_error_closes_stream(&code);
+                                        // An EL error before Ready or during Finalize invalidates
+                                        // this attempt, even if the peer keeps the socket open.
+                                        let finalize_pending =
+                                            finalize_waiter.lock().await.is_some();
+                                        if offered_outcome
+                                            && (!continuation.lock().unwrap().ready_seen
+                                                || finalize_pending)
+                                        {
+                                            server_error_reported = true;
+                                            is_closed_flag.store(true, Ordering::SeqCst);
+                                            continuation.lock().unwrap().changed.notify_waiters();
+                                            if finalize_pending {
+                                                let _ = finalize_waiter.lock().await.take();
+                                            }
+                                        }
                                         // Negotiated EL observers must see a terminal error even
                                         // when the peer leaves its socket open after reporting it.
                                         if server_error_reported {
@@ -1981,6 +2124,9 @@ impl SttProvider for BackendProvider {
                                         } else {
                                             None
                                         };
+                                        validated_terminal_before_normal_close = offered_outcome
+                                            && outcome_negotiated.load(Ordering::SeqCst)
+                                            && validated_el_terminal(&status, outcome.as_ref());
                                         log::debug!(
                                             "Finalize drain complete: status={}, saw_result={}, text_results_seen={}",
                                             status,
@@ -2033,7 +2179,16 @@ impl SttProvider for BackendProvider {
                         );
                         // Если мы сами инициировали закрытие или уже отдали точную ServerMessage::Error,
                         // не эмитим вторую обобщённую ошибку в UI.
-                        if is_closed_flag.load(Ordering::SeqCst) || server_error_reported {
+                        let normal_after_terminal = frame.as_ref().is_some_and(|close| {
+                            u16::from(close.code) == 1000 && validated_terminal_before_normal_close
+                        });
+                        if is_closed_flag.load(Ordering::SeqCst)
+                            || server_error_reported
+                            || normal_after_terminal
+                        {
+                            if normal_after_terminal {
+                                is_closed_flag.store(true, Ordering::SeqCst);
+                            }
                             break;
                         }
                         is_closed_flag.store(true, Ordering::SeqCst);
@@ -2197,6 +2352,7 @@ impl SttProvider for BackendProvider {
             }
             report_backend_unexpected_eof(&callbacks_state, &is_closed_flag, server_error_reported)
                 .await;
+            continuation.lock().unwrap().changed.notify_waiters();
 
             // Wake an in-flight pause/stop immediately when transport dies.
             // Dropping the sender makes the oneshot receiver fail closed
@@ -4648,6 +4804,147 @@ mod tests {
         modern_finalize_case("timeout", "deadline", false).await;
         modern_finalize_case("no_provider", "drained", false).await;
         modern_finalize_case("future_status", "drained", false).await;
+    }
+
+    async fn el_pre_ready_finalize_case(
+        event: &'static str,
+    ) -> (SttResult<()>, usize, usize, usize) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(tcp).await.unwrap();
+            let _config = ws.next().await.unwrap().unwrap();
+            let mut ready_delay = Box::pin(tokio::time::sleep(Duration::from_millis(150)));
+            let mut ready_sent = false;
+            let mut finalize_before_ready = 0;
+            let mut finalize_count = 0;
+            loop {
+                tokio::select! {
+                    _ = &mut ready_delay, if !ready_sent => {
+                        ready_sent = true;
+                        if event == "timeout" {
+                            continue;
+                        }
+                        let payload = match event {
+                            "error" => r#"{"type":"error","code":"PROVIDER_ERROR","message":"pre-ready failure"}"#,
+                            "terminal" => r#"{"type":"finalize_complete","status":"drained","saw_result":true}"#,
+                            _ => r#"{"type":"ready","session_id":"mock","accepted_capabilities":["finalize_outcome_v1"]}"#,
+                        };
+                        if event == "close" {
+                            ws.close(None).await.unwrap();
+                            break;
+                        }
+                        ws.send(Message::Text(payload.into())).await.unwrap();
+                    }
+                    next = ws.next() => match next {
+                        Some(Ok(Message::Binary(_))) => {},
+                        Some(Ok(Message::Text(text))) if text.contains("finalize") => {
+                            finalize_count += 1;
+                            if !ready_sent { finalize_before_ready += 1; }
+                            if event == "ready" || event == "failed" {
+                                tokio::time::sleep(Duration::from_millis(150)).await;
+                                let terminal = if event == "failed" {
+                                    r#"{"type":"finalize_complete","status":"failed","saw_result":false,"outcome":{"reason":"provider_error","tail_evidence":"unconfirmed","provider_release":"released","last_delivery_seq":0,"stable_snapshot":"","error":"provider failed"}}"#
+                                } else {
+                                    r#"{"type":"finalize_complete","status":"unconfirmed","saw_result":true,"outcome":{"reason":"drained","tail_evidence":"unconfirmed","provider_release":"released","last_delivery_seq":0,"stable_snapshot":""}}"#
+                                };
+                                ws.send(Message::Text(terminal.into())).await.unwrap();
+                                ws.send(Message::Close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                                    code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Normal,
+                                    reason: "".into(),
+                                }))).await.unwrap();
+                                break;
+                            }
+                        }
+                        Some(Ok(Message::Text(text))) if text.contains("close") => break,
+                        Some(Ok(Message::Close(_))) | None => break,
+                        Some(Err(_)) => break,
+                        _ => {},
+                    }
+                }
+            }
+            (finalize_before_ready, finalize_count)
+        });
+        let mut config = SttConfig::new(SttProviderType::Backend);
+        config.backend_url = Some(url);
+        config.backend_auth_token = Some("test-token".into());
+        config.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
+        let mut provider = BackendProvider::new();
+        provider.finalize_ready_timeout = Duration::from_millis(400);
+        provider.finalize_drain_ack_timeout = Duration::from_millis(220);
+        provider.initialize(&config).await.unwrap();
+        let error_count = Arc::new(AtomicUsize::new(0));
+        let errors = error_count.clone();
+        provider
+            .start_stream(
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(move |_| {
+                    errors.fetch_add(1, Ordering::SeqCst);
+                }),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .unwrap();
+        provider
+            .send_audio(&AudioChunk::new(vec![1; 480], 16_000, 1))
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2), provider.pause_stream())
+            .await
+            .expect("finalize must terminate promptly");
+        if event == "ready" || event == "failed" {
+            tokio::time::timeout(Duration::from_millis(500), async {
+                while !provider.receiver_task.as_ref().unwrap().is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("normal server close must finish receiver");
+        }
+        provider.abort().await.unwrap();
+        let (before_ready, count) = server.await.unwrap();
+        (
+            result,
+            before_ready,
+            count,
+            error_count.load(Ordering::SeqCst),
+        )
+    }
+
+    #[tokio::test]
+    async fn elevenlabs_finalize_waits_for_delayed_ready_then_has_fresh_drain_window() {
+        let (result, before_ready, count, errors) = el_pre_ready_finalize_case("ready").await;
+        assert!(result.is_ok(), "result={result:?}");
+        assert_eq!(before_ready, 0);
+        assert_eq!(count, 1, "exactly one Finalize");
+        assert_eq!(errors, 0, "validated normal close must not report an error");
+    }
+
+    #[tokio::test]
+    async fn elevenlabs_pre_ready_error_terminal_and_close_fail_without_finalize() {
+        for event in ["error", "terminal", "close", "timeout"] {
+            let (result, before_ready, count, _) = el_pre_ready_finalize_case(event).await;
+            assert!(result.is_err(), "event={event}");
+            assert_eq!(before_ready, 0, "event={event}");
+            assert_eq!(count, 0, "event={event}: unexpected Finalize");
+            if event == "timeout" {
+                assert!(result.unwrap_err().to_string().contains("Ready timed out"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn elevenlabs_failed_terminal_normal_close_still_reports_error() {
+        let (result, before_ready, count, errors) = el_pre_ready_finalize_case("failed").await;
+        assert!(result.is_err());
+        assert_eq!(before_ready, 0);
+        assert_eq!(count, 1);
+        assert_eq!(
+            errors, 1,
+            "failed terminal must not hide the normal close error"
+        );
     }
     #[tokio::test]
     async fn audio_ack_window_only_blocks_after_capability_acceptance() {

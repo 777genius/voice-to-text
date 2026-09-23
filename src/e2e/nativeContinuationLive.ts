@@ -5,7 +5,7 @@ import { listen } from '@tauri-apps/api/event';
 import { useAppConfigStore } from '@/stores/appConfig';
 import { useTranscriptionStore } from '@/stores/transcription';
 
-type Trial = { id: string; continuation: boolean; configDelayMs: number; episodes: string[] };
+type Trial = { id: string; continuation: boolean; configDelayMs: number; gapMs?: number; episodes: string[] };
 type Native = { nativeReadback: NativeReadback; providerTransport: { serverReady: boolean; connectionRetained: boolean } | null; nativeClockMs: number; nativeInsertionTrace: NativeInsertionTrace; logicalProviderRunId: number; captureEpisode: unknown; pausedContinuation: unknown;
   completedReport: unknown; historyEntryCount: number; status: string; sessionId: number; preparedCaptureTokenCount: number;
   qualificationTrial: Trial; qualificationEndpoint: string;
@@ -20,12 +20,12 @@ async function toggle() {
 }
 function check(ok: unknown, message: string): asserts ok { if (!ok) throw new Error(message); }
 // RunTerminalPayload.session_id is run_id.get() in commands.rs, not the UI capture session.
-export function verifyLiveTerminals(continuation: boolean, baseline: boolean,
+export function verifyLiveTerminals(continuation: boolean, baseline: boolean, expectedEpisodes: number,
   episodes: Array<{ logicalRunId?: number }>, terminals: Array<{ sessionId: number; complete: boolean }>) {
   const owners = episodes.map(e => e.logicalRunId);
   const distinct = new Set(owners);
-  check(owners.length === 2 && owners.every(id => Number.isSafeInteger(id) && Number(id) > 0) &&
-    distinct.size === (baseline || continuation ? 1 : 2), 'Expected distinct logical run ownership');
+  check(owners.length === expectedEpisodes && owners.every(id => Number.isSafeInteger(id) && Number(id) > 0) &&
+    distinct.size === (baseline || continuation ? 1 : expectedEpisodes), 'Expected distinct logical run ownership');
   check(terminals.length === distinct.size && terminals.every(t => t.complete && distinct.has(t.sessionId)) &&
     [...distinct].every(id => terminals.filter(t => t.sessionId === id).length === 1),
     'Exactly one complete terminal per expected logical run required');
@@ -77,7 +77,8 @@ export async function runNativeContinuationLive(pinia: Pinia) {
   };
   try {
     const initial = await state(); report.trial = initial.qualificationTrial;
-    check(report.trial?.episodes.length === 2, 'Missing fixed trial');
+    check(report.trial && report.trial.episodes.length >= 2 && report.trial.episodes.length <= 4 &&
+      (report.trial.gapMs === undefined || [0, 200].includes(report.trial.gapMs)), 'Missing fixed trial');
     const store = await nativeLivePreflight(pinia, initial.qualificationEndpoint, subscriptions, (name, payload) => {
         if (report.events.length >= 512) { report.eventOverflow = true; return; }
         const syntheticText = boundedSyntheticText(payload.text);
@@ -128,7 +129,7 @@ export async function runNativeContinuationLive(pinia: Pinia) {
     const gated = baseline || report.trial.continuation;
     const initialHistoryCount = initial.historyEntryCount;
     const preRunText = store.finalText;
-    for (let episode = 0; episode < 2; episode++) {
+    for (let episode = 0; episode < report.trial.episodes.length; episode++) {
       const startMs = now();
       const previousText = store.finalText;
       if (!baseline || episode === 0) await toggle();
@@ -155,8 +156,8 @@ export async function runNativeContinuationLive(pinia: Pinia) {
       report.episodes.push({ episode, startMs, sourceCompleteMs, micReleasedMs: now(),
         logicalRunId: complete.logicalProviderRunId, source,
         nativeEvidence: { captureEpisode: complete.captureEpisode, pausedContinuation: stopped.pausedContinuation } });
-      if (episode === 0 && report.trial.continuation) {
-        await wait(120);
+      if (episode < report.trial.episodes.length - 1 && report.trial.continuation) {
+        await wait(report.trial.gapMs ?? 120);
       } else {
         await poll(s => s.status === 'Idle', 'terminal drain', 35000);
         await wait(1000);
@@ -166,16 +167,27 @@ export async function runNativeContinuationLive(pinia: Pinia) {
       }
     }
     report.final = await state();
-    check(report.final.fixture.captureStarts === (baseline ? 1 : 2) && report.final.fixture.captureStops === (baseline ? 1 : 2) &&
+    check(report.final.fixture.captureStarts === (baseline ? 1 : report.trial.episodes.length) &&
+      report.final.fixture.captureStops === (baseline ? 1 : report.trial.episodes.length) &&
       report.final.fixture.activeCaptures === 0 && report.final.preparedCaptureTokenCount === 0, 'Capture cleanup failed');
-    check(report.final.fixture.sourceEpisodes.length === 2, 'Source episode count mismatch');
+    check(report.final.fixture.sourceEpisodes.length === report.trial.episodes.length, 'Source episode count mismatch');
     if (gated) {
       const first = report.final.fixture.sourceEpisodes[0];
       check(first.sourceGateRequired && first.sourceGateReady?.status === 'Recording' && first.sourceGateReady.serverReady === true &&
         first.sourceGateReady.emittedFrames === 0 && first.nativeSourceStartMs >= first.sourceGateReady.nativeReadyMs,
         'Missing real Ready source gate evidence');
     }
-    check(report.final.historyEntryCount === initialHistoryCount + (report.trial.continuation || baseline ? 1 : 2), 'History count mismatch');
+    if (report.trial.continuation || baseline) {
+      check(report.final.historyEntryCount === initialHistoryCount + 1, 'History count mismatch');
+    } else {
+      // Legacy cold runs append each nonempty stable segment, not one entry per run.
+      const owners = new Set(report.episodes.map(row => row.logicalRunId));
+      const stableFinals = report.events.filter(event => event.event === 'transcription:final' && event.nonempty);
+      check(stableFinals.every(event => owners.has(event.sessionId)) &&
+        [...owners].every(id => stableFinals.some(event => event.sessionId === id)),
+        'Missing or unowned legacy stable segment');
+      check(report.final.historyEntryCount === initialHistoryCount + stableFinals.length, 'History count mismatch');
+    }
     check(report.final.status === 'Idle' && report.final.providerTransport?.connectionRetained === false, 'Normal Stop retained native connection');
     check(report.errors.length === 0, 'Retained transcription error');
     // Runner must additionally verify exact external document and provider connection evidence.
@@ -193,7 +205,7 @@ export async function runNativeContinuationLive(pinia: Pinia) {
   }
   if (report.passed && report.trial) {
     try {
-      verifyLiveTerminals(report.trial.continuation, report.trial.id.startsWith('warm-baseline-'), report.episodes, report.terminals);
+      verifyLiveTerminals(report.trial.continuation, report.trial.id.startsWith('warm-baseline-'), report.trial.episodes.length, report.episodes, report.terminals);
       check(report.errors.length === 0, 'Retained transcription error');
     } catch (error) { report.errors.push(String(error)); report.passed = false; }
   }

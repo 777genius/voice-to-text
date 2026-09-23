@@ -1,6 +1,9 @@
 //! Real TextEdit matrix. Ignored is NOT qualification. See test-artifacts/NATIVE-CONTEXT-REPORT.md.
 #![cfg(target_os = "macos")]
 
+#[path = "native_ax_stall_support/native.rs"]
+mod native;
+
 use anyhow::{bail, ensure, Context, Result};
 use app_lib::domain::ports::{ContextValidation as V, ContinuationContextGuard};
 use app_lib::infrastructure::{
@@ -221,12 +224,29 @@ fn range(target: &AutoPasteTarget, path: &Path, location: isize, length: isize) 
 fn bind_synthetic_reader(
     path: &Path,
 ) -> Result<app_lib::infrastructure::auto_paste::SyntheticTextEditReader> {
-    use app_lib::infrastructure::auto_paste::SyntheticTextEditReader;
+    use app_lib::infrastructure::auto_paste::{
+        synthetic_readiness as policy, SyntheticTextEditReader,
+    };
+    use std::sync::atomic::Ordering;
 
     let deadline = Instant::now() + Duration::from_secs(2);
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut owner = None;
-    let reader = SyntheticTextEditReader::bind(path, &mut owner, 1, cancel, deadline)?;
+    let mut readiness = serde_json::Value::Null;
+    let reader = policy::bind(
+        deadline,
+        Instant::now,
+        || cancel.load(Ordering::SeqCst),
+        std::thread::sleep,
+        |attempt| {
+            SyntheticTextEditReader::bind(path, &mut owner, attempt, cancel.clone(), deadline)
+        },
+        || policy::attempt_snapshot(&SyntheticTextEditReader::diagnostics(None)),
+        |evidence| readiness = evidence,
+    )
+    .with_context(|| format!("synthetic reader bind readiness: {readiness}"))?;
+    policy::admit(Instant::now(), deadline, cancel.load(Ordering::SeqCst), 250)
+        .map_err(anyhow::Error::msg)?;
     SyntheticTextEditReader::finish_arming();
     Ok(reader)
 }
@@ -465,7 +485,7 @@ impl Evidence {
 #[test]
 #[ignore = "requires exact opt-in, new temporary output directory, real macOS AX/TCC and TextEdit"]
 fn native_context_pause_continue_matrix() -> Result<()> {
-    run_native_matrix(false)
+    run_native_matrix(false, None)
 }
 
 #[test]
@@ -475,13 +495,19 @@ fn native_context_pause_continue_service_composition() -> Result<()> {
         std::env::var("VOICETEXT_EL_PAUSE_CONTINUE_V1").as_deref() == Ok("true"),
         "continuation opt-in must be true before process startup"
     );
-    run_native_matrix(true)
+    run_native_matrix(true, None)
+}
+
+#[test]
+#[ignore = "requires explicit owned TextEdit, AX/TCC and private clipboard fixture"]
+fn native_context_owned_delivery_admission() -> Result<()> {
+    run_native_matrix(false, Some("owned-delivery-admission"))
 }
 
 static NATIVE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static NEXT_NATIVE_RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-fn run_native_matrix(composed: bool) -> Result<()> {
+fn run_native_matrix(composed: bool, only_case: Option<&str>) -> Result<()> {
     let _serial = NATIVE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     ensure!(
         std::env::var("VOICETEXT_NATIVE_CONTEXT_E2E").as_deref() == Ok("OWNED_TEXTEDIT_ONLY"),
@@ -543,6 +569,8 @@ fn run_native_matrix(composed: bool) -> Result<()> {
         "e35-secure-field",
         #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
         "e35-expired-budget",
+        #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+        "owned-delivery-admission",
     ];
     let composition_names = [
         "e23_actual_target_change_cold_b_rejects_late_a",
@@ -554,6 +582,10 @@ fn run_native_matrix(composed: bool) -> Result<()> {
     } else {
         &native_names
     };
+    ensure!(
+        only_case.map_or(true, |name| names.contains(&name)),
+        "unknown native case"
+    );
     let mut clipboard = None;
     let mut created = Vec::new();
     let mut failed = false;
@@ -671,7 +703,11 @@ fn run_native_matrix(composed: bool) -> Result<()> {
         failed = true;
         reporting_failed = true;
     }
-    for (index, case) in names.iter().enumerate() {
+    for (index, case) in names
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| only_case.map_or(true, |selected| **name == selected))
+    {
         let run = NEXT_NATIVE_RUN.fetch_add(2, std::sync::atomic::Ordering::SeqCst);
         // Sequential process-wide IDs: composition also owns run + 1.
         // A composition owns its Tokio runtime, including unretained async tasks.
@@ -701,6 +737,66 @@ fn run_native_matrix(composed: bool) -> Result<()> {
                         "{}",
                         json!({"case":case,"run":run,"target_pid":target.pid,"bundle_id":target.bundle_id})
                     )?;
+                    #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
+                    if *case == "owned-delivery-admission" {
+                        use app_lib::infrastructure::continuation_context::native_e2e::{
+                            arm_clipboard_restore_barrier, delivery_observations,
+                        };
+
+                        let worker_before = native::threads()?.0;
+                        let before = read(&root, &paths[0])?;
+                        let other = read(&root, &paths[1])?;
+                        range(&target, &paths[0], before.encode_utf16().count() as isize, 0)?;
+                        ensure!(
+                            matches!(bounded(manager.capture(run, Some(target.clone()), true)).await?, V::Valid { revision: 0 }),
+                            "owned admission capture"
+                        );
+                        let text = " E_QUEUE";
+                        let barrier = arm_clipboard_restore_barrier()?;
+                        clip.check()?;
+                        let before_clip = clip.revision;
+                        clip.uncertain = true;
+                        let paste_manager = manager.clone();
+                        let paste = tokio::spawn(async move {
+                            paste_manager.guarded_paste(run, 1, text.into()).await
+                        });
+                        let deadline = Instant::now() + Duration::from_secs(1);
+                        loop {
+                            if barrier.try_reached()? { break; }
+                            ensure!(Instant::now() < deadline, "owned paste barrier not reached");
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                        let mut validation = manager.begin_validation(run).result;
+                        let wait_started = Instant::now();
+                        let early = tokio::time::timeout(Duration::from_millis(350), &mut validation).await;
+                        let stayed_pending = early.is_err();
+                        let held_ms = wait_started.elapsed().as_millis();
+                        barrier.resume()?; // Always release before checking the early result.
+                        let pasted = bounded(paste).await??;
+                        let validated = match early {
+                            Ok(value) => value,
+                            Err(_) => bounded(validation).await?,
+                        };
+                        ensure!(stayed_pending && held_ms >= 300 && matches!(validated, V::Valid { revision: 1 }),
+                            "same-run validation did not wait for owned paste");
+                        ensure!(matches!(pasted, P::Confirmed { revision: 1 }),
+                            "owned paste was not confirmed: {pasted:?}");
+                        clip.confirmed(before_clip, false, &marker)?;
+                        evidence.text(case, &paths[0], &format!("{before}{text}"))?;
+                        evidence.text(case, &paths[1], &other)?;
+                        let (records, overflow) = delivery_observations(run);
+                        ensure!(!overflow && records.len() == 1 && records[0].delivery_seq == 1
+                            && records[0].insertion_started && records[0].insertion_finished
+                            && records[0].insertion_confirmed
+                            && matches!(records[0].result, Some(P::Confirmed { revision: 1 })),
+                            "owned paste did not have exactly one confirmed native effect: {records:?}");
+                        ensure!(native::threads()?.0 == worker_before, "native worker changed");
+                        evidence.event(case, "queued-validation-after-paste", format!("{validated:?}"),
+                            format!("{:?}", V::Valid { revision: 1 }))?;
+                        writeln!(evidence.file, "{}", json!({"case":case,"stage":"admission-delay",
+                            "held_ms":held_ms,"worker":worker_before,"native_effects":records.len()}))?;
+                        return Ok::<_, anyhow::Error>(());
+                    }
                     #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
                     if index >= 9 {
                         use app_lib::infrastructure::continuation_context::native_e2e::CaptureFault;
@@ -1074,7 +1170,9 @@ fn run_native_matrix(composed: bool) -> Result<()> {
         };
         let released = released.and(released_b);
         let restored = clipboard.as_mut().map(Clipboard::restore).transpose();
-        if (composed || index < 9) && (result.is_err() || released.is_err() || restored.is_err()) {
+        if (composed || index < 9 || *case == "owned-delivery-admission")
+            && (result.is_err() || released.is_err() || restored.is_err())
+        {
             for path in &created {
                 let captured = (|| -> Result<()> {
                     let text = read(&root, path)?;

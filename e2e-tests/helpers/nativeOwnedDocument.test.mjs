@@ -117,6 +117,38 @@ for (const mode of ['diagnostic', 'live']) for (const failure of ['none', 'setup
   });
 }
 
+test('parent live verification accepts each planned long Continue and rejects a missing acceptance', async () => {
+  const trial = { id: 'long', continuation: true, configDelayMs: 0,
+    episodes: ['episode-a.pcm', 'episode-b.pcm', 'long-auto-commit.pcm', 'episode-b.pcm'] };
+  for (const acceptedCount of [3, 2]) {
+    const artifacts = {};
+    let observe;
+    const dependencies = {
+      path, process: { platform: 'darwin', argv: [], on() {}, removeListener() {} }, source: '/TEST/source', performance,
+      parseArguments: () => ({ reuseBuild: '/TEST/build', trialId: trial.id, harnessConfig: '/TEST/config' }),
+      prepareReuseBuild: async () => '/TEST/artifacts', executionEnvironment: () => ({ HOME: '/TEST/home', VOICE_TO_TEXT_NATIVE_E2E_RESULT: '/TEST/result' }),
+      mkdir: async () => {}, liveTrials: [trial], realpath: async p => p, lstat: async () => ({ isFile: () => true, mode: 0o600 }),
+      readFile: async p => p === '/TEST/config' ? '{}' : JSON.stringify({ marker: 'test-marker', passed: true,
+        report: { passed: true, errors: [], trial, expectedInsertion: 'synthetic', targetDocument: 'p4-textedit-a.txt', final: { fixture: {} } } }),
+      writeFile: async (p, data) => { artifacts[path.basename(p)] = data; }, readApprovedFixtures: async () => [],
+      validateHarnessConfig: () => ({ endpoint: 'disabled' }), validateReusableBuild: async () => {}, validateCachedBinary: async () => '/TEST/binary',
+      mockProxy: async (_endpoint, _delay, callback) => { observe = callback; return { url: 'disabled', close: async () => {} }; },
+      maxProxyEvidenceEvents: 32768, createQualificationCollector: () => undefined, randomUUID: () => 'fixed',
+      runOwned: async () => { for (let index = 0; index < acceptedCount; index++) observe('backend_control',
+        { type: 'continue_result', decision: 'accepted', eligible_now: true }); },
+      promisify: fn => fn, execFile: async () => ({ stdout: 'synthetic\n' }),
+      exactInsertionEvidence: () => ({}), verifyQualificationConnections: () => ({}), verifyQualificationRoute: () => ({}),
+      verifyQualificationSources: () => {}, verifyQualificationTerminals: () => {}, ownedDocumentMatches,
+      closeOwnedDocument: async () => {}, marker: 'test-marker', console: { log() {} },
+    };
+    const run = new Function(...Object.keys(dependencies), `${mainBody}; return main;`)(...Object.values(dependencies));
+    if (acceptedCount === 3) await run([]);
+    else await assert.rejects(run([]), /Every planned Continue acceptance required/);
+    const verification = JSON.parse(artifacts['qualification-verification.json']);
+    assert.equal(verification.passed, acceptedCount === 3);
+  }
+});
+
 const { EventEmitter } = await import('node:events');
 const runOwnedBody = runner.slice(runner.indexOf('export async function runOwned('), runner.indexOf('\nexport async function snapshotDigest')).replace('export ', '');
 for (const outcome of ['success', 'failed-exit', 'timeout', 'spawn-error', 'group-retained', 'group-eperm', 'evidence-write-failure']) {

@@ -885,9 +885,15 @@ impl TranscriptionService {
             return crate::domain::ContextValidation::Unavailable;
         };
         // No audio, provider, or native executor lock is held across this wait.
-        tokio::time::timeout(Duration::from_millis(250), guard.validate(logical_run_id))
-            .await
-            .unwrap_or(crate::domain::ContextValidation::Unavailable)
+        // Native admission can account for an already queued write of this run;
+        // other guards retain the ordinary 250 ms bound.
+        let request = guard.begin_validation(logical_run_id);
+        tokio::time::timeout_at(
+            tokio::time::Instant::from_std(request.deadline),
+            request.result,
+        )
+        .await
+        .unwrap_or(crate::domain::ContextValidation::Unavailable)
     }
 
     pub async fn continuation_session_for_run(

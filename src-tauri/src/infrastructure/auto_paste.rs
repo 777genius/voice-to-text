@@ -1112,9 +1112,11 @@ where
 #[cfg(target_os = "macos")]
 fn target_prefers_clipboard_paste(target: &AutoPasteTarget) -> bool {
     let bundle_id = target.bundle_id.to_ascii_lowercase();
-    MACOS_CLIPBOARD_FIRST_BUNDLE_ID_PARTS
-        .iter()
-        .any(|part| bundle_id.contains(part))
+    // Cursor's distributed macOS app uses an opaque ToDesktop identifier.
+    bundle_id == "com.todesktop.230313mzl4w4u92"
+        || MACOS_CLIPBOARD_FIRST_BUNDLE_ID_PARTS
+            .iter()
+            .any(|part| bundle_id.contains(part))
 }
 
 #[cfg(target_os = "macos")]
@@ -3178,6 +3180,22 @@ end tell"#
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn macos_installed_cursor_uses_clipboard_without_false_success_ax_write() {
+        let target =
+            normalize_auto_paste_target("com.todesktop.230313mzl4w4u92".into(), 123).unwrap();
+        let method = super::paste_text_for_target_with(
+            &target,
+            || panic!("Cursor AXSelectedText must not run before a successful paste command"),
+            || Ok(AutoPasteMethod::Clipboard),
+        )
+        .unwrap();
+        assert_eq!(method, AutoPasteMethod::Clipboard);
+        let unrelated = normalize_auto_paste_target("com.todesktop.other".into(), 124).unwrap();
+        assert!(!super::target_prefers_clipboard_paste(&unrelated));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn macos_web_and_editor_targets_use_clipboard_before_accessibility() {
         for bundle_id in [
             "com.brave.Browser",
@@ -3185,6 +3203,7 @@ end tell"#
             "com.anthropic.claude",
             "com.openai.codex",
             "com.todesktop.cursor",
+            "com.todesktop.230313mzl4w4u92",
             "com.microsoft.VSCode",
         ] {
             let target = normalize_auto_paste_target(bundle_id.to_string(), 123)
@@ -3631,7 +3650,15 @@ fn activate_continuation_target(target: &AutoPasteTarget) -> Result<()> {
 
 // Qualification is deliberately explicit: AX support alone is insufficient.
 pub(crate) fn continuation_app_qualified(target: &AutoPasteTarget) -> bool {
-    target.bundle_id == "com.apple.TextEdit" && target.pid > 0
+    if target.bundle_id == "com.apple.TextEdit" && target.pid > 0 {
+        return true;
+    }
+    #[cfg(all(target_os = "macos", debug_assertions, feature = "native-window-e2e"))]
+    {
+        return super::continuation_context::native_e2e::stalled_ax_target_matches(target);
+    }
+    #[cfg(not(all(target_os = "macos", debug_assertions, feature = "native-window-e2e")))]
+    false
 }
 
 fn publish_continuation_copy(
@@ -3703,7 +3730,7 @@ pub use continuation_native::SyntheticTextEditReader;
     feature = "native-window-e2e",
     any(target_os = "macos", test)
 ))]
-pub(crate) mod synthetic_readiness {
+pub mod synthetic_readiness {
     use serde_json::{json, Value};
     use std::time::{Duration, Instant};
     #[derive(Debug)]

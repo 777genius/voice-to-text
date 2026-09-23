@@ -203,7 +203,8 @@ def main():
             print(owner.state, flush=True)
     except BaseException:
         owner.cleanup()
-        print('FAIL', flush=True)
+        # A failed qualification can still have fully proven child cleanup.
+        print('CLEANUP_AFTER_FAIL', flush=True)
         # Cleanup is already complete. Stay independent/alive until driver cleanup
         # acknowledgement or private-pipe EOF; never rearm signals or watchdogs.
         try:

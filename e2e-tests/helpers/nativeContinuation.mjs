@@ -91,12 +91,16 @@ export async function readApprovedFixtures(directory) {
 export const liveTrials = Object.freeze([
   ...[1, 2, 3].map(attempt => ({ id: `warm-baseline-${attempt}`, continuation: false, configDelayMs: 0, route: 'baseline', episodes: ['episode-a.pcm', 'episode-b.pcm'] })),
   ...[1, 2, 3].map(attempt => ({ id: `warm-continue-${attempt}`, continuation: true, configDelayMs: 0, route: 'continued-audio', episodes: ['episode-a.pcm', 'episode-b.pcm'] })),
+  ...[0, 200].map(gapMs => ({ id: `warm-continue-gap-${gapMs}`, continuation: true, configDelayMs: 0, gapMs, route: 'continued-audio', episodes: ['episode-a.pcm', 'episode-b.pcm'] })),
   ...[0, 4000, 8000].map(configDelayMs => ({ id: `cold-${configDelayMs}`, continuation: false, configDelayMs, route: 'cold-two-runs', episodes: ['long-auto-commit.pcm', 'episode-b.pcm'] })),
-  { id: 'long', continuation: true, configDelayMs: 0, route: 'continued-audio', episodes: ['episode-a.pcm', 'long-auto-commit.pcm'] },
-  { id: 'short-tail', continuation: true, configDelayMs: 0, route: 'cancel-unsent', episodes: ['episode-a.pcm', 'stop-inside-word.pcm'] },
+  { id: 'long', continuation: true, configDelayMs: 0, route: 'continued-audio', episodes: ['episode-a.pcm', 'episode-b.pcm', 'long-auto-commit.pcm', 'episode-b.pcm'] },
+  { id: 'short-tail', continuation: true, configDelayMs: 0, route: 'continued-audio', episodes: ['episode-a.pcm', 'stop-inside-word.pcm'] },
   { id: 'old-tail', continuation: true, configDelayMs: 0, route: 'continued-audio', episodes: ['old-commit-new-tail.pcm', 'episode-b.pcm'] },
   warmProviderCanaryTrial,
 ]);
+// Test-only route contract. It cannot be selected by --qualification-live.
+export const cancelUnsentFakeTrial = Object.freeze({ id: 'fake-cancel-unsent', kind: 'continuation-fake',
+  continuation: true, configDelayMs: 0, route: 'cancel-unsent', episodes: ['episode-a.pcm', 'episode-b.pcm'] });
 export function validateHarnessConfig(config) {
   if (config?.schema !== 'p4-test-backend-v1' || config.testOnly !== true ||
       !/^[a-f0-9]{64}$/.test(config.backendSourceSha256 ?? '') ||
@@ -122,7 +126,8 @@ export function exactInsertionEvidence(expected, actual, identity) {
 }
 
 export function qualificationExpectations(trial) {
-  if (!liveTrials.some(row => JSON.stringify(row) === JSON.stringify(trial))) throw new Error('Unplanned qualification trial');
+  if (!liveTrials.some(row => JSON.stringify(row) === JSON.stringify(trial)) &&
+      JSON.stringify(cancelUnsentFakeTrial) !== JSON.stringify(trial)) throw new Error('Unplanned qualification trial');
   if (trial.kind === 'warm-provider-canary') {
     const earlyStops = trial.cycles.filter(cycle => cycle.stopPhase === 'before-ready').length;
     const providerResets = trial.cycles.filter(cycle => cycle.resetProviderBefore === true).length +
@@ -135,9 +140,9 @@ export function qualificationExpectations(trial) {
       gateInitialSource: false, finalGateIndex: trial.finalEpisodeIndex, gapMs: null };
   }
   const baseline = trial.id.startsWith('warm-baseline-');
-  return { baseline, captures: baseline ? 1 : 2, backendConnections: baseline || trial.continuation ? 1 : 2,
+  return { baseline, captures: baseline ? 1 : trial.episodes.length, backendConnections: baseline || trial.continuation ? 1 : trial.episodes.length,
     providerHandshakes: baseline || trial.continuation ? 1 : 2, maxActiveUpstream: 1,
-    gateInitialSource: baseline || trial.continuation, gapMs: 120 };
+    gateInitialSource: baseline || trial.continuation, gapMs: trial.gapMs ?? 120 };
 }
 export function expectedWarmProviderContinues(trial) {
   if (trial?.kind !== 'warm-provider-canary') throw new Error('Warm provider canary plan required');
@@ -335,24 +340,42 @@ export function verifyQualificationRoute(trial, events) {
     clientAudioBytes: binary.reduce((sum, event) => sum + event.bytes, 0),
     clientAudioConnections: connectionIds.size, routeVerified: trial.route };
 
-  const pause = events.findIndex(event => event.event === 'backend_control' && event.type === 'pause_accepted' && event.decision === 'accepted');
-  const continued = events.findIndex(event => event.event === 'backend_control' && event.type === 'continue_result' &&
-    event.decision === 'accepted' && event.eligible_now === true);
-  if (pause < 0 || continued <= pause) throw new Error('Continue route lacks ordered Pause/Continue acceptance');
-  const preContinueAudio = events.slice(pause + 1, continued).filter(event => event.event === 'client_binary');
-  if (preContinueAudio.length !== 0) throw new Error('Client audio preceded Continue acceptance');
-  const postContinueAudio = events.slice(continued + 1).filter(event => event.event === 'client_binary');
-  const restores = events.slice(continued + 1).filter(event => event.event === 'backend_control' &&
+  const pauses = events.flatMap((event, index) => event.event === 'backend_control' &&
+    event.type === 'pause_accepted' && event.decision === 'accepted' ? [index] : []);
+  const continues = events.flatMap((event, index) => event.event === 'backend_control' &&
+    event.type === 'continue_result' && event.decision === 'accepted' && event.eligible_now === true ? [index] : []);
+  const expectedContinues = trial.episodes.length - 1;
+  if (continues.length !== expectedContinues || pauses.length < expectedContinues ||
+      pauses.length > trial.episodes.length) throw new Error('Continue route lacks ordered Pause/Continue acceptance');
+  let postContinueAudioFrames = 0;
+  for (let index = 0; index < expectedContinues; index++) {
+    const pause = pauses[index];
+    const continued = continues[index];
+    const nextPause = pauses[index + 1] ?? events.length;
+    if (pause >= continued || continued >= nextPause ||
+        (index > 0 && pause <= continues[index - 1])) {
+      throw new Error('Continue route lacks ordered Pause/Continue acceptance');
+    }
+    if (events.slice(pause + 1, continued).some(event => event.event === 'client_binary')) {
+      throw new Error('Client audio preceded Continue acceptance');
+    }
+    const audio = events.slice(continued + 1, nextPause).filter(event => event.event === 'client_binary');
+    if (trial.route === 'continued-audio' && audio.length === 0) {
+      throw new Error('Continued route requires a B write after acceptance and no Restore');
+    }
+    postContinueAudioFrames += audio.length;
+  }
+  const restores = events.slice(continues[0] + 1).filter(event => event.event === 'backend_control' &&
     event.type === 'pause_restore_result' && event.decision === 'accepted');
   if (trial.route === 'cancel-unsent') {
-    if (restores.length !== 1 || postContinueAudio.length !== 0) throw new Error('Cancelled unsent route must Restore without a B write');
+    if (expectedContinues !== 1 || restores.length !== 1 || postContinueAudioFrames !== 0) throw new Error('Cancelled unsent route must Restore without a B write');
   } else if (trial.route === 'continued-audio') {
-    if (restores.length !== 0 || postContinueAudio.length === 0) throw new Error('Continued route requires a B write after acceptance and no Restore');
+    if (restores.length !== 0) throw new Error('Continued route requires a B write after acceptance and no Restore');
   } else throw new Error('Unknown continuation route contract');
   return { clientAudioFrames: binary.length,
     clientAudioBytes: binary.reduce((sum, event) => sum + event.bytes, 0),
     clientAudioConnections: connectionIds.size,
-    postContinueAudioFrames: postContinueAudio.length, routeVerified: trial.route };
+    postContinueAudioFrames, acceptedContinues: continues.length, routeVerified: trial.route };
 }
 
 export function verifyWarmProviderTransport(events, fixture, report) {
@@ -466,7 +489,7 @@ export function verifyQualificationTerminals(trial, episodes, terminals) {
   const expected = qualificationExpectations(trial);
   const owners = episodes?.map(row => row.logicalRunId) ?? [];
   const distinct = new Set(owners);
-  if (owners.length !== 2 || owners.some(id => !Number.isSafeInteger(id) || id <= 0) ||
+  if (owners.length !== trial.episodes.length || owners.some(id => !Number.isSafeInteger(id) || id <= 0) ||
       distinct.size !== expected.backendConnections || !Array.isArray(terminals) || terminals.length !== distinct.size ||
       terminals.some(t => t.complete !== true || !distinct.has(t.sessionId)) ||
       [...distinct].some(id => terminals.filter(t => t.sessionId === id).length !== 1))
@@ -476,7 +499,7 @@ export function verifyQualificationTerminals(trial, episodes, terminals) {
 export function verifyQualificationSources(trial, fixture) {
   const expected = qualificationExpectations(trial);
   if (fixture?.observationOverflow || fixture?.captureStarts !== expected.captures || fixture?.captureStops !== expected.captures ||
-      fixture?.activeCaptures !== 0 || fixture?.sourceEpisodes?.length !== 2) throw new Error('Mode-specific capture/source counts failed');
+      fixture?.activeCaptures !== 0 || fixture?.sourceEpisodes?.length !== trial.episodes.length) throw new Error('Mode-specific capture/source counts failed');
   for (const [index, row] of fixture.sourceEpisodes.entries()) {
     const [bytes] = approvedFixtures[trial.episodes[index]];
     const gate = index === 0 && expected.gateInitialSource;

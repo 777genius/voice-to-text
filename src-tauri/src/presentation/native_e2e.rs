@@ -2616,7 +2616,16 @@ fn qualification_source(shared: &Fixture, config: AudioConfig) -> AudioResult<Qu
     } else if baseline {
         1
     } else {
-        2
+        let count = trial["episodes"]
+            .as_array()
+            .map(|episodes| episodes.len() as u64)
+            .ok_or_else(|| AudioError::Capture("qualification episodes missing".into()))?;
+        if !(2..=4).contains(&count) {
+            return Err(AudioError::Capture(
+                "unplanned qualification episode count".into(),
+            ));
+        }
+        count
     };
     if config.sample_rate != 16000 || config.channels != 1 || generation >= maximum_captures {
         return Err(AudioError::Capture(

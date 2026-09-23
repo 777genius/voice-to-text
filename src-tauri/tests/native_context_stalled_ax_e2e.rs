@@ -1,5 +1,5 @@
 //! REAL AX + SYNTHETIC capture. Ignored/unrun is unqualified; no provider/Continue claim.
-#![cfg(target_os = "macos")]
+#![cfg(all(target_os = "macos", debug_assertions, feature = "native-window-e2e"))]
 #[path = "native_ax_stall_support/native.rs"]
 mod native;
 use anyhow::{ensure, Result};
@@ -33,11 +33,22 @@ enum Stage {
     Preflight,
     FixtureReady,
     PrepareCapture,
-    ResponsiveControl,
+    ResponsiveFocus,
+    ResponsiveCapture,
+    ResponsiveValidation,
+    ResponsiveRawRead,
     StoppedValidation,
     DrainControl,
     RawStoppedControl,
-    Recovery,
+    RecoveryContAck,
+    RecoveryRelease,
+    RecoveryRetiredId,
+    RecoveryFocus,
+    RecoveryRawAx,
+    RecoveryFreshCapture,
+    RecoveryFreshValidation,
+    RecoveryRetiredRecheck,
+    RecoverySingletonCounters,
     CaptureCleanup,
     SupervisorCleanup,
 }
@@ -79,8 +90,20 @@ impl FailureEvidence {
 #[test]
 fn fixed_failure_evidence_keeps_primary_and_cleanup_separate() {
     for stage in [
-        Stage::ResponsiveControl,
+        Stage::ResponsiveFocus,
+        Stage::ResponsiveCapture,
+        Stage::ResponsiveValidation,
+        Stage::ResponsiveRawRead,
         Stage::StoppedValidation,
+        Stage::RecoveryContAck,
+        Stage::RecoveryRelease,
+        Stage::RecoveryRetiredId,
+        Stage::RecoveryFocus,
+        Stage::RecoveryRawAx,
+        Stage::RecoveryFreshCapture,
+        Stage::RecoveryFreshValidation,
+        Stage::RecoveryRetiredRecheck,
+        Stage::RecoverySingletonCounters,
         Stage::SupervisorCleanup,
     ] {
         let evidence = FailureEvidence::new();
@@ -279,10 +302,13 @@ async fn exercise(
         let worker = native::threads()?.0;
         for cycle in 0..8u64 {
             let id = 2 + cycle * 2;
-            evidence.at(Stage::ResponsiveControl);
+            evidence.at(Stage::ResponsiveFocus);
             front(&target)?;
+            evidence.at(Stage::ResponsiveCapture);
             ensure!(valid(manager.capture(id, Some(target.clone()), true).await), "responsive capture");
+            evidence.at(Stage::ResponsiveValidation);
             ensure!(valid(manager.validate(id).await), "responsive validation");
+            evidence.at(Stage::ResponsiveRawRead);
             ensure!(probe.read().await?.0 == 0, "responsive raw AX");
             evidence.at(Stage::StoppedValidation);
             let stopped_start = Instant::now();
@@ -327,16 +353,24 @@ async fn exercise(
                 && raw_duration < Duration::from_millis(500), "raw messaging precondition");
             front(&target)?;
             s.command("CHECK", "STOPPED").await?;
-            evidence.at(Stage::Recovery);
+            evidence.at(Stage::RecoveryContAck);
             s.command("CONT", "RUNNING").await?;
             let stopped_ms = stopped_start.elapsed().as_millis();
-            ensure!(!valid(manager.validate(id).await), "retired id revived");
+            evidence.at(Stage::RecoveryRelease);
             manager.release(id).await;
+            evidence.at(Stage::RecoveryRetiredId);
+            ensure!(!valid(manager.validate(id).await), "retired id revived");
+            evidence.at(Stage::RecoveryFocus);
             front(&target)?;
+            evidence.at(Stage::RecoveryRawAx);
             ensure!(probe.read().await?.0 == 0, "raw recovery");
+            evidence.at(Stage::RecoveryFreshCapture);
             ensure!(valid(manager.capture(id+1, Some(target.clone()), true).await), "fresh recovery");
+            evidence.at(Stage::RecoveryFreshValidation);
             ensure!(valid(manager.validate(id+1).await), "fresh validation");
+            evidence.at(Stage::RecoveryRetiredRecheck);
             ensure!(!valid(manager.validate(id).await), "retired id recovery");
+            evidence.at(Stage::RecoverySingletonCounters);
             manager.release(id+1).await;
             let (after, total) = native::threads()?;
             ensure!(confirmed(ContinuationContextManager::new().guarded_copy(1, cycle*2+2, String::new()).await)
@@ -443,19 +477,20 @@ fn real_ax_stalled_owned_target() {
                 "fixture readiness"
             );
             let pid: i32 = fields[1].parse()?;
-            ensure!(
-                pid > 0 && fields[2].starts_with("org.voicetext.synthetic.ax."),
-                "fixture identity"
-            );
-            exercise(
-                &mut supervisor,
-                AutoPasteTarget {
-                    pid,
-                    bundle_id: fields[2].into(),
-                },
-                &evidence,
-            )
-            .await?;
+            let target = AutoPasteTarget {
+                pid,
+                bundle_id: fields[2].into(),
+            };
+            // READY comes from the supervisor that verified the direct child's
+            // executable/UID/start identity. Foreground must still be this owner.
+            front(&target)?;
+            let registration =
+                app_lib::infrastructure::continuation_context::native_e2e::arm_stalled_ax_target(
+                    target.clone(),
+                )?;
+            let exercised = exercise(&mut supervisor, target, &evidence).await;
+            drop(registration); // Clear qualification before DONE or failure EOF.
+            exercised?;
             evidence.at(Stage::SupervisorCleanup);
             let done = supervisor.command("DONE", "CLEAN").await;
             if done.is_err() {
@@ -465,21 +500,33 @@ fn real_ax_stalled_owned_target() {
         })
         .catch_unwind()
         .await;
-        if !matches!(&outcome, Ok(Ok(()))) {
+        let primary_failed = !matches!(&outcome, Ok(Ok(())));
+        if primary_failed {
             evidence.fail();
         }
         evidence.at(Stage::SupervisorCleanup);
         // Closing private command pipe independently triggers CONT/cleanup after failure/panic.
         supervisor.input.take();
+        let failure_cleanup_ack = if primary_failed {
+            supervisor.line(SECOND * 5).await.ok()
+        } else {
+            None
+        };
         let reaped = tokio::time::timeout(SECOND * 5, supervisor.child.wait()).await;
-        if !matches!(&reaped, Ok(Ok(status)) if status.success()) {
+        let cleanup_proven = if primary_failed {
+            failure_cleanup_ack.as_deref() == Some("CLEANUP_AFTER_FAIL")
+                && matches!(&reaped, Ok(Ok(status)) if status.code() == Some(1))
+        } else {
+            matches!(&reaped, Ok(Ok(status)) if status.success())
+        };
+        if !cleanup_proven {
             evidence.cleanup_failed(Stage::SupervisorCleanup);
         }
         match outcome {
             Ok(r) => r?,
             Err(_) => anyhow::bail!("driver panic"),
         }
-        ensure!(reaped??.success(), "supervisor cleanup");
+        ensure!(cleanup_proven, "supervisor cleanup");
         Ok::<_, anyhow::Error>(())
     });
     if result.is_err() {

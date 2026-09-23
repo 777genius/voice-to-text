@@ -53,15 +53,15 @@ async function fixture(t) {
 test('reuse selects exactly one of 12 planned trials or 9 cases; rejects replay/matrix/implicit selection', () => {
   const root = '/tmp/voicetext-native-e2e-Abc123';
   for (const trial of liveTrials) assert.equal(parseArguments(['--reuse-build', root, '--qualification-live', '/tmp/backend.json', trial.id]).trialId, trial.id);
-  for (const name of ['seal-stop', 'seal-hold', 'seal-close', 'cancel', 'stale-epoch', 'terminal-before-write', 'E04', 'E41', 'E42']) {
+  for (const name of ['seal-stop', 'seal-hold', 'seal-close', 'seal-toggle', 'stale-epoch', 'terminal-before-write', 'E04', 'E41', 'E42']) {
     assert.equal(parseArguments(['--reuse-build', root, '--continuation-case', name]).continuationCase, name);
   }
   for (const tail of [[], ['--continuation-fake'], ['--no-build', root], ['--live-elevenlabs', '/tmp/audio'],
     ['--continuation-case', 'all'], ['--qualification-live', '/tmp/backend.json', 'retry'],
-    ['--qualification-live', '/tmp/backend.json', 'long', 'long'], ['--continuation-case', 'cancel', '--retry']]) {
+    ['--qualification-live', '/tmp/backend.json', 'long', 'long'], ['--continuation-case', 'seal-toggle', '--retry']]) {
     assert.throws(() => parseArguments(['--reuse-build', root, ...tail]), /Usage/);
   }
-  assert.throws(() => parseArguments(['--reuse-build', 'relative', '--continuation-case', 'cancel']));
+  assert.throws(() => parseArguments(['--reuse-build', 'relative', '--continuation-case', 'seal-toggle']));
 });
 
 test('fresh executions copy only build provenance, keep compiled identity and create independent runtime paths', async t => {
@@ -75,7 +75,7 @@ test('fresh executions copy only build provenance, keep compiled identity and cr
   await writeFile(path.join(f.snapshot, 'dist/old.js'), 'generated');
   await symlink(f.checkout, path.join(f.snapshot, 'node_modules'));
   const a = await f.reuse(['--qualification-live', '/tmp/fresh-backend.json', 'warm-baseline-2']);
-  const b = await f.reuse(['--continuation-case', 'cancel']);
+  const b = await f.reuse(['--continuation-case', 'seal-toggle']);
   for (const result of [a, b]) {
     assert.notEqual(result.directory, f.origin);
     assert.equal(await realpath(result.directory), result.directory);
@@ -103,13 +103,13 @@ test('fresh executions copy only build provenance, keep compiled identity and cr
   assert.equal(a.manifest.continuationCase, null);
   assert.equal(b.manifest.mode, 'continuation-fake');
   assert.equal(b.manifest.trialId, null);
-  assert.equal(b.manifest.continuationCase, 'cancel');
+  assert.equal(b.manifest.continuationCase, 'seal-toggle');
   assert.equal(a.env.VOICETEXT_NATIVE_CONTINUATION, 'p4-live-v1');
   assert.equal(a.env.VOICETEXT_EL_PAUSE_CONTINUE_V1, undefined);
   assert.equal(a.env.VOICETEXT_EL_FINALIZE_OUTCOME_V1, undefined);
   assert.equal(a.env.VOICETEXT_NATIVE_CONTINUATION_CASE, undefined);
   assert.equal(b.env.VOICETEXT_NATIVE_CONTINUATION, 'p4-fake-v1');
-  assert.equal(b.env.VOICETEXT_NATIVE_CONTINUATION_CASE, 'cancel');
+  assert.equal(b.env.VOICETEXT_NATIVE_CONTINUATION_CASE, 'seal-toggle');
   assert.equal(b.env.VOICETEXT_EL_PAUSE_CONTINUE_V1, 'true');
   const continuing = executionEnvironment(a.directory, { trialId: 'warm-continue-2' });
   assert.equal(continuing.VOICETEXT_EL_PAUSE_CONTINUE_V1, 'true');
@@ -140,7 +140,7 @@ for (const mutation of ['binary', 'snapshot', 'checkout', 'config', 'identity', 
     if (mutation === 'origin') f.manifest.buildOrigin.sha256 = 'a'.repeat(64);
     if (mutation === 'old-manifest') delete f.manifest.schema;
     await writeFile(path.join(f.origin, 'native-build.json'), JSON.stringify(f.manifest));
-    await assert.rejects(f.reuse(['--continuation-case', 'cancel']));
+    await assert.rejects(f.reuse(['--continuation-case', 'seal-toggle']));
   });
 }
 
@@ -152,25 +152,25 @@ for (const target of ['native-build.json', 'native-window-e2e', 'frontend', 'fro
     await cp(file, saved, { recursive: true });
     await rm(file, { recursive: true });
     await symlink(saved, file);
-    await assert.rejects(f.reuse(['--continuation-case', 'cancel']), /Untrusted|symlink|Noncanonical/);
+    await assert.rejects(f.reuse(['--continuation-case', 'seal-toggle']), /Untrusted|symlink|Noncanonical/);
   });
 }
 
 test('refuses untrusted paths, writable artifacts, hardlinks and checkout source symlinks', async t => {
   const f = await fixture(t);
-  await assert.rejects(prepareReuseBuild({ reuseBuild: f.checkout, continuationCase: 'cancel' }, f.checkout), /Refusing/);
+  await assert.rejects(prepareReuseBuild({ reuseBuild: f.checkout, continuationCase: 'seal-toggle' }, f.checkout), /Refusing/);
   await chmod(f.origin, 0o777);
-  await assert.rejects(f.reuse(['--continuation-case', 'cancel']), /Untrusted/);
+  await assert.rejects(f.reuse(['--continuation-case', 'seal-toggle']), /Untrusted/);
   await chmod(f.origin, 0o700);
   const binary = path.join(f.origin, 'native-window-e2e');
   await chmod(binary, 0o666);
-  await assert.rejects(f.reuse(['--continuation-case', 'cancel']), /Untrusted/);
+  await assert.rejects(f.reuse(['--continuation-case', 'seal-toggle']), /Untrusted/);
   await chmod(binary, 0o600);
   await link(binary, path.join(f.origin, 'hardlink'));
-  await assert.rejects(f.reuse(['--continuation-case', 'cancel']), /Untrusted/);
+  await assert.rejects(f.reuse(['--continuation-case', 'seal-toggle']), /Untrusted/);
   await rm(path.join(f.origin, 'hardlink'));
   await symlink(path.join(f.checkout, 'input.rs'), path.join(f.checkout, 'new.rs'));
-  await assert.rejects(f.reuse(['--continuation-case', 'cancel']), /symlink/);
+  await assert.rejects(f.reuse(['--continuation-case', 'seal-toggle']), /symlink/);
 });
 
 test('launch gate rechecks copied binary, source, provenance and current checkout after preparation', async t => {
@@ -244,7 +244,7 @@ test('clean source accepts four ordinary generated schemas and preserves bytes t
   await assert.rejects(validateReusableBuild(f.origin, f.checkout), /snapshot hash/);
   await bindSnapshot(f); // Simulate original fresh postbuild artifact binding.
   await validateReusableBuild(f.origin, f.checkout);
-  const reused = await f.reuse(['--continuation-case', 'cancel']);
+  const reused = await f.reuse(['--continuation-case', 'seal-toggle']);
   for (const name of schemaNames) assert.deepEqual(await readFile(path.join(reused.directory, 'frontend/src-tauri/gen/schemas', name)), await readFile(path.join(f.snapshot, 'src-tauri/gen/schemas', name)));
   await addSchemas(f.checkout);
   assert.equal(await sourceInputFingerprint(f.checkout), f.manifest.sourceInputSha256);
@@ -297,6 +297,8 @@ const permitted = [
   'e2e-tests/helpers/nativeContinuationProxy.mjs', 'e2e-tests/helpers/nativeContinuationProxy.test.mjs',
   'e2e-tests/helpers/nativeBuildReuse.test.mjs', 'e2e-tests/helpers/nativeQualificationGuards.test.mjs',
   'e2e-tests/run-native-window-e2e.mjs',
+  'src-tauri/tests/native_context_pause_continue_e2e.rs',
+  'src-tauri/tests/native_context_stalled_ax_e2e.rs',
 ].sort();
 async function inputFixture(t) {
   const f = await fixture(t);
@@ -311,11 +313,11 @@ async function inputFixture(t) {
   await bindSnapshot(f);
   return f;
 }
-test('seven exact external Node changes get fresh evidence with immutable origin and successive reuse', async t => {
+test('exact runner and stalled AX integration test changes get fresh evidence with immutable origin and successive reuse', async t => {
   const f = await inputFixture(t);
   const originBytes = await readFile(path.join(f.origin, 'native-build.json'));
   for (const name of permitted) await writeFile(path.join(f.checkout, name), 'new external Node');
-  const a = await f.reuse(['--continuation-case', 'cancel']);
+  const a = await f.reuse(['--continuation-case', 'seal-toggle']);
   assert.deepEqual(a.manifest.allowedChangedPaths, permitted);
   assert.equal(a.manifest.runnerSourceSha256, await sourceInputFingerprint(f.checkout));
   assert.notEqual(a.manifest.runnerSourceSha256, a.manifest.sourceInputSha256);
@@ -337,6 +339,24 @@ test('seven exact external Node changes get fresh evidence with immutable origin
   await writeFile(path.join(f.checkout, permitted[0]), 'later Node edit');
   await assert.rejects(validateReusableBuild(a.directory, f.checkout), /evidence/);
 });
+for (const allowed of ['src-tauri/tests/native_context_stalled_ax_e2e.rs',
+  'src-tauri/tests/native_context_pause_continue_e2e.rs']) {
+test(`only the exact ${allowed} integration test may differ from immutable app inputs`, async t => {
+  const f = await inputFixture(t);
+  const originalManifest = await readFile(path.join(f.origin, 'native-build.json'));
+  const originalBinary = await readFile(path.join(f.origin, 'native-window-e2e'));
+  const originalSnapshotHash = f.manifest.sourceSha256;
+  await writeFile(path.join(f.checkout, allowed), 'new integration test only');
+  const reused = await f.reuse(['--continuation-case', 'seal-toggle']);
+  assert.deepEqual(reused.manifest.allowedChangedPaths, [allowed]);
+  assert.equal(reused.manifest.runnerSourceSha256, await sourceInputFingerprint(f.checkout));
+  assert.equal(reused.manifest.sourceSha256, originalSnapshotHash);
+  assert.deepEqual(await readFile(path.join(f.origin, 'native-build.json')), originalManifest);
+  assert.deepEqual(await readFile(path.join(f.origin, 'native-window-e2e')), originalBinary);
+  await writeFile(path.join(f.checkout, 'src-tauri/src/main.rs'), 'changed app Rust source');
+  await assert.rejects(f.reuse(['--continuation-case', 'seal-toggle']), /fingerprint/);
+});
+}
 for (const name of ['src-tauri/src/main.rs', 'src/App.vue', 'assets/icon.png', 'src-tauri/tauri.conf.json', 'package.json', 'pnpm-lock.yaml', 'unknown.txt', 'e2e-tests/helpers/unknown.mjs']) {
   for (const mutation of ['change', 'delete', 'addition']) {
     test(`full input union rejects ${mutation}: ${name}`, async t => {
@@ -352,31 +372,31 @@ for (const name of ['src-tauri/src/main.rs', 'src/App.vue', 'assets/icon.png', '
         }
         await rm(file);
       } else await writeFile(mutation === 'addition' ? file + '.added' : file, 'changed');
-      await assert.rejects(f.reuse(['--continuation-case', 'cancel']), /fingerprint/);
+      await assert.rejects(f.reuse(['--continuation-case', 'seal-toggle']), /fingerprint/);
     });
   }
 }
 test('allowed additions/deletions are exact and directories cannot impersonate allowed files', async t => {
   const f = await inputFixture(t);
   await rm(path.join(f.checkout, permitted[0]));
-  const deleted = await f.reuse(['--continuation-case', 'cancel']);
+  const deleted = await f.reuse(['--continuation-case', 'seal-toggle']);
   assert.deepEqual(deleted.manifest.allowedChangedPaths, [permitted[0]]);
   await mkdir(path.join(f.checkout, permitted[0]));
-  await assert.rejects(f.reuse(['--continuation-case', 'cancel']), /fingerprint/);
+  await assert.rejects(f.reuse(['--continuation-case', 'seal-toggle']), /fingerprint/);
   await rm(path.join(f.checkout, permitted[0]), { recursive: true });
   await rm(path.join(f.snapshot, permitted[0]));
   f.manifest.sourceInputSha256 = await sourceInputFingerprint(f.checkout);
   f.manifest.buildOrigin.sourceInputSha256 = f.manifest.sourceInputSha256;
   await bindSnapshot(f);
   await writeFile(path.join(f.checkout, permitted[0]), 'new');
-  const added = await f.reuse(['--continuation-case', 'cancel']);
+  const added = await f.reuse(['--continuation-case', 'seal-toggle']);
   assert.deepEqual(added.manifest.allowedChangedPaths, [permitted[0]]);
 });
 
 test('runner evidence requires both exact fields and sorted paths; allowed snapshot edits remain forbidden', async t => {
   const f = await inputFixture(t);
   for (const name of permitted) await writeFile(path.join(f.checkout, name), 'changed');
-  const result = await f.reuse(['--continuation-case', 'cancel']);
+  const result = await f.reuse(['--continuation-case', 'seal-toggle']);
   for (const altered of [
     { ...result.manifest, runnerSourceSha256: undefined, allowedChangedPaths: undefined },
     { ...result.manifest, runnerSourceSha256: undefined },
@@ -395,7 +415,7 @@ test('runner evidence requires both exact fields and sorted paths; allowed snaps
 test('unknown empty checkout directory is rejected by full union', async t => {
   const f = await inputFixture(t);
   await mkdir(path.join(f.checkout, 'unknown-empty'));
-  await assert.rejects(f.reuse(['--continuation-case', 'cancel']), /fingerprint/);
+  await assert.rejects(f.reuse(['--continuation-case', 'seal-toggle']), /fingerprint/);
 });
 
 // Run an unchanged copy of the real entry point in an isolated Node process.
@@ -404,6 +424,7 @@ test('unknown empty checkout directory is rejected by full union', async t => {
 async function launchFixture(t) {
   const f = await fixture(t);
   for (const name of ['run-native-window-e2e.mjs', 'helpers/nativeContinuation.mjs',
+    'helpers/nativeQualificationSummary.mjs',
     'helpers/nativeContinuationProxy.mjs', 'helpers/nativeOwnedDocument.mjs',
     'helpers/nativeRestartCrash.mjs']) {
     const target = path.join(f.checkout, 'e2e-tests', name);
@@ -424,7 +445,7 @@ exit 73
   f.manifest.sourceInputSha256 = await sourceInputFingerprint(f.checkout);
   f.manifest.buildOrigin.sourceInputSha256 = f.manifest.sourceInputSha256;
   await bindSnapshot(f);
-  const result = await f.reuse(['--continuation-case', 'cancel']);
+  const result = await f.reuse(['--continuation-case', 'seal-toggle']);
   const runner = pathToFileURL(path.join(f.checkout, 'e2e-tests/run-native-window-e2e.mjs')).href;
   const require = createRequire(import.meta.url);
   const nodePath = path.dirname(path.dirname(require.resolve('jsdom/package.json')));

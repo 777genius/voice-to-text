@@ -8,8 +8,8 @@ vi.mock('@/stores/transcription', () => ({ useTranscriptionStore: () => fixture.
 const nativeReadback = () => ({ armed: true, valid: true, stopped: false, error: null, maxSamplingGapMs: 0, records: [{ sequence: 0, text: '', identityValid: true, readStartMs: 0, readEndMs: 0, lastReadStartMs: 0, lastReadEndMs: 0, samples: 1, maxSamplingGapMs: 0 }] });
 import { runNativeContinuationLive } from './nativeContinuationLive';
 beforeEach(() => { fixture.invoke.mockReset(); fixture.store.finalText = ''; fixture.listeners = {}; });
-for (const id of ['warm-baseline-1', 'warm-continue-1', 'cold-0', 'cold-4000', 'cold-8000', 'long', 'short-tail', 'old-tail']) {
-  for (const fault of ['none', 'missing', 'duplicate', 'unexpected', 'incomplete', 'same-cold-owner', 'retained-connection', 'reader-not-armed', 'reader-calibration-invalid', 'reader-identity-error', 'reader-join-timeout']) {
+for (const id of ['warm-baseline-1', 'warm-continue-1', 'warm-continue-gap-0', 'warm-continue-gap-200', 'cold-0', 'cold-4000', 'cold-8000', 'long', 'short-tail', 'old-tail']) {
+  for (const fault of ['none', 'missing', 'duplicate', 'unexpected', 'incomplete', 'same-cold-owner', 'history-count-mismatch', 'retained-connection', 'reader-not-armed', 'reader-calibration-invalid', 'reader-identity-error', 'reader-join-timeout']) {
   it(`${id}: ${fault}; actual Ready gate, terminal owners and insertion ledger`, async () => {
     const baseline = id.startsWith('warm-baseline');
     const continuation = !baseline && !id.startsWith('cold');
@@ -20,7 +20,9 @@ for (const id of ['warm-baseline-1', 'warm-continue-1', 'cold-0', 'cold-4000', '
     const source = (name: string, generation: number) => ({ name, bytes: 640, sourceFrames: 320, emittedFrames: 0,
       sourceDurationMs: 20, captureGeneration: generation, sourceGateRequired: gated && generation === 1,
       sourceGateReady: null as any, nativeSourceStartMs: null as number | null, nativeSourceEndMs: null as number | null });
-    const value = { nativeReadback: nativeReadback(), qualificationTrial: { id, continuation, configDelayMs: 0, episodes: ['episode-a.pcm', 'episode-b.pcm'] },
+    const gapMs = id.startsWith('warm-continue-gap-') ? Number(id.slice('warm-continue-gap-'.length)) : undefined;
+    const episodes = id === 'long' ? ['episode-a.pcm', 'episode-b.pcm', 'long-auto-commit.pcm', 'episode-b.pcm'] : ['episode-a.pcm', 'episode-b.pcm'];
+    const value = { nativeReadback: nativeReadback(), qualificationTrial: { id, continuation, configDelayMs: 0, gapMs, episodes },
       qualificationEndpoint: 'ws://127.0.0.1:52999', status: 'Idle', historyEntryCount: 0, preparedCaptureTokenCount: 0,
       logicalProviderRunId: 1, providerTransport: { serverReady: false, connectionRetained: false }, nativeInsertionTrace: { overflow: false, records: [] },
       fixture: { sourceEpisodes: [] as ReturnType<typeof source>[], activeCaptures: 0, captureStarts: 0, captureStops: 0, observationOverflow: false } };
@@ -76,9 +78,19 @@ for (const id of ['warm-baseline-1', 'warm-continue-1', 'cold-0', 'cold-4000', '
           if (baseline) value.fixture.sourceEpisodes.push(source('episode-b.pcm', 1));
         } else {
           value.fixture.captureStops++; value.fixture.activeCaptures = 0;
-          if (continuation && value.fixture.captureStops === 1) value.status = 'Paused';
+          if (continuation && value.fixture.captureStops < episodes.length) value.status = 'Paused';
           else {
-            value.status = 'Idle'; value.historyEntryCount++;
+            value.status = 'Idle';
+            if (gated) value.historyEntryCount++;
+            else {
+              const stableCount = id === 'cold-0' && value.fixture.captureStops === 1 ? 7 : 1;
+              for (let segment = 1; segment <= stableCount; segment++) {
+                fixture.listeners['transcription:final']({ payload: { session_id: value.logicalProviderRunId,
+                  delivery_seq: segment, text: `stable segment ${segment}` } });
+                value.historyEntryCount++;
+              }
+            }
+            if (fault === 'history-count-mismatch' && value.fixture.captureStops === (baseline ? 1 : episodes.length)) value.historyEntryCount++;
             value.providerTransport = { serverReady: false, connectionRetained: fault === 'retained-connection' };
             if (!baseline) fixture.store.finalText = value.fixture.captureStops === 1 ? 'A' : 'B';
             const terminal = { payload: { session_id: fault === 'unexpected' ? 999 : value.logicalProviderRunId,
@@ -95,6 +107,7 @@ for (const id of ['warm-baseline-1', 'warm-continue-1', 'cold-0', 'cold-4000', '
     await runNativeContinuationLive({} as Pinia);
     if (fault !== 'none' && !(fault === 'same-cold-owner' && gated)) {
       expect(report.passed).toBe(false); expect(report.errors.length).toBeGreaterThan(0);
+      if (fault === 'history-count-mismatch') expect(report.errors).toContain('Error: History count mismatch');
       if (fault === 'reader-not-armed' || fault === 'reader-calibration-invalid') {
         expect(value.fixture.captureStarts).toBe(0);
         expect(fixture.invoke.mock.calls.some(([command]) => command === 'native_e2e_hotkey')).toBe(false);
@@ -110,13 +123,18 @@ for (const id of ['warm-baseline-1', 'warm-continue-1', 'cold-0', 'cold-4000', '
     }
     expect(report.errors).toEqual([]);
     expect(report.passed).toBe(true);
-    expect(report.episodes).toHaveLength(2);
+    expect(report.episodes).toHaveLength(episodes.length);
     expect(report.clockExchanges.map((p: any) => p.phase)).toEqual(['pre', 'pre', 'pre', 'post', 'post', 'post']);
     expect(fixture.invoke.mock.calls.filter(([command, args]) => command === 'native_e2e_state' && args?.stopReadback)).toHaveLength(1);
-    expect(value.fixture.captureStarts).toBe(baseline ? 1 : 2);
-    expect(value.fixture.captureStops).toBe(baseline ? 1 : 2);
+    expect(value.fixture.captureStarts).toBe(baseline ? 1 : episodes.length);
+    expect(value.fixture.captureStops).toBe(baseline ? 1 : episodes.length);
+    if (gapMs !== undefined) expect(fixture.invoke.mock.calls.filter(([command, args]) => command === 'native_e2e_delay' && args.durationMs === gapMs)).toHaveLength(1);
     expect(gateCalls).toBe(gated ? 1 : 0);
     expect(report.expectedInsertion).toBe(baseline ? 'AB' : continuation ? 'B' : 'AB');
+    if (id === 'cold-0') {
+      expect(report.events.filter((event: any) => event.event === 'transcription:final' && event.nonempty)).toHaveLength(8);
+      expect(report.final.historyEntryCount).toBe(8);
+    }
     if (baseline) expect(report.episodes[0].micReleasedMs).toBeNull();
   });
   }

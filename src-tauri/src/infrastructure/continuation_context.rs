@@ -1,13 +1,13 @@
 //! One process-wide bounded executor owns all native references. No request spawns
 //! a replacement thread, and no audio/provider mutex participates in native work.
 use super::auto_paste::{AutoPasteTarget, ContinuationNativeContext};
-use crate::domain::ports::{ContextValidation, ContinuationContextGuard};
+use crate::domain::ports::{ContextValidation, ContextValidationRequest, ContinuationContextGuard};
 use async_trait::async_trait;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 // Instrumentation is absent from product builds; no content is retained.
 #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
@@ -188,6 +188,7 @@ const ELIGIBILITY_TIMEOUT: std::time::Duration = std::time::Duration::from_milli
 struct Registry {
     floor: u64,
     active: HashMap<u64, Arc<AtomicBool>>,
+    pending: HashMap<u64, Vec<Arc<DeliveryStatus>>>,
 }
 impl Registry {
     fn register(&mut self, id: u64) -> bool {
@@ -217,6 +218,24 @@ impl Registry {
             live.store(false, Ordering::SeqCst);
         }
     }
+    fn finish_delivery(&mut self, id: u64, status: &Arc<DeliveryStatus>) {
+        if let Some(pending) = self.pending.get_mut(&id) {
+            pending.retain(|candidate| !Arc::ptr_eq(candidate, status));
+            if pending.is_empty() {
+                self.pending.remove(&id);
+            }
+        }
+    }
+}
+struct DeliveryStatus {
+    deadline: std::time::Instant,
+    completed: watch::Sender<Option<(GuardedPasteOutcome, std::time::Instant)>>,
+}
+impl DeliveryStatus {
+    fn finish(&self, outcome: GuardedPasteOutcome) {
+        self.completed
+            .send_replace(Some((outcome, std::time::Instant::now())));
+    }
 }
 #[derive(Clone)]
 struct Execution {
@@ -227,6 +246,7 @@ struct Execution {
     canceled: Arc<AtomicBool>,
     attempted: Arc<AtomicBool>,
     registry: Arc<Mutex<Registry>>,
+    completion: Option<Arc<DeliveryStatus>>,
 }
 impl Execution {
     fn allowed(&self) -> bool {
@@ -337,6 +357,27 @@ async fn validation_reply(
     reply.unwrap_or(ContextValidation::Unavailable)
 }
 
+fn admitted_deadline(
+    ceiling: std::time::Instant,
+    predecessors: &[Arc<DeliveryStatus>],
+) -> Option<std::time::Instant> {
+    let mut latest = None;
+    for predecessor in predecessors {
+        let (outcome, completed_at) = (*predecessor.completed.borrow())?;
+        if !matches!(outcome, GuardedPasteOutcome::Confirmed { .. })
+            || completed_at >= predecessor.deadline
+        {
+            return None;
+        }
+        latest = Some(latest.map_or(completed_at, |previous: std::time::Instant| {
+            previous.max(completed_at)
+        }));
+    }
+    Some(latest.map_or(ceiling, |completed_at| {
+        ceiling.min(completed_at + ELIGIBILITY_TIMEOUT)
+    }))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum GuardedPasteOutcome {
@@ -393,6 +434,113 @@ pub mod native_e2e {
     fn capture_fault() -> &'static Mutex<Option<ArmedCaptureFault>> {
         static FAULT: OnceLock<Mutex<Option<ArmedCaptureFault>>> = OnceLock::new();
         FAULT.get_or_init(Default::default)
+    }
+    #[cfg(target_os = "macos")]
+    struct ArmedStalledAxTarget {
+        token: u64,
+        target: super::AutoPasteTarget,
+    }
+    #[cfg(target_os = "macos")]
+    fn stalled_ax_target() -> &'static Mutex<Option<ArmedStalledAxTarget>> {
+        static TARGET: OnceLock<Mutex<Option<ArmedStalledAxTarget>>> = OnceLock::new();
+        TARGET.get_or_init(Default::default)
+    }
+    #[cfg(target_os = "macos")]
+    pub struct StalledAxTargetRegistration(u64);
+    #[cfg(target_os = "macos")]
+    pub fn arm_stalled_ax_target(
+        target: super::AutoPasteTarget,
+    ) -> anyhow::Result<StalledAxTargetRegistration> {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let nonce = target.bundle_id.strip_prefix("org.voicetext.synthetic.ax.");
+        anyhow::ensure!(
+            target.pid > 0
+                && nonce.is_some_and(|value| value.len() == 32
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))),
+            "exact stalled AX fixture identity required"
+        );
+        let mut slot = stalled_ax_target()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        anyhow::ensure!(slot.is_none(), "stalled AX target already armed");
+        let token = NEXT.fetch_add(1, Ordering::SeqCst);
+        *slot = Some(ArmedStalledAxTarget { token, target });
+        Ok(StalledAxTargetRegistration(token))
+    }
+    #[cfg(target_os = "macos")]
+    impl Drop for StalledAxTargetRegistration {
+        fn drop(&mut self) {
+            let mut slot = stalled_ax_target()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if slot.as_ref().is_some_and(|armed| armed.token == self.0) {
+                slot.take();
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    pub(crate) fn stalled_ax_target_matches(target: &super::AutoPasteTarget) -> bool {
+        stalled_ax_target()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|armed| &armed.target == target)
+    }
+    #[cfg(all(test, target_os = "macos"))]
+    #[test]
+    fn stalled_ax_qualification_requires_exact_live_registration() {
+        let fixture = super::AutoPasteTarget {
+            pid: 123,
+            bundle_id: "org.voicetext.synthetic.ax.0123456789abcdef0123456789abcdef".into(),
+        };
+        let textedit = super::AutoPasteTarget {
+            pid: 123,
+            bundle_id: "com.apple.TextEdit".into(),
+        };
+        assert!(crate::infrastructure::auto_paste::continuation_app_qualified(&textedit));
+        assert!(!crate::infrastructure::auto_paste::continuation_app_qualified(&fixture));
+        assert!(arm_stalled_ax_target(super::AutoPasteTarget {
+            pid: 0,
+            ..fixture.clone()
+        })
+        .is_err());
+        assert!(arm_stalled_ax_target(super::AutoPasteTarget {
+            pid: 123,
+            bundle_id: "org.voicetext.synthetic.ax.bad".into()
+        })
+        .is_err());
+        assert!(arm_stalled_ax_target(super::AutoPasteTarget {
+            pid: 123,
+            bundle_id: "com.apple.Notes".into()
+        })
+        .is_err());
+        let registration = arm_stalled_ax_target(fixture.clone()).unwrap();
+        assert!(arm_stalled_ax_target(fixture.clone()).is_err());
+        assert!(crate::infrastructure::auto_paste::continuation_app_qualified(&fixture));
+        drop(StalledAxTargetRegistration(u64::MAX));
+        assert!(crate::infrastructure::auto_paste::continuation_app_qualified(&fixture));
+        assert!(
+            !crate::infrastructure::auto_paste::continuation_app_qualified(
+                &super::AutoPasteTarget {
+                    pid: 124,
+                    ..fixture.clone()
+                }
+            )
+        );
+        assert!(
+            !crate::infrastructure::auto_paste::continuation_app_qualified(
+                &super::AutoPasteTarget {
+                    bundle_id: "org.voicetext.synthetic.ax.ffffffffffffffffffffffffffffffff".into(),
+                    ..fixture.clone()
+                }
+            )
+        );
+        drop(registration);
+        assert!(!crate::infrastructure::auto_paste::continuation_app_qualified(&fixture));
+        drop(arm_stalled_ax_target(fixture.clone()).unwrap());
+        assert!(!crate::infrastructure::auto_paste::continuation_app_qualified(&fixture));
     }
     pub struct CaptureFaultHandle {
         token: u64,
@@ -802,7 +950,12 @@ enum Command {
         std::time::Instant,
         oneshot::Sender<ContextValidation>,
     ),
-    Validate(u64, std::time::Instant, oneshot::Sender<ContextValidation>),
+    Validate(
+        u64,
+        std::time::Instant,
+        Vec<Arc<DeliveryStatus>>,
+        oneshot::Sender<ContextValidation>,
+    ),
     Paste(
         u64,
         u64,
@@ -1080,7 +1233,11 @@ impl ContinuationContextManager {
                                 worker_registry.lock().unwrap().refuse(id);
                             }
                         }
-                        Command::Validate(id, deadline, reply) => {
+                        Command::Validate(id, ceiling, predecessors, reply) => {
+                            let Some(deadline) = admitted_deadline(ceiling, &predecessors) else {
+                                let _ = reply.send(ContextValidation::Unavailable);
+                                continue;
+                            };
                             if reply.is_closed() || std::time::Instant::now() >= deadline {
                                 continue;
                             }
@@ -1138,6 +1295,13 @@ impl ContinuationContextManager {
                             }
                             #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
                             observation::finish(execution.trace, result);
+                            if let Some(completion) = &execution.completion {
+                                completion.finish(result);
+                                worker_registry
+                                    .lock()
+                                    .unwrap()
+                                    .finish_delivery(id, completion);
+                            }
                             if reply.send(result).is_err() {
                                 worker_registry.lock().unwrap().refuse(id);
                             }
@@ -1185,6 +1349,7 @@ impl ContinuationContextManager {
                 #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
                 trace: None,
                 registry: self.registry.clone(),
+                completion: None,
             },
             true,
         );
@@ -1236,14 +1401,21 @@ impl ContinuationContextManager {
             .await
     }
     async fn delivery(&self, id: u64, seq: u64, text: String, copy: bool) -> GuardedPasteOutcome {
+        let deadline = std::time::Instant::now() + REQUEST_TIMEOUT;
+        let (completed, _) = watch::channel(None);
+        let completion = Arc::new(DeliveryStatus {
+            deadline,
+            completed,
+        });
         let execution = Execution {
             id,
-            deadline: std::time::Instant::now() + REQUEST_TIMEOUT,
+            deadline,
             canceled: Arc::new(AtomicBool::new(false)),
             attempted: Arc::new(AtomicBool::new(false)),
             #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
             trace: observation::queued(id, seq, copy),
             registry: self.registry.clone(),
+            completion: Some(completion.clone()),
         };
         let mut caller = Caller(execution.clone(), true);
         let (tx, rx) = oneshot::channel();
@@ -1252,7 +1424,23 @@ impl ContinuationContextManager {
         } else {
             Command::Paste(id, seq, text, execution.clone(), tx)
         };
-        if self.sender.try_send(command).is_err() {
+        // Registration and queue admission share the lock with begin_validation:
+        // a probe observes either this delivery or its queue position before it.
+        let admitted = {
+            let mut registry = self.registry.lock().unwrap();
+            registry
+                .pending
+                .entry(id)
+                .or_default()
+                .push(completion.clone());
+            let admitted = self.sender.try_send(command).is_ok();
+            if !admitted {
+                completion.finish(GuardedPasteOutcome::Unavailable);
+                registry.finish_delivery(id, &completion);
+            }
+            admitted
+        };
+        if !admitted {
             #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
             observation::finish(execution.trace, GuardedPasteOutcome::Unavailable);
             return GuardedPasteOutcome::Unavailable;
@@ -1278,28 +1466,90 @@ impl ContinuationContextManager {
         // Only a wakeup: durable retirement and periodic cleanup do not depend on this.
         let _ = self.sender.try_send(Command::Release(logical_run_id, tx));
     }
+
+    fn queued_validation(&self, logical_run_id: u64) -> ContextValidationRequest<'static> {
+        let (tx, rx) = oneshot::channel();
+        let registry = self.registry.clone();
+        let locked = registry.lock().unwrap();
+        let predecessors = locked
+            .pending
+            .get(&logical_run_id)
+            .cloned()
+            .unwrap_or_default();
+        let deadline = predecessors
+            .iter()
+            .map(|entry| entry.deadline + ELIGIBILITY_TIMEOUT)
+            .max()
+            .unwrap_or_else(|| std::time::Instant::now() + ELIGIBILITY_TIMEOUT);
+        let waits = predecessors
+            .iter()
+            .map(|entry| entry.completed.subscribe())
+            .collect::<Vec<_>>();
+        let admission = predecessors.clone();
+        let admitted = self
+            .sender
+            .try_send(Command::Validate(
+                logical_run_id,
+                deadline,
+                predecessors,
+                tx,
+            ))
+            .is_ok();
+        drop(locked);
+        ContextValidationRequest {
+            deadline,
+            result: Box::pin(async move {
+                if !admitted {
+                    return ContextValidation::Unavailable;
+                }
+                for mut predecessor in waits {
+                    if predecessor.borrow().is_none() {
+                        let completed = async {
+                            loop {
+                                predecessor.changed().await.map_err(|_| ())?;
+                                if predecessor.borrow().is_some() {
+                                    return Ok::<(), ()>(());
+                                }
+                            }
+                        };
+                        if !matches!(
+                            tokio::time::timeout_at(
+                                tokio::time::Instant::from_std(deadline),
+                                completed,
+                            )
+                            .await,
+                            Ok(Ok(()))
+                        ) {
+                            return ContextValidation::Unavailable;
+                        }
+                    }
+                }
+                // The owned predecessor buys only a fresh 100 ms queue + AX
+                // budget after completion; unrelated work cannot inherit its 3 s.
+                let Some(probe_deadline) = admitted_deadline(deadline, &admission) else {
+                    return ContextValidation::Unavailable;
+                };
+                let result =
+                    validation_reply(rx, tokio::time::Instant::from_std(probe_deadline)).await;
+                if matches!(result, ContextValidation::Valid { .. })
+                    && !registry.lock().unwrap().allowed(logical_run_id)
+                {
+                    ContextValidation::Unavailable
+                } else {
+                    result
+                }
+            }),
+        }
+    }
 }
 #[async_trait]
 impl ContinuationContextGuard for ContinuationContextManager {
     async fn validate(&self, logical_run_id: u64) -> ContextValidation {
-        let deadline = std::time::Instant::now() + ELIGIBILITY_TIMEOUT;
-        let (tx, rx) = oneshot::channel();
-        if self
-            .sender
-            .try_send(Command::Validate(logical_run_id, deadline, tx))
-            .is_err()
-        {
-            return ContextValidation::Unavailable;
-        }
-        // Eligibility owns only this reply, never the in-flight paste or run.
-        // Dropping/expiring the probe closes the reply without retiring its owner.
-        let result = validation_reply(rx, tokio::time::Instant::from_std(deadline)).await;
-        if matches!(result, ContextValidation::Valid { .. })
-            && !self.registry.lock().unwrap().allowed(logical_run_id)
-        {
-            return ContextValidation::Unavailable;
-        }
-        result
+        self.queued_validation(logical_run_id).result.await
+    }
+
+    fn begin_validation(&self, logical_run_id: u64) -> ContextValidationRequest<'_> {
+        self.queued_validation(logical_run_id)
     }
 }
 
@@ -1656,6 +1906,7 @@ mod queue_tests {
             .try_send(Command::Validate(
                 1,
                 std::time::Instant::now() + ELIGIBILITY_TIMEOUT,
+                Vec::new(),
                 tx,
             ))
             .ok()
@@ -1857,7 +2108,7 @@ mod eligibility_tests {
             registry: Arc::new(Mutex::new(Registry::default())),
         };
         assert_eq!(manager.validate(1).await, ContextValidation::Unavailable);
-        let Command::Validate(_, deadline, reply) = receiver.try_recv().unwrap() else {
+        let Command::Validate(_, deadline, _, reply) = receiver.try_recv().unwrap() else {
             panic!("wrong command");
         };
         assert!(std::time::Instant::now() >= deadline);
@@ -1931,6 +2182,7 @@ mod review_fix_tests {
             attempted: Arc::new(AtomicBool::new(false)),
             #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
             trace: None,
+            completion: None,
         }
     }
     #[test]
@@ -2435,6 +2687,7 @@ mod review2_tests {
             #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
             trace: None,
             registry: registry.clone(),
+            completion: None,
         };
         let _scope = ExecutionScope::enter(execution.clone());
         let mut run = Run {
@@ -2503,9 +2756,10 @@ mod remediation_tests {
             registry,
             #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
             trace: None,
+            completion: None,
         };
         assert_eq!(manager.validate(1).await, ContextValidation::Unavailable);
-        let Command::Validate(_, _, expired) = receiver.try_recv().unwrap() else {
+        let Command::Validate(_, _, _, expired) = receiver.try_recv().unwrap() else {
             panic!()
         };
         assert!(expired.is_closed());
@@ -2517,7 +2771,7 @@ mod remediation_tests {
             std::task::Poll::Pending
         ));
         drop(probe);
-        let Command::Validate(_, _, abandoned) = receiver.try_recv().unwrap() else {
+        let Command::Validate(_, _, _, abandoned) = receiver.try_recv().unwrap() else {
             panic!()
         };
         assert!(abandoned.is_closed());
@@ -2528,7 +2782,7 @@ mod remediation_tests {
         let next = manager.validate(1);
         let answer = async {
             tokio::task::yield_now().await;
-            let Command::Validate(_, _, reply) = receiver.try_recv().unwrap() else {
+            let Command::Validate(_, _, _, reply) = receiver.try_recv().unwrap() else {
                 panic!()
             };
             reply
@@ -2550,5 +2804,118 @@ mod remediation_tests {
         };
         assert_eq!(manager.validate(1).await, ContextValidation::Unavailable);
         assert!(manager.registry.lock().unwrap().allowed(1));
+    }
+}
+
+#[cfg(test)]
+mod owned_admission_tests {
+    use super::*;
+
+    fn tracked(registry: &Arc<Mutex<Registry>>, id: u64) -> Arc<DeliveryStatus> {
+        let (completed, _) = watch::channel(None);
+        let status = Arc::new(DeliveryStatus {
+            deadline: std::time::Instant::now() + REQUEST_TIMEOUT,
+            completed,
+        });
+        registry
+            .lock()
+            .unwrap()
+            .pending
+            .entry(id)
+            .or_default()
+            .push(status.clone());
+        status
+    }
+
+    #[tokio::test]
+    async fn same_run_paste_finishing_after_350ms_gets_fresh_ax_budget() {
+        let (sender, receiver) = mpsc::sync_channel(MAX_QUEUE);
+        let registry = Arc::new(Mutex::new(Registry::default()));
+        assert!(registry.lock().unwrap().register(1));
+        let paste = tracked(&registry, 1);
+        let manager = ContinuationContextManager {
+            sender: Arc::new(sender),
+            registry,
+        };
+        let request = manager.begin_validation(1);
+        let worker = std::thread::spawn(move || {
+            let Command::Validate(1, ceiling, predecessors, reply) = receiver.recv().unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(predecessors.len(), 1);
+            std::thread::sleep(std::time::Duration::from_millis(350));
+            paste.finish(GuardedPasteOutcome::Confirmed { revision: 1 });
+            let deadline = admitted_deadline(ceiling, &predecessors).unwrap();
+            assert!(deadline > std::time::Instant::now());
+            reply
+                .send(ContextValidation::Valid { revision: 1 })
+                .unwrap();
+        });
+        assert_eq!(
+            request.result.await,
+            ContextValidation::Valid { revision: 1 }
+        );
+        worker.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn uncertain_predecessor_and_retired_owner_fail_closed() {
+        for retire in [false, true] {
+            let (sender, receiver) = mpsc::sync_channel(MAX_QUEUE);
+            let registry = Arc::new(Mutex::new(Registry::default()));
+            assert!(registry.lock().unwrap().register(1));
+            let paste = tracked(&registry, 1);
+            let manager = ContinuationContextManager {
+                sender: Arc::new(sender),
+                registry,
+            };
+            let request = manager.begin_validation(1);
+            let Command::Validate(_, ceiling, predecessors, reply) = receiver.recv().unwrap()
+            else {
+                panic!()
+            };
+            if retire {
+                manager.release(1).await;
+                paste.finish(GuardedPasteOutcome::Confirmed { revision: 1 });
+                assert!(admitted_deadline(ceiling, &predecessors).is_some());
+                reply
+                    .send(ContextValidation::Valid { revision: 1 })
+                    .unwrap();
+            } else {
+                paste.finish(GuardedPasteOutcome::Uncertain);
+                assert!(admitted_deadline(ceiling, &predecessors).is_none());
+                drop(reply);
+            }
+            assert_eq!(request.result.await, ContextValidation::Unavailable);
+        }
+    }
+
+    #[tokio::test]
+    async fn other_run_and_abandoned_probe_do_not_borrow_owned_write_budget() {
+        let (sender, receiver) = mpsc::sync_channel(MAX_QUEUE);
+        let registry = Arc::new(Mutex::new(Registry::default()));
+        assert!(registry.lock().unwrap().register(1));
+        assert!(registry.lock().unwrap().register(2));
+        let paste = tracked(&registry, 2);
+        let manager = ContinuationContextManager {
+            sender: Arc::new(sender),
+            registry: registry.clone(),
+        };
+        let started = std::time::Instant::now();
+        let request = manager.begin_validation(1);
+        assert!(
+            request.deadline
+                <= started + ELIGIBILITY_TIMEOUT + std::time::Duration::from_millis(10)
+        );
+        let Command::Validate(1, _, predecessors, reply) = receiver.recv().unwrap() else {
+            panic!()
+        };
+        assert!(predecessors.is_empty());
+        drop(request);
+        assert!(reply.is_closed());
+        assert!(registry.lock().unwrap().allowed(1));
+        assert!(registry.lock().unwrap().allowed(2));
+        assert!(paste.completed.borrow().is_none());
     }
 }

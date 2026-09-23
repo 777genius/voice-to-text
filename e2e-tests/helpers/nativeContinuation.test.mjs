@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { approvedFixtures, maxProxyEvidenceEvents, validatePcm, readApprovedFixtures, liveTrials,
+import { approvedFixtures, maxProxyEvidenceEvents, validatePcm, readApprovedFixtures, liveTrials, cancelUnsentFakeTrial,
   warmProviderCanaryJittersMs, warmProviderCanaryPhases, warmProviderCanaryTrial,
   validateHarnessConfig, exactInsertionEvidence, expectedWarmProviderCallbackGenerations,
   expectedWarmProviderContinues, expectedWarmProviderLogicalRuns,
@@ -11,13 +11,17 @@ test('qualification requires explicit opt in and inherits no feature flags', () 
   assert.equal(sanitizedEnvironment('/tmp/example', { VOICETEXT_EL_PAUSE_CONTINUE_V1: 'true' }).VOICETEXT_EL_PAUSE_CONTINUE_V1, undefined);
 });
 test('fixed live budget includes all trials and full long clock', async t => {
-  assert.equal(liveTrials.length, 13);
+  assert.equal(liveTrials.length, 15);
   assert.equal(liveTrials.filter(x => x.id.startsWith('warm-baseline')).length, 3);
-  assert.equal(liveTrials.filter(x => x.id.startsWith('warm-continue')).length, 3);
-  assert.equal(new Set(liveTrials.map(x => x.id)).size, 13);
+  assert.equal(liveTrials.filter(x => /^warm-continue-\d$/.test(x.id)).length, 3);
+  assert.deepEqual(liveTrials.filter(x => x.id.startsWith('warm-continue-gap-')).map(x => x.gapMs), [0, 200]);
+  assert.equal(new Set(liveTrials.map(x => x.id)).size, 15);
   assert.equal(approvedFixtures['long-auto-commit.pcm'][0] / 32, 49268);
-  const longestTwoEpisodeBytes = approvedFixtures['long-auto-commit.pcm'][0] + approvedFixtures['episode-b.pcm'][0];
-  assert.ok(Math.ceil(longestTwoEpisodeBytes / 640) + 128 < maxProxyEvidenceEvents);
+  const longestTrialBytes = liveTrials.filter(trial => trial.kind !== 'warm-provider-canary')
+    .reduce((maximum, trial) => Math.max(maximum, trial.episodes.reduce((sum, name) => sum + approvedFixtures[name][0], 0)), 0);
+  assert.ok(Math.ceil(longestTrialBytes / 640) + 128 < maxProxyEvidenceEvents);
+  assert.equal(liveTrials.find(x => x.id === 'long').episodes.length, 4);
+  assert.equal(liveTrials.find(x => x.id === 'short-tail').route, 'continued-audio');
   let rows;
   try {
     rows = await readApprovedFixtures(new URL('../../../qualification-fixtures', import.meta.url).pathname);
@@ -52,20 +56,22 @@ test('errors cannot be overwritten by a passing continuation report', () => {
 });
 test('live selection is one predetermined trial with explicit trusted config, never an implicit matrix retry', () => {
   for (const trial of liveTrials) assert.deepEqual(parseArguments(['--qualification-live', '/tmp/p4-backend.json', trial.id]), { harnessConfig: '/tmp/p4-backend.json', trialId: trial.id });
+  assert.throws(() => parseArguments(['--qualification-live', '/tmp/p4-backend.json', cancelUnsentFakeTrial.id]));
   for (const args of [ ['--qualification-live', 'relative.json', 'long'], ['--qualification-live', '/tmp/config.json', 'retry'], ['--qualification-live', '/tmp/config.json', 'all'] ]) assert.throws(() => parseArguments(args));
 });
 test('adversarial cases require exact bounded selection and retained native evidence', () => {
-  for (const selected of ['seal-stop', 'seal-hold', 'seal-close', 'cancel', 'stale-epoch', 'terminal-before-write', 'E04', 'E41', 'E42']) {
+  for (const selected of ['seal-stop', 'seal-hold', 'seal-close', 'seal-toggle', 'stale-epoch', 'terminal-before-write', 'E04', 'E41', 'E42']) {
     assert.deepEqual(parseArguments(['--continuation-case', selected]), { continuationFake: true, continuationCase: selected });
   }
   assert.throws(() => parseArguments(['--continuation-case', 'arbitrary']));
+  assert.throws(() => parseArguments(['--continuation-case', 'cancel']));
   const envelope = { marker: 'VOICETEXT_NATIVE_WINDOW_E2E_V1', passed: true,
     fixture: { activeCaptures: 0, activeProviders: 0, captureStarts: 2, captureStops: 2,
       providerStarts: 1, maxActiveProviders: 1, providerResumes: 0, finals: 1, markerViolations: [] },
-    report: { mode: 'continuation-case', case: 'cancel', passed: true, errors: [],
-      micReleasedBeforeAccepted: true, cleanup: true, restored: true, firstBWrites: 0 } };
+    report: { mode: 'continuation-case', case: 'seal-toggle', passed: true, errors: [],
+      micReleasedBeforeAccepted: true, cleanup: true, restored: false, firstBWrites: 1 } };
   assert.equal(validateResult(envelope), envelope.report);
-  for (const edit of [v => { v.report.firstBWrites = 1; }, v => { v.report.restored = false; },
+  for (const edit of [v => { v.report.firstBWrites = 0; }, v => { v.report.restored = true; },
     v => { v.report.micReleasedBeforeAccepted = false; }, v => { v.fixture.providerStarts = 2; },
     v => { v.report.errors.push('late error'); }]) {
     const invalid = structuredClone(envelope); edit(invalid); assert.throws(() => validateResult(invalid));
@@ -860,11 +866,11 @@ test('mode counts and initial-only Ready gate preserve the legacy prescribed tri
   const { qualificationExpectations } = await import('./nativeContinuation.mjs');
   for (const trial of liveTrials.filter(row => row.kind !== 'warm-provider-canary')) {
     const expected = qualificationExpectations(trial);
-    assert.equal(expected.captures, trial.id.startsWith('warm-baseline-') ? 1 : 2);
+    assert.equal(expected.captures, trial.id.startsWith('warm-baseline-') ? 1 : trial.episodes.length);
     assert.equal(expected.backendConnections, trial.id.startsWith('cold-') ? 2 : 1);
     assert.equal(expected.providerHandshakes, expected.backendConnections);
     assert.equal(expected.gateInitialSource, !trial.id.startsWith('cold-'));
-    assert.equal(expected.gapMs, 120);
+    assert.equal(expected.gapMs, trial.gapMs ?? 120);
   }
 });
 test('connection verifier rejects overlap, retry, missing closes and every retained proxy failure', async () => {
@@ -1036,12 +1042,12 @@ test('normal baseline/cold reject continuation controls', async () => {
   const { verifyQualificationTerminals, qualificationExpectations } = await import('./nativeContinuation.mjs');
   for (const trial of liveTrials.filter(row => row.kind !== 'warm-provider-canary')) {
     const count = qualificationExpectations(trial).backendConnections;
-    const episodes = [{ logicalRunId: 41 }, { logicalRunId: count === 1 ? 41 : 42 }];
+    const episodes = trial.episodes.map((_, index) => ({ logicalRunId: count === 1 ? 41 : 41 + index }));
     const terminals = [...new Set(episodes.map(e => e.logicalRunId))].map(sessionId => ({ sessionId, complete: true }));
     verifyQualificationTerminals(trial, episodes, terminals);
     for (const bad of [[], [...terminals, terminals[0]], [{ sessionId: 999, complete: true }], terminals.map(t => ({ ...t, complete: false }))])
       assert.throws(() => verifyQualificationTerminals(trial, episodes, bad));
-    if (count === 2) assert.throws(() => verifyQualificationTerminals(trial, [{ logicalRunId: 41 }, { logicalRunId: 41 }], terminals));
+    if (count > 1) assert.throws(() => verifyQualificationTerminals(trial, trial.episodes.map(() => ({ logicalRunId: 41 })), terminals));
   }
 });
 test('normal Stop closure must precede explicit live-process collector boundary, never finish/exit cleanup', async () => {
@@ -1064,7 +1070,8 @@ test('live route verifier rejects A-only false positives and distinguishes seale
   const continued = { event: 'backend_control', type: 'continue_result', decision: 'accepted', eligible_now: true };
   const restore = { event: 'backend_control', type: 'pause_restore_result', decision: 'accepted' };
   const continuedTrial = liveTrials.find(t => t.id === 'warm-continue-1');
-  const cancelledTrial = liveTrials.find(t => t.id === 'short-tail');
+  const shortTailTrial = liveTrials.find(t => t.id === 'short-tail');
+  const longTrial = liveTrials.find(t => t.id === 'long');
   verifyQualificationRoute(continuedTrial, [connected, audio(), pause, continued, audio()]);
   verifyQualificationRoute(continuedTrial, [connected, audio(9600), pause, continued, audio(9600)]);
   for (const bytes of [1, 9601, 9602]) {
@@ -1073,10 +1080,17 @@ test('live route verifier rejects A-only false positives and distinguishes seale
   assert.throws(() => verifyQualificationRoute(continuedTrial, [connected, audio(), pause, continued]), /requires a B write/);
   assert.throws(() => verifyQualificationRoute(continuedTrial, [connected, audio(), pause, audio(), continued, audio()]), /preceded Continue/);
   assert.throws(() => verifyQualificationRoute(continuedTrial, [connected, audio(), pause, continued, restore, audio()]), /no Restore/);
-  verifyQualificationRoute(cancelledTrial, [connected, audio(), pause, continued, restore]);
-  assert.throws(() => verifyQualificationRoute(cancelledTrial, [connected, audio(), pause, audio(), continued, restore]), /preceded Continue/);
-  assert.throws(() => verifyQualificationRoute(cancelledTrial, [connected, audio(), pause, continued, audio(), restore]), /without a B write/);
-  assert.throws(() => verifyQualificationRoute(cancelledTrial, [connected, audio(), continued, restore]), /ordered Pause\/Continue/);
+  verifyQualificationRoute(shortTailTrial, [connected, audio(), pause, continued, audio()]);
+  assert.throws(() => verifyQualificationRoute(shortTailTrial, [connected, audio(), pause, continued, restore]), /requires a B write/);
+  verifyQualificationRoute(cancelUnsentFakeTrial, [connected, audio(), pause, continued, restore]);
+  assert.throws(() => verifyQualificationRoute(cancelUnsentFakeTrial, [connected, audio(), pause, audio(), continued, restore]), /preceded Continue/);
+  assert.throws(() => verifyQualificationRoute(cancelUnsentFakeTrial, [connected, audio(), pause, continued, audio(), restore]), /without a B write/);
+  assert.throws(() => verifyQualificationRoute(cancelUnsentFakeTrial, [connected, audio(), continued, restore]), /ordered Pause\/Continue/);
+  const longRoute = [connected, audio(), pause, continued, audio(), pause, continued, audio(), pause, continued, audio()];
+  assert.equal(verifyQualificationRoute(longTrial, longRoute).acceptedContinues, 3);
+  assert.throws(() => verifyQualificationRoute(longTrial, longRoute.slice(0, -2)), /ordered Pause\/Continue/);
+  assert.throws(() => verifyQualificationRoute(longTrial, [...longRoute.slice(0, -1), restore]), /requires a B write/);
+  assert.throws(() => verifyQualificationRoute(longTrial, [connected, audio(), pause, continued, audio(), pause, audio(), continued, audio(), pause, continued, audio()]), /preceded Continue/);
 });
 
 test('cold route verifier requires client audio on both connection owners', async () => {

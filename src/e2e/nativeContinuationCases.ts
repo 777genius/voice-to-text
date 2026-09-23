@@ -28,7 +28,7 @@ export async function runNativeContinuationCase(pinia: Pinia, selected: string) 
     restored: false, fallbackAfterRefusal: false, firstBWrites: -1, final: null as State | null };
   const unlisten = await listen('transcription:error', event => report.errors.push(JSON.stringify(event.payload)));
   try {
-    check(['seal-stop', 'seal-hold', 'seal-close', 'cancel', 'stale-epoch', 'terminal-before-write'].includes(selected), 'Unknown case');
+    check(['seal-stop', 'seal-hold', 'seal-close', 'seal-toggle', 'stale-epoch', 'terminal-before-write'].includes(selected), 'Unknown case');
     const config = useAppConfigStore(pinia); await config.startSync();
     const hold = selected === 'seal-hold';
     await invoke('update_app_config', { holdToRecord: hold, showMiniRecordingWindow: true,
@@ -57,11 +57,11 @@ export async function runNativeContinuationCase(pinia: Pinia, selected: string) 
       await invoke('stop_recording');
       await poll(s => s.fixture.activeCaptures === 0, 'Fallback mic not released', 1000);
     } else {
-    // Retain short B PCM before the stop/cancel production intent. Stay inside the 600ms response delay.
+    // Retain short B PCM before the Stop intent. Stay inside the 600ms response delay.
     await sleep(130);
     if (selected === 'seal-hold') await release();
     else if (selected === 'seal-close') await invoke('native_e2e_close_recording');
-    else if (selected === 'cancel') await toggle();
+    else if (selected === 'seal-toggle') await toggle();
     else await invoke('stop_recording');
     const stopped = await poll(s => s.fixture.activeCaptures === 0, 'B mic not released promptly', 400);
     report.micReleasedBeforeAccepted = stopped.fixture.controlResults.some(c => c.operation === 'continue' && !c.delivered);
@@ -71,9 +71,9 @@ export async function runNativeContinuationCase(pinia: Pinia, selected: string) 
       s.preparedCaptureTokenCount === 0, 'Terminal resources retained');
     report.final = final; report.cleanup = true;
     report.firstBWrites = final.fixture.firstBWrites.length;
-    report.restored = final.fixture.controlResults.some(c => c.operation === 'restore' && c.result.decision === 'accepted');
-    check(fallback ? report.firstBWrites === 0 : selected === 'cancel' ? report.restored && report.firstBWrites === 0 : report.firstBWrites === 1,
-      'Sealed B must drain once; cancelled unsent B must Restore without write');
+    report.restored = final.fixture.controlResults.some(c => c.operation === 'restore');
+    check(fallback ? report.firstBWrites === 0 : report.firstBWrites === 1 && !report.restored,
+      'Sealed B must drain once without Restore');
     check(report.errors.length === 0, 'Native errors prevent passing');
     report.passed = true;
   } catch (error) { report.errors.push(String(error)); }

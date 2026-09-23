@@ -2,6 +2,7 @@ import { runRestartCrash } from './helpers/nativeRestartCrash.mjs';
 import { closeOwnedDocument, ownedDocumentMatches } from './helpers/nativeOwnedDocument.mjs';
 import { isDeepStrictEqual, promisify } from 'node:util';
 import { verifyQualificationTerminals, verifyQualificationSources, verifyQualificationConnections, verifyQualificationRoute, verifyWarmProviderCanary, verifyWarmProviderTransport, verifyWarmProviderFinalFixtureAgreement, expectedWarmProviderContinues, maxProxyEvidenceEvents, liveTrials, readApprovedFixtures, validateHarnessConfig, exactInsertionEvidence } from './helpers/nativeContinuation.mjs';
+import { writeNativeQualificationBinding } from './helpers/nativeQualificationSummary.mjs';
 import { createWriteStream } from 'node:fs';
 import { spawn, execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -304,7 +305,7 @@ export function parseArguments(args) {
     return { ...parseArguments(args.slice(2)), reuseBuild: args[1] };
   }
   if (args.length === 3 && args[0] === '--qualification-live' && path.isAbsolute(args[1]) && liveTrials.some(t => t.id === args[2])) return { harnessConfig: args[1], trialId: args[2] };
-  if (args.length === 2 && args[0] === '--continuation-case' && ['after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle', 'seal-stop', 'seal-hold', 'seal-close', 'cancel', 'stale-epoch', 'terminal-before-write', 'E04', 'E41', 'E42', 'E54'].includes(args[1])) return { continuationFake: true, continuationCase: args[1] };
+  if (args.length === 2 && args[0] === '--continuation-case' && ['after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle', 'seal-stop', 'seal-hold', 'seal-close', 'seal-toggle', 'stale-epoch', 'terminal-before-write', 'E04', 'E41', 'E42', 'E54'].includes(args[1])) return { continuationFake: true, continuationCase: args[1] };
   if (args.length === 1 && args[0] === '--continuation-fake') return { continuationFake: true };
   if (args.length === 1 && args[0] === '--terminal-cleanup') return { terminalCleanup: true };
   if (args.length === 2 && args[0] === '--live-elevenlabs' && path.isAbsolute(args[1])) {
@@ -623,6 +624,8 @@ const allowedRunnerPaths = new Set([
   'e2e-tests/helpers/nativeBuildReuse.test.mjs',
   'e2e-tests/helpers/nativeQualificationGuards.test.mjs',
   'e2e-tests/run-native-window-e2e.mjs',
+  'src-tauri/tests/native_context_pause_continue_e2e.rs',
+  'src-tauri/tests/native_context_stalled_ax_e2e.rs',
 ]);
 async function runnerEvidence(snapshot, checkout, originalTauriConfig) {
   const entries = async (root, config, trusted) => {
@@ -1021,13 +1024,13 @@ export function validateResult(envelope) {
   if (report?.mode === 'continuation-case') {
     const fallback = ['stale-epoch', 'terminal-before-write'].includes(report.case);
     if (envelope.marker !== marker || envelope.passed !== true || report.passed !== true ||
-      !['seal-stop', 'seal-hold', 'seal-close', 'cancel', 'stale-epoch', 'terminal-before-write'].includes(report.case) ||
+      !['seal-stop', 'seal-hold', 'seal-close', 'seal-toggle', 'stale-epoch', 'terminal-before-write'].includes(report.case) ||
       (fallback ? report.fallbackAfterRefusal !== true : report.micReleasedBeforeAccepted !== true) || report.cleanup !== true ||
       !Array.isArray(report.errors) || report.errors.length || fixture?.activeCaptures !== 0 ||
       fixture?.activeProviders !== 0 || fixture?.captureStarts !== 2 || fixture?.captureStops !== 2 ||
       fixture?.providerStarts !== (fallback ? 2 : 1) || fixture?.maxActiveProviders !== 1 || fixture?.providerResumes !== 0 || fixture?.finals !== (fallback ? 2 : 1) ||
       fixture?.markerViolations?.length !== 0 ||
-      (fallback ? report.firstBWrites !== 0 : report.case === 'cancel' ? report.restored !== true || report.firstBWrites !== 0 : report.firstBWrites !== 1)) {
+      (fallback ? report.firstBWrites !== 0 : report.firstBWrites !== 1 || report.restored !== false)) {
       throw new Error('Incomplete native adversarial continuation evidence');
     }
     return report;
@@ -1475,6 +1478,7 @@ export async function main(args = process.argv.slice(2)) {
   if (runtimeFailure) throw runtimeFailure;
   if (trial) {
     const verification = { passed: false, qualificationPassed: false, trialId: trial.id, actualPasteVerified: false };
+    let verificationFailure;
     try {
       const report = envelope.report;
       const reportTrialId = trial.kind === 'warm-provider-canary' ? report?.trialId : report?.trial?.id;
@@ -1509,14 +1513,23 @@ export async function main(args = process.argv.slice(2)) {
         verifyQualificationSources(trial, report.final?.fixture);
         verifyQualificationTerminals(trial, report.episodes, report.terminals);
         const accepted = proxyEvents.filter(e => e.event === 'backend_control' && e.type === 'continue_result' && e.decision === 'accepted' && e.eligible_now === true);
-        if (trial.continuation && accepted.length !== 1) throw new Error('Exactly one eligible Continue acceptance required');
+        if (trial.continuation && accepted.length !== trial.episodes.length - 1) throw new Error('Every planned Continue acceptance required');
       }
       verification.continueOutcomes = proxyEvents.filter(e => e.event === 'backend_control');
       // Upstream provider connect count must come from backend/native instrumentation, not socket inference.
       verification.limitations = ['Provider handshake/Continue eligibility and native insertion timing require parent instrumentation; this is pipeline evidence only.'];
       verification.passed = true;
-    } catch (error) { verification.error = String(error); throw error; }
-    finally { await writeFile(path.join(directory, 'qualification-verification.json'), JSON.stringify(verification, null, 2)); }
+    } catch (error) { verification.error = String(error); verificationFailure = error; throw error; }
+    finally {
+      try {
+        await writeFile(path.join(directory, 'qualification-verification.json'), JSON.stringify(verification, null, 2));
+        await writeNativeQualificationBinding(directory, env.VOICE_TO_TEXT_NATIVE_E2E_RESULT, trial.id);
+      } catch (evidenceError) {
+        if (verificationFailure) throw new AggregateError([verificationFailure, evidenceError],
+          `${verificationFailure.message}; qualification evidence: ${evidenceError.message}`, { cause: verificationFailure });
+        throw evidenceError;
+      }
+    }
   } else {
     validateResult(envelope);
     if (liveMode) {
