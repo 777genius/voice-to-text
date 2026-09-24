@@ -617,6 +617,57 @@ describe('transcription connect-retry reliability', () => {
     store.cleanup();
   });
 
+  it.each([false, true])('negotiated fallback never replays an uncertain paste (effect applied=%s)', async (effectApplied) => {
+    appConfigMock.autoPasteText = true;
+    appConfigMock.autoCopyToClipboard = true;
+    const firstReply = deferred<void>();
+    const documents = new Map<number, string>();
+    invokeMock.mockImplementation((command: string, args: any) => {
+      if (command === 'auto_paste_text') {
+        // Simulate the external effect independently of IPC acknowledgement.
+        if (args.sessionId !== 1 || effectApplied) {
+          documents.set(args.sessionId, (documents.get(args.sessionId) ?? '') + args.text);
+        }
+        if (args.sessionId === 1 && args.text === 'first') return firstReply.promise;
+      }
+      return Promise.resolve();
+    });
+    const { handlers, store } = await initializeStoreWithHandlers();
+    const status = (session_id: number) => handlers.get('recording:status')({
+      payload: { session_id, status: 'Recording' },
+    });
+    const stable = (session_id: number, delivery_seq: number, text: string) =>
+      handlers.get('transcription:final')({ payload: {
+        session_id, delivery_seq, text, continuation_delivery: false,
+        completion_v1: true, timing_known: false, timestamp: 0, start: 0, duration: 0,
+      } });
+    await status(1);
+    const first = stable(1, 1, 'first');
+    await flushMicrotasks();
+    const tail = stable(1, 2, 'tail');
+    const terminal = { session_id: 1, continuation_delivery: false,
+      stable_snapshot: 'first tail', delivery_complete: true, report: null, error: null };
+    handlers.get('transcription:terminal')({ payload: terminal });
+    await status(2);
+    const next = stable(2, 1, 'fresh');
+    firstReply.reject(new Error('reply lost after possible insertion'));
+    await Promise.all([first, tail, next]);
+    handlers.get('transcription:terminal')({ payload: terminal });
+    await stable(1, 3, 'stale');
+    for (let turn = 0; turn < 10; turn++) await flushMicrotasks();
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'auto_paste_text').map(([, args]) => args)).toEqual([
+      { text: 'first', sessionId: 1 }, { text: 'fresh', sessionId: 2 },
+    ]);
+    expect(documents.get(1) ?? '').toBe(effectApplied ? 'first' : '');
+    expect(documents.get(2)).toBe('fresh');
+    expect(store.finalText).toBe('fresh');
+    expect(store.deliveryRecovery).toEqual([
+      { sessionId: 1, transcript: 'first tail', unconfirmedText: 'first tail' },
+    ]);
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'copy_to_clipboard_native')).toHaveLength(0);
+    store.cleanup();
+  });
+
   it('queues 50 received stable deliveries promptly when the paste queue is free', async () => {
     appConfigMock.autoPasteText = true;
     const elapsed: number[] = [];

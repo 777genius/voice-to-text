@@ -1569,6 +1569,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       }, 'info');
       return true;
     } catch (err) {
+      // A negotiated stable may already have reached the target before IPC failed.
+      // Freeze this run's effects; replaying its cumulative snapshot can duplicate it.
+      if (pasteLedger.negotiated) {
+        pasteLedger.automaticDeliveryRefused = true;
+        deliveryRevision.value++;
+      }
       clientLog('stt_paste_command_unknown', {
         runId: pasteLedger.sessionId, queueId: timing.queueId,
         providerDeliverySeq: timing.providerDeliverySeq, unixMs: Date.now(),

@@ -1611,6 +1611,7 @@ impl TranscriptionService {
                 on_error,
                 on_connection_quality,
                 Some(token),
+                Some(cancelled.as_ref()),
             );
             tokio::pin!(start);
             loop {
@@ -1625,8 +1626,18 @@ impl TranscriptionService {
             }
         };
         if let Some(result) = completed {
-            result
-        } else {
+            if result
+                .as_ref()
+                .err()
+                .and_then(|error| error.downcast_ref::<PreparedCaptureCancelled>())
+                .is_none()
+            {
+                return result;
+            }
+        }
+        // A cancellation observed by the start future must use the same owner-scoped
+        // teardown as the timer branch; the inner lifecycle guard has been dropped.
+        {
             let _ = self.capture_meter_generation.compare_exchange(
                 token.generation as usize,
                 0,
@@ -1983,6 +1994,7 @@ impl TranscriptionService {
             on_error,
             on_connection_quality,
             Some(token),
+            None,
         )
         .await
     }
@@ -1996,6 +2008,7 @@ impl TranscriptionService {
         on_error: ErrorCallback,
         on_connection_quality: ConnectionQualityCallback,
         expected_token: Option<PreparedCaptureToken>,
+        cancellation: Option<&AtomicBool>,
     ) -> Result<()> {
         let expected_token = expected_token
             .ok_or_else(|| anyhow::anyhow!("Exact prepared capture token is required"))?;
@@ -2312,13 +2325,17 @@ impl TranscriptionService {
 
         // Commit startup and Recording status under one gate. A provider error either wins
         // before this point and turns start into Err, or is reported as a runtime failure.
-        let startup_error = {
+        let (startup_error, startup_cancelled) = {
             let mut status = self.status.write().await;
             let mut gate = lock_stt_startup_error_gate(&startup_error_gate);
             if let Some(error) = gate.error.take() {
                 *status = RecordingStatus::Idle;
                 gate.committed = true;
-                Some(error)
+                (Some(error), false)
+            } else if cancellation.is_some_and(|signal| signal.load(Ordering::Acquire)) {
+                *status = RecordingStatus::Idle;
+                gate.committed = true;
+                (None, true)
             } else {
                 *status = if accounting.sealed.load(Ordering::Acquire) {
                     RecordingStatus::Processing
@@ -2326,9 +2343,17 @@ impl TranscriptionService {
                     RecordingStatus::Recording
                 };
                 gate.committed = true;
-                None
+                (None, false)
             }
         };
+        if startup_cancelled {
+            abort_prestart_visualizer_task(
+                &mut prestart_visual_task,
+                &prestart_visual_active,
+                "cancelled before STT start commit",
+            );
+            return Err(anyhow::Error::new(PreparedCaptureCancelled));
+        }
         if let Some(error) = startup_error {
             abort_prestart_visualizer_task(
                 &mut prestart_visual_task,
@@ -2362,6 +2387,18 @@ impl TranscriptionService {
             // One source budget covers the receiver, current send and unacked
             // backend PCM. Dequeue/submission alone does not release capacity.
             accounting.track_acknowledgements();
+        }
+
+        // A cancellation may arrive during the provider ownership/accounting awaits
+        // above. Keep retained PCM away from the processor until the outer owner
+        // performs its normal cancellation cleanup.
+        if cancellation.is_some_and(|signal| signal.load(Ordering::Acquire)) {
+            abort_prestart_visualizer_task(
+                &mut prestart_visual_task,
+                &prestart_visual_active,
+                "cancelled before audio processor attach",
+            );
+            return Err(anyhow::Error::new(PreparedCaptureCancelled));
         }
 
         // Теперь STT готов принимать аудио. Recording выставлен до запуска processor task,
@@ -10889,4 +10926,5 @@ mod tests {
         assert_eq!(run.stops.load(Ordering::SeqCst), 1);
         assert_eq!(run.aborts.load(Ordering::SeqCst), 0);
     }
+    include!("transcription_service/composed_ready_tests.rs");
 }
