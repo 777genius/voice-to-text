@@ -409,6 +409,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     readonly pasteLedger: AutoPasteSessionLedger;
   }
   let autoPasteQueue: Promise<void> = Promise.resolve();
+  let nextDeliveryLogId = 0;
+  const queuedDeliveryTimes = new Map<number, number>();
+  type DeliveryTiming = {
+    readonly queueId: number;
+    readonly providerDeliverySeq: number | null;
+    readonly eventReceivedAt: number;
+  };
   const autoPasteLedgers = new Map<number, AutoPasteSessionLedger>();
   const deliveryRevision = ref(0);
   const deliveryRecovery = computed(() => {
@@ -1314,6 +1321,12 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   // A delivery belongs to its run even when B already owns the visible buffers.
   function acceptSequencedStable(payload: PartialTranscriptionPayload | FinalTranscriptionPayload): Promise<boolean> | null {
     if (payload.delivery_seq == null) return null;
+    const eventReceivedAt = performance.now();
+    clientLog('stt_stable_event_received', {
+      runId: payload.session_id, deliverySeq: payload.delivery_seq,
+      callbackUnixMs: payload.timestamp, receivedUnixMs: Date.now(),
+      textLength: payload.text.length,
+    });
     if (!Number.isSafeInteger(payload.delivery_seq) || payload.delivery_seq < 0) {
       return Promise.resolve(false);
     }
@@ -1352,7 +1365,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
     // Queue before yielding. The cumulative snapshot preserves legitimate repeats;
     // only run + delivery_seq deduplicates provider deliveries.
-    return enqueueTextDelivery('stable_delivery', ledger.stableSnapshot, ledger, false, ledger.autoPaste);
+    return enqueueTextDelivery('stable_delivery', ledger.stableSnapshot, ledger, false, ledger.autoPaste,
+      null, false, payload.delivery_seq, eventReceivedAt);
   }
 
   function captureLegacyTranscript(payloadSessionId: number): void {
@@ -1459,6 +1473,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     reason: string,
     currentText: string,
     pasteLedger: AutoPasteSessionLedger,
+    timing: DeliveryTiming,
   ): Promise<boolean> {
     const normalizedCurrent = currentText.trim();
     if (pasteLedger.continuation) {
@@ -1472,9 +1487,23 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       const remainder = normalizedCurrent.slice(pasteLedger.baseline.length).trim();
       if (!remainder) return guardedContinuationCopy(pasteLedger, '');
       const text = pasteLedger.baseline ? ` ${remainder}` : remainder;
+      const nativeDeliverySeq = ++pasteLedger.nativeDeliverySeq;
+      const pasteStartedAt = performance.now();
+      clientLog('stt_paste_command_started', {
+        runId: pasteLedger.sessionId, queueId: timing.queueId,
+        providerDeliverySeq: timing.providerDeliverySeq, nativeDeliverySeq,
+        command: 'auto_paste_continuation_text', textLength: text.length,
+        unixMs: Date.now(), eventToPasteMs: Math.round(pasteStartedAt - timing.eventReceivedAt),
+      });
       try {
         const outcome = await invoke<GuardedPasteOutcome>('auto_paste_continuation_text', {
-          text, sessionId: pasteLedger.sessionId, deliverySeq: ++pasteLedger.nativeDeliverySeq,
+          text, sessionId: pasteLedger.sessionId, deliverySeq: nativeDeliverySeq,
+        });
+        clientLog('stt_paste_command_completed', {
+          runId: pasteLedger.sessionId, queueId: timing.queueId,
+          providerDeliverySeq: timing.providerDeliverySeq, nativeDeliverySeq,
+          command: 'auto_paste_continuation_text', status: outcome.status,
+          unixMs: Date.now(), commandElapsedMs: Math.round(performance.now() - pasteStartedAt),
         });
         if (outcome.status === 'confirmed' && Number.isSafeInteger(outcome.revision) &&
             outcome.revision > pasteLedger.nativeRevision) {
@@ -1484,6 +1513,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           return true;
         }
       } catch {
+        clientLog('stt_paste_command_unknown', {
+          runId: pasteLedger.sessionId, queueId: timing.queueId,
+          providerDeliverySeq: timing.providerDeliverySeq, nativeDeliverySeq,
+          unixMs: Date.now(), commandElapsedMs: Math.round(performance.now() - pasteStartedAt),
+        }, 'warn');
         // IPC failure may follow an insertion: no retry or clipboard fallback.
       }
       pasteLedger.automaticDeliveryRefused = true;
@@ -1493,11 +1527,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     const textToInsert = getAutoPasteDelta(normalizedCurrent, pasteLedger.baseline);
 
     if (!textToInsert.trim()) {
-      console.log('[AutoPaste] Nothing new to paste:', {
-        reason,
-        currentText: normalizedCurrent,
-        alreadyPasted: pasteLedger.baseline,
-      });
+      console.log('[AutoPaste] Nothing new to paste:', { reason, currentLength: normalizedCurrent.length });
       clientLog('auto_paste_skipped', {
         reason,
         currentLength: normalizedCurrent.length,
@@ -1507,7 +1537,14 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     }
 
     try {
-      console.log('[AutoPaste] Pasting new text:', { reason, textToInsert });
+      console.log('[AutoPaste] Pasting new text:', { reason, textLength: textToInsert.length });
+      const pasteStartedAt = performance.now();
+      clientLog('stt_paste_command_started', {
+        runId: pasteLedger.sessionId, queueId: timing.queueId,
+        providerDeliverySeq: timing.providerDeliverySeq, command: 'auto_paste_text',
+        textLength: textToInsert.length, unixMs: Date.now(),
+        eventToPasteMs: Math.round(pasteStartedAt - timing.eventReceivedAt),
+      });
       clientLog('auto_paste_attempt', {
         reason,
         textLength: textToInsert.length,
@@ -1518,6 +1555,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         text: textToInsert,
         sessionId: pasteLedger.sessionId ?? undefined,
       });
+      clientLog('stt_paste_command_completed', {
+        runId: pasteLedger.sessionId, queueId: timing.queueId,
+        providerDeliverySeq: timing.providerDeliverySeq, command: 'auto_paste_text',
+        unixMs: Date.now(), commandElapsedMs: Math.round(performance.now() - pasteStartedAt),
+      });
       pasteLedger.baseline = normalizedCurrent;
       console.log('✅ Auto-pasted successfully');
       clientLog('auto_paste_success', {
@@ -1527,6 +1569,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       }, 'info');
       return true;
     } catch (err) {
+      clientLog('stt_paste_command_unknown', {
+        runId: pasteLedger.sessionId, queueId: timing.queueId,
+        providerDeliverySeq: timing.providerDeliverySeq, unixMs: Date.now(),
+      }, 'warn');
       console.error('❌ Failed to auto-paste:', err);
       clientLog('auto_paste_failed', {
         reason,
@@ -1545,11 +1591,29 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     shouldAutoPaste: boolean,
     copyOnPasteFailureText: string | null = null,
     acknowledgeTerminal = false,
+    providerDeliverySeq: number | null = null,
+    eventReceivedAt = performance.now(),
   ): Promise<boolean> {
     const textSnapshot = currentText.trim();
+    const queueId = ++nextDeliveryLogId;
+    const queuedAt = performance.now();
+    const oldestQueuedAt = queuedDeliveryTimes.values().next().value ?? queuedAt;
+    queuedDeliveryTimes.set(queueId, queuedAt);
+    const timing: DeliveryTiming = { queueId, providerDeliverySeq, eventReceivedAt };
+    clientLog('stt_delivery_queued', {
+      runId: pasteLedger.sessionId, queueId, providerDeliverySeq, reason,
+      unixMs: Date.now(), textLength: textSnapshot.length,
+      queueDepth: queuedDeliveryTimes.size, oldestQueuedAgeMs: Math.round(queuedAt - oldestQueuedAt),
+      autoPaste: shouldAutoPaste,
+    });
     const task = autoPasteQueue
       .catch(() => undefined)
       .then(async () => {
+        clientLog('stt_delivery_started', {
+          runId: pasteLedger.sessionId, queueId, providerDeliverySeq, reason,
+          unixMs: Date.now(), queueWaitMs: Math.round(performance.now() - queuedAt),
+          queueDepth: queuedDeliveryTimes.size,
+        });
         try {
           // Empty terminals still own a queue slot, but have no text effects.
           if (acknowledgeTerminal && !textSnapshot) return true;
@@ -1564,7 +1628,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             }
           }
 
-          const pasted = !shouldAutoPaste || await runAutoPasteCurrentText(reason, textSnapshot, pasteLedger);
+          const pasted = !shouldAutoPaste || await runAutoPasteCurrentText(reason, textSnapshot, pasteLedger, timing);
           if (pasteLedger.automaticDeliveryRefused) return false;
           if (shouldAutoCopy && pasteLedger.continuation) {
             if (!await guardedContinuationCopy(pasteLedger, textSnapshot)) return false;
@@ -1593,7 +1657,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             }
           }
         }
-      });
+      }).finally(() => { queuedDeliveryTimes.delete(queueId); });
 
     autoPasteQueue = task.then(
       () => undefined,
@@ -1608,6 +1672,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     currentText = buildCurrentTranscriptionText(),
     pasteLedger = captureAutoPasteLedger(sessionId.value),
     copyOnPasteFailureText: string | null = null,
+    eventReceivedAt = performance.now(),
   ): Promise<boolean> {
     return enqueueTextDelivery(
       reason,
@@ -1616,6 +1681,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
       false,
       true,
       copyOnPasteFailureText,
+      false,
+      null,
+      eventReceivedAt,
     );
   }
 
@@ -1839,6 +1907,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         generation,
         EVENT_TRANSCRIPTION_PARTIAL,
         async (event) => {
+          const eventReceivedAt = performance.now();
           if (event.payload.is_segment_final) {
             const delivery = acceptSequencedStable(event.payload);
             if (delivery) { await delivery; return; }
@@ -1865,6 +1934,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             last_finalized: lastFinalizedSegmentKey.value
           });
           clientLog('transcription_partial_event_received', {
+            runId: event.payload.session_id, deliverySeq: event.payload.delivery_seq,
+            callbackUnixMs: event.payload.timestamp, receivedUnixMs: Date.now(),
             textLength: event.payload.text.length,
             isSegmentFinal: event.payload.is_segment_final,
             start: event.payload.start,
@@ -1872,7 +1943,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             accumulatedLength: accumulatedText.value.length,
             partialLength: partialText.value.length,
             finalLength: finalText.value.length,
-          }, 'debug');
+          }, 'info');
 
           // Если сегмент финализирован (is_final=true, но не speech_final)
           if (event.payload.is_segment_final) {
@@ -1920,7 +1991,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
             captureLegacyTranscript(event.payload.session_id);
             if (autoPasteEnabled.value && newText.trim()) {
-              await autoPasteCurrentText('segment_final');
+              await autoPasteCurrentText('segment_final', undefined, undefined, null, eventReceivedAt);
             }
 
           } else {
@@ -1980,6 +2051,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
         generation,
         EVENT_TRANSCRIPTION_FINAL,
         async (event) => {
+          const eventReceivedAt = performance.now();
           const delivery = acceptSequencedStable(event.payload);
           if (delivery) { await delivery; return; }
           if (!ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:final')) {
@@ -1997,13 +2069,15 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             current_partial: partialText.value
           });
           clientLog('transcription_final_event_received', {
+            runId: event.payload.session_id, deliverySeq: event.payload.delivery_seq,
+            callbackUnixMs: event.payload.timestamp, receivedUnixMs: Date.now(),
             textLength: event.payload.text.length,
             start: event.payload.start,
             duration: event.payload.duration,
             accumulatedLength: accumulatedText.value.length,
             partialLength: partialText.value.length,
             finalLength: finalText.value.length,
-          }, 'debug');
+          }, 'info');
 
           // `speech_final=true` закрывает текущий utterance/диапазон транскрипта, но не запись.
           // Жизненным циклом записи владеет Rust/VAD или явная команда пользователя.
@@ -2101,6 +2175,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
                 undefined,
                 undefined,
                 autoCopyEnabled.value ? currentUtteranceText : null,
+                eventReceivedAt,
               );
             }
 

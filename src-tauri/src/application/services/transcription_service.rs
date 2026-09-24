@@ -2424,6 +2424,7 @@ impl TranscriptionService {
             mut rx,
             mut prefetched,
             on_chunk,
+            queued_bytes,
             accounting,
             ..
         } = prepared;
@@ -2458,6 +2459,7 @@ impl TranscriptionService {
             let mut stall_restarts: u32 = 0;
             let mut audio_stats = AudioSessionStats::default();
             let mut ready_packet: Option<AudioChunk> = None;
+            let mut last_latency_log_at: Option<Instant> = None;
 
             // На macOS/некоторых девайсах при отсутствии разрешения на микрофон или при "пустом" input
             // CoreAudio может отдавать строго нулевые семплы. Это выглядит как "всё работает", но речи нет.
@@ -2778,6 +2780,34 @@ impl TranscriptionService {
                 let send_timeout = provider
                     .audio_send_timeout()
                     .unwrap_or(STT_SEND_OPERATION_TIMEOUT);
+                let send_started = Instant::now();
+                let log_this_send =
+                    last_latency_log_at.is_none_or(|last| last.elapsed() >= Duration::from_secs(1));
+                let source_bytes_per_second = u64::from(amplified_chunk.sample_rate)
+                    .saturating_mul(u64::from(amplified_chunk.channels.max(1)))
+                    .saturating_mul(2)
+                    .max(1);
+                if log_this_send {
+                    last_latency_log_at = Some(send_started);
+                    let progress = provider.audio_delivery_progress();
+                    let source = accounting.report(AudioDrainReason::Drained);
+                    let capture_queued_bytes =
+                        source.accepted_bytes.saturating_sub(source.read_bytes);
+                    let captured_unix_ms = amplified_chunk.timestamp;
+                    let now_unix_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|v| v.as_millis() as i64)
+                        .unwrap_or(0);
+                    log::info!(
+                        "stt_audio_submit_start run_id={} capture_generation={} chunk={} unix_ms={} captured_unix_ms={} dequeued_chunk_age_ms={} capture_queued_bytes={} capture_queued_pcm_ms={} current_pcm_ms={} source_outstanding_bytes={} submitted_unacked_bytes={}",
+                        logical_run_id, token.generation, chunk_count, now_unix_ms, captured_unix_ms,
+                        now_unix_ms.saturating_sub(captured_unix_ms).max(0), capture_queued_bytes,
+                        capture_queued_bytes.saturating_mul(1000) / source_bytes_per_second,
+                        (amplified_chunk.data.len() as u64).saturating_mul(2000) / source_bytes_per_second,
+                        queued_bytes.load(Ordering::Acquire),
+                        progress.map(|p| p.sent_bytes.saturating_sub(p.acked_bytes)).unwrap_or(0)
+                    );
+                }
                 let send_result = await_stt_operation(
                     provider.send_audio(&amplified_chunk),
                     send_timeout,
@@ -2807,8 +2837,24 @@ impl TranscriptionService {
                     // replay it or hide it behind a successful terminal result.
                     drop(send_lease);
                 }
-                if let Some(progress) = provider.audio_delivery_progress() {
+                let progress = provider.audio_delivery_progress();
+                if let Some(progress) = progress {
                     accounting.acknowledge(progress.acked_bytes.saturating_sub(ack_base));
+                }
+                let send_elapsed_ms = send_started.elapsed().as_millis();
+                if log_this_send || send_elapsed_ms >= 500 {
+                    let source = accounting.report(AudioDrainReason::Drained);
+                    let capture_queued_bytes =
+                        source.accepted_bytes.saturating_sub(source.read_bytes);
+                    log::info!(
+                        "stt_audio_submit_done run_id={} capture_generation={} chunk={} unix_ms={} send_elapsed_ms={} success={} capture_queued_bytes={} source_outstanding_bytes={} submitted_unacked_bytes={}",
+                        logical_run_id, token.generation, chunk_count,
+                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                            .map(|v| v.as_millis()).unwrap_or(0),
+                        send_elapsed_ms, send_result.is_ok(), capture_queued_bytes,
+                        queued_bytes.load(Ordering::Acquire),
+                        progress.map(|p| p.sent_bytes.saturating_sub(p.acked_bytes)).unwrap_or(0)
+                    );
                 }
 
                 match send_result {

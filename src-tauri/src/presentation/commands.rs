@@ -4435,11 +4435,20 @@ async fn start_recording_checked(
                     if delivery.terminal {
                         continue;
                     }
+                    let callback_unix_ms = transcription.timestamp;
+                    let text_len = transcription.text.len();
+                    let delivery_seq = transcription.delivery_seq;
                     let payload =
                         PartialTranscriptionPayload::from_transcription(transcription, session_id);
-                    if let Err(e) =
-                        app_handle_transcripts.emit(EVENT_TRANSCRIPTION_PARTIAL, payload)
-                    {
+                    let emitted = app_handle_transcripts.emit(EVENT_TRANSCRIPTION_PARTIAL, payload);
+                    log::info!(
+                        "stt_transcript_event_emit run_id={} kind=partial delivery_seq={:?} callback_unix_ms={} emit_unix_ms={} text_len={} success={}",
+                        session_id, delivery_seq, callback_unix_ms,
+                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                            .map(|v| v.as_millis()).unwrap_or(0),
+                        text_len, emitted.is_ok()
+                    );
+                    if let Err(e) = emitted {
                         delivery.delivery_error = Some(e.to_string());
                         log::error!("Failed to emit partial transcription event: {}", e);
                     }
@@ -4490,10 +4499,20 @@ async fn start_recording_checked(
                     if delivery.terminal {
                         continue;
                     }
+                    let callback_unix_ms = transcription.timestamp;
+                    let text_len = transcription.text.len();
+                    let delivery_seq = transcription.delivery_seq;
                     let payload =
                         FinalTranscriptionPayload::from_transcription(transcription, session_id);
-                    if let Err(e) = app_handle_transcripts.emit(EVENT_TRANSCRIPTION_FINAL, payload)
-                    {
+                    let emitted = app_handle_transcripts.emit(EVENT_TRANSCRIPTION_FINAL, payload);
+                    log::info!(
+                        "stt_transcript_event_emit run_id={} kind=final delivery_seq={:?} callback_unix_ms={} emit_unix_ms={} text_len={} success={}",
+                        session_id, delivery_seq, callback_unix_ms,
+                        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                            .map(|v| v.as_millis()).unwrap_or(0),
+                        text_len, emitted.is_ok()
+                    );
+                    if let Err(e) = emitted {
                         delivery.delivery_error = Some(e.to_string());
                         log::error!("Failed to emit final transcription event: {}", e);
                     }

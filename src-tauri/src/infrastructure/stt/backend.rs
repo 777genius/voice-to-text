@@ -204,6 +204,7 @@ pub struct BackendProvider {
     next_send_at: Option<std::time::Instant>,
     el_catchup_disabled: bool,
     batch_started_at: Option<std::time::Instant>,
+    last_audio_latency_log_at: Option<std::time::Instant>,
 
     finalize_drain_ack_timeout: Duration,
     finalize_ready_timeout: Duration,
@@ -470,6 +471,7 @@ impl BackendProvider {
             next_send_at: None,
             el_catchup_disabled: false,
             batch_started_at: None,
+            last_audio_latency_log_at: None,
             finalize_drain_ack_timeout: FINALIZE_DRAIN_ACK_TIMEOUT,
             finalize_ready_timeout: EL_FINALIZE_READY_TIMEOUT,
             finalize_report: Arc::new(std::sync::Mutex::new(None)),
@@ -1424,6 +1426,7 @@ impl SttProvider for BackendProvider {
         self.audio_batch.clear();
         self.next_send_at = None;
         self.batch_started_at = None;
+        self.last_audio_latency_log_at = None;
 
         let auth_token = self
             .auth_token
@@ -1746,10 +1749,15 @@ impl SttProvider for BackendProvider {
         let is_closed_flag = self.is_closed.clone();
         let shared_remaining = self.last_remaining_secs.clone();
 
+        // ElevenLabs may send audio only after Ready fixes the negotiated ACK
+        // window and packetization. Keep the socket reader alive while capture
+        // continues to fill its existing bounded FIFO.
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<SttResult<()>>();
         // Сбрасываем remaining на старте нового соединения
         shared_remaining.store(f32::MAX.to_bits(), Ordering::SeqCst);
 
         let receiver_task = tokio::spawn(async move {
+            let mut ready_tx = Some(ready_tx);
             log::debug!("Backend receiver task started");
 
             const LIMIT_REMAINING_THRESHOLD: f32 = 5.0;
@@ -1798,6 +1806,9 @@ impl SttProvider for BackendProvider {
                                             Ordering::SeqCst,
                                         );
                                         continuation.lock().unwrap().changed.notify_waiters();
+                                        if let Some(ready_tx) = ready_tx.take() {
+                                            let _ = ready_tx.send(Ok(()));
+                                        }
                                         log::info!("Session ready: {}", session_id);
                                         // Уведомляем о хорошем качестве связи
                                         let cb = {
@@ -1913,7 +1924,10 @@ impl SttProvider for BackendProvider {
                                         start_ms,
                                         duration_ms,
                                     } => {
-                                        log::debug!("Partial: {} (conf: {:?})", text, confidence);
+                                        let received_unix_ms = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|v| v.as_millis().min(i64::MAX as u128) as i64)
+                                            .unwrap_or(0);
                                         let has_text = !text.trim().is_empty();
                                         if has_text && finalize_waiter.lock().await.is_some() {
                                             finalize_text_results_seen =
@@ -1927,12 +1941,18 @@ impl SttProvider for BackendProvider {
                                             start_ms.unwrap_or(0) as f64 / 1000.0,
                                             duration_ms.unwrap_or(0) as f64 / 1000.0,
                                         );
+                                        transcription.timestamp = received_unix_ms;
                                         transcription.continuation_delivery = continuation_delivery;
                                         transcription.completion_v1 =
                                             outcome_negotiated.load(Ordering::SeqCst);
                                         if let Some(conf) = confidence {
                                             transcription = transcription.with_confidence(conf);
                                         }
+                                        log::info!(
+                                            "stt_partial_received connection_generation={} received_unix_ms={} text_len={} segment_final={} start_ms={:?} duration_ms={:?}",
+                                            connection_generation, transcription.timestamp, transcription.text.len(),
+                                            transcription.is_final, start_ms, duration_ms
+                                        );
                                         let cb = {
                                             let state = callbacks_state.lock().await;
                                             state.active.as_ref().map(|c| c.on_partial.clone())
@@ -1960,6 +1980,10 @@ impl SttProvider for BackendProvider {
                                         transcription.continuation_delivery = continuation_delivery;
                                         transcription.completion_v1 = true;
                                         transcription.confidence = confidence;
+                                        log::info!(
+                                            "stt_stable_received connection_generation={} delivery_seq={} received_unix_ms={} text_len={}",
+                                            connection_generation, delivery_seq, transcription.timestamp, transcription.text.len()
+                                        );
                                         let cb = callbacks_state
                                             .lock()
                                             .await
@@ -1979,12 +2003,10 @@ impl SttProvider for BackendProvider {
                                         start_ms,
                                         duration_ms,
                                     } => {
-                                        log::debug!(
-                                            "Final: {} (conf: {:?}, dur: {}ms)",
-                                            text,
-                                            confidence,
-                                            duration_ms
-                                        );
+                                        let received_unix_ms = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|v| v.as_millis().min(i64::MAX as u128) as i64)
+                                            .unwrap_or(0);
                                         let has_text = !text.trim().is_empty();
                                         if has_text && finalize_waiter.lock().await.is_some() {
                                             finalize_text_results_seen =
@@ -1995,12 +2017,18 @@ impl SttProvider for BackendProvider {
                                                 start_ms.unwrap_or(0) as f64 / 1000.0,
                                                 duration_ms as f64 / 1000.0,
                                             );
+                                        transcription.timestamp = received_unix_ms;
                                         transcription.continuation_delivery = continuation_delivery;
                                         transcription.completion_v1 =
                                             outcome_negotiated.load(Ordering::SeqCst);
                                         if let Some(conf) = confidence {
                                             transcription = transcription.with_confidence(conf);
                                         }
+                                        log::info!(
+                                            "stt_final_received connection_generation={} received_unix_ms={} text_len={} start_ms={:?} duration_ms={}",
+                                            connection_generation, transcription.timestamp, transcription.text.len(),
+                                            start_ms, duration_ms
+                                        );
                                         let cb = {
                                             let state = callbacks_state.lock().await;
                                             state.active.as_ref().map(|c| c.on_final.clone())
@@ -2138,23 +2166,25 @@ impl SttProvider for BackendProvider {
                                                 state.changed.notify_waiters();
                                             }
                                         }
+                                        let error = SttError::Connection(SttConnectionError {
+                                            message,
+                                            details: SttConnectionDetails {
+                                                category: Some(category_for_server_error(&code)),
+                                                server_code: Some(code),
+                                                ..Default::default()
+                                            },
+                                        });
+                                        if !continuation.lock().unwrap().ready_seen {
+                                            if let Some(ready_tx) = ready_tx.take() {
+                                                let _ = ready_tx.send(Err(error.clone()));
+                                            }
+                                        }
                                         let cb = {
                                             let state = callbacks_state.lock().await;
                                             state.error_callback()
                                         };
                                         if let Some(cb) = cb {
-                                            call_backend_callback("error", || {
-                                                cb(SttError::Connection(SttConnectionError {
-                                                    message,
-                                                    details: SttConnectionDetails {
-                                                        category: Some(category_for_server_error(
-                                                            &code,
-                                                        )),
-                                                        server_code: Some(code),
-                                                        ..Default::default()
-                                                    },
-                                                }))
-                                            });
+                                            call_backend_callback("error", || cb(error));
                                         }
                                     }
 
@@ -2163,6 +2193,20 @@ impl SttProvider for BackendProvider {
                                         saw_result,
                                         outcome,
                                     } => {
+                                        if offered_outcome
+                                            && !continuation.lock().unwrap().ready_seen
+                                        {
+                                            if let Some(ready_tx) = ready_tx.take() {
+                                                let _ = ready_tx.send(Err(SttError::Connection(
+                                                    SttConnectionError::with_category(
+                                                        "Backend terminal arrived before ElevenLabs Ready",
+                                                        SttConnectionCategory::ServerError,
+                                                    ),
+                                                )));
+                                            }
+                                            server_error_reported = true;
+                                            break;
+                                        }
                                         let outcome = if outcome_negotiated.load(Ordering::SeqCst) {
                                             outcome
                                         } else {
@@ -2238,46 +2282,50 @@ impl SttProvider for BackendProvider {
                         }
                         is_closed_flag.store(true, Ordering::SeqCst);
                         ack_changed.notify_waiters();
+                        let code_u16 = frame.as_ref().map(|f| u16::from(f.code));
+                        let mut category = match code_u16 {
+                            Some(1008) => SttConnectionCategory::LimitExceeded,
+                            Some(1012) | Some(1013) | Some(1014) => {
+                                SttConnectionCategory::ServerUnavailable
+                            }
+                            Some(1000) => SttConnectionCategory::Closed,
+                            _ => SttConnectionCategory::ServerUnavailable,
+                        };
+
+                        // Fallback: сервер может закрыть WS без кода 1008 (race condition между
+                        // отправкой LIMIT_EXCEEDED и close frame). Если последний UsageUpdate
+                        // показывал почти нулевой остаток — это лимит, а не обрыв связи.
+                        let remaining = f32::from_bits(shared_remaining.load(Ordering::SeqCst));
+                        if category != SttConnectionCategory::LimitExceeded
+                            && remaining < LIMIT_REMAINING_THRESHOLD
+                        {
+                            log::warn!(
+                                    "Close frame without 1008, but last remaining={:.1}s < {:.0}s → treating as limit_exceeded",
+                                    remaining,
+                                    LIMIT_REMAINING_THRESHOLD
+                                );
+                            category = SttConnectionCategory::LimitExceeded;
+                        }
+
+                        let error = SttError::Connection(SttConnectionError {
+                            message: "WebSocket closed by server".to_string(),
+                            details: SttConnectionDetails {
+                                category: Some(category),
+                                ws_close_code: code_u16,
+                                ..Default::default()
+                            },
+                        });
+                        if offered_outcome && !continuation.lock().unwrap().ready_seen {
+                            if let Some(ready_tx) = ready_tx.take() {
+                                let _ = ready_tx.send(Err(error.clone()));
+                            }
+                        }
                         let cb = {
                             let state = callbacks_state.lock().await;
                             state.error_callback()
                         };
                         if let Some(cb) = cb {
-                            let code_u16 = frame.as_ref().map(|f| u16::from(f.code));
-                            let mut category = match code_u16 {
-                                Some(1008) => SttConnectionCategory::LimitExceeded,
-                                Some(1012) | Some(1013) | Some(1014) => {
-                                    SttConnectionCategory::ServerUnavailable
-                                }
-                                Some(1000) => SttConnectionCategory::Closed,
-                                _ => SttConnectionCategory::ServerUnavailable,
-                            };
-
-                            // Fallback: сервер может закрыть WS без кода 1008 (race condition между
-                            // отправкой LIMIT_EXCEEDED и close frame). Если последний UsageUpdate
-                            // показывал почти нулевой остаток — это лимит, а не обрыв связи.
-                            let remaining = f32::from_bits(shared_remaining.load(Ordering::SeqCst));
-                            if category != SttConnectionCategory::LimitExceeded
-                                && remaining < LIMIT_REMAINING_THRESHOLD
-                            {
-                                log::warn!(
-                                    "Close frame without 1008, but last remaining={:.1}s < {:.0}s → treating as limit_exceeded",
-                                    remaining,
-                                    LIMIT_REMAINING_THRESHOLD
-                                );
-                                category = SttConnectionCategory::LimitExceeded;
-                            }
-
-                            call_backend_callback("error", || {
-                                cb(SttError::Connection(SttConnectionError {
-                                    message: "WebSocket closed by server".to_string(),
-                                    details: SttConnectionDetails {
-                                        category: Some(category),
-                                        ws_close_code: code_u16,
-                                        ..Default::default()
-                                    },
-                                }))
-                            });
+                            call_backend_callback("error", || cb(error));
                         }
                         break;
                     }
@@ -2307,83 +2355,83 @@ impl SttProvider for BackendProvider {
                         }
                         is_closed_flag.store(true, Ordering::SeqCst);
                         ack_changed.notify_waiters();
+                        let mut details = match &e {
+                            tokio_tungstenite::tungstenite::Error::Io(ioe) => {
+                                let kind = ioe.kind();
+                                let kind_str = format!("{:?}", kind);
+                                let os_error = ioe.raw_os_error();
+                                let category = match kind {
+                                    std::io::ErrorKind::ConnectionRefused => {
+                                        SttConnectionCategory::Refused
+                                    }
+                                    std::io::ErrorKind::ConnectionReset => {
+                                        SttConnectionCategory::Reset
+                                    }
+                                    std::io::ErrorKind::BrokenPipe => {
+                                        SttConnectionCategory::ServerUnavailable
+                                    }
+                                    std::io::ErrorKind::NotConnected
+                                    | std::io::ErrorKind::NetworkUnreachable
+                                    | std::io::ErrorKind::HostUnreachable
+                                    | std::io::ErrorKind::AddrNotAvailable => {
+                                        SttConnectionCategory::Offline
+                                    }
+                                    std::io::ErrorKind::TimedOut => SttConnectionCategory::Timeout,
+                                    _ => SttConnectionCategory::Unknown,
+                                };
+                                SttConnectionDetails {
+                                    category: Some(category),
+                                    io_error_kind: Some(kind_str),
+                                    os_error,
+                                    ..Default::default()
+                                }
+                            }
+                            tokio_tungstenite::tungstenite::Error::Tls(_) => SttConnectionDetails {
+                                category: Some(SttConnectionCategory::Tls),
+                                ..Default::default()
+                            },
+                            tokio_tungstenite::tungstenite::Error::ConnectionClosed
+                            | tokio_tungstenite::tungstenite::Error::AlreadyClosed => {
+                                SttConnectionDetails {
+                                    category: Some(SttConnectionCategory::Closed),
+                                    ..Default::default()
+                                }
+                            }
+                            _ => SttConnectionDetails {
+                                category: Some(SttConnectionCategory::Unknown),
+                                ..Default::default()
+                            },
+                        };
+
+                        // Fallback: обрыв соединения (reset/closed) при почти нулевом остатке
+                        // — скорее всего сервер закрыл из-за лимита без нормального close frame.
+                        let remaining = f32::from_bits(shared_remaining.load(Ordering::SeqCst));
+                        if details.category != Some(SttConnectionCategory::LimitExceeded)
+                            && remaining < LIMIT_REMAINING_THRESHOLD
+                        {
+                            log::warn!(
+                                    "WS error with last remaining={:.1}s < {:.0}s → treating as limit_exceeded",
+                                    remaining,
+                                    LIMIT_REMAINING_THRESHOLD
+                                );
+                            details.category = Some(SttConnectionCategory::LimitExceeded);
+                        }
+
+                        let error = SttError::Connection(SttConnectionError {
+                            message: e.to_string(),
+                            details,
+                        });
+                        if offered_outcome && !continuation.lock().unwrap().ready_seen {
+                            if let Some(ready_tx) = ready_tx.take() {
+                                let _ = ready_tx.send(Err(error.clone()));
+                            }
+                        }
                         let cb = {
                             let state = callbacks_state.lock().await;
                             state.error_callback()
                         };
                         if let Some(cb) = cb {
-                            let mut details = match &e {
-                                tokio_tungstenite::tungstenite::Error::Io(ioe) => {
-                                    let kind = ioe.kind();
-                                    let kind_str = format!("{:?}", kind);
-                                    let os_error = ioe.raw_os_error();
-                                    let category = match kind {
-                                        std::io::ErrorKind::ConnectionRefused => {
-                                            SttConnectionCategory::Refused
-                                        }
-                                        std::io::ErrorKind::ConnectionReset => {
-                                            SttConnectionCategory::Reset
-                                        }
-                                        std::io::ErrorKind::BrokenPipe => {
-                                            SttConnectionCategory::ServerUnavailable
-                                        }
-                                        std::io::ErrorKind::NotConnected
-                                        | std::io::ErrorKind::NetworkUnreachable
-                                        | std::io::ErrorKind::HostUnreachable
-                                        | std::io::ErrorKind::AddrNotAvailable => {
-                                            SttConnectionCategory::Offline
-                                        }
-                                        std::io::ErrorKind::TimedOut => {
-                                            SttConnectionCategory::Timeout
-                                        }
-                                        _ => SttConnectionCategory::Unknown,
-                                    };
-                                    SttConnectionDetails {
-                                        category: Some(category),
-                                        io_error_kind: Some(kind_str),
-                                        os_error,
-                                        ..Default::default()
-                                    }
-                                }
-                                tokio_tungstenite::tungstenite::Error::Tls(_) => {
-                                    SttConnectionDetails {
-                                        category: Some(SttConnectionCategory::Tls),
-                                        ..Default::default()
-                                    }
-                                }
-                                tokio_tungstenite::tungstenite::Error::ConnectionClosed
-                                | tokio_tungstenite::tungstenite::Error::AlreadyClosed => {
-                                    SttConnectionDetails {
-                                        category: Some(SttConnectionCategory::Closed),
-                                        ..Default::default()
-                                    }
-                                }
-                                _ => SttConnectionDetails {
-                                    category: Some(SttConnectionCategory::Unknown),
-                                    ..Default::default()
-                                },
-                            };
-
-                            // Fallback: обрыв соединения (reset/closed) при почти нулевом остатке
-                            // — скорее всего сервер закрыл из-за лимита без нормального close frame.
-                            let remaining = f32::from_bits(shared_remaining.load(Ordering::SeqCst));
-                            if details.category != Some(SttConnectionCategory::LimitExceeded)
-                                && remaining < LIMIT_REMAINING_THRESHOLD
-                            {
-                                log::warn!(
-                                    "WS error with last remaining={:.1}s < {:.0}s → treating as limit_exceeded",
-                                    remaining,
-                                    LIMIT_REMAINING_THRESHOLD
-                                );
-                                details.category = Some(SttConnectionCategory::LimitExceeded);
-                            }
-
-                            call_backend_callback("error", || {
-                                cb(SttError::Connection(SttConnectionError {
-                                    message: e.to_string(),
-                                    details,
-                                }))
-                            });
+                            call_backend_callback("error", || cb(error));
                         }
                         break;
                     }
@@ -2456,6 +2504,34 @@ impl SttProvider for BackendProvider {
             log::debug!("Backend keepalive task ended");
         });
         self.keepalive_task = Some(keepalive_task);
+
+        if provider_name == "elevenlabs" {
+            let ready_wait_started = std::time::Instant::now();
+            let ready_result =
+                match tokio::time::timeout(self.finalize_ready_timeout, ready_rx).await {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(_)) => Err(SttError::Connection(SttConnectionError::with_category(
+                        "Backend closed before ElevenLabs Ready",
+                        SttConnectionCategory::Closed,
+                    ))),
+                    Err(_) => Err(SttError::Connection(SttConnectionError::with_category(
+                        "Backend ElevenLabs Ready timed out",
+                        SttConnectionCategory::Timeout,
+                    ))),
+                };
+            log::info!(
+                "stt_ready_gate connection_generation={} unix_ms={} wait_ms={} ready={} outcome_negotiated={}",
+                self.connection_generation,
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                    .map(|v| v.as_millis()).unwrap_or(0),
+                ready_wait_started.elapsed().as_millis(), ready_result.is_ok(),
+                self.outcome_negotiated.load(Ordering::Acquire)
+            );
+            if let Err(error) = ready_result {
+                let _ = self.abort().await;
+                return Err(error);
+            }
+        }
 
         self.is_streaming = true;
         self.is_paused = false;
@@ -2553,12 +2629,16 @@ impl SttProvider for BackendProvider {
             // A cancelled or failed send must not silently discard speech.
             let bytes = self.audio_batch[..bytes_to_send].to_vec();
 
+            let send_started = std::time::Instant::now();
             self.wait_for_audio_window(bytes_to_send).await?;
-            let now2 = std::time::Instant::now();
+            let ack_window_wait_ms = send_started.elapsed().as_millis();
+            let pacing_started = std::time::Instant::now();
+            let now2 = pacing_started;
             let next_at = self.next_send_at.unwrap_or(now2);
             if next_at > now2 {
                 tokio::time::sleep_until(tokio::time::Instant::from_std(next_at)).await;
             }
+            let pacing_wait_ms = pacing_started.elapsed().as_millis();
             self.next_send_at = Some(
                 std::time::Instant::now()
                     + if self.outcome_negotiated.load(Ordering::SeqCst) {
@@ -2592,7 +2672,32 @@ impl SttProvider for BackendProvider {
                     .map_err(|error| SttError::Processing(error.to_string()))
             };
 
-            match tokio::time::timeout(Duration::from_secs(WS_SEND_TIMEOUT_SECS), send_fut).await {
+            let socket_write_started = std::time::Instant::now();
+            let send_result =
+                tokio::time::timeout(Duration::from_secs(WS_SEND_TIMEOUT_SECS), send_fut).await;
+            let socket_write_ms = socket_write_started.elapsed().as_millis();
+            let total_send_ms = send_started.elapsed().as_millis();
+            let should_log_latency = self
+                .last_audio_latency_log_at
+                .is_none_or(|last| last.elapsed() >= Duration::from_secs(1))
+                || total_send_ms >= 500;
+            if should_log_latency {
+                self.last_audio_latency_log_at = Some(std::time::Instant::now());
+                let ready_seen = self.continuation.lock().unwrap().ready_seen;
+                let ledger = self.delivery.lock().unwrap();
+                log::info!(
+                    "stt_audio_send connection_generation={} unix_ms={} seq={} pcm_ms={} batch_pcm_ms_before_drain={} batch_oldest_age_ms={} ack_window_wait_ms={} pacing_wait_ms={} socket_write_ms={} total_send_ms={} outcome={} ready_seen={} outcome_negotiated={} unacked_bytes_before_send={} last_ack_seq={}",
+                    self.connection_generation,
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|v| v.as_millis()).unwrap_or(0),
+                    issued_seq, bytes_to_send / 32, self.audio_batch.len() / 32,
+                    self.batch_started_at.map(|t| t.elapsed().as_millis()).unwrap_or(0),
+                    ack_window_wait_ms, pacing_wait_ms, socket_write_ms, total_send_ms,
+                    if matches!(&send_result, Ok(Ok(()))) { "written" } else { "failed" },
+                    ready_seen, self.outcome_negotiated.load(Ordering::Acquire),
+                    ledger.progress.sent_bytes.saturating_sub(ledger.progress.acked_bytes), ledger.last_ack
+                );
+            }
+            match send_result {
                 Ok(Ok(())) => {
                     self.audio_batch.drain(..bytes_to_send);
                     self.sent_chunks_count += 1;
@@ -3797,6 +3902,11 @@ mod tests {
                     let value: serde_json::Value =
                         serde_json::from_str(&text).expect("config json");
                     if value.get("type").and_then(|v| v.as_str()) == Some("config") {
+                        ws.send(Message::Text(
+                            r#"{"type":"ready","session_id":"config-capture"}"#.into(),
+                        ))
+                        .await
+                        .expect("send ready after config capture");
                         return value;
                     }
                 }
@@ -4933,7 +5043,7 @@ mod tests {
         provider.initialize(&config).await.unwrap();
         let error_count = Arc::new(AtomicUsize::new(0));
         let errors = error_count.clone();
-        provider
+        let start_result = provider
             .start_stream(
                 Arc::new(|_| {}),
                 Arc::new(|_| {}),
@@ -4942,15 +5052,18 @@ mod tests {
                 }),
                 Arc::new(|_, _| {}),
             )
-            .await
-            .unwrap();
-        provider
-            .send_audio(&AudioChunk::new(vec![1; 480], 16_000, 1))
-            .await
-            .unwrap();
-        let result = tokio::time::timeout(Duration::from_secs(2), provider.pause_stream())
-            .await
-            .expect("finalize must terminate promptly");
+            .await;
+        let result = if start_result.is_ok() {
+            provider
+                .send_audio(&AudioChunk::new(vec![1; 480], 16_000, 1))
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), provider.pause_stream())
+                .await
+                .expect("finalize must terminate promptly")
+        } else {
+            start_result
+        };
         if event == "ready" || event == "failed" {
             tokio::time::timeout(Duration::from_millis(500), async {
                 while !provider.receiver_task.as_ref().unwrap().is_finished() {
@@ -5385,42 +5498,135 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn eight_second_pre_ready_delay_has_no_new_ack_deadline_or_graceful_abort() {
+    async fn delayed_elevenlabs_ready_blocks_start_without_sending_pre_ready_pcm() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (configured_tx, configured_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(tcp).await.unwrap();
+            let config = ws.next().await.unwrap().unwrap();
+            assert!(config.to_text().unwrap().contains("elevenlabs"));
+            configured_tx.send(()).unwrap();
+            tokio::select! {
+                _ = release_rx => {},
+                message = ws.next() => panic!("PCM or control before Ready: {message:?}"),
+            }
+            ws.send(Message::Text(
+                r#"{"type":"ready","session_id":"delayed","accepted_capabilities":["finalize_outcome_v1"]}"#.into(),
+            )).await.unwrap();
+            let audio = tokio::time::timeout(Duration::from_secs(2), ws.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(matches!(&audio, Message::Binary(_)));
+            audio.into_data().len()
+        });
+        let mut config = SttConfig::new(SttProviderType::Backend);
+        config.backend_url = Some(url);
+        config.backend_auth_token = Some("test-token".into());
+        config.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
+        let mut provider = BackendProvider::new();
+        provider.initialize(&config).await.unwrap();
+        {
+            let mut start = Box::pin(provider.start_stream(
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_, _| {}),
+            ));
+            tokio::select! {
+                _ = configured_rx => {},
+                result = &mut start => panic!("start returned before Config was observed: {result:?}"),
+            }
+            assert!(tokio::time::timeout(Duration::from_millis(100), &mut start)
+                .await
+                .is_err());
+            release_tx.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(2), &mut start)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(provider.audio_delivery_progress().unwrap().sent_bytes, 0);
+        assert_eq!(provider.preferred_audio_batch_samples(), Some(4800));
+        provider
+            .send_audio(&AudioChunk::new(vec![1; 4800], 16_000, 1))
+            .await
+            .unwrap();
+        assert_eq!(server.await.unwrap(), 9600);
+        provider.abort().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_elevenlabs_ready_wait_hard_aborts_without_wire_effects() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let (configured_tx, configured_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(tcp).await.unwrap();
+            let _ = ws.next().await.unwrap().unwrap();
+            configured_tx.send(()).unwrap();
+            while let Some(message) = ws.next().await {
+                match message {
+                    Ok(Message::Binary(_)) | Ok(Message::Close(_)) => {
+                        panic!("hard abort sent PCM or WebSocket Close")
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        });
+        let mut config = SttConfig::new(SttProviderType::Backend);
+        config.backend_url = Some(url);
+        config.backend_auth_token = Some("test-token".into());
+        config.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
+        let mut provider = BackendProvider::new();
+        provider.initialize(&config).await.unwrap();
+        {
+            let mut start = Box::pin(provider.start_stream(
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_, _| {}),
+            ));
+            tokio::select! {
+                _ = configured_rx => {},
+                result = &mut start => panic!("start returned before Ready: {result:?}"),
+            }
+            assert!(tokio::time::timeout(Duration::from_millis(50), &mut start)
+                .await
+                .is_err());
+        }
+        provider.abort().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn elevenlabs_legacy_ready_without_capabilities_still_starts() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut ws = accept_async(tcp).await.unwrap();
-            let _ = ws.next().await;
-            let ready_delay = tokio::time::sleep(Duration::from_secs(8));
-            tokio::pin!(ready_delay);
-            let mut ready = false;
-            let mut seq = 0;
-            let mut bytes = 0;
-            loop {
-                tokio::select! {
-                    _ = &mut ready_delay, if !ready => {
-                        ready = true;
-                        ws.send(Message::Text(r#"{"type":"ready","session_id":"test","accepted_capabilities":["finalize_outcome_v1"]}"#.into())).await.unwrap();
-                        if seq > 0 { ws.send(Message::Text(serde_json::json!({"type":"ack","seq":seq}).to_string())).await.unwrap(); }
-                    }
-                    message = ws.next() => {
-                        match message {
-                            Some(Ok(Message::Binary(audio))) => {
-                                assert!(audio.len() <= 9600);
-                                bytes += audio.len();
-                                seq += 1;
-                                if ready { ws.send(Message::Text(serde_json::json!({"type":"ack","seq":seq}).to_string())).await.unwrap(); }
-                            }
-                            Some(Ok(Message::Close(_))) => panic!("hard abort emitted WebSocket Close"),
-                            Some(Ok(Message::Text(_))) => panic!("hard abort emitted a JSON control frame"),
-                            Some(Err(_)) | None => break,
-                            _ => {}
-                        }
-                    }
-                }
-            }
-            (seq, bytes)
+            let _ = ws.next().await.unwrap().unwrap();
+            ws.send(Message::Text(
+                r#"{"type":"ready","session_id":"legacy","accepted_capabilities":[]}"#.into(),
+            ))
+            .await
+            .unwrap();
+            let audio = tokio::time::timeout(Duration::from_secs(2), ws.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(matches!(audio, Message::Binary(_)));
         });
         let mut config = SttConfig::new(SttProviderType::Backend);
         config.backend_url = Some(url);
@@ -5437,42 +5643,150 @@ mod tests {
             )
             .await
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(3), async {
-            for _ in 0..40 {
-                provider
-                    .send_audio(&AudioChunk::new(vec![1; 480], 16000, 1))
-                    .await
-                    .unwrap();
-            }
-        })
-        .await
-        .expect("pre-Ready debt must not activate a negotiated ACK timeout");
-        assert_eq!(
-            provider.audio_delivery_progress().unwrap().sent_bytes,
-            38_400
-        );
-        assert_eq!(provider.audio_delivery_progress().unwrap().acked_bytes, 0);
         assert_eq!(provider.preferred_audio_batch_samples(), None);
-        tokio::time::timeout(Duration::from_secs(9), async {
-            while !provider.outcome_negotiated.load(Ordering::SeqCst) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(provider.preferred_audio_batch_samples(), Some(4800));
-        // A partial frame remains in the batch. Abort must discard it locally,
-        // without flushing pending PCM or either JSON/WS Close to the peer.
         provider
-            .send_audio(&AudioChunk::new(vec![1; 20], 16000, 1))
+            .send_audio(&AudioChunk::new(vec![1; 480], 16_000, 1))
             .await
             .unwrap();
-        assert_eq!(provider.audio_batch.len(), 40);
+        server.await.unwrap();
         provider.abort().await.unwrap();
-        let (seq, bytes) = tokio::time::timeout(Duration::from_secs(2), server)
+    }
+
+    #[tokio::test]
+    async fn elevenlabs_pre_ready_error_or_terminal_fails_even_if_socket_stays_open() {
+        for (message, expected_code) in [
+            (
+                r#"{"type":"error","code":"PROVIDER_ERROR","message":"early failure"}"#,
+                Some("PROVIDER_ERROR"),
+            ),
+            (
+                r#"{"type":"finalize_complete","status":"failed","saw_result":false}"#,
+                None,
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut ws = accept_async(tcp).await.unwrap();
+                let _ = ws.next().await.unwrap().unwrap();
+                ws.send(Message::Text(message.into())).await.unwrap();
+                // Keep the socket open: a typed pre-Ready failure must wake start.
+                tokio::time::timeout(Duration::from_secs(2), ws.next())
+                    .await
+                    .unwrap()
+            });
+            let mut config = SttConfig::new(SttProviderType::Backend);
+            config.backend_url = Some(url);
+            config.backend_auth_token = Some("test-token".into());
+            config.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
+            let mut provider = BackendProvider::new();
+            provider.initialize(&config).await.unwrap();
+            let error = tokio::time::timeout(
+                Duration::from_secs(2),
+                provider.start_stream(
+                    Arc::new(|_| {}),
+                    Arc::new(|_| {}),
+                    Arc::new(|_| {}),
+                    Arc::new(|_, _| {}),
+                ),
+            )
             .await
             .unwrap()
-            .unwrap();
-        assert_eq!((seq, bytes), (40, 38_400));
+            .expect_err("pre-Ready terminal must fail startup");
+            let SttError::Connection(connection) = error else {
+                panic!("expected connection error");
+            };
+            assert_eq!(connection.details.server_code.as_deref(), expected_code);
+            assert!(!provider.is_streaming);
+            assert!(provider.ws_write.is_none());
+            let _ = server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn elevenlabs_pre_ready_close_preserves_typed_category_and_close_code() {
+        for (close_code, expected_category) in [
+            (1008, SttConnectionCategory::LimitExceeded),
+            (1013, SttConnectionCategory::ServerUnavailable),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut ws = accept_async(tcp).await.unwrap();
+                let _ = ws.next().await.unwrap().unwrap();
+                let code = if close_code == 1008 {
+                    tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy
+                } else {
+                    tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Again
+                };
+                ws.send(Message::Close(Some(
+                    tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                        code,
+                        reason: "".into(),
+                    },
+                )))
+                .await
+                .unwrap();
+            });
+            let mut config = SttConfig::new(SttProviderType::Backend);
+            config.backend_url = Some(url);
+            config.backend_auth_token = Some("test-token".into());
+            config.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
+            let mut provider = BackendProvider::new();
+            provider.initialize(&config).await.unwrap();
+            let error = tokio::time::timeout(
+                Duration::from_secs(2),
+                provider.start_stream(
+                    Arc::new(|_| {}),
+                    Arc::new(|_| {}),
+                    Arc::new(|_| {}),
+                    Arc::new(|_, _| {}),
+                ),
+            )
+            .await
+            .unwrap()
+            .expect_err("pre-Ready close must fail startup");
+            let SttError::Connection(connection) = error else {
+                panic!("expected connection error");
+            };
+            assert_eq!(connection.details.category, Some(expected_category));
+            assert_eq!(connection.details.ws_close_code, Some(close_code));
+            assert!(provider.ws_write.is_none());
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn deepgram_start_does_not_wait_for_ready() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(tcp).await.unwrap();
+            let _ = ws.next().await.unwrap().unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+        let mut config = SttConfig::new(SttProviderType::Backend);
+        config.backend_url = Some(url);
+        config.backend_auth_token = Some("test-token".into());
+        config.backend_streaming_provider = crate::domain::BackendStreamingProvider::Deepgram;
+        let mut provider = BackendProvider::new();
+        provider.initialize(&config).await.unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            provider.start_stream(
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_, _| {}),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        provider.abort().await.unwrap();
+        server.await.unwrap();
     }
 }
