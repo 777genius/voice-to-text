@@ -1,6 +1,7 @@
 import { runNativeMiniUxScenario } from './nativeMiniUxScenario';
 import { runNativeReaderPreparation } from './nativeReaderPreparation';
 import { runNativeContinuationCase } from './nativeContinuationCases';
+import { runNativeLimitErrorScenario } from './nativeLimitErrorScenario';
 import { runNativeContinuationLive } from './nativeContinuationLive';
 import { runNativeWarmProviderCanary } from './nativeWarmProviderCanary';
 import { runNativeContinuationScenarios } from './nativeContinuationScenarios';
@@ -100,6 +101,7 @@ export async function runNativeWindowScenarios(pinia: Pinia): Promise<void> {
   if (qualificationTrial?.kind === 'warm-provider-canary') { await runNativeWarmProviderCanary(pinia); return; }
   if (qualificationTrial) { await runNativeContinuationLive(pinia); return; }
   const continuationCase = (await state()).continuationCase;
+  if (continuationCase === 'limit-error') { await runNativeLimitErrorScenario(pinia); return; }
   if (continuationCase === 'E54') { await runRestartCrashScenario(pinia); return; }
   if (continuationCase) { await runNativeContinuationCase(pinia, continuationCase); return; }
   if ((await state()).continuationMode) { await runNativeContinuationScenarios(pinia); return; }

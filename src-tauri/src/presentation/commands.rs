@@ -2122,6 +2122,8 @@ fn execute_recording_coordinator_effect(
                     intent_revision: Some(projection.intent_revision.get()),
                     status: coordinator_projection_status(projection.status),
                     desired_on,
+                    retain_terminal_panel: !desired_on
+                        && projection.panel_goal == recording_intent::PanelGoal::Shown,
                     pending_start: projection.pending_start,
                     processing_jobs: projection.processing_jobs,
                     shutdown_requested: projection.shutdown_requested,
@@ -5220,7 +5222,7 @@ pub fn stop_recording_on_native_close(app: &AppHandle) {
         .recording_intent_coordinator
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .current_capture_stop(recording_intent::IntentSource::Frontend);
+        .current_native_close();
     if let Some(event) = event {
         dispatch_recording_coordinator_event(app.clone(), event);
     }

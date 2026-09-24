@@ -6,6 +6,35 @@ import { approvedFixtures, maxProxyEvidenceEvents, validatePcm, readApprovedFixt
   expectedWarmProviderContinues, expectedWarmProviderLogicalRuns,
   verifyWarmProviderFinalFixtureAgreement } from './nativeContinuation.mjs';
 import { parseArguments, sanitizedEnvironment, validateResult } from '../run-native-window-e2e.mjs';
+test('isolated limit error requires callback, retained panel, stale owner and resource evidence', () => {
+  assert.deepEqual(parseArguments(['--continuation-case', 'limit-error']),
+    { continuationFake: true, continuationCase: 'limit-error' });
+  const fixture = { captureStarts: 2, captureStops: 2, providerStarts: 2,
+    activeCaptures: 0, activeProviders: 0, observationOverflow: false, markerViolations: [] };
+  const frame = (visible, activeCaptures, epoch, emissions, starts = 1) =>
+    ({ visible, windowEpoch: epoch, limitErrorEmissions: emissions,
+      fixture: { activeCaptures, activeProviders: activeCaptures, captureStarts: starts } });
+  const report = { mode: 'limit-error', passed: true, errors: [],
+    errorEvents: [{ session_id: 7, error_type: 'limit_exceeded',
+      error_details: { category: 'limit_exceeded', serverCode: 'LIMIT_EXCEEDED' } }],
+    a: { ...frame(true, 1, 11, 0), sessionId: 7 }, errorFrame: frame(true, 0, 11, 1),
+    afterIdle: frame(true, 0, 11, 1), dismissed: frame(false, 0, 11, 1),
+    b: frame(true, 1, 12, 1, 2), afterStale: frame(true, 1, 12, 2, 2),
+    final: { ...frame(false, 0, 12, 2, 2), fixture },
+    localizedText: 'Usage limit reached.', licenseAction: 'Activate license' };
+  const envelope = { marker: 'VOICETEXT_NATIVE_WINDOW_E2E_V1', passed: true, report, fixture };
+  assert.equal(validateResult(envelope), report);
+  for (const change of [
+    e => { e.report.errorEvents = []; },
+    e => { e.report.afterIdle.visible = false; },
+    e => { e.report.afterStale.windowEpoch = 13; },
+    e => { e.fixture.activeProviders = 1; },
+    e => { e.report.final.fixture.activeProviders = 1; },
+  ]) {
+    const invalid = structuredClone(envelope); change(invalid);
+    assert.throws(() => validateResult(invalid));
+  }
+});
 test('qualification requires explicit opt in and inherits no feature flags', () => {
   assert.deepEqual(parseArguments(['--continuation-fake']), { continuationFake: true });
   assert.equal(sanitizedEnvironment('/tmp/example', { VOICETEXT_EL_PAUSE_CONTINUE_V1: 'true' }).VOICETEXT_EL_PAUSE_CONTINUE_V1, undefined);
@@ -1664,7 +1693,7 @@ test('E63 native submission precedes teardown and runner keeps the original inde
   assert.match(finish, /"preFinish":true/);
   assert.match(finish, /diagnostic::healthy\(\)/);
   const runner = await readFile(new URL('../run-native-window-e2e.mjs', import.meta.url), 'utf8');
-  assert.match(runner, /options\.readerPreparation \|\| \['E04', 'E41', 'E42'\]\.includes\(options\.continuationCase\) \? 30_000\s*: 900_000/);
+  assert.match(runner, /options\.readerPreparation \|\| \['E04', 'E41', 'E42', 'limit-error'\]\.includes\(options\.continuationCase\) \? 30_000\s*: 900_000/);
   assert.ok(runner.indexOf('E63 native diagnostic failed') < runner.lastIndexOf('validateResult(envelope)'));
   const envelope = afterWriteEnvelope('after-write-stop');
   envelope.afterWriteServiceAfter.pausedContinuation = 9;

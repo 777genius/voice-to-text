@@ -99,11 +99,18 @@ interface MiniCaptureProjection {
   placeholderText: string;
 }
 
+const retainsTerminalPanel = computed(() => {
+  const projection = store.lastAcceptedRecordingIntentProjection;
+  return projection?.retainTerminalPanel === true && !projection.desiredOn &&
+    Number.isSafeInteger(projection.windowOwnerRunId) && Number(projection.windowOwnerRunId) > 0;
+});
+
 const stoppedMiniWindowOwnerRunId = computed<number | null>(() => {
   if (!appConfigStore.showMiniRecordingWindow) return null;
   const projection = store.lastAcceptedRecordingIntentProjection;
   const owner = projection?.windowOwnerRunId;
-  if (!projection || projection.desiredOn || projection.fault || store.hasError || store.error ||
+  if (!projection || projection.desiredOn || projection.fault || retainsTerminalPanel.value ||
+      store.hasError || store.error ||
       !Number.isSafeInteger(owner) || Number(owner) <= 0) return null;
   return Number(owner);
 });
@@ -223,6 +230,9 @@ function normalizeMiniTranscriptText(...parts: string[]): string {
 
 const miniCurrentDisplayText = computed(() => {
   if (hasMiniError.value) {
+    if (!store.incomingTranslationError && store.errorType === 'limit_exceeded') {
+      return t('errors.limitExceededShort');
+    }
     return store.incomingTranslationError || store.errorSummary;
   }
 
@@ -258,9 +268,14 @@ const showMiniRecoveryWarning = computed(() => {
     );
   return !newerDisplayOwnsSurface;
 });
-const miniDisplayText = computed(() => showMiniRecoveryWarning.value
-  ? 'Automatic insertion stopped. Check the target before pasting unconfirmed text.'
-  : miniCurrentDisplayText.value);
+const miniDisplayText = computed(() => {
+  if (hasMiniError.value && store.errorType === 'limit_exceeded' && !store.incomingTranslationError) {
+    return miniCurrentDisplayText.value;
+  }
+  return showMiniRecoveryWarning.value
+    ? 'Automatic insertion stopped. Check the target before pasting unconfirmed text.'
+    : miniCurrentDisplayText.value;
+});
 
 const miniTranscriptionTextRef = ref<HTMLElement | null>(null);
 const isMiniTextOverflowing = ref(false);
@@ -664,7 +679,7 @@ async function playMiniOpenAnimation() {
 }
 
 async function scheduleHideRecordingWindow(reason: string, sessionId: number | null = null) {
-  if (hasPendingCurrentStart()) return;
+  if (store.hasError || store.error || retainsTerminalPanel.value || hasPendingCurrentStart()) return;
   const requestedGeneration = hideGeneration;
   let windowEpoch = currentWindowEpoch;
   if (sessionId !== null) {
@@ -680,7 +695,7 @@ async function scheduleHideRecordingWindow(reason: string, sessionId: number | n
   // even before that event's own native epoch query has completed.
   if (requestedGeneration !== hideGeneration ||
       windowEpoch === null || windowEpoch !== currentWindowEpoch || hasPendingCurrentStart() ||
-      isComponentUnmounted) return;
+      store.hasError || store.error || retainsTerminalPanel.value || isComponentUnmounted) return;
   if (hasVisibleIncomingTranslation.value) {
     if (pendingAutoHideSessionId === sessionId) {
       pendingAutoHideSessionId = null;
@@ -706,7 +721,8 @@ async function scheduleHideRecordingWindow(reason: string, sessionId: number | n
   hideRecordingWindowTimeout = window.setTimeout(async () => {
     if (!isCurrentHide()) return;
     hideRecordingWindowTimeout = null;
-    if (hasVisibleIncomingTranslation.value || hasPendingCurrentStart()) {
+    if (store.hasError || store.error || retainsTerminalPanel.value ||
+        hasVisibleIncomingTranslation.value || hasPendingCurrentStart()) {
       if (pendingAutoHideSessionId === sessionId) {
         pendingAutoHideSessionId = null;
       }
@@ -717,7 +733,7 @@ async function scheduleHideRecordingWindow(reason: string, sessionId: number | n
 
     try {
       const hidden = await invoke<boolean>('hide_recording_window_if_current', { windowEpoch });
-      if (!hidden || !isCurrentHide()) return;
+      if (!hidden || !isCurrentHide() || store.hasError || store.error || retainsTerminalPanel.value) return;
       if (sessionId !== null) {
         completedAutoHideSessionId = sessionId;
       }
@@ -955,6 +971,10 @@ onMounted(async () => {
 // before another native event or IPC continuation can act on it.
 watch(() => store.lastAcceptedRecordingStatus, (payload) => {
   if (!payload || isComponentUnmounted) return;
+  if (store.hasError || store.error || retainsTerminalPanel.value) {
+    cancelPendingHideRecordingWindow();
+    return;
+  }
   const nextStatus = payload.status;
   const windowOwnerSessionId = payload.window_owner_session_id ?? payload.session_id;
   if (nextStatus !== 'Processing' && nextStatus !== 'Idle') {
@@ -988,6 +1008,10 @@ watch(() => store.lastAcceptedRecordingStatus, (payload) => {
 // Intent ownership is authoritative when a buffered successor is stopped while
 // the status surface still belongs to its finalizing predecessor.
 watch(() => store.lastAcceptedRecordingIntentProjection, (projection) => {
+  if (retainsTerminalPanel.value) {
+    cancelPendingHideRecordingWindow();
+    return;
+  }
   const windowOwnerRunId = stoppedMiniWindowOwnerRunId.value;
   if (!projection || windowOwnerRunId === null || store.hasError || store.error ||
       !appConfigStore.showMiniRecordingWindow) return;
@@ -1004,11 +1028,13 @@ watch([
   () => store.recordingDesiredOn,
   () => store.recordingStartPending,
   () => store.isCaptureReady,
+  retainsTerminalPanel,
   hasVisibleIncomingTranslation,
 ], () => {
   const hasForegroundStartStatus = stoppedMiniWindowOwnerRunId.value === null &&
     (store.isStarting || store.isRecording);
-  if (hasForegroundStartStatus || store.hasError || hasVisibleIncomingTranslation.value || hasPendingCurrentStart()) {
+  if (hasForegroundStartStatus || store.hasError || retainsTerminalPanel.value ||
+      hasVisibleIncomingTranslation.value || hasPendingCurrentStart()) {
     cancelPendingHideRecordingWindow();
   }
 }, { flush: 'sync' });
@@ -1274,7 +1300,9 @@ const minimizeWindow = async (event?: Event) => {
               error: store.hasError || Boolean(store.error) || showMiniRecoveryWarning,
               overflowing: isMiniTextOverflowing,
             }"
-            :title="miniDisplayText || miniHotkeyPrompt"
+            :title="store.errorType === 'limit_exceeded' && !store.incomingTranslationError
+              ? store.errorSummary
+              : miniDisplayText || miniHotkeyPrompt"
           >
             <span class="mini-transcription-text-inner">
               {{ miniDisplayText || miniHotkeyPrompt }}

@@ -422,6 +422,11 @@ pub enum CoordinatorEvent {
         phase: InputTracePhase,
     },
     Intent(RecordingIntent),
+    /// Native Close captured while a terminal error panel has no live capture.
+    DismissFault {
+        run_id: RunId,
+        revision: IntentRevision,
+    },
     /// Native callbacks carry physical generation, never the projection revision.
     CaptureIntent {
         intent: RecordingIntent,
@@ -963,6 +968,17 @@ impl EventTraceContext {
                 outcome: None,
                 error: Some(error),
             },
+            CoordinatorEvent::DismissFault { run_id, .. } => Self {
+                phase: TracePhase::IntentApplied,
+                source: Some(IntentSource::Frontend),
+                gesture_id: None,
+                run_id: Some(run_id),
+                effect_id: None,
+                window_epoch: None,
+                reason: Some(StopReason::User),
+                outcome: None,
+                error: None,
+            },
             CoordinatorEvent::WindowFinished { effect_id, outcome } => Self {
                 phase: TracePhase::WindowCompleted,
                 source: None,
@@ -1131,6 +1147,31 @@ impl CoordinatorState {
             Some((_, generation)) => CoordinatorEvent::CaptureIntent { intent, generation },
             None => CoordinatorEvent::Intent(intent),
         })
+    }
+
+    /// Snapshot a native Close without letting a delayed callback dismiss B.
+    pub fn current_native_close(&self) -> Option<CoordinatorEvent> {
+        self.current_capture_stop(IntentSource::Frontend)
+            .or_else(|| {
+                let fault = self.fault?;
+                let current_fault = match (self.desired_recording, fault) {
+                    (DesiredRecording::Off, _) => true,
+                    (
+                        DesiredRecording::On { revision, .. },
+                        CoordinatorFault::StartFailed {
+                            revision: failed, ..
+                        },
+                    ) => revision == failed,
+                    _ => false,
+                };
+                (current_fault
+                    && self.desired_panel == PanelGoal::Shown
+                    && matches!(self.capture, CaptureState::Idle))
+                .then_some(CoordinatorEvent::DismissFault {
+                    run_id: fault.run_id(),
+                    revision: IntentRevision::new(self.ids.intent),
+                })
+            })
     }
 
     /// The visible episode can precede provider admission, or be reserved while
@@ -1541,6 +1582,37 @@ fn apply_event(
         }
         CoordinatorEvent::InputTrace { .. } => {}
         CoordinatorEvent::Intent(intent) => apply_intent(state, intent, phase),
+        CoordinatorEvent::DismissFault { run_id, revision } => {
+            let current_fault = match (state.desired_recording, state.fault) {
+                (DesiredRecording::Off, Some(fault)) => fault.run_id() == run_id,
+                (
+                    DesiredRecording::On {
+                        revision: current, ..
+                    },
+                    Some(CoordinatorFault::StartFailed {
+                        run_id: failed_run,
+                        revision: failed_revision,
+                        ..
+                    }),
+                ) => current == failed_revision && failed_run == run_id,
+                _ => false,
+            };
+            if state.ids.intent == revision.get()
+                && current_fault
+                && state.desired_panel == PanelGoal::Shown
+                && matches!(state.capture, CaptureState::Idle)
+            {
+                state.fault = None;
+                state.desired_recording = DesiredRecording::Off;
+                state.desired_policy = None;
+                state.desired_stop_reason = StopReason::User;
+                state.desired_panel = PanelGoal::Hidden;
+                state.blocked_start_revision = None;
+                state.next_revision();
+            } else {
+                *phase = TracePhase::IntentRejected;
+            }
+        }
         CoordinatorEvent::CaptureIntent { intent, generation } => {
             let current = state.capture_identity();
             if current.is_some_and(|(run, current_generation)| {
@@ -1650,8 +1722,8 @@ fn apply_intent(state: &mut CoordinatorState, intent: RecordingIntent, phase: &m
                     _ => None,
                 })
         {
-            force_off(state, StopReason::RuntimeFailure);
             set_recoverable_fault(state, CoordinatorFault::FinalizeFailed { run_id, error });
+            force_off_for_foreground_error(state, run_id);
             *phase = TracePhase::IntentRejected;
             return;
         }
@@ -1664,7 +1736,19 @@ fn apply_intent(state: &mut CoordinatorState, intent: RecordingIntent, phase: &m
         *phase = TracePhase::IntentRejected;
         return;
     }
+    let dismiss_error_panel = !wants_on
+        && state.desired_panel == PanelGoal::Shown
+        && (matches!(state.desired_recording, DesiredRecording::Off)
+            || matches!(state.capture, CaptureState::Idle))
+        && state
+            .fault
+            .is_some_and(|fault| !fault.blocks_capture_start());
     if !wants_on {
+        // A foreground error remains visible after capture has stopped. An
+        // explicit Stop (including the panel close action) acknowledges it.
+        if dismiss_error_panel {
+            state.fault = None;
+        }
         retain_window_owner_for_stop(state);
         note_continuation_stop(state, intent.kind == IntentKind::Toggle);
     }
@@ -1675,7 +1759,11 @@ fn apply_intent(state: &mut CoordinatorState, intent: RecordingIntent, phase: &m
     {
         // Starting again from idle acknowledges a recoverable fault. An
         // unrelated B stop/toggle must not erase the terminal error owned by A.
-        if wants_on && matches!(state.capture, CaptureState::Idle) {
+        if wants_on
+            && (matches!(state.capture, CaptureState::Idle)
+                || (matches!(state.desired_recording, DesiredRecording::Off)
+                    && state.desired_panel == PanelGoal::Shown))
+        {
             state.fault = None;
         }
         state.blocked_start_revision = None;
@@ -1706,6 +1794,9 @@ fn apply_intent(state: &mut CoordinatorState, intent: RecordingIntent, phase: &m
         state.desired_policy = None;
         state.desired_stop_reason = stop_reason_for_source(intent.source);
         state.desired_panel = panel_goal_for_off(state.current_policy, intent.source);
+        if dismiss_error_panel {
+            state.desired_panel = PanelGoal::Hidden;
+        }
     }
 }
 
@@ -1823,7 +1914,7 @@ fn apply_runtime_failed(
             .run()
             .filter(|run| run.run_id == route.episode)
         {
-            force_off(state, StopReason::RuntimeFailure);
+            force_off_for_foreground_error(state, run.run_id);
             continuation::settle_after_physical_release(state, run, effects);
         } else {
             begin_terminal_finalize(state, run_id, 1, effects);
@@ -1835,7 +1926,7 @@ fn apply_runtime_failed(
         return;
     }
     set_recoverable_fault(state, CoordinatorFault::RuntimeFailed { run_id, error });
-    force_off(state, StopReason::RuntimeFailure);
+    force_off_for_foreground_error(state, run_id);
     if !requires_terminal {
         if let CaptureState::Starting { effect_id, .. } = capture {
             effects.push(CoordinatorEffect::CancelStart { effect_id, run_id });
@@ -1857,7 +1948,34 @@ fn apply_runtime_failed(
     }
 }
 
+fn force_off_for_foreground_error(state: &mut CoordinatorState, run_id: RunId) {
+    let keep_error_panel = foreground_error_panel_owned_by(state, run_id);
+    force_off(state, StopReason::RuntimeFailure);
+    if keep_error_panel {
+        state.desired_panel = PanelGoal::Shown;
+    }
+}
+
+fn foreground_error_panel_owned_by(state: &CoordinatorState, run_id: RunId) -> bool {
+    state.desired_panel == PanelGoal::Shown
+        && (state.foreground_desired_run().map(|run| run.run_id) == Some(run_id)
+            || (matches!(state.desired_recording, DesiredRecording::Off)
+                && state.fault.is_some_and(|fault| {
+                    fault.run_id() == run_id
+                        || state.continuation.is_some_and(|route| {
+                            route.episode == run_id && route.key.logical_run_id == fault.run_id()
+                        })
+                })))
+}
+
 fn clear_recoverable_fault(state: &mut CoordinatorState, run_id: RunId) {
+    // Physical cleanup must not erase the error before the user can read it.
+    if state.desired_panel == PanelGoal::Shown
+        && matches!(state.desired_recording, DesiredRecording::Off)
+        && state.fault.is_some_and(|fault| fault.run_id() == run_id)
+    {
+        return;
+    }
     if !state
         .fault
         .is_some_and(CoordinatorFault::blocks_capture_start)
@@ -1985,7 +2103,7 @@ fn apply_prepare_finished(
                     error,
                 },
             );
-            force_off(state, StopReason::RuntimeFailure);
+            force_off_for_foreground_error(state, run_id);
             start_active_stop(state, run, StopReason::RuntimeFailure, false, effects);
         }
     }
@@ -2085,7 +2203,7 @@ fn apply_start_finished(
                     error,
                 },
             );
-            force_off(state, StopReason::RuntimeFailure);
+            force_off_for_foreground_error(state, run_id);
             // Provider startup never committed, so only the physical capture
             // needs compensating cleanup. Finalizing an absent provider would
             // turn this recoverable stop into a false terminal finalize fault.
@@ -2427,6 +2545,20 @@ fn apply_finalize_finished(
         FinalizeOutcome::Committed | FinalizeOutcome::NoTranscript => {
             state.processing_jobs.remove(&run_id);
             state.terminal_status_run = Some(run_id);
+            if matches!(state.desired_recording, DesiredRecording::Off)
+                && state.desired_stop_reason == StopReason::RuntimeFailure
+                && state.desired_panel == PanelGoal::Shown
+                && state.fault.is_none()
+            {
+                // An unexpected terminal stayed visible while its outcome was
+                // unknown. With no error callback and a successful finalize,
+                // restore the ordinary force-off visibility policy.
+                state.desired_panel = if state.current_policy.hide_panel_on_force_off {
+                    PanelGoal::Hidden
+                } else {
+                    PanelGoal::Preserve
+                };
+            }
         }
         FinalizeOutcome::FailedReleased(error) => {
             state.processing_jobs.remove(&run_id);
@@ -2447,7 +2579,11 @@ fn apply_finalize_finished(
             {
                 // B cannot cold-route until admission release is proved. End its
                 // capture explicitly instead of showing indefinite Processing.
-                force_off(state, StopReason::RuntimeFailure);
+                let episode = state
+                    .continuation
+                    .map(|route| route.episode)
+                    .unwrap_or(run_id);
+                force_off_for_foreground_error(state, episode);
             }
             effects.push(CoordinatorEffect::ReleaseTranscriptBarrier { run_id });
         }
@@ -2461,7 +2597,7 @@ fn apply_finalize_finished(
                 state.terminal_status_run = Some(run_id);
                 set_recoverable_fault(state, CoordinatorFault::FinalizeFailed { run_id, error });
                 state.blocked_start_revision = state.desired_recording.revision();
-                force_off(state, StopReason::RuntimeFailure);
+                force_off_for_foreground_error(state, run_id);
                 effects.push(CoordinatorEffect::ReleaseTranscriptBarrier { run_id });
             }
         }
@@ -3923,6 +4059,285 @@ mod tests {
             .any(|effect| matches!(effect, CoordinatorEffect::FinalizeRecording { .. })));
         assert!(state.processing_jobs.is_empty());
         assert!(state.validate().is_ok());
+    }
+
+    #[test]
+    fn foreground_runtime_failure_keeps_error_panel_through_capture_cleanup_until_user_stop() {
+        let mut state = CoordinatorState::default();
+        let initial = reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::CarbonHotkey, 1),
+        );
+        let (start_id, run) = finish_prepare_and_find_start(&mut state, &initial);
+        complete_start(&mut state, start_id, run.run_id);
+        let show_id = initial
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::ShowPanel { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .expect("foreground show");
+        reduce(
+            &mut state,
+            CoordinatorEvent::WindowFinished {
+                effect_id: show_id,
+                outcome: WindowOutcome::Applied { window_epoch: 7 },
+            },
+        );
+
+        let failure = reduce(
+            &mut state,
+            CoordinatorEvent::RuntimeFailed {
+                run_id: run.run_id,
+                error: ErrorCode(42),
+            },
+        );
+        assert_eq!(state.desired_panel, PanelGoal::Shown);
+        assert!(!failure
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::HidePanel { .. })));
+        let (stop_id, _) = find_stop(&failure);
+        let cleanup = reduce(
+            &mut state,
+            CoordinatorEvent::CaptureStopped {
+                effect_id: stop_id,
+                run_id: run.run_id,
+                outcome: CaptureStopOutcome::Inactive,
+            },
+        );
+        assert!(!cleanup
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::HidePanel { .. })));
+        assert_eq!(state.projection().status, ProjectionStatus::Error);
+        assert_eq!(state.projection().fault_run_id, Some(run.run_id));
+
+        let dismissed = reduce(
+            &mut state,
+            intent(IntentKind::Stop, IntentSource::Frontend, 2),
+        );
+        assert!(dismissed
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::HidePanel { .. })));
+        assert_eq!(state.projection().fault, None);
+    }
+
+    #[test]
+    fn pending_show_ack_after_runtime_failure_does_not_hide_error_panel() {
+        let mut state = CoordinatorState::default();
+        let initial = reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::Frontend, 1),
+        );
+        let (start_id, run) = finish_prepare_and_find_start(&mut state, &initial);
+        complete_start(&mut state, start_id, run.run_id);
+        let show_id = initial
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::ShowPanel { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .expect("pending show");
+
+        let failure = reduce(
+            &mut state,
+            CoordinatorEvent::RuntimeFailed {
+                run_id: run.run_id,
+                error: ErrorCode(42),
+            },
+        );
+        assert!(!failure
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::HidePanel { .. })));
+        let after_ack = reduce(
+            &mut state,
+            CoordinatorEvent::WindowFinished {
+                effect_id: show_id,
+                outcome: WindowOutcome::Applied { window_epoch: 9 },
+            },
+        );
+        assert!(!after_ack
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::HidePanel { .. })));
+        assert!(matches!(state.panel, PanelState::Shown { window_epoch: 9 }));
+    }
+
+    #[test]
+    fn new_start_acknowledges_error_while_failed_capture_is_still_stopping() {
+        let mut state = CoordinatorState::default();
+        let initial = reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::Frontend, 1),
+        );
+        let (start_id, run) = finish_prepare_and_find_start(&mut state, &initial);
+        complete_start(&mut state, start_id, run.run_id);
+        let failure = reduce(
+            &mut state,
+            CoordinatorEvent::RuntimeFailed {
+                run_id: run.run_id,
+                error: ErrorCode(42),
+            },
+        );
+        let (stop_id, _) = find_stop(&failure);
+        let restart = reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::Frontend, 2),
+        );
+        assert_eq!(state.fault, None);
+        assert!(state.desired_recording.is_on());
+        assert!(!restart
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::HidePanel { .. })));
+        let cleanup = reduce(
+            &mut state,
+            CoordinatorEvent::CaptureStopped {
+                effect_id: stop_id,
+                run_id: run.run_id,
+                outcome: CaptureStopOutcome::Inactive,
+            },
+        );
+        assert!(cleanup.iter().any(|effect| matches!(effect, CoordinatorEffect::PrepareCapture { run: next, .. } if next.run_id != run.run_id)));
+        assert_eq!(state.fault, None);
+    }
+
+    #[test]
+    fn explicit_stop_before_late_failure_does_not_reopen_panel() {
+        let mut state = CoordinatorState::default();
+        let initial = reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::Frontend, 1),
+        );
+        let (start_id, run) = finish_prepare_and_find_start(&mut state, &initial);
+        complete_start(&mut state, start_id, run.run_id);
+        reduce(
+            &mut state,
+            intent(IntentKind::Stop, IntentSource::Frontend, 2),
+        );
+        let late = reduce(
+            &mut state,
+            CoordinatorEvent::RuntimeFailed {
+                run_id: run.run_id,
+                error: ErrorCode(42),
+            },
+        );
+        assert_ne!(state.desired_panel, PanelGoal::Shown);
+        assert!(!late
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::ShowPanel { .. })));
+    }
+
+    #[test]
+    fn active_start_failure_keeps_foreground_error_panel() {
+        let mut state = CoordinatorState::default();
+        let initial = reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::Frontend, 1),
+        );
+        let (start_id, run) = finish_prepare_and_find_start(&mut state, &initial);
+        let failure = reduce(
+            &mut state,
+            CoordinatorEvent::StartFinished {
+                effect_id: start_id,
+                run_id: run.run_id,
+                outcome: StartOutcome::FailedCaptureActive(ErrorCode(42)),
+            },
+        );
+        assert_eq!(state.desired_panel, PanelGoal::Shown);
+        assert!(!failure
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::HidePanel { .. })));
+        let (stop_id, _) = find_stop(&failure);
+        reduce(
+            &mut state,
+            CoordinatorEvent::CaptureStopped {
+                effect_id: stop_id,
+                run_id: run.run_id,
+                outcome: CaptureStopOutcome::Inactive,
+            },
+        );
+        assert_eq!(state.projection().fault, Some(ProjectionFault::StartFailed));
+    }
+
+    #[test]
+    fn native_close_dismisses_idle_error_and_stale_close_cannot_hide_new_run() {
+        let mut state = CoordinatorState::default();
+        let initial = reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::Frontend, 1),
+        );
+        let (start_id, run) = finish_prepare_and_find_start(&mut state, &initial);
+        complete_start(&mut state, start_id, run.run_id);
+        let show_id = initial
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::ShowPanel { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .expect("foreground show");
+        reduce(
+            &mut state,
+            CoordinatorEvent::WindowFinished {
+                effect_id: show_id,
+                outcome: WindowOutcome::Applied { window_epoch: 7 },
+            },
+        );
+        let failure = reduce(
+            &mut state,
+            CoordinatorEvent::RuntimeFailed {
+                run_id: run.run_id,
+                error: ErrorCode(42),
+            },
+        );
+        let (stop_id, _) = find_stop(&failure);
+        reduce(
+            &mut state,
+            CoordinatorEvent::CaptureStopped {
+                effect_id: stop_id,
+                run_id: run.run_id,
+                outcome: CaptureStopOutcome::Inactive,
+            },
+        );
+        let close = state.current_native_close().expect("idle error close");
+
+        let dismissed = reduce(&mut state, close);
+        assert_eq!(state.fault, None);
+        assert_eq!(state.desired_panel, PanelGoal::Hidden);
+        assert!(!dismissed
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::ShowPanel { .. })));
+        let hide_id = dismissed
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::HidePanel { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .expect("dismissal hides panel");
+        reduce(
+            &mut state,
+            CoordinatorEvent::WindowFinished {
+                effect_id: hide_id,
+                outcome: WindowOutcome::Applied { window_epoch: 7 },
+            },
+        );
+
+        // The same queued Close must not alter a later foreground episode.
+        let restart = reduce(
+            &mut state,
+            intent(IntentKind::Start, IntentSource::Frontend, 2),
+        );
+        assert!(restart
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::ShowPanel { .. })));
+        let desired = state.desired_recording;
+        let stale = reduce(&mut state, close);
+        assert_eq!(state.desired_recording, desired);
+        assert_eq!(state.desired_panel, PanelGoal::Shown);
+        assert!(!stale
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::HidePanel { .. })));
+        assert_eq!(
+            state.trace().last().unwrap().phase,
+            TracePhase::IntentRejected
+        );
     }
 
     #[test]

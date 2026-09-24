@@ -107,6 +107,8 @@ export interface RecordingIntentProjectionPayload {
   intentRevision: number;
   status: RecordingStatus;
   desiredOn: boolean;
+  /** Foreground terminal/error still owns the panel until its outcome or dismissal. */
+  retainTerminalPanel?: boolean;
   pendingStart: boolean;
   processingJobs: number;
   shutdownRequested: boolean;

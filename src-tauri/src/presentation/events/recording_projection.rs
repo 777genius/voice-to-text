@@ -16,6 +16,9 @@ pub struct RecordingIntentProjectionPayload {
     pub intent_revision: Option<u64>,
     pub status: RecordingStatus,
     pub desired_on: bool,
+    /// Current terminal/fault still owns the visible panel until outcome or dismissal.
+    #[serde(skip_serializing_if = "is_false")]
+    pub retain_terminal_panel: bool,
     pub pending_start: bool,
     pub processing_jobs: usize,
     pub shutdown_requested: bool,
@@ -87,12 +90,16 @@ pub enum RecordingIntentProjectionFault {
     FinalizeFailed,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn logical_projection_uses_documented_camel_case_and_closed_phase_names() {
-        let value = serde_json::to_value(RecordingIntentProjectionPayload {
+        let mut payload = RecordingIntentProjectionPayload {
             logical_run_id: Some(101),
             capture_episode_id: Some(102),
             continuation_phase: Some(RecordingContinuationPhase::ContinuePending),
@@ -101,18 +108,23 @@ mod tests {
             intent_revision: Some(8),
             status: RecordingStatus::Processing,
             desired_on: true,
+            retain_terminal_panel: false,
             pending_start: true,
             processing_jobs: 1,
             shutdown_requested: false,
             fault: None,
             fault_run_id: None,
-        })
-        .unwrap();
+        };
+        let value = serde_json::to_value(&payload).unwrap();
         assert_eq!(value["logicalRunId"], 101);
         assert_eq!(value["captureEpisodeId"], 102);
         assert_eq!(value["runId"], 102);
         assert_eq!(value["windowOwnerRunId"], 102);
         assert_eq!(value["continuationPhase"], "continue_pending");
+        assert!(value.get("retainTerminalPanel").is_none());
+        payload.retain_terminal_panel = true;
+        let retained = serde_json::to_value(&payload).unwrap();
+        assert_eq!(retained["retainTerminalPanel"], true);
         assert!(value.get("logical_run_id").is_none());
         for (phase, wire) in [
             (RecordingContinuationPhase::Active, "active"),

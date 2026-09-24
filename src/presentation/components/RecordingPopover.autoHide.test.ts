@@ -14,6 +14,7 @@ const tauriEventMock = vi.hoisted(() => ({
 }));
 
 const invokeMock = vi.hoisted(() => vi.fn());
+const apiClientMock = vi.hoisted(() => ({ get: vi.fn() }));
 const openExternalUrlMock = vi.hoisted(() => vi.fn());
 const hideWindowMock = vi.hoisted(() => vi.fn());
 const outerPositionMock = vi.hoisted(() => vi.fn());
@@ -56,6 +57,8 @@ const authStoreMock = vi.hoisted(() => ({
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (...args: any[]) => invokeMock(...args),
 }));
+
+vi.mock('../../features/auth/infrastructure/api/apiClient', () => ({ api: apiClientMock }));
 
 vi.mock('@tauri-apps/plugin-shell', () => ({
   open: (...args: any[]) => openExternalUrlMock(...args),
@@ -239,6 +242,7 @@ function mountRecordingPopover(setupStore?: (store: ReturnType<typeof useTranscr
           title: 'Profile',
         },
         errors: {
+          limitExceededShort: 'Limit reached',
           actions: {
             reconnect: 'Reconnect',
             showDetails: 'Details',
@@ -303,6 +307,8 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     });
 
     invokeMock.mockReset();
+    apiClientMock.get.mockReset();
+    apiClientMock.get.mockResolvedValue({ licenses: [] });
     openExternalUrlMock.mockReset();
     openExternalUrlMock.mockResolvedValue(undefined);
     nativeWindowEpoch.value = 1;
@@ -389,6 +395,29 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     expect(button).toBeTruthy();
     expect(invokeMock.mock.calls.filter(([cmd]) => cmd === 'copy_to_clipboard_native')).toHaveLength(0);
     button!.click();
+    await flushMicrotasks();
+    expect(invokeMock).toHaveBeenCalledWith('copy_to_clipboard_native', { text: 'unconfirmed' });
+    wrapper.unmount();
+  });
+
+  it('shows the current limit error with license action while same-run recovery remains copyable', async () => {
+    const wrapper = mountRecordingPopover((store) => {
+      vi.spyOn(store, 'deliveryRecovery', 'get').mockReturnValue([
+        { sessionId: 1, transcript: 'confirmed unconfirmed', unconfirmedText: 'unconfirmed' },
+      ]);
+    });
+    const store = useTranscriptionStore();
+    store.sessionId = 1;
+    store.status = RecordingStatus.Error;
+    store.errorType = 'limit_exceeded';
+    store.error = 'Лимит использования исчерпан. Обновите тариф для продолжения.';
+    await nextTick();
+
+    expect(document.querySelector('.mini-transcription-text-inner')?.textContent).toBe('Limit reached');
+    expect(document.querySelector('.mini-transcription-text')?.getAttribute('title')).toBe(store.error);
+    expect(document.querySelector('[title="Activate license"]')).not.toBeNull();
+    expect(document.querySelector('[data-testid="mini-copy-recovery"]')).not.toBeNull();
+    document.querySelector<HTMLButtonElement>('[data-testid="mini-copy-recovery"]')!.click();
     await flushMicrotasks();
     expect(invokeMock).toHaveBeenCalledWith('copy_to_clipboard_native', { text: 'unconfirmed' });
     wrapper.unmount();
@@ -2097,6 +2126,106 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     expect(useTranscriptionStore().hasError).toBe(true);
     wrapper.unmount();
   });
+
+  it('keeps the mini limit error and license action visible while account lookup is pending', async () => {
+    const usage = deferred<{ licenses: never[] }>();
+    apiClientMock.get.mockReturnValue(usage.promise);
+    const wrapper = mountRecordingPopover();
+    await waitForListenerCount('hotkey:toggle-recording', 1);
+    await emitTauriEvent('recording:status', { session_id: 82, status: 'Recording' });
+    await emitTauriEvent('transcription:error', {
+      session_id: 82, error: 'LIMIT_EXCEEDED', error_type: 'limit_exceeded',
+      error_details: { category: 'limit_exceeded', serverCode: 'LIMIT_EXCEEDED' },
+    });
+    await emitTauriEvent('recording:status', { session_id: 82, status: 'Idle' });
+    await vi.advanceTimersByTimeAsync(500);
+
+    const store = useTranscriptionStore();
+    expect(store.status).toBe('Error');
+    expect(document.querySelector('.mini-transcription-text-inner')?.textContent).toBe('Limit reached');
+    expect(document.querySelector('.mini-transcription-text')?.getAttribute('title')).toContain('Лимит использования исчерпан');
+    expect(document.querySelector('[title="Activate license"]')).not.toBeNull();
+    expect(document.querySelector('[data-testid="mini-error-retry"]')).toBeNull();
+    expect(hideWindowMock).not.toHaveBeenCalled();
+    document.querySelector<HTMLButtonElement>('[title="Activate license"]')!.click();
+    expect(invokeMock).toHaveBeenCalledWith('show_profile_window', { initialSection: 'license' });
+    usage.resolve({ licenses: [] });
+    await flushMicrotasks();
+    wrapper.unmount();
+  });
+
+  it.each(['lease', 'timeout'] as const)(
+    'does not hide a limit error when a previous Processing close is pending at %s', async (phase) => {
+      const usage = deferred<{ licenses: never[] }>();
+      apiClientMock.get.mockReturnValue(usage.promise);
+      const lease = deferred<number>();
+      const defaultInvoke = invokeMock.getMockImplementation()!;
+      if (phase === 'lease') {
+        invokeMock.mockImplementation((command: string, ...args: any[]) =>
+          command === 'get_recording_window_epoch_for_session' ? lease.promise : defaultInvoke(command, ...args));
+      }
+      const wrapper = mountRecordingPopover();
+      await waitForListenerCount('hotkey:toggle-recording', 1);
+      await emitTauriEvent('recording:status', { session_id: 83, status: 'Recording' });
+      await emitTauriEvent('recording:status', { session_id: 83, status: 'Processing' });
+      await flushMicrotasks();
+      await emitTauriEvent('transcription:error', {
+        session_id: 83, error: 'LIMIT_EXCEEDED', error_type: 'limit_exceeded',
+        error_details: { category: 'limit_exceeded' },
+      });
+      lease.resolve(nativeWindowEpoch.value);
+      await flushMicrotasks();
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(useTranscriptionStore().status).toBe('Error');
+      expect(document.querySelector('.mini-transcription-text-inner')?.textContent).toBe('Limit reached');
+      expect(hideWindowMock).not.toHaveBeenCalled();
+      usage.resolve({ licenses: [] });
+      await flushMicrotasks();
+      wrapper.unmount();
+    },
+  );
+
+  it.each(['lease', 'timeout'] as const)(
+    'retains terminal-first mini panel until the delayed limit error arrives (%s)', async (phase) => {
+      const lease = deferred<number>();
+      const defaultInvoke = invokeMock.getMockImplementation()!;
+      if (phase === 'lease') {
+        invokeMock.mockImplementation((command: string, ...args: any[]) =>
+          command === 'get_recording_window_epoch_for_session' ? lease.promise : defaultInvoke(command, ...args));
+      }
+      const wrapper = mountRecordingPopover();
+      await waitForListenerCount('hotkey:toggle-recording', 1);
+      await emitTauriEvent('recording:status', { session_id: 84, status: 'Recording' });
+      await emitTauriEvent('recording:status', { session_id: 84, status: 'Processing' });
+      await emitTauriEvent('recording:intent-projection', {
+        runId: 84, windowOwnerRunId: 84, intentRevision: 1,
+        status: 'Processing', desiredOn: false, pendingStart: false,
+        processingJobs: 0, shutdownRequested: false, retainTerminalPanel: true,
+      });
+      lease.resolve(nativeWindowEpoch.value);
+      await flushMicrotasks();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(hideWindowMock).not.toHaveBeenCalled();
+
+      await emitTauriEvent('recording:intent-projection', {
+        runId: null, windowOwnerRunId: 84, faultRunId: 84, intentRevision: 1,
+        status: 'Error', desiredOn: false, pendingStart: false,
+        processingJobs: 0, shutdownRequested: false,
+        fault: 'finalizeFailed', retainTerminalPanel: true,
+      });
+      await emitTauriEvent('transcription:error', {
+        session_id: 84, error: 'LIMIT_EXCEEDED', error_type: 'limit_exceeded',
+        error_details: { category: 'limit_exceeded' },
+      });
+      await vi.advanceTimersByTimeAsync(500);
+      expect(useTranscriptionStore().errorType).toBe('limit_exceeded');
+      expect(document.querySelector('.mini-transcription-text-inner')?.textContent).toBe('Limit reached');
+      expect(document.querySelector('[title="Activate license"]')).not.toBeNull();
+      expect(hideWindowMock).not.toHaveBeenCalled();
+      wrapper.unmount();
+    },
+  );
 
   it.each(['before-shown', 'during-epoch-validation', 'during-status-snapshot'])(
     'keeps the current failed-start error visible when it arrives %s', async (order) => {

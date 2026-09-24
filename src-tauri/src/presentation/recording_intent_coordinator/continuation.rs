@@ -517,7 +517,7 @@ pub(super) fn apply_continuation_event(
                             error,
                         },
                     );
-                    force_off(state, StopReason::RuntimeFailure);
+                    force_off_for_foreground_error(state, run_id);
                     if state
                         .capture
                         .run()
@@ -631,7 +631,10 @@ pub(super) fn apply_continuation_event(
                 .run()
                 .is_some_and(|run| run.run_id == route.episode)
             {
-                force_off(state, StopReason::RuntimeFailure);
+                // The terminal monitor can win the race with a provider's
+                // error callback. Keep the current foreground panel until
+                // finalization proves a normal outcome or the fault arrives.
+                force_off_for_foreground_error(state, route.episode);
                 if let Some(run) = state.capture.run() {
                     settle_after_physical_release(state, run, effects);
                 }
@@ -1759,6 +1762,218 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn negotiated_failure_keeps_foreground_error_panel_through_terminal_and_failed_release() {
+        let (mut state, run) = active();
+        let show_id = match state.panel {
+            PanelState::Showing { effect_id, .. } => effect_id,
+            _ => panic!("foreground show pending"),
+        };
+        reduce(
+            &mut state,
+            CoordinatorEvent::WindowFinished {
+                effect_id: show_id,
+                outcome: WindowOutcome::Applied { window_epoch: 7 },
+            },
+        );
+        let failure = reduce(
+            &mut state,
+            CoordinatorEvent::NegotiatedRuntimeFailed {
+                run_id: run.run_id,
+                error: ErrorCode(42),
+            },
+        );
+        assert_eq!(state.desired_panel, PanelGoal::Shown);
+        assert!(!failure
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::HidePanel { .. })));
+        let terminal = event(
+            &mut state,
+            ContinuationEvent::TerminalObserved {
+                logical_run_id: run.run_id,
+                connection_generation: 7,
+            },
+        );
+        assert_eq!(state.desired_panel, PanelGoal::Shown);
+        assert!(!terminal
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::HidePanel { .. })));
+        let stop_id = failure
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::StopRecording { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .expect("physical stop");
+        let stopped = reduce(
+            &mut state,
+            CoordinatorEvent::CaptureStopped {
+                effect_id: stop_id,
+                run_id: run.run_id,
+                outcome: CaptureStopOutcome::Inactive,
+            },
+        );
+        let finalize_id = stopped
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::FinalizeRecording { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .expect("terminal finalize");
+        let finalized = reduce(
+            &mut state,
+            CoordinatorEvent::FinalizeFinished {
+                effect_id: finalize_id,
+                run_id: run.run_id,
+                outcome: FinalizeOutcome::ReleaseUnconfirmed(ErrorCode(43)),
+            },
+        );
+        assert_eq!(state.desired_panel, PanelGoal::Shown);
+        assert!(!finalized
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::HidePanel { .. })));
+        assert_eq!(
+            state.projection().fault,
+            Some(ProjectionFault::FinalizeFailed)
+        );
+    }
+
+    #[test]
+    fn terminal_observed_before_error_callback_keeps_current_panel_until_outcome() {
+        let (mut state, run) = active();
+        let show_id = match state.panel {
+            PanelState::Showing { effect_id, .. } => effect_id,
+            _ => panic!("foreground show pending"),
+        };
+        reduce(
+            &mut state,
+            CoordinatorEvent::WindowFinished {
+                effect_id: show_id,
+                outcome: WindowOutcome::Applied { window_epoch: 7 },
+            },
+        );
+        let terminal = event(
+            &mut state,
+            ContinuationEvent::TerminalObserved {
+                logical_run_id: run.run_id,
+                connection_generation: 7,
+            },
+        );
+        assert_eq!(state.desired_panel, PanelGoal::Shown);
+        assert_eq!(state.fault, None);
+        assert!(!terminal
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::HidePanel { .. })));
+
+        let callback = reduce(
+            &mut state,
+            CoordinatorEvent::NegotiatedRuntimeFailed {
+                run_id: run.run_id,
+                error: ErrorCode(42),
+            },
+        );
+        assert_eq!(
+            state.projection().fault,
+            Some(ProjectionFault::RuntimeFailed)
+        );
+        assert!(!callback
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::HidePanel { .. })));
+        let stop_id = terminal
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::StopRecording { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .expect("physical stop");
+        let stopped = reduce(
+            &mut state,
+            CoordinatorEvent::CaptureStopped {
+                effect_id: stop_id,
+                run_id: run.run_id,
+                outcome: CaptureStopOutcome::Inactive,
+            },
+        );
+        let finalize_id = stopped
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::FinalizeRecording { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .expect("terminal finalize");
+        let finalized = reduce(
+            &mut state,
+            CoordinatorEvent::FinalizeFinished {
+                effect_id: finalize_id,
+                run_id: run.run_id,
+                outcome: FinalizeOutcome::FailedReleased(ErrorCode(43)),
+            },
+        );
+        assert_eq!(state.desired_panel, PanelGoal::Shown);
+        assert_eq!(state.projection().status, ProjectionStatus::Error);
+        assert!(!finalized
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::HidePanel { .. })));
+    }
+
+    #[test]
+    fn terminal_without_runtime_error_hides_after_successful_finalize() {
+        let (mut state, run) = active();
+        let show_id = match state.panel {
+            PanelState::Showing { effect_id, .. } => effect_id,
+            _ => panic!("foreground show pending"),
+        };
+        reduce(
+            &mut state,
+            CoordinatorEvent::WindowFinished {
+                effect_id: show_id,
+                outcome: WindowOutcome::Applied { window_epoch: 7 },
+            },
+        );
+        let terminal = event(
+            &mut state,
+            ContinuationEvent::TerminalObserved {
+                logical_run_id: run.run_id,
+                connection_generation: 7,
+            },
+        );
+        assert_eq!(state.desired_panel, PanelGoal::Shown);
+        let stop_id = terminal
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::StopRecording { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .expect("physical stop");
+        let stopped = reduce(
+            &mut state,
+            CoordinatorEvent::CaptureStopped {
+                effect_id: stop_id,
+                run_id: run.run_id,
+                outcome: CaptureStopOutcome::Inactive,
+            },
+        );
+        let finalize_id = stopped
+            .iter()
+            .find_map(|effect| match effect {
+                CoordinatorEffect::FinalizeRecording { effect_id, .. } => Some(*effect_id),
+                _ => None,
+            })
+            .expect("terminal finalize");
+        let finalized = reduce(
+            &mut state,
+            CoordinatorEvent::FinalizeFinished {
+                effect_id: finalize_id,
+                run_id: run.run_id,
+                outcome: FinalizeOutcome::NoTranscript,
+            },
+        );
+        assert_eq!(state.desired_panel, PanelGoal::Hidden);
+        assert!(finalized
+            .iter()
+            .any(|effect| matches!(effect, CoordinatorEffect::HidePanel { .. })));
     }
 
     #[test]

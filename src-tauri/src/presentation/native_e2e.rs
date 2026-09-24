@@ -1908,6 +1908,14 @@ pub struct Fixture {
     capture_run_association_ready: tokio::sync::Notify,
     capture_stop_release: tokio::sync::Notify,
     saved_capture_events: Mutex<Option<[super::recording_intent_coordinator::CoordinatorEvent; 2]>>,
+    limit_error_a: Mutex<Option<LimitErrorHandle>>,
+    limit_error_emissions: std::sync::atomic::AtomicU64,
+}
+#[derive(Clone)]
+struct LimitErrorHandle {
+    callback: ErrorCallback,
+    terminal: Arc<Mutex<Option<ProviderFinalizeReport>>>,
+    lifecycle: Arc<tokio::sync::Notify>,
 }
 /// Explicit live canary in the already isolated debug harness, never normal builds.
 pub(super) fn live_mode() -> bool {
@@ -3073,7 +3081,7 @@ impl SttProviderFactory for FixtureFactory {
             shared: self.0.clone(),
             partial: None,
             final_result: Mutex::new(None),
-            terminal: Mutex::new(None),
+            terminal: Arc::new(Mutex::new(None)),
             lifecycle: Arc::new(tokio::sync::Notify::new()),
             session: 0,
             received_audio: false,
@@ -3104,7 +3112,7 @@ struct FixtureProvider {
     shared: Arc<Fixture>,
     partial: Option<TranscriptionCallback>,
     final_result: Mutex<Option<TranscriptionCallback>>,
-    terminal: Mutex<Option<ProviderFinalizeReport>>,
+    terminal: Arc<Mutex<Option<ProviderFinalizeReport>>>,
     lifecycle: Arc<tokio::sync::Notify>,
     session: u64,
     received_audio: bool,
@@ -3260,10 +3268,18 @@ impl SttProvider for FixtureProvider {
         &mut self,
         partial: TranscriptionCallback,
         final_result: TranscriptionCallback,
-        _: ErrorCallback,
+        on_error: ErrorCallback,
         _: ConnectionQualityCallback,
     ) -> SttResult<()> {
-        self.begin(partial, final_result, false).await
+        self.begin(partial, final_result, false).await?;
+        if event_case("limit-error") && self.session == 1 {
+            *self.shared.limit_error_a.lock().unwrap() = Some(LimitErrorHandle {
+                callback: on_error,
+                terminal: self.terminal.clone(),
+                lifecycle: self.lifecycle.clone(),
+            });
+        }
+        Ok(())
     }
     async fn send_audio(&mut self, chunk: &AudioChunk) -> SttResult<()> {
         if diagnostic_refuses_effect() {
@@ -3754,6 +3770,7 @@ pub struct FixtureConfig {
     control_delay_ms: Option<u64>,
     qualification_endpoint: Option<String>,
     source_gate_ready: Option<bool>,
+    emit_limit_error: Option<String>,
 }
 #[tauri::command]
 pub async fn native_e2e_configure(
@@ -3761,6 +3778,74 @@ pub async fn native_e2e_configure(
     app_handle: AppHandle,
     config: FixtureConfig,
 ) -> Result<(), String> {
+    if let Some(phase) = config.emit_limit_error.as_deref() {
+        if !event_case("limit-error")
+            || live_mode()
+            || config.warm_stalled.is_some()
+            || config.warm_route_valid.is_some()
+            || config.hold_next_finalize.is_some()
+            || config.release_finalization.is_some()
+            || config.start_delay_ms.is_some()
+            || config.stop_delay_ms.is_some()
+            || config.audio_delay_ms.is_some()
+            || config.fail_next_start.is_some()
+            || config.keep_alive.is_some()
+            || config.control_delay_ms.is_some()
+            || config.qualification_endpoint.is_some()
+            || config.source_gate_ready.is_some()
+        {
+            return Err("limit error requires isolated fake fixture action".into());
+        }
+        let shared = fixture();
+        let emissions = shared
+            .limit_error_emissions
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let capture_starts = shared.counters.lock().unwrap().capture_starts;
+        if state.transcription_service.get_status().await != RecordingStatus::Recording
+            || !matches!(
+                (phase, emissions, capture_starts),
+                ("A", 0, 1) | ("stale-A", 1, 2)
+            )
+        {
+            return Err("limit error requires current A or recording B".into());
+        }
+        let handle = shared
+            .limit_error_a
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("A provider callback unavailable")?;
+        if phase == "A" {
+            // The actual backend retains server terminal evidence before local
+            // abort. Publish the same release evidence before its error callback;
+            // finalization snapshots the provider before calling abort().
+            let mut terminal = handle.terminal.lock().unwrap();
+            if terminal.is_some() {
+                return Err("A provider already terminal".into());
+            }
+            *terminal = Some(ProviderFinalizeReport {
+                reason: FinalizeReason::ProviderError,
+                tail_evidence: TailEvidence::Unconfirmed,
+                provider_release: ProviderRelease::Released,
+                last_delivery_seq: 0,
+                stable_snapshot: String::new(),
+                error: Some("LIMIT_EXCEEDED: Native fixture quota exhausted".into()),
+            });
+            shared.counters.lock().unwrap().provider_stops += 1;
+            drop(terminal);
+            handle.lifecycle.notify_one();
+        }
+        shared
+            .limit_error_emissions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut connection = SttConnectionError::with_category(
+            "LIMIT_EXCEEDED: Native fixture quota exhausted",
+            SttConnectionCategory::LimitExceeded,
+        );
+        connection.details.server_code = Some("LIMIT_EXCEEDED".into());
+        (handle.callback)(SttError::Connection(connection));
+        return Ok(());
+    }
     if config.warm_stalled.is_some() || config.warm_route_valid.is_some() {
         if !mini_ux_mode() || live_mode() {
             return Err("warm controls require isolated mini UX fixture".into());
@@ -4340,6 +4425,9 @@ pub async fn native_e2e_state(
     if continuation_mode() {
         result["continuationCase"] =
             json!(std::env::var("VOICETEXT_NATIVE_CONTINUATION_CASE").ok());
+    }
+    if event_case("limit-error") {
+        result["limitErrorEmissions"] = json!(fixture.limit_error_emissions.load(std::sync::atomic::Ordering::SeqCst));
     }
     if qualification_live() {
         let directory = RESULT_PATH
@@ -5478,7 +5566,7 @@ mod drain_tests {
             shared,
             partial: None,
             final_result: Mutex::new(None),
-            terminal: Mutex::new(None),
+            terminal: Arc::new(Mutex::new(None)),
             lifecycle: Arc::new(tokio::sync::Notify::new()),
             session: 0,
             received_audio: false,

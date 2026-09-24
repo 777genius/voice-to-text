@@ -1113,7 +1113,41 @@ describe('transcription connect-retry reliability', () => {
     },
   );
 
-  it.each(['runtimeFailed', 'startFailed'] as const)('does not carry a previous run provider error into a failed new run (%s)', async (fault) => {
+  it.each(['error-first', 'finalize-first'] as const)(
+    'keeps the same-run LIMIT_EXCEEDED diagnosis across finalizeFailed (%s)', async (order) => {
+      invokeMock.mockResolvedValue(null);
+      const { handlers, store } = await initializeStoreWithHandlers();
+      await handlers.get('recording:status')({ payload: { session_id: 503, status: 'Recording' } });
+      const limitError = () => handlers.get('transcription:error')({ payload: {
+        session_id: 503, error: 'Connection error: LIMIT_EXCEEDED',
+        error_type: 'limit_exceeded',
+        error_details: { category: 'limit_exceeded', serverCode: 'LIMIT_EXCEEDED' },
+      } });
+      const fault = (kind: 'runtimeFailed' | 'finalizeFailed') =>
+        handlers.get('recording:intent-projection')({ payload: {
+          runId: null, faultRunId: 503, intentRevision: 1, status: 'Error',
+          desiredOn: false, pendingStart: false, processingJobs: 0,
+          shutdownRequested: false, fault: kind,
+        } });
+
+      if (order === 'error-first') {
+        await limitError();
+        await fault('runtimeFailed');
+        await fault('finalizeFailed');
+      } else {
+        await fault('finalizeFailed');
+        expect(store.errorType).toBe('processing');
+        await limitError();
+      }
+
+      expect(store.status).toBe('Error');
+      expect(store.errorType).toBe('limit_exceeded');
+      expect(store.canActivateLicense).toBe(true);
+      expect(store.error).toContain('Лимит использования исчерпан');
+    },
+  );
+
+  it.each(['runtimeFailed', 'startFailed', 'finalizeFailed'] as const)('does not carry a previous run provider error into a failed new run (%s)', async (fault) => {
     invokeMock.mockResolvedValue(null);
     const { handlers, store } = await initializeStoreWithHandlers();
     await handlers.get('recording:status')({
@@ -2196,6 +2230,90 @@ describe('transcription connect-retry reliability', () => {
 
     expect(store.sessionId).toBe(712);
     expect(store.status).toBe('Recording');
+    expect(store.errorType).toBeNull();
+  });
+
+  it('shows LIMIT_EXCEEDED and license action before usage lookup completes, without retrying', async () => {
+    const usage = deferred<{ licenses: Array<{ status: string; plan: string; seconds_used: number; seconds_limit: number }> }>();
+    apiClientMock.get.mockReturnValue(usage.promise);
+    invokeMock.mockResolvedValue(null);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({ payload: { session_id: 713, status: 'Recording' } });
+
+    await handlers.get('transcription:error')({ payload: {
+      session_id: 713, error: 'Connection error: LIMIT_EXCEEDED', error_type: 'connection',
+      error_details: { category: 'http', httpStatus: 429, serverCode: 'LIMIT_EXCEEDED' },
+    } });
+    expect(store.status).toBe('Error');
+    expect(store.errorType).toBe('limit_exceeded');
+    expect(store.error).toContain('Лимит использования исчерпан');
+    expect(store.canActivateLicense).toBe(true);
+    expect(store.canReconnect).toBe(false);
+    expect(store.sessionId).toBeNull();
+    expect(apiClientMock.get).toHaveBeenCalledTimes(1);
+
+    await handlers.get('recording:status')({ payload: { session_id: 713, status: 'Idle' } });
+    await handlers.get('transcription:error')({ payload: {
+      session_id: 713, error: 'Connection error: LIMIT_EXCEEDED', error_type: 'connection',
+      error_details: { category: 'limit_exceeded' },
+    } });
+    expect(store.status).toBe('Error');
+    expect(apiClientMock.get).toHaveBeenCalledTimes(1);
+
+    usage.resolve({ licenses: [{ status: 'active', plan: 'pro', seconds_used: 3_600, seconds_limit: 7_200 }] });
+    await flushMicrotasks();
+    expect(store.error).toContain('60/120');
+  });
+
+  it('ends the connect retry operation immediately on a limit error', async () => {
+    const usage = deferred<{ licenses: never[] }>();
+    apiClientMock.get.mockReturnValue(usage.promise);
+    invokeMock.mockResolvedValue(null);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    const start = store.startRecording();
+    await flushMicrotasks();
+    expect(store.isConnecting).toBe(true);
+    await handlers.get('recording:status')({ payload: { session_id: 716, status: 'Starting' } });
+    await handlers.get('transcription:error')({ payload: {
+      session_id: 716, error: 'LIMIT_EXCEEDED', error_type: 'limit_exceeded',
+      error_details: { category: 'limit_exceeded', httpStatus: 429 },
+    } });
+    await start;
+    expect(store.isConnecting).toBe(false);
+    expect(store.status).toBe('Error');
+    expect(store.canActivateLicense).toBe(true);
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'start_recording')).toHaveLength(1);
+    usage.resolve({ licenses: [] });
+  });
+
+  it('keeps the generic limit error when usage lookup rejects and ignores its late result after clear', async () => {
+    const rejected = deferred<never>();
+    apiClientMock.get.mockReturnValueOnce(rejected.promise);
+    invokeMock.mockResolvedValue(null);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({ payload: { session_id: 714, status: 'Recording' } });
+    await handlers.get('transcription:error')({ payload: {
+      session_id: 714, error: 'LIMIT_EXCEEDED', error_type: 'limit_exceeded',
+      error_details: { category: 'limit_exceeded' },
+    } });
+    rejected.reject(new Error('account API unavailable'));
+    await flushMicrotasks();
+    expect(store.status).toBe('Error');
+    expect(store.error).toContain('Лимит использования исчерпан');
+
+    const late = deferred<{ licenses: Array<{ status: string; plan: string; seconds_used: number; seconds_limit: number }> }>();
+    apiClientMock.get.mockReturnValueOnce(late.promise);
+    store.prepareForRustHotkeyStart(false);
+    await handlers.get('recording:status')({ payload: { session_id: 715, status: 'Recording' } });
+    await handlers.get('transcription:error')({ payload: {
+      session_id: 715, error: 'LIMIT_EXCEEDED', error_type: 'limit_exceeded',
+      error_details: { category: 'limit_exceeded' },
+    } });
+    store.clearText();
+    expect(store.error).toBeNull();
+    late.resolve({ licenses: [{ status: 'active', plan: 'pro', seconds_used: 3_600, seconds_limit: 7_200 }] });
+    await flushMicrotasks();
+    expect(store.error).toBeNull();
     expect(store.errorType).toBeNull();
   });
 

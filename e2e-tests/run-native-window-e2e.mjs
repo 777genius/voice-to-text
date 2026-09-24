@@ -305,7 +305,7 @@ export function parseArguments(args) {
     return { ...parseArguments(args.slice(2)), reuseBuild: args[1] };
   }
   if (args.length === 3 && args[0] === '--qualification-live' && path.isAbsolute(args[1]) && liveTrials.some(t => t.id === args[2])) return { harnessConfig: args[1], trialId: args[2] };
-  if (args.length === 2 && args[0] === '--continuation-case' && ['after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle', 'seal-stop', 'seal-hold', 'seal-close', 'seal-toggle', 'stale-epoch', 'terminal-before-write', 'E04', 'E41', 'E42', 'E54'].includes(args[1])) return { continuationFake: true, continuationCase: args[1] };
+  if (args.length === 2 && args[0] === '--continuation-case' && ['after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle', 'seal-stop', 'seal-hold', 'seal-close', 'seal-toggle', 'stale-epoch', 'terminal-before-write', 'E04', 'E41', 'E42', 'E54', 'limit-error'].includes(args[1])) return { continuationFake: true, continuationCase: args[1] };
   if (args.length === 1 && args[0] === '--continuation-fake') return { continuationFake: true };
   if (args.length === 1 && args[0] === '--terminal-cleanup') return { terminalCleanup: true };
   if (args.length === 2 && args[0] === '--live-elevenlabs' && path.isAbsolute(args[1])) {
@@ -925,6 +925,30 @@ export function validateResult(envelope) {
   const report = envelope?.report;
   const fixture = envelope?.fixture;
   if (report?.error || (Array.isArray(report?.errors) && report.errors.length)) throw new Error("Native report retains failure evidence");
+  if (report?.mode === 'limit-error') {
+    const released = s => s?.fixture?.activeCaptures === 0 && s?.fixture?.activeProviders === 0;
+    const event = report.errorEvents?.find(e => e?.session_id === report.a?.sessionId &&
+      e?.error_type === 'limit_exceeded' && e?.error_details?.category === 'limit_exceeded' &&
+      e?.error_details?.serverCode === 'LIMIT_EXCEEDED');
+    if (envelope.marker !== marker || envelope.passed !== true || report.passed !== true ||
+      !Array.isArray(report.errors) || report.errors.length || !event ||
+      report.a?.visible !== true || report.a?.fixture?.activeCaptures !== 1 ||
+      report.errorFrame?.visible !== true || report.errorFrame?.limitErrorEmissions !== 1 ||
+      !released(report.errorFrame) || report.afterIdle?.visible !== true || !released(report.afterIdle) ||
+      report.dismissed?.visible !== false || report.b?.visible !== true ||
+      report.b?.fixture?.activeCaptures !== 1 || report.b?.fixture?.captureStarts !== 2 ||
+      report.afterStale?.visible !== true || report.afterStale?.windowEpoch !== report.b.windowEpoch ||
+      report.afterStale?.limitErrorEmissions !== 2 || report.afterStale?.fixture?.activeCaptures !== 1 ||
+      !released(report.final) || report.final?.fixture?.captureStops !== 2 ||
+      typeof report.localizedText !== 'string' || !report.localizedText ||
+      typeof report.licenseAction !== 'string' || !report.licenseAction ||
+      fixture?.captureStarts !== 2 || fixture?.captureStops !== 2 || fixture?.providerStarts !== 2 ||
+      fixture?.activeCaptures !== 0 || fixture?.activeProviders !== 0 ||
+      fixture?.observationOverflow !== false || fixture?.markerViolations?.length !== 0) {
+      throw new Error('Incomplete native LIMIT_EXCEEDED panel evidence');
+    }
+    return report;
+  }
   if (report?.mode === 'after-write-case') {
     requireAfterWrite(envelope.marker === marker && envelope.passed === true && report.passed === true &&
       ['after-write-stop', 'after-write-hold', 'after-write-close', 'after-write-toggle'].includes(report.case) &&
@@ -1441,7 +1465,7 @@ export async function main(args = process.argv.slice(2)) {
     // Event/preparation timeout: 30 seconds, then up to 5 seconds SIGTERM grace before SIGKILL.
     const runtimeTimeoutMs = options.miniUx ? 480_000
       : trial?.kind === 'warm-provider-canary' ? 900_000
-      : options.readerPreparation || ['E04', 'E41', 'E42'].includes(options.continuationCase) ? 30_000
+      : options.readerPreparation || ['E04', 'E41', 'E42', 'limit-error'].includes(options.continuationCase) ? 30_000
       : 900_000;
     await runOwned(binary, [], { cwd: directory, env }, runtimeTimeoutMs,
       path.join(directory, `native-runtime-${randomUUID()}.log`), path.join(directory, 'native-progress.jsonl'),

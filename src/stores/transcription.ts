@@ -229,8 +229,10 @@ export const useTranscriptionStore = defineStore('transcription', () => {
   // Auth store — нужен, чтобы корректно сбрасывать ошибки записи после успешной авторизации,
   // если ошибка относилась к предыдущему пользователю/токену.
   const authStore = useAuthStore();
+  let recordingErrorRevision = 0;
 
   function clearRecordingErrorState(): void {
+    recordingErrorRevision += 1;
     error.value = null;
     errorType.value = null;
     errorRaw.value = null;
@@ -245,6 +247,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     details?: TranscriptionErrorPayload['error_details'] | null,
     displayMessage?: string,
   ): void {
+    recordingErrorRevision += 1;
     errorType.value = type;
     errorRaw.value = raw;
     errorDetails.value = details ?? null;
@@ -2219,7 +2222,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
                   ? i18n.global.t('errors.transcriptFinalizeFailed')
                   : i18n.global.t('errors.processing');
               const preservesRunError =
-                (event.payload.fault === 'runtimeFailed' || event.payload.fault === 'startFailed') &&
+                (event.payload.fault === 'runtimeFailed' ||
+                  event.payload.fault === 'startFailed' ||
+                  event.payload.fault === 'finalizeFailed') &&
                 faultOwnerRunId !== null &&
                 terminalRecordingErrorSessionId === faultOwnerRunId &&
                 errorType.value !== null &&
@@ -2543,7 +2548,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             sessionId.value === null &&
             (terminalRecordingErrorSessionId !== null
               ? terminalRecordingErrorSessionId === event.payload.session_id
-              : (recordingIntentFault.value === 'runtimeFailed' || recordingIntentFault.value === 'startFailed') &&
+              : (recordingIntentFault.value === 'runtimeFailed' ||
+                  recordingIntentFault.value === 'startFailed' ||
+                  recordingIntentFault.value === 'finalizeFailed') &&
                 recordingIntentFaultRunId.value === event.payload.session_id);
           if (!isTerminalRunError &&
               !ensureActiveSessionForIncomingEvent(event.payload.session_id, 'transcription:error')) {
@@ -2608,7 +2615,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
           // Лимит подписки исчерпан — показываем сразу, без retry
           const isLimitExceeded = event.payload.error_type === 'limit_exceeded'
-            || event.payload.error_details?.category === 'limit_exceeded';
+            || event.payload.error_details?.category === 'limit_exceeded'
+            || event.payload.error_details?.serverCode === 'LIMIT_EXCEEDED'
+            || detectedFromRaw === 'limit_exceeded';
 
           const isProviderQuotaExceeded =
             event.payload.error_type === 'provider_quota_exceeded' ||
@@ -2629,34 +2638,38 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           }
 
           if (isLimitExceeded) {
-            // Уже обработали — не дёргаем API повторно
+            // The account lookup is optional: the terminal error and its action must be visible now.
             if (errorType.value === 'limit_exceeded') return;
-            // Пробуем получить детальную информацию об использовании для наглядного сообщения
-            let usageMessage = mapErrorMessage('limit_exceeded', event.payload.error, event.payload.error_details);
-            try {
-              const data = await api.get<{ licenses: Array<{ status: string; plan: string; seconds_used: number; seconds_limit: number }> }>('/api/v1/account/licenses');
-              const lic = data.licenses.find(l => l.status === 'active') ?? data.licenses[0];
-              if (lic) {
+            if (isConnecting.value) cancelConnectOperation();
+            setRecordingError(
+              'limit_exceeded',
+              event.payload.error,
+              event.payload.error_details
+            );
+            setTerminalRecordingErrorStatus(
+              event.payload.session_id,
+              'transcription:error:limit_exceeded'
+            );
+            const shownErrorRevision = recordingErrorRevision;
+            // A slow or failed lookup must never delay the error or revive it after dismissal.
+            void (async () => {
+              try {
+                const data = await api.get<{ licenses: Array<{ status: string; plan: string; seconds_used: number; seconds_limit: number }> }>('/api/v1/account/licenses');
+                const lic = data.licenses.find(l => l.status === 'active') ?? data.licenses[0];
+                if (!lic || !errorContinuationIsCurrent() ||
+                    recordingErrorRevision !== shownErrorRevision ||
+                    status.value !== RecordingStatus.Error || errorType.value !== 'limit_exceeded') return;
                 const usedMin = Math.round(lic.seconds_used / 60);
                 const totalMin = Math.round(lic.seconds_limit / 60);
                 const planKey = `profile.plans.${lic.plan}`;
                 const planName = i18n.global.t(planKey) !== planKey
                   ? i18n.global.t(planKey)
                   : lic.plan;
-                usageMessage = i18n.global.t('errors.limitExceededDetailed', { plan: planName, used: usedMin, total: totalMin });
+                error.value = i18n.global.t('errors.limitExceededDetailed', { plan: planName, used: usedMin, total: totalMin });
+              } catch {
+                // The generic localized message remains visible.
               }
-            } catch {}
-            if (!errorContinuationIsCurrent()) return;
-            setRecordingError(
-              'limit_exceeded',
-              event.payload.error,
-              event.payload.error_details,
-              usageMessage
-            );
-            setTerminalRecordingErrorStatus(
-              event.payload.session_id,
-              'transcription:error:limit_exceeded'
-            );
+            })();
             return;
           }
 
@@ -2717,41 +2730,6 @@ export const useTranscriptionStore = defineStore('transcription', () => {
           // Во время подключения подавляем показ ошибки и даём retry-циклу принять решение.
           // Это убирает "Проблема с подключением" на первой же неудачной попытке.
           if (isConnecting.value) {
-            // Лимит подписки — нет смысла ретраить, прерываем цикл и показываем ошибку сразу
-            const connectIsLimitExceeded = event.payload.error_type === 'limit_exceeded'
-              || event.payload.error_details?.category === 'limit_exceeded';
-            if (connectIsLimitExceeded) {
-              // Уже обработали — не дёргаем API повторно
-              if (errorType.value === 'limit_exceeded') return;
-              isConnecting.value = false;
-              let usageMessage = mapErrorMessage('limit_exceeded', event.payload.error, event.payload.error_details);
-              try {
-                const data = await api.get<{ licenses: Array<{ status: string; plan: string; seconds_used: number; seconds_limit: number }> }>('/api/v1/account/licenses');
-                const lic = data.licenses.find(l => l.status === 'active') ?? data.licenses[0];
-                if (lic) {
-                  const usedMin = Math.round(lic.seconds_used / 60);
-                  const totalMin = Math.round(lic.seconds_limit / 60);
-                  const planKey = `profile.plans.${lic.plan}`;
-                  const planName = i18n.global.t(planKey) !== planKey
-                    ? i18n.global.t(planKey)
-                    : lic.plan;
-                  usageMessage = i18n.global.t('errors.limitExceededDetailed', { plan: planName, used: usedMin, total: totalMin });
-                }
-              } catch {}
-              if (!errorContinuationIsCurrent()) return;
-              setRecordingError(
-                'limit_exceeded',
-                event.payload.error,
-                event.payload.error_details,
-                usageMessage
-              );
-              setTerminalRecordingErrorStatus(
-                event.payload.session_id,
-                'transcription:error:connect_limit_exceeded'
-              );
-              return;
-            }
-
             const connectIsProviderQuotaExceeded =
               event.payload.error_type === 'provider_quota_exceeded' ||
               event.payload.error_details?.category === 'provider_quota_exceeded' ||
