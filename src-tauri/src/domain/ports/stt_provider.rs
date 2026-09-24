@@ -150,6 +150,12 @@ pub trait SttProvider: Send + Sync {
     /// during an active streaming session
     async fn send_audio(&mut self, chunk: &AudioChunk) -> SttResult<()>;
 
+    /// Optional absolute deadline for one ordinary send_audio operation.
+    /// Callers retain their default when the provider has no override.
+    fn audio_send_timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     /// Stop streaming and finalize transcription
     async fn stop_stream(&mut self) -> SttResult<()>;
 

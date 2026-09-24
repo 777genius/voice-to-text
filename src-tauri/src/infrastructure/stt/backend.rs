@@ -94,6 +94,11 @@ const DEV_BACKEND_URL: &str = "ws://localhost:8080";
 // Без них connect/send могут "подвиснуть" и UI будет бесконечно ждать.
 const WS_CONNECT_TIMEOUT_SECS: u64 = 8;
 const WS_SEND_TIMEOUT_SECS: u64 = 3;
+// A negotiated ACK follows one server egress: durable reserve (3s), Redis
+// admission (2s), provider write (5s), durable commit (3s), and client WS
+// write (3s). Leave 1s for scheduling/network jitter. This is a stall budget
+// per advancing cumulative ACK, separate from the local socket write timeout.
+const AUDIO_ACK_STALL_TIMEOUT: Duration = Duration::from_secs(17);
 // The backend can spend up to 5s waiting for an ElevenLabs VAD commit and then
 // perform one bounded manual fallback. Keep the desktop deadline above that
 // provider-side contract so a valid stop tail is not mistaken for a dead
@@ -411,6 +416,7 @@ fn call_backend_callback(label: &str, callback: impl FnOnce()) {
 async fn report_backend_unexpected_eof(
     callbacks_state: &Arc<Mutex<CallbackState>>,
     is_closed: &Arc<AtomicBool>,
+    ack_changed: &Arc<tokio::sync::Notify>,
     server_error_reported: bool,
 ) {
     if server_error_reported
@@ -420,6 +426,8 @@ async fn report_backend_unexpected_eof(
     {
         return;
     }
+
+    ack_changed.notify_waiters();
 
     log::warn!("Backend WebSocket stream ended without a close frame");
     let callback = {
@@ -717,35 +725,59 @@ impl BackendProvider {
     }
 
     async fn wait_for_audio_window(&self, bytes: usize) -> SttResult<()> {
+        self.wait_for_audio_window_with_timeout(bytes, AUDIO_ACK_STALL_TIMEOUT)
+            .await
+    }
+
+    async fn wait_for_audio_window_with_timeout(
+        &self,
+        bytes: usize,
+        stall_timeout: Duration,
+    ) -> SttResult<()> {
         // No new ACK deadline applies to a peer until its Ready accepts this capability.
         if !self.outcome_negotiated.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let wait = async {
-            loop {
-                let changed = self.ack_changed.notified();
-                if self.is_closed.load(Ordering::SeqCst) {
-                    return Err(SttError::Connection(SttConnectionError::simple(
-                        "Connection closed while waiting for audio ACK",
-                    )));
-                }
-                let progress = self.delivery.lock().unwrap().progress;
-                if progress.sent_bytes.saturating_sub(progress.acked_bytes) + bytes as u64 <= 32_000
-                {
-                    return Ok(());
-                }
-                changed.await;
+        let mut observed_acked = self.delivery.lock().unwrap().progress.acked_bytes;
+        let mut deadline = tokio::time::Instant::now() + stall_timeout;
+        loop {
+            let changed = self.ack_changed.notified();
+            tokio::pin!(changed);
+            // Register before reading the ledger, so an ACK cannot slip between
+            // the state check and the wait. Duplicate ACKs never notify or reset.
+            changed.as_mut().enable();
+            if self.is_closed.load(Ordering::SeqCst) {
+                return Err(SttError::Connection(SttConnectionError::simple(
+                    "Connection closed while waiting for audio ACK",
+                )));
             }
-        };
-        match tokio::time::timeout(Duration::from_secs(WS_SEND_TIMEOUT_SECS), wait).await {
-            Ok(result) => result,
-            Err(_) => {
+            let (progress, last_ack, highest_issued) = {
+                let ledger = self.delivery.lock().unwrap();
+                (ledger.progress, ledger.last_ack, ledger.highest_issued)
+            };
+            if progress.sent_bytes.saturating_sub(progress.acked_bytes) + bytes as u64 <= 32_000 {
+                return Ok(());
+            }
+            if progress.acked_bytes > observed_acked {
+                observed_acked = progress.acked_bytes;
+                deadline = tokio::time::Instant::now() + stall_timeout;
+            }
+            if tokio::time::Instant::now() >= deadline {
                 self.is_closed.store(true, Ordering::SeqCst);
-                Err(SttError::Connection(SttConnectionError::with_category(
+                log::warn!(
+                    "Backend audio ACK window timed out: sent_bytes={}, acked_bytes={}, unacked_bytes={}, last_ack_seq={}, highest_issued_seq={}",
+                    progress.sent_bytes,
+                    progress.acked_bytes,
+                    progress.sent_bytes.saturating_sub(progress.acked_bytes),
+                    last_ack,
+                    highest_issued
+                );
+                return Err(SttError::Connection(SttConnectionError::with_category(
                     "Backend audio ACK window timed out",
                     SttConnectionCategory::Timeout,
-                )))
+                )));
             }
+            let _ = tokio::time::timeout_at(deadline, changed.as_mut()).await;
         }
     }
 
@@ -1100,6 +1132,16 @@ impl Default for BackendProvider {
 
 #[async_trait]
 impl SttProvider for BackendProvider {
+    fn audio_send_timeout(&self) -> Option<Duration> {
+        // Bound the entire service call even if separate advancing ACKs each
+        // earn a fresh stall window. Decide from Config so pre-Ready calls do
+        // not race capability negotiation; legacy EL retains its 3s WS write.
+        self.config.as_ref().and_then(|config| {
+            (backend_streaming_provider_name(config) == "elevenlabs")
+                .then_some(Duration::from_secs(30))
+        })
+    }
+
     fn continuation_delivery_mode(&self) -> Option<bool> {
         let negotiation = self.continuation.lock().unwrap();
         (!negotiation.offered || negotiation.ready_seen).then_some(negotiation.session.is_some())
@@ -2079,6 +2121,7 @@ impl SttProvider for BackendProvider {
                                         {
                                             server_error_reported = true;
                                             is_closed_flag.store(true, Ordering::SeqCst);
+                                            ack_changed.notify_waiters();
                                             continuation.lock().unwrap().changed.notify_waiters();
                                             if finalize_pending {
                                                 let _ = finalize_waiter.lock().await.take();
@@ -2091,6 +2134,7 @@ impl SttProvider for BackendProvider {
                                             let state = continuation.lock().unwrap();
                                             if state.session.is_some() {
                                                 is_closed_flag.store(true, Ordering::SeqCst);
+                                                ack_changed.notify_waiters();
                                                 state.changed.notify_waiters();
                                             }
                                         }
@@ -2188,10 +2232,12 @@ impl SttProvider for BackendProvider {
                         {
                             if normal_after_terminal {
                                 is_closed_flag.store(true, Ordering::SeqCst);
+                                ack_changed.notify_waiters();
                             }
                             break;
                         }
                         is_closed_flag.store(true, Ordering::SeqCst);
+                        ack_changed.notify_waiters();
                         let cb = {
                             let state = callbacks_state.lock().await;
                             state.error_callback()
@@ -2260,6 +2306,7 @@ impl SttProvider for BackendProvider {
                             break;
                         }
                         is_closed_flag.store(true, Ordering::SeqCst);
+                        ack_changed.notify_waiters();
                         let cb = {
                             let state = callbacks_state.lock().await;
                             state.error_callback()
@@ -2350,8 +2397,14 @@ impl SttProvider for BackendProvider {
             if server_error_reported {
                 is_closed_flag.store(true, Ordering::SeqCst);
             }
-            report_backend_unexpected_eof(&callbacks_state, &is_closed_flag, server_error_reported)
-                .await;
+            ack_changed.notify_waiters();
+            report_backend_unexpected_eof(
+                &callbacks_state,
+                &is_closed_flag,
+                &ack_changed,
+                server_error_reported,
+            )
+            .await;
             continuation.lock().unwrap().changed.notify_waiters();
 
             // Wake an in-flight pause/stop immediately when transport dies.
@@ -2372,6 +2425,7 @@ impl SttProvider for BackendProvider {
         // Поэтому держим TTL коротким и всегда закрываем соединение по таймеру в TranscriptionService.
         let ws_write_for_keepalive = ws_write.clone();
         let is_closed_for_keepalive = self.is_closed.clone();
+        let ack_changed_for_keepalive = self.ack_changed.clone();
         let keepalive_task = tokio::spawn(async move {
             log::debug!("Backend keepalive task started");
             loop {
@@ -2395,6 +2449,7 @@ impl SttProvider for BackendProvider {
                         "[ReconnectDiag] Backend keepalive ping failed, marking connection closed"
                     );
                     is_closed_for_keepalive.store(true, Ordering::SeqCst);
+                    ack_changed_for_keepalive.notify_waiters();
                     break;
                 }
             }
@@ -2712,6 +2767,7 @@ impl SttProvider for BackendProvider {
 
         // ПЕРВЫМ ДЕЛОМ ставим флаг закрытия
         self.is_closed.store(true, Ordering::SeqCst);
+        self.ack_changed.notify_waiters();
         let _ = self.finalize_waiter.lock().await.take();
 
         if let Some(task) = self.keepalive_task.take() {
@@ -4636,9 +4692,10 @@ mod tests {
             ..Default::default()
         }));
         let is_closed = Arc::new(AtomicBool::new(false));
+        let ack_changed = Arc::new(tokio::sync::Notify::new());
 
-        report_backend_unexpected_eof(&callbacks, &is_closed, false).await;
-        report_backend_unexpected_eof(&callbacks, &is_closed, false).await;
+        report_backend_unexpected_eof(&callbacks, &is_closed, &ack_changed, false).await;
+        report_backend_unexpected_eof(&callbacks, &is_closed, &ack_changed, false).await;
 
         assert!(is_closed.load(Ordering::SeqCst));
         assert_eq!(reported.load(Ordering::SeqCst), 1);
@@ -4978,6 +5035,238 @@ mod tests {
         .await
         .expect("ACK must unblock sender")
         .unwrap();
+    }
+
+    #[test]
+    fn only_elevenlabs_backend_requests_the_longer_service_send_deadline() {
+        let mut provider = BackendProvider::new();
+        assert_eq!(provider.audio_send_timeout(), None);
+        let mut config = SttConfig::new(SttProviderType::Backend);
+        config.backend_streaming_provider = crate::domain::BackendStreamingProvider::Deepgram;
+        provider.config = Some(config.clone());
+        assert_eq!(provider.audio_send_timeout(), None);
+        config.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
+        provider.config = Some(config);
+        assert_eq!(provider.audio_send_timeout(), Some(Duration::from_secs(30)));
+    }
+
+    #[tokio::test]
+    async fn negotiated_audio_waits_for_delayed_cumulative_ack_without_resending() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(tcp).await.unwrap();
+            assert!(matches!(ws.next().await, Some(Ok(Message::Text(_)))));
+            ws.send(Message::Text(
+                r#"{"type":"ready","session_id":"test","accepted_capabilities":["finalize_outcome_v1"]}"#.into(),
+            ))
+            .await
+            .unwrap();
+            let mut sizes = Vec::new();
+            for _ in 0..3 {
+                let message = tokio::time::timeout(Duration::from_secs(2), ws.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                let Message::Binary(bytes) = message else {
+                    panic!("expected PCM");
+                };
+                sizes.push(bytes.len());
+            }
+            // One valid server-side egress can take longer than the 3s WS write timeout.
+            tokio::time::sleep(Duration::from_millis(3_700)).await;
+            ws.send(Message::Text(r#"{"type":"ack","seq":3}"#.into()))
+                .await
+                .unwrap();
+            let message = tokio::time::timeout(Duration::from_secs(2), ws.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let Message::Binary(bytes) = message else {
+                panic!("expected fourth PCM frame");
+            };
+            sizes.push(bytes.len());
+            ws.send(Message::Text(r#"{"type":"ack","seq":4}"#.into()))
+                .await
+                .unwrap();
+            while let Some(Ok(message)) = ws.next().await {
+                assert!(
+                    !matches!(message, Message::Binary(_)),
+                    "audio was retransmitted"
+                );
+            }
+            sizes
+        });
+        let mut config = SttConfig::new(SttProviderType::Backend);
+        config.backend_url = Some(url);
+        config.backend_auth_token = Some("test-token".into());
+        config.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
+        let mut provider = BackendProvider::new();
+        provider.initialize(&config).await.unwrap();
+        provider
+            .start_stream(
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !provider.outcome_negotiated.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Ready negotiation");
+        let started = tokio::time::Instant::now();
+        for _ in 0..4 {
+            provider
+                .send_audio(&AudioChunk::new(vec![1; 4_800], 16_000, 1))
+                .await
+                .expect("delayed ACK must restore 32KB credit");
+        }
+        assert!(started.elapsed() >= Duration::from_millis(3_500));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while provider.audio_delivery_progress().unwrap().acked_bytes != 38_400 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cumulative ACK for every sent byte");
+        assert_eq!(
+            provider.audio_delivery_progress().unwrap().sent_bytes,
+            38_400
+        );
+        provider.abort().await.unwrap();
+        assert_eq!(server.await.unwrap(), vec![9_600; 4]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn audio_ack_stall_expires_despite_duplicate_or_spurious_notifications() {
+        let provider = BackendProvider::new();
+        provider.is_closed.store(false, Ordering::SeqCst);
+        provider.outcome_negotiated.store(true, Ordering::SeqCst);
+        {
+            let mut ledger = provider.delivery.lock().unwrap();
+            let seq = ledger.issue();
+            ledger.sent(seq, 1_000);
+            assert!(ledger.ack(1));
+            let seq = ledger.issue();
+            ledger.sent(seq, 32_000);
+        }
+        let delivery = provider.delivery.clone();
+        let changed = provider.ack_changed.clone();
+        let duplicate = tokio::spawn(async move {
+            for _ in 0..8 {
+                tokio::time::sleep(Duration::from_millis(15)).await;
+                assert!(!delivery.lock().unwrap().ack(1));
+                changed.notify_one();
+            }
+        });
+        let started = tokio::time::Instant::now();
+        let error = provider
+            .wait_for_audio_window_with_timeout(960, Duration::from_millis(80))
+            .await
+            .expect_err("duplicate ACKs cannot extend the stall deadline");
+        assert!(error.to_string().contains("ACK window timed out"));
+        assert!(started.elapsed() < Duration::from_millis(180));
+        assert!(provider.is_closed.load(Ordering::SeqCst));
+        duplicate.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn advancing_ack_resets_stall_deadline_only_while_window_is_full() {
+        let provider = BackendProvider::new();
+        provider.is_closed.store(false, Ordering::SeqCst);
+        provider.outcome_negotiated.store(true, Ordering::SeqCst);
+        {
+            let mut ledger = provider.delivery.lock().unwrap();
+            for _ in 0..3 {
+                let seq = ledger.issue();
+                ledger.sent(seq, 16_000);
+            }
+        }
+        let delivery = provider.delivery.clone();
+        let changed = provider.ack_changed.clone();
+        let advance = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(45)).await;
+            assert!(delivery.lock().unwrap().ack(1));
+            changed.notify_one();
+            tokio::time::sleep(Duration::from_millis(45)).await;
+            assert!(delivery.lock().unwrap().ack(2));
+            changed.notify_one();
+        });
+        provider
+            .wait_for_audio_window_with_timeout(960, Duration::from_millis(70))
+            .await
+            .expect("advancing ACK must provide another bounded server egress window");
+        advance.await.unwrap();
+        assert_eq!(
+            provider.audio_delivery_progress().unwrap().acked_bytes,
+            32_000
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_close_wakes_full_audio_window_promptly() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(tcp).await.unwrap();
+            let _ = ws.next().await.unwrap().unwrap();
+            ws.send(Message::Text(
+                r#"{"type":"ready","session_id":"test","accepted_capabilities":["finalize_outcome_v1"]}"#.into(),
+            ))
+            .await
+            .unwrap();
+            for _ in 0..3 {
+                assert!(matches!(ws.next().await, Some(Ok(Message::Binary(_)))));
+            }
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            ws.close(None).await.unwrap();
+        });
+        let mut config = SttConfig::new(SttProviderType::Backend);
+        config.backend_url = Some(url);
+        config.backend_auth_token = Some("test-token".into());
+        config.backend_streaming_provider = crate::domain::BackendStreamingProvider::ElevenLabs;
+        let mut provider = BackendProvider::new();
+        provider.initialize(&config).await.unwrap();
+        provider
+            .start_stream(
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !provider.outcome_negotiated.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        for _ in 0..3 {
+            provider
+                .send_audio(&AudioChunk::new(vec![1; 4_800], 16_000, 1))
+                .await
+                .unwrap();
+        }
+        let started = tokio::time::Instant::now();
+        let error = provider
+            .send_audio(&AudioChunk::new(vec![1; 4_800], 16_000, 1))
+            .await
+            .expect_err("closed transport must wake sender");
+        assert!(error.to_string().contains("Connection closed"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        provider.abort().await.unwrap();
+        server.await.unwrap();
     }
     #[test]
     fn delivery_ledger_rejects_future_ack_and_preserves_keepalive_sequence_floor() {

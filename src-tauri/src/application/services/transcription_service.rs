@@ -2775,9 +2775,12 @@ impl TranscriptionService {
                         .len()
                         .saturating_mul(std::mem::size_of::<i16>()),
                 );
+                let send_timeout = provider
+                    .audio_send_timeout()
+                    .unwrap_or(STT_SEND_OPERATION_TIMEOUT);
                 let send_result = await_stt_operation(
                     provider.send_audio(&amplified_chunk),
-                    STT_SEND_OPERATION_TIMEOUT,
+                    send_timeout,
                     "STT send_audio",
                 )
                 .await;
@@ -10323,6 +10326,8 @@ mod tests {
     enum DrainTestSend {
         Record,
         Block,
+        BlockWithExtendedSendDeadline,
+        DelaySevenSeconds,
         AuthenticationFailure,
     }
 
@@ -10381,11 +10386,24 @@ mod tests {
             self.sent.send(chunk.clone()).unwrap();
             match self.behavior {
                 DrainTestSend::Record => Ok(()),
-                DrainTestSend::Block => std::future::pending().await,
+                DrainTestSend::Block | DrainTestSend::BlockWithExtendedSendDeadline => {
+                    std::future::pending().await
+                }
+                DrainTestSend::DelaySevenSeconds => {
+                    tokio::time::sleep(Duration::from_secs(7)).await;
+                    Ok(())
+                }
                 DrainTestSend::AuthenticationFailure => {
                     Err(SttError::Authentication("test expired subscription".into()))
                 }
             }
+        }
+        fn audio_send_timeout(&self) -> Option<Duration> {
+            matches!(
+                self.behavior,
+                DrainTestSend::DelaySevenSeconds | DrainTestSend::BlockWithExtendedSendDeadline
+            )
+            .then_some(Duration::from_secs(30))
         }
         fn preferred_audio_batch_samples(&self) -> Option<usize> {
             self.preferred_samples
@@ -10484,6 +10502,36 @@ mod tests {
             .await
             .expect("ready/live audio must be submitted without waiting for a packet to fill")
             .expect("test provider packet")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn service_send_audio_honors_provider_deadline_beyond_six_seconds() {
+        let mut run = prepare_drain_test(DrainTestSend::DelaySevenSeconds, None).await;
+        connect_drain_test(&run).await;
+        (run.capture)(AudioChunk::new(vec![1200; 480], 16_000, 1));
+        let sent = next_drain_test_packet(&mut run).await;
+        assert_eq!(sent.data.len(), 480);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(6) + Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        run.service
+            .stop_capture_for_run(run.token.run_id)
+            .await
+            .unwrap();
+        run.service
+            .finalize_provider_for_run(run.token.run_id)
+            .await
+            .unwrap();
+        let report = run
+            .service
+            .completed_report_for_run(run.token.run_id)
+            .await
+            .unwrap();
+        assert_eq!(report.audio.accepted_bytes, 960);
+        assert_eq!(report.audio.submitted_bytes, 960);
+        assert!(!report.audio.is_incomplete());
+        assert_eq!(run.aborts.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -10630,11 +10678,17 @@ mod tests {
 
     #[tokio::test]
     async fn drain_deadline_cancels_inflight_send_without_graceful_stop_or_replay() {
-        for selected in [
-            crate::domain::BackendStreamingProvider::Deepgram,
-            crate::domain::BackendStreamingProvider::ElevenLabs,
+        for (selected, behavior) in [
+            (
+                crate::domain::BackendStreamingProvider::Deepgram,
+                DrainTestSend::Block,
+            ),
+            (
+                crate::domain::BackendStreamingProvider::ElevenLabs,
+                DrainTestSend::BlockWithExtendedSendDeadline,
+            ),
         ] {
-            let mut run = prepare_drain_test(DrainTestSend::Block, None).await;
+            let mut run = prepare_drain_test(behavior, None).await;
             run.service
                 .prepared_capture
                 .lock()
