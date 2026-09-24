@@ -387,3 +387,152 @@ async fn composed_cancel_before_ready_fences_stale_capture_from_fresh_run() {
         assert!(service.stt_provider.read().await.is_none());
     }).await.expect("cancel/fresh-run deadline");
 }
+
+#[tokio::test]
+async fn composed_overflow_while_ready_waits_fails_sealed_start_without_pcm() {
+    for fifo_capacity in [false, true] {
+        tokio::time::timeout(Duration::from_secs(6), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let config = ready_test_config(format!("ws://{}", listener.local_addr().unwrap()));
+            let (config_tx, config_rx) = tokio::sync::oneshot::channel();
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let peer = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                assert!(matches!(
+                    ws.next().await.unwrap().unwrap(),
+                    Message::Text(_)
+                ));
+                config_tx.send(()).unwrap();
+                ready_rx.await.unwrap();
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(60), ws.next())
+                        .await
+                        .is_err(),
+                    "overflowed capture sent a frame before Ready"
+                );
+                ws.send(Message::Text(
+                    serde_json::json!({"type":"ready","session_id":"overflow",
+                    "accepted_capabilities":["finalize_outcome_v1"]})
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+                while let Some(frame) = ws.next().await {
+                    match frame {
+                        Ok(Message::Binary(_)) => {
+                            panic!("overflowed capture delivered an incomplete prefix")
+                        }
+                        Ok(Message::Close(_)) => break,
+                        Ok(Message::Ping(payload)) => {
+                            ws.send(Message::Pong(payload)).await.unwrap()
+                        }
+                        Err(WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake)) => {
+                            break
+                        }
+                        Err(WsError::Io(error))
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::ConnectionReset
+                                    | std::io::ErrorKind::UnexpectedEof
+                            ) =>
+                        {
+                            break
+                        }
+                        Err(error) => panic!("unexpected overflow peer error: {error}"),
+                        _ => {}
+                    }
+                }
+            });
+            let callback = Arc::new(std::sync::Mutex::new(None));
+            let service = Arc::new(TranscriptionService::new(
+                Box::new(ManualAudioCapture::new(callback.clone())),
+                Arc::new(ReadyBackendFactory),
+            ));
+            service.update_config(config.clone()).await.unwrap();
+            let run_id = if fifo_capacity { 922 } else { 921 };
+            let errors = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let target = service.clone();
+            let observed = errors.clone();
+            let (cleanup_tx, mut cleanup_rx) = tokio::sync::mpsc::unbounded_channel();
+            let token = service
+                .prepare_recording_capture(
+                    run_id,
+                    config,
+                    Arc::new(|_, _| {}),
+                    Arc::new(|_, _| {}),
+                    Arc::new(move |error| {
+                        observed.lock().unwrap().push(error.to_string());
+                        let service = target.clone();
+                        let tx = cleanup_tx.clone();
+                        tokio::spawn(async move {
+                            tx.send(
+                                service
+                                    .cleanup_capture_runtime_failure(run_id, "FIFO overflow")
+                                    .await,
+                            )
+                            .unwrap();
+                        });
+                    }),
+                )
+                .await
+                .unwrap();
+            let capture = callback.lock().unwrap().clone().unwrap();
+            let connect = tokio::spawn(ready_test_connect(
+                service.clone(),
+                token,
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(std::sync::Mutex::new(Vec::new())),
+                |_, _| {},
+            ));
+            config_rx.await.unwrap();
+            if fifo_capacity {
+                for _ in 0..PREPARED_AUDIO_QUEUE_CAPACITY {
+                    capture(AudioChunk::new(vec![1234], 16_000, 1));
+                }
+                capture(AudioChunk::new(vec![5678], 16_000, 1));
+            } else {
+                capture(AudioChunk::new(vec![1234; 480], 16_000, 1));
+                capture(AudioChunk::new(
+                    vec![5678; PREPARED_AUDIO_MAX_SECONDS * 16_000],
+                    16_000,
+                    1,
+                ));
+            }
+            assert_eq!(errors.lock().unwrap().len(), 1, "one overflow callback");
+            let accounting = service
+                .active_audio
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .1
+                .clone();
+            service.stop_capture_for_run(run_id).await.unwrap();
+            ready_tx.send(()).unwrap();
+            let error = connect
+                .await
+                .unwrap()
+                .expect_err("overflowed capture must fail startup");
+            let observed_error = errors.lock().unwrap()[0].clone();
+            assert_eq!(error.root_cause().to_string(), observed_error);
+            assert_eq!(
+                accounting.failure().unwrap().to_string(),
+                observed_error,
+                "overflow failure must survive Stop"
+            );
+            assert_eq!(
+                cleanup_rx.recv().await.unwrap(),
+                None,
+                "late physical cleanup must not reclaim a sealed capture"
+            );
+            peer.await.unwrap();
+            assert!(!service.audio_capture.read().await.is_capturing());
+            assert!(service.stt_provider.read().await.is_none());
+            assert_eq!(service.logical_provider_run_id(), 0);
+        })
+        .await
+        .expect("overflow/Ready cleanup deadline");
+    }
+}

@@ -741,10 +741,12 @@ impl TranscriptionService {
             if previous.saturating_add(chunk_bytes) > max_bytes {
                 queued_bytes_cb.fetch_sub(chunk_bytes, Ordering::AcqRel);
                 if !overflowed_cb.swap(true, Ordering::AcqRel) {
-                    on_buffer_error(SttError::Processing(format!(
+                    let error = SttError::Processing(format!(
                         "Prepared audio buffer exceeded {} bytes ({} seconds PCM16)",
                         max_bytes, PREPARED_AUDIO_MAX_SECONDS
-                    )));
+                    ));
+                    accounting_cb.fail(error.clone());
+                    on_buffer_error(error);
                 }
                 return;
             }
@@ -753,9 +755,10 @@ impl TranscriptionService {
                 if matches!(error, tokio::sync::mpsc::error::TrySendError::Full(_))
                     && !overflowed_cb.swap(true, Ordering::AcqRel)
                 {
-                    on_buffer_error(SttError::Processing(
-                        "Prepared audio FIFO capacity exceeded".to_string(),
-                    ));
+                    let error =
+                        SttError::Processing("Prepared audio FIFO capacity exceeded".to_string());
+                    accounting_cb.fail(error.clone());
+                    on_buffer_error(error);
                 }
                 return;
             }
@@ -2328,7 +2331,7 @@ impl TranscriptionService {
         let (startup_error, startup_cancelled) = {
             let mut status = self.status.write().await;
             let mut gate = lock_stt_startup_error_gate(&startup_error_gate);
-            if let Some(error) = gate.error.take() {
+            if let Some(error) = gate.error.take().or_else(|| accounting.failure()) {
                 *status = RecordingStatus::Idle;
                 gate.committed = true;
                 (Some(error), false)
