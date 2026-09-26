@@ -265,6 +265,9 @@ struct FinalizeDrainComplete {
 struct DeliveryLedger {
     progress: AudioDeliveryProgress,
     pending: std::collections::VecDeque<(u64, u64)>,
+    // Transport diagnostics only. The credit ledger above remains authoritative.
+    attempts: std::collections::VecDeque<(u64, std::time::Instant)>,
+    ack_timing: Option<(u64, u64, std::time::Duration)>,
     last_ack: u64,
     highest_issued: u64,
     unsent_range: Option<(u64, u64)>,
@@ -273,12 +276,19 @@ impl DeliveryLedger {
     /// Reserve before polling the write future: an actual ACK may race its completion.
     fn issue(&mut self) -> u64 {
         self.highest_issued += 1;
+        if self.attempts.len() >= 2048 {
+            self.attempts.pop_front();
+        }
+        self.attempts
+            .push_back((self.highest_issued, std::time::Instant::now()));
         self.highest_issued
     }
 
     fn begin_run(&mut self) {
         self.progress = AudioDeliveryProgress::default();
         self.pending.clear();
+        self.attempts.clear();
+        self.ack_timing = None;
         self.unsent_range = None;
         // The WS sequence continues across Deepgram keep-alive runs. A late ACK
         // for the old run must not advance the new run or activate its callbacks.
@@ -330,12 +340,28 @@ impl DeliveryLedger {
     }
 
     fn ack(&mut self, seq: u64) -> bool {
+        self.ack_timing = None;
         if seq == 0
             || seq > self.highest_issued
             || seq <= self.last_ack
             || self.unsent_range.is_some_and(|(first, _)| seq >= first)
         {
             return false;
+        }
+        let first_acked = self.last_ack.saturating_add(1);
+        let mut attempt_at = None;
+        while self
+            .attempts
+            .front()
+            .is_some_and(|(issued, _)| *issued <= seq)
+        {
+            let (issued, at) = self.attempts.pop_front().unwrap();
+            if issued == seq {
+                attempt_at = Some(at);
+            }
+        }
+        if let Some(at) = attempt_at {
+            self.ack_timing = Some((first_acked, seq, at.elapsed()));
         }
         self.last_ack = seq;
         while self
@@ -1851,14 +1877,22 @@ impl SttProvider for BackendProvider {
                                     }
                                     ServerMessage::Ack { seq } => {
                                         log::trace!("Ack received: seq={}", seq);
-                                        let ack_result = {
+                                        let (ack_result, ack_timing) = {
                                             let mut ledger = delivery.lock().unwrap();
                                             if seq == 0 || seq > ledger.highest_issued {
-                                                Err(ledger.highest_issued)
+                                                (Err(ledger.highest_issued), None)
                                             } else {
-                                                Ok(ledger.ack(seq))
+                                                let accepted = ledger.ack(seq);
+                                                (Ok(accepted), ledger.ack_timing.take())
                                             }
                                         };
+                                        if let Some((first, last, duration)) = ack_timing {
+                                            if duration >= Duration::from_millis(250) {
+                                                log::info!("stt_audio_ack connection_generation={} first_seq={} last_seq={} send_attempt_to_ack_ms={}", connection_generation, first, last, duration.as_millis());
+                                            } else {
+                                                log::debug!("stt_audio_ack connection_generation={} first_seq={} last_seq={} send_attempt_to_ack_ms={}", connection_generation, first, last, duration.as_millis());
+                                            }
+                                        }
                                         match ack_result {
                                             Err(highest_issued) => {
                                                 is_closed_flag.store(true, Ordering::SeqCst);
@@ -4864,6 +4898,7 @@ mod tests {
         let mut ledger = DeliveryLedger::default();
         assert_eq!(ledger.issue(), 1);
         assert!(ledger.ack(1));
+        assert!(matches!(ledger.ack_timing.take(), Some((1, 1, _))));
         ledger.sent(1, 960);
         assert_eq!(ledger.issue(), 2);
         ledger.sent(2, 1920);
@@ -4875,7 +4910,9 @@ mod tests {
             }
         );
         ledger.ack(2);
+        assert!(matches!(ledger.ack_timing.take(), Some((2, 2, _))));
         ledger.ack(2);
+        assert!(ledger.ack_timing.is_none());
         ledger.ack(1);
         assert_eq!(ledger.progress.acked_bytes, 2880);
         assert!(ledger.pending.is_empty());

@@ -207,7 +207,11 @@ impl AuthStore {
     async fn migrate_legacy_plugin_store_once_for_paths(
         store_path: &Path,
         legacy_plugin_store_path: &Path,
+        custom_config_dir: Option<&str>,
     ) -> Result<()> {
+        if Self::has_custom_config_dir(custom_config_dir) {
+            return Ok(());
+        }
         let marker_path = Self::plugin_store_migration_marker_path(store_path)?;
         if marker_path.exists() {
             return Ok(());
@@ -286,9 +290,22 @@ impl AuthStore {
     async fn migrate_legacy_plugin_store_once(store_path: &Path) -> Result<()> {
         #[cfg(all(debug_assertions, feature = "native-window-e2e"))]
         return Ok(());
+        let custom_dir = std::env::var("VOICE_TO_TEXT_CONFIG_DIR").ok();
+        // A separate dev profile must never inspect the regular app's session.
+        if Self::has_custom_config_dir(custom_dir.as_deref()) {
+            return Ok(());
+        }
         let legacy_plugin_store_path = Self::legacy_plugin_store_path()?;
-        Self::migrate_legacy_plugin_store_once_for_paths(store_path, &legacy_plugin_store_path)
-            .await
+        Self::migrate_legacy_plugin_store_once_for_paths(
+            store_path,
+            &legacy_plugin_store_path,
+            custom_dir.as_deref(),
+        )
+        .await
+    }
+
+    fn has_custom_config_dir(value: Option<&str>) -> bool {
+        value.is_some_and(|dir| !dir.trim().is_empty())
     }
 
     async fn write_file_atomic(path: &Path, contents: &str) -> Result<()> {
@@ -438,7 +455,7 @@ mod tests {
         )
         .unwrap();
 
-        AuthStore::migrate_legacy_plugin_store_once_for_paths(&target, &legacy)
+        AuthStore::migrate_legacy_plugin_store_once_for_paths(&target, &legacy, None)
             .await
             .unwrap();
 
@@ -455,6 +472,36 @@ mod tests {
             .join(AuthStore::plugin_store_migration_marker_file_name())
             .exists());
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn custom_profile_does_not_import_global_legacy_session() {
+        // Regression: a fresh isolated dev profile previously imported a live
+        // legacy session even though its auth_store.json path was separate.
+        let root =
+            std::env::temp_dir().join(format!("voice-to-text-auth-isolation-{}", Uuid::new_v4()));
+        let target_dir = root.join("isolated-dev");
+        let legacy_dir = root.join("com.voicetotext.app");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        let target = target_dir.join("auth_store.json");
+        let legacy = legacy_dir.join("auth.json");
+        std::fs::write(&legacy, r#"{"device_id":"desktop-global","auth_session":{"accessToken":"global-access","accessExpiresAt":"2026-01-01T00:00:00Z"}}"#).unwrap();
+
+        AuthStore::migrate_legacy_plugin_store_once_for_paths(
+            &target,
+            &legacy,
+            Some(target_dir.to_str().unwrap()),
+        )
+        .await
+        .unwrap();
+
+        assert!(!target.exists());
+        assert!(!target_dir
+            .join(AuthStore::plugin_store_migration_marker_file_name())
+            .exists());
+        assert!(legacy.exists());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -496,7 +543,7 @@ mod tests {
         )
         .unwrap();
 
-        AuthStore::migrate_legacy_plugin_store_once_for_paths(&target, &legacy)
+        AuthStore::migrate_legacy_plugin_store_once_for_paths(&target, &legacy, None)
             .await
             .unwrap();
 
