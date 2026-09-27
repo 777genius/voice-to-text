@@ -16,18 +16,17 @@
 
 ---
 
-## Текущий релиз: v0.16.9
+## Текущий релиз: v0.16.10
 
-Patch-релиз с надёжным повторным открытием по hotkey, session-scoped доставкой текста и необязательным macOS audio evidence для релиза.
+Patch-релиз с сохранением аудио при медленном старте записи, защитой быстрых Stop/Start и диагностикой задержки audio ACK.
 
 ### Что говорить в статье
 
 - Скачать приложение можно с [voicetext.site](https://voicetext.site).
-- Повторные hotkey start/stop не теряются из-за delayed native window, provider или frontend callbacks.
-- Auto-paste и финализация текста изолированы по recording session, поэтому старая доставка не меняет новую сессию.
-- Ранняя речь и финальный transcript tail сохраняются при быстрых рестартах.
-- Deepgram выбран streaming provider по умолчанию; для ElevenLabs в Settings показано предупреждение о reconnect latency.
-- macOS Audio Release Gate теперь optional: если run ID передан, evidence по-прежнему проверяется строго.
+- Речь в начале и конце записи сохраняется при быстрых Stop/Start и медленном подключении провайдера.
+- Поздние callbacks и auto-paste остаются в своей recording session.
+- ACK timing теперь помогает измерять задержку аудио; устранение ранее замеченного отставания пока не подтверждено.
+- Экспериментальное продолжение ElevenLabs остаётся выключенным на production до отдельной приёмки.
 
 ### Ссылки на код для статьи
 
@@ -38,23 +37,23 @@ Patch-релиз с надёжным повторным открытием по 
 
 ### Release notes для GitHub
 
-Источник release notes - секция `0.16.9` в `CHANGELOG.md`; получить её можно командой ниже.
+Источник release notes - секция `0.16.10` в `CHANGELOG.md`; получить её можно командой ниже.
 
 Изолированные native-window E2E используют синтетические PCM/STT. Эти сценарии и idle-проверки не заменяют hardware/Zoom audio gate и не подтверждают ручные проверки устройств.
 
 ### Команды релиза
 
 ```bash
-pnpm release:notes v0.16.9
+pnpm release:notes v0.16.10
 git add CHANGELOG.md docs package.json src-tauri src e2e-tests
-git commit -m "release: v0.16.9"
-git tag v0.16.9
+git commit -m "release: v0.16.10"
+git tag v0.16.10
 git push origin HEAD
-git push origin v0.16.9
+git push origin v0.16.10
 
 # Optional: только после реальных Zoom/output-disconnect/sleep-wake проверок
 gh workflow run "macOS Audio Release Gate" \
-  -f ref=v0.16.9 \
+  -f ref=v0.16.10 \
   -f soak_seconds=1800 \
   -f zoom_half_volume_bidirectional_verified=true \
   -f output_disconnect_recovery_verified=true \
@@ -62,11 +61,11 @@ gh workflow run "macOS Audio Release Gate" \
 
 # Release без audio evidence
 gh workflow run Release \
-  -f tag=v0.16.9
+  -f tag=v0.16.10
 
 # Либо со строгой проверкой optional audio evidence
 gh workflow run Release \
-  -f tag=v0.16.9 \
+  -f tag=v0.16.10 \
   -f macos_audio_gate_run_id=<SUCCESSFUL_GATE_RUN_ID>
 ```
 

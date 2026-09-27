@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.16.10] - 2026-09-27
+
+### Fixed
+- Preserved audio captured during slow recording startup and rapid Stop/Start cycles.
+- Kept transcript tails and auto-paste delivery tied to the correct recording session, including delayed callbacks and cancelled starts.
+- Waited for streaming provider readiness before sending queued audio and aligned acknowledgement deadlines with actual sends.
+
+### Changed
+- Added bounded audio acknowledgement timing diagnostics for investigating streaming delays.
+- Prepared ElevenLabs continuation support; production use remains gated by server acceptance.
+
 ## [0.16.9] - 2026-09-02
 
 ### Changed
