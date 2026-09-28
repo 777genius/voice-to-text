@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.16.11] - 2026-09-28
+
+### Fixed
+- Show when transcription is temporarily rate limited without incorrectly blaming active sessions. The specific active-session limit still has its own message.
+
 ## [0.16.10] - 2026-09-27
 
 ### Fixed
