@@ -2062,6 +2062,25 @@ describe('transcription connect-retry reliability', () => {
     }
   });
 
+  it.each([
+    ['RATE_LIMIT_EXCEEDED', 'Транскрипция временно ограничена'],
+    ['TOO_MANY_SESSIONS', 'Слишком много активных сессий'],
+  ])('shows the actual rate limit category for %s', async (serverCode, expected) => {
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({
+      payload: { session_id: 82, status: 'Recording', stopped_via_hotkey: false },
+    });
+    await handlers.get('transcription:error')({
+      payload: {
+        session_id: 82,
+        error: 'Rate limited',
+        error_type: 'connection',
+        error_details: { category: 'rate_limited', serverCode },
+      },
+    });
+    expect(store.error).toContain(expected);
+  });
+
   it('принимает translation delta как live mode fallback если status event потерялся', async () => {
     const handlers = new Map<string, any>();
     appConfigMock.recordingMode = 'live_translation';

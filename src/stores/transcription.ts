@@ -3198,6 +3198,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     details: TranscriptionErrorPayload['error_details'] | null | undefined
   ): string {
     const category = details?.category;
+    if (details?.serverCode === 'TOO_MANY_SESSIONS') {
+      return i18n.global.t('errors.tooManySessions');
+    }
     if (
       details?.serverCode === 'PROVIDER_QUOTA_EXCEEDED' ||
       category === 'provider_quota_exceeded'
