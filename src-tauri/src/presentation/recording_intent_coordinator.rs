@@ -581,7 +581,8 @@ pub struct RecordingStatusProjection {
     pub shutdown_requested: bool,
     pub fault: Option<ProjectionFault>,
     pub fault_run_id: Option<RunId>,
-    /// False only for a confirmed released diagnosis owned by a retired run.
+    /// False when no fault is retained, or when a confirmed released diagnosis
+    /// belongs to a retired run. Provisional capture errors may have no fault.
     pub fault_affects_foreground: bool,
 }
 
