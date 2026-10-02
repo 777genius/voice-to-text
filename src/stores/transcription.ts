@@ -2296,6 +2296,13 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               ...event.payload,
               awaitingSessionStart: awaitingSessionStart.value,
             }, 'debug');
+            // A retained diagnosis can accompany a provisional microphone stop
+            // error for B. Keep B's transcript alive while its stop retry runs.
+            if (backgroundReleasedFault && event.payload.status === RecordingStatus.Error &&
+                validRunId !== null && sessionId.value === validRunId &&
+                recordingIntentFault.value === null) {
+              status.value = RecordingStatus.Error;
+            }
             lastAcceptedRecordingIntentProjection.value = {
               ...event.payload,
               windowOwnerRunId: validWindowOwnerRunId,
@@ -2431,6 +2438,19 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               payloadSessionId,
               nextStatus,
             }, 'warn');
+            return;
+          }
+
+          const currentProjection = lastAcceptedRecordingIntentProjection.value;
+          if (nextStatus === RecordingStatus.Error && status.value === RecordingStatus.Error &&
+              recordingIntentFault.value === null && currentProjection?.status === RecordingStatus.Error &&
+              currentProjection.intentRevision === recordingIntentRevision.value &&
+              currentProjection.fault === 'finalizeFailed' && currentProjection.faultAffectsForeground === false &&
+              currentProjection.runId === payloadSessionId && sessionId.value === payloadSessionId) {
+            // This paired status confirms the provisional capture error, not a
+            // transcript terminal. A successful retry can still finalize B.
+            recordingStateRevision += 1;
+            lastAcceptedRecordingStatus.value = { ...event.payload };
             return;
           }
 
