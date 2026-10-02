@@ -3055,7 +3055,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     } finally {wrapper.unmount();}
   });
 
-  it('shows provisional B capture error over released A and accepts B retry terminal', async () => {
+  it.each(['retained', 'acknowledged', 'legacy', 'malformed', 'dangling'])('shows provisional B capture error and accepts B retry terminal (%s)', async (diagnosis) => {
     const wrapper = mountRecordingPopover();
     try {
       await waitForListenerCount('recording:intent-projection', 1);
@@ -3096,8 +3096,41 @@ describe('RecordingPopover mini auto-hide e2e', () => {
       await vi.advanceTimersByTimeAsync(500);
       expect(hideWindowMock).not.toHaveBeenCalled();
 
+      const { fault: _fault, faultRunId: _faultRunId, ...withoutFault } = stopped;
+      let recovery: Record<string, unknown> = stopped;
+      if (diagnosis !== 'retained') {
+        const acknowledged = {
+          ...withoutFault, intentRevision: 5, logicalRunId: 52, captureEpisodeId: 52,
+          continuationPhase: 'finalizing', desiredOn: true, pendingStart: true, status: 'Error',
+          faultAffectsForeground: diagnosis === 'legacy' ? undefined : false,
+          ...(diagnosis === 'malformed' ? { logicalRunId: '52' } : {}),
+          ...(diagnosis === 'dangling' ? { faultRunId: 51 } : {}),
+        };
+        await emitTauriEvent('recording:intent-projection', acknowledged);
+        await emitTauriEvent('recording:status', {
+          session_id: 52, window_owner_session_id: 52, status: 'Error', stopped_via_hotkey: false,
+        });
+        if (diagnosis === 'legacy' || diagnosis === 'malformed' || diagnosis === 'dangling') {
+          // Unknown applicability/ownership cannot preserve a transcript after Error.
+          expect(store.closedSessionIdFloor).toBe(52);
+          return;
+        }
+        expect(store.status).toBe('Error');
+        expect(store.sessionId).toBe(52);
+        expect(store.closedSessionIdFloor).toBeLessThan(52);
+        expect(store.lastAcceptedRecordingIntentProjection?.fault).toBeUndefined();
+        expect(store.lastAcceptedRecordingIntentProjection?.pendingStart).toBe(true);
+        expect(document.querySelector('.mini-status-dot')?.classList.contains('error')).toBe(true);
+        // Cancel queued C while B's stop retry still owns physical capture.
+        recovery = { ...withoutFault, intentRevision: 6 };
+        await emitTauriEvent('recording:intent-projection', { ...recovery, status: 'Error' });
+        await emitTauriEvent('recording:status', {
+          session_id: 52, window_owner_session_id: 52, status: 'Error', stopped_via_hotkey: true,
+        });
+        expect(store.closedSessionIdFloor).toBeLessThan(52);
+      }
       await emitTauriEvent('recording:intent-projection', {
-        ...stopped, runId: null, windowOwnerRunId: null, processingJobs: 1,
+        ...recovery, runId: null, windowOwnerRunId: null, processingJobs: 1,
       });
       await emitTauriEvent('recording:status', {
         session_id: 52, window_owner_session_id: null, status: 'Processing', stopped_via_hotkey: true,
@@ -3115,7 +3148,7 @@ describe('RecordingPopover mini auto-hide e2e', () => {
       await flushMicrotasks();
       expect(store.finalText).toBe('B stable B terminal');
       await emitTauriEvent('recording:intent-projection', {
-        ...stopped, runId: null, windowOwnerRunId: null, processingJobs: 0, status: 'Idle',
+        ...recovery, runId: null, windowOwnerRunId: null, processingJobs: 0, status: 'Idle',
       });
       await emitTauriEvent('recording:status', {
         session_id: 52, window_owner_session_id: null, status: 'Idle', stopped_via_hotkey: true,

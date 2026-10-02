@@ -4630,6 +4630,16 @@ mod tests {
                 CoordinatorEffect::PrepareCapture { .. } | CoordinatorEffect::StartRecording { .. }
             )));
             assert!(matches!(state.capture, CaptureState::StopUncertain { .. }));
+            if unexpected_terminal {
+                // Start acknowledges A while B's physical stop is still unresolved.
+                let acknowledged = state.projection();
+                assert_eq!(acknowledged.status, ProjectionStatus::Error);
+                assert_eq!(acknowledged.current_run, Some(replacement.run_id));
+                assert_eq!(acknowledged.status_run, Some(replacement.run_id));
+                assert_eq!(acknowledged.fault, None);
+                assert!(!acknowledged.fault_affects_foreground);
+                assert!(acknowledged.pending_start);
+            }
             assert!(state.validate().is_ok());
             return;
         }
@@ -4686,6 +4696,11 @@ mod tests {
     #[test]
     fn released_predecessor_fault_does_not_own_successor_stop_uncertainty() {
         released_finalize_failure_successor_lifecycle(false, FinalizeOutcome::Committed, true);
+    }
+
+    #[test]
+    fn released_predecessor_diagnosis_can_be_acknowledged_during_successor_stop_retry() {
+        released_finalize_failure_successor_lifecycle(true, FinalizeOutcome::Committed, true);
     }
 
     #[test]

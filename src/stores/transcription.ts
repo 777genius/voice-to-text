@@ -494,6 +494,21 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     return `${runId ?? 'none'}:${revision}`;
   }
 
+  function isProvisionalCaptureErrorProjection(payload: RecordingIntentProjectionPayload | null): boolean {
+    if (!payload || payload.status !== RecordingStatus.Error || payload.faultAffectsForeground !== false ||
+        recordingIntentFault.value !== null || !Number.isSafeInteger(payload.runId) ||
+        Number(payload.runId) <= 0 || payload.runId !== sessionId.value) return false;
+    const owners = [payload.logicalRunId, payload.captureEpisodeId, payload.windowOwnerRunId];
+    if (owners.some((owner) => owner != null && (!Number.isSafeInteger(owner) || Number(owner) <= 0))) {
+      return false;
+    }
+    // Start can acknowledge the retired diagnosis while the physical stop is
+    // still unconfirmed. Missing or malformed metadata cannot authorize this.
+    if (payload.fault == null) return payload.faultRunId == null;
+    return payload.fault === 'finalizeFailed' && Number.isSafeInteger(payload.faultRunId) &&
+      Number(payload.faultRunId) > 0 && ![payload.runId, ...owners].includes(payload.faultRunId);
+  }
+
   function isCaptureReadinessPayload(value: unknown): value is RecordingCaptureReadinessPayload {
     if (!value || typeof value !== 'object') return false;
     const payload = value as Partial<RecordingCaptureReadinessPayload>;
@@ -2296,11 +2311,8 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               ...event.payload,
               awaitingSessionStart: awaitingSessionStart.value,
             }, 'debug');
-            // A retained diagnosis can accompany a provisional microphone stop
-            // error for B. Keep B's transcript alive while its stop retry runs.
-            if (backgroundReleasedFault && event.payload.status === RecordingStatus.Error &&
-                validRunId !== null && sessionId.value === validRunId &&
-                recordingIntentFault.value === null) {
+            // Keep B's transcript alive while its authoritative stop retry runs.
+            if (isProvisionalCaptureErrorProjection(event.payload)) {
               status.value = RecordingStatus.Error;
             }
             lastAcceptedRecordingIntentProjection.value = {
@@ -2443,10 +2455,9 @@ export const useTranscriptionStore = defineStore('transcription', () => {
 
           const currentProjection = lastAcceptedRecordingIntentProjection.value;
           if (nextStatus === RecordingStatus.Error && status.value === RecordingStatus.Error &&
-              recordingIntentFault.value === null && currentProjection?.status === RecordingStatus.Error &&
-              currentProjection.intentRevision === recordingIntentRevision.value &&
-              currentProjection.fault === 'finalizeFailed' && currentProjection.faultAffectsForeground === false &&
-              currentProjection.runId === payloadSessionId && sessionId.value === payloadSessionId) {
+              isProvisionalCaptureErrorProjection(currentProjection) &&
+              currentProjection?.intentRevision === recordingIntentRevision.value &&
+              currentProjection?.runId === payloadSessionId) {
             // This paired status confirms the provisional capture error, not a
             // transcript terminal. A successful retry can still finalize B.
             recordingStateRevision += 1;
