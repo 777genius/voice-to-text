@@ -2589,7 +2589,7 @@ fn apply_finalize_finished(
             if matches!(state.desired_recording, DesiredRecording::Off)
                 && state.desired_stop_reason == StopReason::RuntimeFailure
                 && state.desired_panel == PanelGoal::Shown
-                && state.fault.is_none()
+                && !state.fault_affects_foreground()
             {
                 // An unexpected terminal stayed visible while its outcome was
                 // unknown. With no error callback and a successful finalize,
@@ -4471,8 +4471,10 @@ mod tests {
         assert!(!state.processing_jobs.contains_key(&run.run_id));
     }
 
-    #[test]
-    fn released_finalize_failure_preserves_pending_run_and_owned_fault() {
+    fn released_finalize_failure_successor_lifecycle(
+        unexpected_terminal: bool,
+        successor_outcome: FinalizeOutcome,
+    ) {
         let mut state = CoordinatorState::default();
         let initial = reduce(
             &mut state,
@@ -4546,10 +4548,43 @@ mod tests {
         assert!(!state.projection().fault_affects_foreground);
         assert_eq!(state.projection().status, ProjectionStatus::Recording);
         assert_eq!(state.projection().status_run, Some(replacement.run_id));
-        let stop_b = reduce(
-            &mut state,
-            intent(IntentKind::Stop, IntentSource::CarbonHotkey, 4),
-        );
+        let stop_b = if unexpected_terminal {
+            let show_id = match state.panel {
+                PanelState::Showing { effect_id, .. } => effect_id,
+                _ => panic!("successor show pending"),
+            };
+            reduce(
+                &mut state,
+                CoordinatorEvent::WindowFinished {
+                    effect_id: show_id,
+                    outcome: WindowOutcome::Applied { window_epoch: 7 },
+                },
+            );
+            reduce(
+                &mut state,
+                CoordinatorEvent::Continuation(ContinuationEvent::Negotiated {
+                    logical_run_id: replacement.run_id,
+                    connection_generation: 7,
+                }),
+            );
+            let terminal = reduce(
+                &mut state,
+                CoordinatorEvent::Continuation(ContinuationEvent::TerminalObserved {
+                    logical_run_id: replacement.run_id,
+                    connection_generation: 7,
+                }),
+            );
+            assert_eq!(state.desired_panel, PanelGoal::Shown);
+            assert!(!terminal
+                .iter()
+                .any(|effect| matches!(effect, CoordinatorEffect::HidePanel { .. })));
+            terminal
+        } else {
+            reduce(
+                &mut state,
+                intent(IntentKind::Stop, IntentSource::CarbonHotkey, 4),
+            )
+        };
         let (stop_b_id, _) = find_stop(&stop_b);
         assert!(!state.projection().fault_affects_foreground);
         assert_eq!(state.projection().status, ProjectionStatus::Processing);
@@ -4566,19 +4601,41 @@ mod tests {
         assert_eq!(state.projection().status, ProjectionStatus::Processing);
         assert_eq!(state.projection().status_run, Some(replacement.run_id));
         let (finalize_b_id, _) = find_finalize(&stopped_b);
-        reduce(
+        let finalized_b = reduce(
             &mut state,
             CoordinatorEvent::FinalizeFinished {
                 effect_id: finalize_b_id,
                 run_id: replacement.run_id,
-                outcome: FinalizeOutcome::Committed,
+                outcome: successor_outcome,
             },
         );
+        if unexpected_terminal {
+            assert_eq!(state.desired_panel, PanelGoal::Hidden);
+            assert!(finalized_b
+                .iter()
+                .any(|effect| matches!(effect, CoordinatorEffect::HidePanel { .. })));
+            assert_eq!(
+                state.projection().window_owner_run,
+                Some(replacement.run_id)
+            );
+        }
         assert_eq!(state.projection().status, ProjectionStatus::Idle);
         assert_eq!(state.projection().status_run, Some(replacement.run_id));
         assert!(!state.projection().fault_affects_foreground);
         assert_eq!(state.projection().fault_run_id, Some(run.run_id));
         assert!(state.validate().is_ok());
+    }
+
+    #[test]
+    fn released_finalize_failure_preserves_pending_run_and_owned_fault() {
+        released_finalize_failure_successor_lifecycle(false, FinalizeOutcome::Committed);
+    }
+
+    #[test]
+    fn released_predecessor_fault_does_not_retain_successful_unexpected_terminal_panel() {
+        for outcome in [FinalizeOutcome::Committed, FinalizeOutcome::NoTranscript] {
+            released_finalize_failure_successor_lifecycle(true, outcome);
+        }
     }
 
     #[test]
