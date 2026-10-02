@@ -581,6 +581,9 @@ pub struct RecordingStatusProjection {
     pub shutdown_requested: bool,
     pub fault: Option<ProjectionFault>,
     pub fault_run_id: Option<RunId>,
+    /// False when no fault is retained, or when a confirmed released diagnosis
+    /// belongs to a retired run. Provisional capture errors may have no fault.
+    pub fault_affects_foreground: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -609,6 +612,7 @@ pub enum CoordinatorFault {
     FinalizeFailed {
         run_id: RunId,
         error: ErrorCode,
+        release_confirmed: bool,
     },
 }
 
@@ -1277,7 +1281,37 @@ impl CoordinatorState {
         }
     }
 
+    fn fault_affects_foreground(&self) -> bool {
+        let Some(CoordinatorFault::FinalizeFailed {
+            run_id,
+            release_confirmed: true,
+            ..
+        }) = self.fault
+        else {
+            return self.fault.is_some();
+        };
+        // Unknown provider release and shared logical ownership remain fail-closed.
+        if self
+            .processing_jobs
+            .values()
+            .any(|job| matches!(job.state, ProcessingState::ReleaseUnconfirmed { .. }))
+            || self
+                .continuation
+                .is_some_and(|route| route.key.logical_run_id == run_id)
+        {
+            return true;
+        }
+        let foreground_run = self
+            .capture
+            .run()
+            .map(|run| run.run_id)
+            .or_else(|| self.processing_jobs.keys().next_back().copied())
+            .or(self.terminal_status_run);
+        foreground_run.map_or(true, |foreground| foreground == run_id)
+    }
+
     pub fn projection(&self) -> RecordingStatusProjection {
+        let fault_affects_foreground = self.fault_affects_foreground();
         let status = match self.capture {
             CaptureState::StopUncertain { .. } => ProjectionStatus::Error,
             CaptureState::Preparing { .. } | CaptureState::Buffering { .. }
@@ -1295,7 +1329,7 @@ impl CoordinatorState {
             CaptureState::Starting { .. } => ProjectionStatus::Starting,
             CaptureState::Recording { .. } => ProjectionStatus::Recording,
             CaptureState::Stopping { .. } => ProjectionStatus::Processing,
-            CaptureState::Idle if self.fault.is_some() => ProjectionStatus::Error,
+            CaptureState::Idle if fault_affects_foreground => ProjectionStatus::Error,
             CaptureState::Idle if !self.processing_jobs.is_empty() => ProjectionStatus::Processing,
             CaptureState::Idle => ProjectionStatus::Idle,
         };
@@ -1309,6 +1343,7 @@ impl CoordinatorState {
             );
         let status_run = if status == ProjectionStatus::Error {
             self.fault
+                .filter(|_| fault_affects_foreground)
                 .map(CoordinatorFault::run_id)
                 .or_else(|| self.capture.run().map(|run| run.run_id))
                 .or(self.terminal_status_run)
@@ -1352,6 +1387,7 @@ impl CoordinatorState {
             shutdown_requested: self.shutdown_requested,
             fault: self.fault.map(CoordinatorFault::projection),
             fault_run_id: self.fault.map(CoordinatorFault::run_id),
+            fault_affects_foreground,
         }
     }
 
@@ -1722,7 +1758,14 @@ fn apply_intent(state: &mut CoordinatorState, intent: RecordingIntent, phase: &m
                     _ => None,
                 })
         {
-            set_recoverable_fault(state, CoordinatorFault::FinalizeFailed { run_id, error });
+            set_recoverable_fault(
+                state,
+                CoordinatorFault::FinalizeFailed {
+                    run_id,
+                    error,
+                    release_confirmed: false,
+                },
+            );
             force_off_for_foreground_error(state, run_id);
             *phase = TracePhase::IntentRejected;
             return;
@@ -1987,6 +2030,20 @@ fn clear_recoverable_fault(state: &mut CoordinatorState, run_id: RunId) {
 }
 
 fn set_recoverable_fault(state: &mut CoordinatorState, fault: CoordinatorFault) {
+    // A confirmed released terminal is diagnostic only if a newer run has its
+    // own failure. Unknown release must still replace it to expose the fence.
+    if matches!(
+        fault,
+        CoordinatorFault::FinalizeFailed {
+            release_confirmed: true,
+            ..
+        }
+    ) && state
+        .fault
+        .is_some_and(|current| current.run_id() > fault.run_id())
+    {
+        return;
+    }
     if !state
         .fault
         .is_some_and(CoordinatorFault::blocks_capture_start)
@@ -2548,7 +2605,7 @@ fn apply_finalize_finished(
             if matches!(state.desired_recording, DesiredRecording::Off)
                 && state.desired_stop_reason == StopReason::RuntimeFailure
                 && state.desired_panel == PanelGoal::Shown
-                && state.fault.is_none()
+                && !state.fault_affects_foreground()
             {
                 // An unexpected terminal stayed visible while its outcome was
                 // unknown. With no error callback and a successful finalize,
@@ -2563,7 +2620,14 @@ fn apply_finalize_finished(
         FinalizeOutcome::FailedReleased(error) => {
             state.processing_jobs.remove(&run_id);
             state.terminal_status_run = Some(run_id);
-            set_recoverable_fault(state, CoordinatorFault::FinalizeFailed { run_id, error });
+            set_recoverable_fault(
+                state,
+                CoordinatorFault::FinalizeFailed {
+                    run_id,
+                    error,
+                    release_confirmed: true,
+                },
+            );
             effects.push(CoordinatorEffect::ReleaseTranscriptBarrier { run_id });
         }
         FinalizeOutcome::ReleaseUnconfirmed(error) => {
@@ -2572,7 +2636,14 @@ fn apply_finalize_finished(
             }
             // Retain the provider ownership fence. Idle capture alone does not
             // prove that the previous provider can no longer consume audio.
-            set_recoverable_fault(state, CoordinatorFault::FinalizeFailed { run_id, error });
+            set_recoverable_fault(
+                state,
+                CoordinatorFault::FinalizeFailed {
+                    run_id,
+                    error,
+                    release_confirmed: false,
+                },
+            );
             if state
                 .continuation
                 .is_some_and(|route| route.key.logical_run_id == run_id)
@@ -2595,7 +2666,14 @@ fn apply_finalize_finished(
             } else {
                 state.processing_jobs.remove(&run_id);
                 state.terminal_status_run = Some(run_id);
-                set_recoverable_fault(state, CoordinatorFault::FinalizeFailed { run_id, error });
+                set_recoverable_fault(
+                    state,
+                    CoordinatorFault::FinalizeFailed {
+                        run_id,
+                        error,
+                        release_confirmed: false,
+                    },
+                );
                 state.blocked_start_revision = state.desired_recording.revision();
                 force_off_for_foreground_error(state, run_id);
                 effects.push(CoordinatorEffect::ReleaseTranscriptBarrier { run_id });
@@ -4409,8 +4487,11 @@ mod tests {
         assert!(!state.processing_jobs.contains_key(&run.run_id));
     }
 
-    #[test]
-    fn released_finalize_failure_preserves_pending_run_and_owned_fault() {
+    fn released_finalize_failure_successor_lifecycle(
+        unexpected_terminal: bool,
+        successor_outcome: FinalizeOutcome,
+        uncertain_stop: bool,
+    ) {
         let mut state = CoordinatorState::default();
         let initial = reduce(
             &mut state,
@@ -4476,14 +4557,94 @@ mod tests {
         let (replacement_start, replacement) = find_start(&finalized);
         assert_ne!(replacement.run_id, run.run_id);
         assert!(!state.processing_jobs.contains_key(&run.run_id));
+        // B is eligible immediately after release, while A's diagnosis remains.
+        assert!(!state.projection().fault_affects_foreground);
+        assert_eq!(state.projection().status, ProjectionStatus::Starting);
         complete_start(&mut state, replacement_start, replacement.run_id);
         assert_eq!(state.projection().fault_run_id, Some(run.run_id));
-        let stop_b = reduce(
-            &mut state,
-            intent(IntentKind::Stop, IntentSource::CarbonHotkey, 4),
-        );
+        assert!(!state.projection().fault_affects_foreground);
+        assert_eq!(state.projection().status, ProjectionStatus::Recording);
+        assert_eq!(state.projection().status_run, Some(replacement.run_id));
+        let stop_b = if unexpected_terminal {
+            let show_id = match state.panel {
+                PanelState::Showing { effect_id, .. } => effect_id,
+                _ => panic!("successor show pending"),
+            };
+            reduce(
+                &mut state,
+                CoordinatorEvent::WindowFinished {
+                    effect_id: show_id,
+                    outcome: WindowOutcome::Applied { window_epoch: 7 },
+                },
+            );
+            reduce(
+                &mut state,
+                CoordinatorEvent::Continuation(ContinuationEvent::Negotiated {
+                    logical_run_id: replacement.run_id,
+                    connection_generation: 7,
+                }),
+            );
+            let terminal = reduce(
+                &mut state,
+                CoordinatorEvent::Continuation(ContinuationEvent::TerminalObserved {
+                    logical_run_id: replacement.run_id,
+                    connection_generation: 7,
+                }),
+            );
+            assert_eq!(state.desired_panel, PanelGoal::Shown);
+            assert!(!terminal
+                .iter()
+                .any(|effect| matches!(effect, CoordinatorEffect::HidePanel { .. })));
+            terminal
+        } else {
+            reduce(
+                &mut state,
+                intent(IntentKind::Stop, IntentSource::CarbonHotkey, 4),
+            )
+        };
         let (stop_b_id, _) = find_stop(&stop_b);
-        reduce(
+        assert!(!state.projection().fault_affects_foreground);
+        assert_eq!(state.projection().status, ProjectionStatus::Processing);
+        if uncertain_stop {
+            let retry = reduce(
+                &mut state,
+                CoordinatorEvent::CaptureStopped {
+                    effect_id: stop_b_id,
+                    run_id: replacement.run_id,
+                    outcome: CaptureStopOutcome::StillActive(ErrorCode(55)),
+                },
+            );
+            let projection = state.projection();
+            assert_eq!(projection.status, ProjectionStatus::Error);
+            assert_eq!(projection.status_run, Some(replacement.run_id));
+            assert_eq!(projection.window_owner_run, Some(replacement.run_id));
+            assert_eq!(projection.fault_run_id, Some(run.run_id));
+            assert!(!projection.fault_affects_foreground);
+            assert!(retry.iter().any(|effect| matches!(effect,
+                CoordinatorEffect::StopRecording { run_id, .. } if *run_id == replacement.run_id)));
+            let start = reduce(
+                &mut state,
+                intent(IntentKind::Start, IntentSource::Frontend, 5),
+            );
+            assert!(!start.iter().any(|effect| matches!(
+                effect,
+                CoordinatorEffect::PrepareCapture { .. } | CoordinatorEffect::StartRecording { .. }
+            )));
+            assert!(matches!(state.capture, CaptureState::StopUncertain { .. }));
+            if unexpected_terminal {
+                // Start acknowledges A while B's physical stop is still unresolved.
+                let acknowledged = state.projection();
+                assert_eq!(acknowledged.status, ProjectionStatus::Error);
+                assert_eq!(acknowledged.current_run, Some(replacement.run_id));
+                assert_eq!(acknowledged.status_run, Some(replacement.run_id));
+                assert_eq!(acknowledged.fault, None);
+                assert!(!acknowledged.fault_affects_foreground);
+                assert!(acknowledged.pending_start);
+            }
+            assert!(state.validate().is_ok());
+            return;
+        }
+        let stopped_b = reduce(
             &mut state,
             CoordinatorEvent::CaptureStopped {
                 effect_id: stop_b_id,
@@ -4491,8 +4652,56 @@ mod tests {
                 outcome: CaptureStopOutcome::Inactive,
             },
         );
+        assert_eq!(state.projection().current_run, None);
+        assert!(!state.projection().fault_affects_foreground);
+        assert_eq!(state.projection().status, ProjectionStatus::Processing);
+        assert_eq!(state.projection().status_run, Some(replacement.run_id));
+        let (finalize_b_id, _) = find_finalize(&stopped_b);
+        let finalized_b = reduce(
+            &mut state,
+            CoordinatorEvent::FinalizeFinished {
+                effect_id: finalize_b_id,
+                run_id: replacement.run_id,
+                outcome: successor_outcome,
+            },
+        );
+        if unexpected_terminal {
+            assert_eq!(state.desired_panel, PanelGoal::Hidden);
+            assert!(finalized_b
+                .iter()
+                .any(|effect| matches!(effect, CoordinatorEffect::HidePanel { .. })));
+            assert_eq!(
+                state.projection().window_owner_run,
+                Some(replacement.run_id)
+            );
+        }
+        assert_eq!(state.projection().status, ProjectionStatus::Idle);
+        assert_eq!(state.projection().status_run, Some(replacement.run_id));
+        assert!(!state.projection().fault_affects_foreground);
         assert_eq!(state.projection().fault_run_id, Some(run.run_id));
         assert!(state.validate().is_ok());
+    }
+
+    #[test]
+    fn released_finalize_failure_preserves_pending_run_and_owned_fault() {
+        released_finalize_failure_successor_lifecycle(false, FinalizeOutcome::Committed, false);
+    }
+
+    #[test]
+    fn released_predecessor_fault_does_not_retain_successful_unexpected_terminal_panel() {
+        for outcome in [FinalizeOutcome::Committed, FinalizeOutcome::NoTranscript] {
+            released_finalize_failure_successor_lifecycle(true, outcome, false);
+        }
+    }
+
+    #[test]
+    fn released_predecessor_fault_does_not_own_successor_stop_uncertainty() {
+        released_finalize_failure_successor_lifecycle(false, FinalizeOutcome::Committed, true);
+    }
+
+    #[test]
+    fn released_predecessor_diagnosis_can_be_acknowledged_during_successor_stop_retry() {
+        released_finalize_failure_successor_lifecycle(true, FinalizeOutcome::Committed, true);
     }
 
     #[test]
@@ -4563,6 +4772,8 @@ mod tests {
             .iter()
             .any(|effect| matches!(effect, CoordinatorEffect::StartRecording { .. })));
         assert!(state.processing_jobs.contains_key(&run.run_id));
+        assert!(state.projection().fault_affects_foreground);
+        assert_eq!(state.projection().fault_run_id, Some(run.run_id));
         assert!(state.validate().is_ok());
     }
 
@@ -4964,8 +5175,10 @@ mod tests {
         assert!(state.validate().is_ok());
     }
 
-    #[test]
-    fn pending_prepare_failure_never_attributes_error_to_old_processing_tail() {
+    fn pending_successor_failure_before_predecessor_terminal(
+        runtime_failure: bool,
+        predecessor_outcome: FinalizeOutcome,
+    ) {
         let mut state = CoordinatorState::default();
         let initial = reduce(
             &mut state,
@@ -5002,9 +5215,31 @@ mod tests {
             CoordinatorEvent::PrepareFinished {
                 effect_id: prepare_id,
                 run_id: pending_run.run_id,
-                outcome: PrepareOutcome::Failed(ErrorCode(53)),
+                outcome: if runtime_failure {
+                    PrepareOutcome::Succeeded { generation: 2 }
+                } else {
+                    PrepareOutcome::Failed(ErrorCode(53))
+                },
             },
         );
+        if runtime_failure {
+            let failed = reduce(
+                &mut state,
+                CoordinatorEvent::RuntimeFailed {
+                    run_id: pending_run.run_id,
+                    error: ErrorCode(53),
+                },
+            );
+            let (stop_id, _) = find_stop(&failed);
+            reduce(
+                &mut state,
+                CoordinatorEvent::CaptureStopped {
+                    effect_id: stop_id,
+                    run_id: pending_run.run_id,
+                    outcome: CaptureStopOutcome::Inactive,
+                },
+            );
+        }
 
         let projection = state.projection();
         assert_eq!(projection.status, ProjectionStatus::Error);
@@ -5012,6 +5247,74 @@ mod tests {
         assert_eq!(projection.fault_run_id, Some(pending_run.run_id));
         assert_ne!(projection.status_run, Some(old_run.run_id));
         assert!(state.processing_jobs.contains_key(&old_run.run_id));
+        let successor_fault = state.fault;
+        assert!(matches!(successor_fault,
+            Some(CoordinatorFault::StartFailed { run_id, error: ErrorCode(53), .. }) |
+            Some(CoordinatorFault::RuntimeFailed { run_id, error: ErrorCode(53) })
+            if run_id == pending_run.run_id));
+        let (finalize_id, _) = find_finalize(&queued);
+        let settled = reduce(
+            &mut state,
+            CoordinatorEvent::FinalizeFinished {
+                effect_id: finalize_id,
+                run_id: old_run.run_id,
+                outcome: predecessor_outcome,
+            },
+        );
+        if matches!(predecessor_outcome, FinalizeOutcome::FailedReleased(_)) {
+            assert_eq!(state.fault, successor_fault);
+            let after = state.projection();
+            assert_eq!(after.status, ProjectionStatus::Error);
+            assert_eq!(after.status_run, projection.status_run);
+            assert_eq!(after.window_owner_run, projection.window_owner_run);
+            assert_eq!(after.fault_run_id, Some(pending_run.run_id));
+            assert!(after.fault_affects_foreground);
+            assert_eq!(state.terminal_status_run, Some(old_run.run_id));
+            assert!(!state.processing_jobs.contains_key(&old_run.run_id));
+            assert!(settled.iter().any(|effect| matches!(effect,
+                CoordinatorEffect::ReleaseTranscriptBarrier { run_id } if *run_id == old_run.run_id)));
+        } else {
+            assert_eq!(state.projection().fault_run_id, Some(old_run.run_id));
+            assert!(state.projection().fault_affects_foreground);
+            assert!(matches!(
+                state.processing_jobs[&old_run.run_id].state,
+                ProcessingState::ReleaseUnconfirmed { .. }
+            ));
+            let start = reduce(
+                &mut state,
+                intent(IntentKind::Start, IntentSource::Frontend, 4),
+            );
+            assert!(!start.iter().any(|effect| matches!(
+                effect,
+                CoordinatorEffect::PrepareCapture { .. } | CoordinatorEffect::StartRecording { .. }
+            )));
+            assert_eq!(state.desired_recording, DesiredRecording::Off);
+        }
+        assert!(state.validate().is_ok());
+    }
+
+    #[test]
+    fn pending_prepare_failure_never_attributes_error_to_old_processing_tail() {
+        pending_successor_failure_before_predecessor_terminal(
+            false,
+            FinalizeOutcome::FailedReleased(ErrorCode(77)),
+        );
+    }
+
+    #[test]
+    fn pending_runtime_failure_survives_predecessor_confirmed_release() {
+        pending_successor_failure_before_predecessor_terminal(
+            true,
+            FinalizeOutcome::FailedReleased(ErrorCode(77)),
+        );
+    }
+
+    #[test]
+    fn unconfirmed_predecessor_release_still_fences_a_failed_successor() {
+        pending_successor_failure_before_predecessor_terminal(
+            false,
+            FinalizeOutcome::ReleaseUnconfirmed(ErrorCode(77)),
+        );
     }
 
     #[test]

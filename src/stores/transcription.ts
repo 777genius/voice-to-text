@@ -494,6 +494,21 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     return `${runId ?? 'none'}:${revision}`;
   }
 
+  function isProvisionalCaptureErrorProjection(payload: RecordingIntentProjectionPayload | null): boolean {
+    if (!payload || payload.status !== RecordingStatus.Error || payload.faultAffectsForeground !== false ||
+        recordingIntentFault.value !== null || !Number.isSafeInteger(payload.runId) ||
+        Number(payload.runId) <= 0 || payload.runId !== sessionId.value) return false;
+    const owners = [payload.logicalRunId, payload.captureEpisodeId, payload.windowOwnerRunId];
+    if (owners.some((owner) => owner != null && (!Number.isSafeInteger(owner) || Number(owner) <= 0))) {
+      return false;
+    }
+    // Start can acknowledge the retired diagnosis while the physical stop is
+    // still unconfirmed. Missing or malformed metadata cannot authorize this.
+    if (payload.fault == null) return payload.faultRunId == null;
+    return payload.fault === 'finalizeFailed' && Number.isSafeInteger(payload.faultRunId) &&
+      Number(payload.faultRunId) > 0 && ![payload.runId, ...owners].includes(payload.faultRunId);
+  }
+
   function isCaptureReadinessPayload(value: unknown): value is RecordingCaptureReadinessPayload {
     if (!value || typeof value !== 'object') return false;
     const payload = value as Partial<RecordingCaptureReadinessPayload>;
@@ -2238,6 +2253,18 @@ export const useTranscriptionStore = defineStore('transcription', () => {
             const validFaultRunId = Number.isSafeInteger(nextFaultRunId) && Number(nextFaultRunId) > 0
               ? Number(nextFaultRunId)
               : null;
+            // Only an explicit producer classification can retire a diagnosis. Unknown,
+            // legacy, and malformed ownership must retain foreground cancellation fences.
+            const malformedFaultOwner = [nextRunId, nextFaultRunId, event.payload.logicalRunId,
+              event.payload.captureEpisodeId, event.payload.windowOwnerRunId].some(
+                (owner) => owner != null && (!Number.isSafeInteger(owner) || Number(owner) <= 0),
+              );
+            const backgroundReleasedFault = event.payload.fault === 'finalizeFailed' &&
+              event.payload.faultAffectsForeground === false && validFaultRunId !== null &&
+              !malformedFaultOwner &&
+              ![validRunId, event.payload.logicalRunId, event.payload.captureEpisodeId,
+                event.payload.windowOwnerRunId].includes(validFaultRunId);
+            const foregroundFault = backgroundReleasedFault ? undefined : event.payload.fault;
             const faultOwnerRunId = Object.prototype.hasOwnProperty.call(event.payload, 'faultRunId')
               ? validFaultRunId
               : validRunId;
@@ -2257,7 +2284,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
                 : null
             );
             const preservesConnectRetry =
-              (event.payload.fault === 'startFailed' || event.payload.fault === 'runtimeFailed') &&
+              (foregroundFault === 'startFailed' || foregroundFault === 'runtimeFailed') &&
               status.value !== RecordingStatus.Recording &&
               connectOperation !== null &&
               connectOperation.reachedRecording === false &&
@@ -2269,10 +2296,11 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               connectRetryCleanupRevision = nextIntentRevision;
               recordingIntentFault.value = null;
               recordingIntentFaultRunId.value = null;
-            } else if (event.payload.fault) {
-              recordingIntentFault.value = event.payload.fault;
+            } else if (foregroundFault) {
+              recordingIntentFault.value = foregroundFault;
               recordingIntentFaultRunId.value = faultOwnerRunId;
-            } else if (previousIntentRevision === null || nextIntentRevision > previousIntentRevision) {
+            } else if (previousIntentRevision === null || nextIntentRevision > previousIntentRevision ||
+                (backgroundReleasedFault && recordingIntentFaultRunId.value === validFaultRunId)) {
               connectRetryCleanupRevision = null;
               recordingIntentFault.value = null;
               recordingIntentFaultRunId.value = null;
@@ -2283,36 +2311,40 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               ...event.payload,
               awaitingSessionStart: awaitingSessionStart.value,
             }, 'debug');
+            // Keep B's transcript alive while its authoritative stop retry runs.
+            if (isProvisionalCaptureErrorProjection(event.payload)) {
+              status.value = RecordingStatus.Error;
+            }
             lastAcceptedRecordingIntentProjection.value = {
               ...event.payload,
               windowOwnerRunId: validWindowOwnerRunId,
             };
 
-            if (event.payload.fault) {
+            if (foregroundFault) {
               recordingStartPending.value = false;
               awaitingSessionStart.value = false;
               if (preservesConnectRetry) return;
               if (connectOperation) cancelConnectOperation();
               status.value = RecordingStatus.Error;
               if (faultOwnerRunId !== null && sessionId.value === faultOwnerRunId) {
-                closeCurrentRecordingSession(`intent_fault:${event.payload.fault}`);
+                closeCurrentRecordingSession(`intent_fault:${foregroundFault}`);
               }
-              const message = event.payload.fault === 'stopUncertain'
+              const message = foregroundFault === 'stopUncertain'
                 ? i18n.global.t('errors.microphoneStopUncertain')
-                : event.payload.fault === 'finalizeFailed'
+                : foregroundFault === 'finalizeFailed'
                   ? i18n.global.t('errors.transcriptFinalizeFailed')
                   : i18n.global.t('errors.processing');
               const preservesRunError =
-                (event.payload.fault === 'runtimeFailed' ||
-                  event.payload.fault === 'startFailed' ||
-                  event.payload.fault === 'finalizeFailed') &&
+                (foregroundFault === 'runtimeFailed' ||
+                  foregroundFault === 'startFailed' ||
+                  foregroundFault === 'finalizeFailed') &&
                 faultOwnerRunId !== null &&
                 terminalRecordingErrorSessionId === faultOwnerRunId &&
                 errorType.value !== null &&
                 errorType.value !== 'processing';
               if (!preservesRunError) {
                 setRecordingError(
-                  event.payload.fault === 'stopUncertain' ? null : 'processing',
+                  foregroundFault === 'stopUncertain' ? null : 'processing',
                   message,
                   null,
                   message,
@@ -2418,6 +2450,18 @@ export const useTranscriptionStore = defineStore('transcription', () => {
               payloadSessionId,
               nextStatus,
             }, 'warn');
+            return;
+          }
+
+          const currentProjection = lastAcceptedRecordingIntentProjection.value;
+          if (nextStatus === RecordingStatus.Error && status.value === RecordingStatus.Error &&
+              isProvisionalCaptureErrorProjection(currentProjection) &&
+              currentProjection?.intentRevision === recordingIntentRevision.value &&
+              currentProjection?.runId === payloadSessionId) {
+            // This paired status confirms the provisional capture error, not a
+            // transcript terminal. A successful retry can still finalize B.
+            recordingStateRevision += 1;
+            lastAcceptedRecordingStatus.value = { ...event.payload };
             return;
           }
 
@@ -4170,6 +4214,7 @@ export const useTranscriptionStore = defineStore('transcription', () => {
     recordingDesiredOn,
     recordingStartPending,
     recordingIntentRunId,
+    recordingIntentFault: computed(() => recordingIntentFault.value),
     recordingIntentFaultRunId: computed(() => recordingIntentFaultRunId.value),
     recordingIntentRevision,
     lastAcceptedRecordingIntentProjection,

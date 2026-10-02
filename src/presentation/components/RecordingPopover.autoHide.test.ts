@@ -2980,4 +2980,182 @@ describe('RecordingPopover mini auto-hide e2e', () => {
     wrapper.unmount();
   });
 
+  it.each(['Recording', 'Processing', 'finalizing', 'Idle'])('producer event pair released A fault preserves B %s', async (step) => {
+    const phase = step === 'finalizing' ? 'Processing' : step;
+    const wrapper = mountRecordingPopover();
+    try {
+      await waitForListenerCount('recording:intent-projection', 1);
+      const store = useTranscriptionStore();
+      const originalInvoke = invokeMock.getMockImplementation()!;
+      invokeMock.mockImplementation(async (command: string, args: any) => {
+        if (command === 'get_recording_status') return phase;
+        if (command === 'get_recording_window_epoch_for_session') return args.sessionId === 52 ? 2 : 1;
+        return originalInvoke(command, args);
+      });
+      nativeWindowEpoch.value = 2;
+      await emitTauriEvent('recording:start-requested', {windowEpoch: 2, warmStartExpected: false});
+      await emitTauriEvent('recording:window-shown', {windowEpoch: 2});
+      await emitTauriEvent('recording:intent-projection', {intentRevision: 3, runId: 52,
+        windowOwnerRunId: 52, desiredOn: true, pendingStart: false,
+        status: 'Recording', processingJobs: 0, shutdownRequested: false});
+      await emitTauriEvent('recording:capture-readiness', {revision: 3, runId: 52, generation: 2,
+        state: 'streaming', reason: 'recording', captureReady: true, transportReady: true});
+      await emitTauriEvent('recording:status', {session_id: 52, status: 'Recording'});
+      expect(store.status).toBe('Recording');
+      expect(store.sessionId).toBe(52);
+      if (step === 'finalizing' || step === 'Idle') {
+        // Stop B carries its physical window owner before capture cleanup.
+        await emitTauriEvent('recording:intent-projection', {
+          intentRevision: 4, runId: 52, windowOwnerRunId: 52,
+          faultRunId: 51, faultAffectsForeground: false, fault: 'finalizeFailed',
+          desiredOn: false, pendingStart: false, status: 'Processing',
+          processingJobs: 0, shutdownRequested: false, retainTerminalPanel: false,
+        });
+        await emitTauriEvent('recording:status', {
+          session_id: 52, window_owner_session_id: 52, status: 'Processing', stopped_via_hotkey: true,
+        });
+        if (step === 'Idle') {
+          await emitTauriEvent('recording:intent-projection', {
+            intentRevision: 4, runId: null, windowOwnerRunId: null,
+            faultRunId: 51, faultAffectsForeground: false, fault: 'finalizeFailed',
+            desiredOn: false, pendingStart: false, status: 'Processing',
+            processingJobs: 1, shutdownRequested: false, retainTerminalPanel: false,
+          });
+          await emitTauriEvent('recording:status', {
+            session_id: 52, window_owner_session_id: null, status: 'Processing', stopped_via_hotkey: true,
+          });
+        }
+      }
+      // Native reducer retains recoverable fault A after FailedReleased(A), even after StartSucceeded(B).
+      // This is current intent revision, not the obsolete-revision event covered by prior tests.
+      await emitTauriEvent('recording:intent-projection', {intentRevision: phase === 'Recording' ? 3 : 4, runId: step === 'finalizing' || step === 'Idle' ? null : 52,
+        faultRunId: 51, faultAffectsForeground: false, windowOwnerRunId: step === 'Processing' ? 52 : null,
+        desiredOn: phase === 'Recording', pendingStart: false,
+        status: phase, fault: 'finalizeFailed', processingJobs: step === 'finalizing' ? 1 : 0, shutdownRequested: false,
+        retainTerminalPanel: false});
+      // EmitProjection producer immediately emits the paired status for B.
+      await emitTauriEvent('recording:status', {session_id: 52,
+        window_owner_session_id: step === 'Processing' ? 52 : null,
+        status: phase, stopped_via_hotkey: phase === 'Processing'});
+      await flushMicrotasks();
+      expect(store.lastAcceptedRecordingIntentProjection?.faultRunId).toBe(51);
+      expect(store.lastAcceptedRecordingIntentProjection?.fault).toBe('finalizeFailed');
+      if (phase !== 'Idle') expect(store.sessionId).toBe(52);
+      if (phase !== 'Recording') expect(store.lastAcceptedRecordingIntentProjection?.windowOwnerRunId).toBe(52);
+      expect(store.status).toBe(phase);
+      expect(store.error).toBeNull();
+      expect(document.querySelector('.mini-status-dot')?.classList.contains('error')).toBe(false);
+      if (phase === 'Recording') {
+        await vi.advanceTimersByTimeAsync(500);
+        expect(hideWindowMock).not.toHaveBeenCalled();
+      } else {
+        await vi.advanceTimersByTimeAsync(500);
+        expect(invokeMock).toHaveBeenCalledWith('hide_recording_window_if_current', { windowEpoch: 2 });
+      }
+    } finally {wrapper.unmount();}
+  });
+
+  it.each(['retained', 'acknowledged', 'legacy', 'malformed', 'dangling'])('shows provisional B capture error and accepts B retry terminal (%s)', async (diagnosis) => {
+    const wrapper = mountRecordingPopover();
+    try {
+      await waitForListenerCount('recording:intent-projection', 1);
+      const store = useTranscriptionStore();
+      nativeWindowEpoch.value = 2;
+      await emitTauriEvent('recording:start-requested', { windowEpoch: 2, warmStartExpected: false });
+      await emitTauriEvent('recording:intent-projection', {
+        intentRevision: 3, runId: 52, logicalRunId: 52, continuationPhase: 'active',
+        desiredOn: true, pendingStart: false, status: 'Recording',
+        processingJobs: 0, shutdownRequested: false,
+      });
+      await emitTauriEvent('recording:status', { session_id: 52, status: 'Recording' });
+      const stopped = {
+        intentRevision: 4, runId: 52, windowOwnerRunId: 52,
+        faultRunId: 51, faultAffectsForeground: false, fault: 'finalizeFailed',
+        desiredOn: false, pendingStart: false, status: 'Processing',
+        processingJobs: 0, shutdownRequested: false, retainTerminalPanel: false,
+      };
+      await emitTauriEvent('recording:intent-projection', stopped);
+      await emitTauriEvent('recording:status', {
+        session_id: 52, window_owner_session_id: 52, status: 'Processing', stopped_via_hotkey: true,
+      });
+      expect(store.status).toBe('Processing');
+      expect(document.querySelector('.mini-closing')).not.toBeNull();
+      // First StillActive stop is provisional; A's diagnosis remains background.
+      await emitTauriEvent('recording:intent-projection', { ...stopped, status: 'Error' });
+      expect(store.status).toBe('Error');
+      expect(store.sessionId).toBe(52);
+      expect(document.querySelector('.mini-closing')).toBeNull();
+      await emitTauriEvent('recording:status', {
+        session_id: 52, window_owner_session_id: 52, status: 'Error', stopped_via_hotkey: true,
+      });
+      expect(store.status).toBe('Error');
+      expect(store.sessionId).toBe(52);
+      expect(store.lastAcceptedRecordingStatus?.status).toBe('Error');
+      expect(store.lastAcceptedRecordingIntentProjection?.faultRunId).toBe(51);
+      expect(document.querySelector('.mini-status-dot')?.classList.contains('error')).toBe(true);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(hideWindowMock).not.toHaveBeenCalled();
+
+      const { fault: _fault, faultRunId: _faultRunId, ...withoutFault } = stopped;
+      let recovery: Record<string, unknown> = stopped;
+      if (diagnosis !== 'retained') {
+        const acknowledged = {
+          ...withoutFault, intentRevision: 5, logicalRunId: 52, captureEpisodeId: 52,
+          continuationPhase: 'finalizing', desiredOn: true, pendingStart: true, status: 'Error',
+          faultAffectsForeground: diagnosis === 'legacy' ? undefined : false,
+          ...(diagnosis === 'malformed' ? { logicalRunId: '52' } : {}),
+          ...(diagnosis === 'dangling' ? { faultRunId: 51 } : {}),
+        };
+        await emitTauriEvent('recording:intent-projection', acknowledged);
+        await emitTauriEvent('recording:status', {
+          session_id: 52, window_owner_session_id: 52, status: 'Error', stopped_via_hotkey: false,
+        });
+        if (diagnosis === 'legacy' || diagnosis === 'malformed' || diagnosis === 'dangling') {
+          // Unknown applicability/ownership cannot preserve a transcript after Error.
+          expect(store.closedSessionIdFloor).toBe(52);
+          return;
+        }
+        expect(store.status).toBe('Error');
+        expect(store.sessionId).toBe(52);
+        expect(store.closedSessionIdFloor).toBeLessThan(52);
+        expect(store.lastAcceptedRecordingIntentProjection?.fault).toBeUndefined();
+        expect(store.lastAcceptedRecordingIntentProjection?.pendingStart).toBe(true);
+        expect(document.querySelector('.mini-status-dot')?.classList.contains('error')).toBe(true);
+        // Cancel queued C while B's stop retry still owns physical capture.
+        recovery = { ...withoutFault, intentRevision: 6 };
+        await emitTauriEvent('recording:intent-projection', { ...recovery, status: 'Error' });
+        await emitTauriEvent('recording:status', {
+          session_id: 52, window_owner_session_id: 52, status: 'Error', stopped_via_hotkey: true,
+        });
+        expect(store.closedSessionIdFloor).toBeLessThan(52);
+      }
+      await emitTauriEvent('recording:intent-projection', {
+        ...recovery, runId: null, windowOwnerRunId: null, processingJobs: 1,
+      });
+      await emitTauriEvent('recording:status', {
+        session_id: 52, window_owner_session_id: null, status: 'Processing', stopped_via_hotkey: true,
+      });
+      expect(store.status).toBe('Processing');
+      expect(store.sessionId).toBe(52);
+      expect(document.querySelector('.mini-status-dot')?.classList.contains('error')).toBe(false);
+      await emitTauriEvent('transcription:final', {
+        session_id: 52, delivery_seq: 1, text: 'B stable', timestamp: 0, start: 0, duration: 1,
+      });
+      await emitTauriEvent('transcription:terminal', {
+        session_id: 52, stable_snapshot: 'B stable B terminal', continuation_delivery: true,
+        delivery_complete: true, report: null, error: null,
+      });
+      await flushMicrotasks();
+      expect(store.finalText).toBe('B stable B terminal');
+      await emitTauriEvent('recording:intent-projection', {
+        ...recovery, runId: null, windowOwnerRunId: null, processingJobs: 0, status: 'Idle',
+      });
+      await emitTauriEvent('recording:status', {
+        session_id: 52, window_owner_session_id: null, status: 'Idle', stopped_via_hotkey: true,
+      });
+      expect(store.status).toBe('Idle');
+      expect(store.error).toBeNull();
+    } finally { wrapper.unmount(); }
+  });
+
 });

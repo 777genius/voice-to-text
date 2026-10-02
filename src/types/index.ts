@@ -104,6 +104,8 @@ export interface RecordingIntentProjectionPayload {
   /** Physical recording-window lease owner for this intent revision. */
   windowOwnerRunId?: number | null;
   faultRunId?: number | null;
+  /** False when no fault is retained, or for a confirmed released diagnosis of a retired run. */
+  faultAffectsForeground?: boolean;
   intentRevision: number;
   status: RecordingStatus;
   desiredOn: boolean;

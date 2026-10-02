@@ -109,7 +109,7 @@ const stoppedMiniWindowOwnerRunId = computed<number | null>(() => {
   if (!appConfigStore.showMiniRecordingWindow) return null;
   const projection = store.lastAcceptedRecordingIntentProjection;
   const owner = projection?.windowOwnerRunId;
-  if (!projection || projection.desiredOn || projection.fault || retainsTerminalPanel.value ||
+  if (!projection || projection.desiredOn || store.recordingIntentFault || retainsTerminalPanel.value ||
       store.hasError || store.error ||
       !Number.isSafeInteger(owner) || Number(owner) <= 0) return null;
   return Number(owner);

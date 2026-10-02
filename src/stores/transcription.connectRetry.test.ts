@@ -1058,6 +1058,74 @@ describe('transcription connect-retry reliability', () => {
     expect(store.sessionId).toBeNull();
   });
 
+  it('keeps B connect and pending start alive across a current released A diagnosis', async () => {
+    invokeMock.mockResolvedValue(null);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    const pending = deferred<string>();
+    invokeMock.mockImplementation((command) => command === 'start_recording'
+      ? pending.promise : Promise.resolve(null));
+    const start = store.startRecording();
+    await flushMicrotasks();
+    await handlers.get('recording:status')({ payload: { session_id: 52, status: 'Starting' } });
+    await handlers.get('recording:intent-projection')({ payload: {
+      runId: 52, faultRunId: 51, faultAffectsForeground: false, intentRevision: 3,
+      status: 'Starting', desiredOn: true, pendingStart: true,
+      processingJobs: 0, shutdownRequested: false, fault: 'finalizeFailed',
+    } });
+    expect(store.isConnecting).toBe(true);
+    expect(store.recordingStartPending).toBe(true);
+    expect(store.status).toBe('Starting');
+    expect(store.error).toBeNull();
+    expect(store.recordingIntentFaultRunId).toBeNull();
+    expect(store.lastAcceptedRecordingIntentProjection?.faultRunId).toBe(51);
+    await handlers.get('recording:status')({ payload: { session_id: 52, status: 'Recording' } });
+    pending.resolve('Recording start requested');
+    await start;
+    expect(store.status).toBe('Recording');
+    expect(store.sessionId).toBe(52);
+    expect(store.error).toBeNull();
+  });
+
+  it.each([
+    ['own run', { runId: 52, faultRunId: 52, faultAffectsForeground: false }],
+    ['shared logical owner', { logicalRunId: 51, captureEpisodeId: 52, continuationPhase: 'active',
+      runId: 52, faultRunId: 51, faultAffectsForeground: false }],
+    ['unconfirmed release', { runId: 52, faultRunId: 51, faultAffectsForeground: true }],
+    ['legacy', { runId: 52, faultRunId: 51 }],
+    ['unknown applicability', { runId: 52, faultRunId: 51, faultAffectsForeground: 'false' }],
+    ['malformed fault owner', { runId: 52, faultRunId: '51', faultAffectsForeground: false }],
+    ['malformed capture owner', { runId: -52, faultRunId: 51, faultAffectsForeground: false }],
+    ['missing fault owner', { runId: 52, faultAffectsForeground: false }],
+  ])('keeps %s finalize faults visible and fail-closed', async (_label, ownership) => {
+    invokeMock.mockResolvedValue(null);
+    const { handlers, store } = await initializeStoreWithHandlers();
+    await handlers.get('recording:status')({ payload: { session_id: 52, status: 'Recording' } });
+    await handlers.get('recording:intent-projection')({ payload: {
+      ...ownership, intentRevision: 3, status: 'Processing', desiredOn: true,
+      pendingStart: true, processingJobs: 1, shutdownRequested: false, fault: 'finalizeFailed',
+    } });
+    expect(store.status).toBe('Error');
+    expect(store.error).toBeTruthy();
+    expect(store.recordingStartPending).toBe(false);
+    expect(store.recordingIntentFault).toBe('finalizeFailed');
+  });
+
+  it.each(['runtimeFailed', 'startFailed', 'stopUncertain'])(
+    'does not retire %s using finalize release metadata', async (fault) => {
+      invokeMock.mockResolvedValue(null);
+      const { handlers, store } = await initializeStoreWithHandlers();
+      await handlers.get('recording:status')({ payload: { session_id: 52, status: 'Recording' } });
+      await handlers.get('recording:intent-projection')({ payload: {
+        runId: 52, faultRunId: 51, faultAffectsForeground: false, intentRevision: 3,
+        status: 'Processing', desiredOn: true, pendingStart: true,
+        processingJobs: 1, shutdownRequested: false, fault,
+      } });
+      expect(store.status).toBe('Error');
+      expect(store.error).toBeTruthy();
+      expect(store.recordingStartPending).toBe(false);
+    },
+  );
+
   it.each(['error-first', 'projection-first', 'connection-quota-projection'] as const)(
     'keeps the provider quota error when runtimeFailed arrives %s',
     async (order) => {
