@@ -26,6 +26,8 @@ pub struct RecordingIntentProjectionPayload {
     pub fault: Option<RecordingIntentProjectionFault>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fault_run_id: Option<u64>,
+    /// Applicability of retained fault diagnosis to foreground capture/admission.
+    pub fault_affects_foreground: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -114,6 +116,7 @@ mod tests {
             shutdown_requested: false,
             fault: None,
             fault_run_id: None,
+            fault_affects_foreground: false,
         };
         let value = serde_json::to_value(&payload).unwrap();
         assert_eq!(value["logicalRunId"], 101);
@@ -122,6 +125,18 @@ mod tests {
         assert_eq!(value["windowOwnerRunId"], 102);
         assert_eq!(value["continuationPhase"], "continue_pending");
         assert!(value.get("retainTerminalPanel").is_none());
+        assert_eq!(value["faultAffectsForeground"], false);
+        payload.fault = Some(RecordingIntentProjectionFault::FinalizeFailed);
+        payload.fault_run_id = Some(100);
+        let background = serde_json::to_value(&payload).unwrap();
+        assert_eq!(background["fault"], "finalizeFailed");
+        assert_eq!(background["faultRunId"], 100);
+        assert_eq!(background["faultAffectsForeground"], false);
+        payload.fault_affects_foreground = true;
+        assert_eq!(
+            serde_json::to_value(&payload).unwrap()["faultAffectsForeground"],
+            true
+        );
         payload.retain_terminal_panel = true;
         let retained = serde_json::to_value(&payload).unwrap();
         assert_eq!(retained["retainTerminalPanel"], true);

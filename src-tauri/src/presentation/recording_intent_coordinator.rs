@@ -581,6 +581,8 @@ pub struct RecordingStatusProjection {
     pub shutdown_requested: bool,
     pub fault: Option<ProjectionFault>,
     pub fault_run_id: Option<RunId>,
+    /// False only for a confirmed released diagnosis owned by a retired run.
+    pub fault_affects_foreground: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -609,6 +611,7 @@ pub enum CoordinatorFault {
     FinalizeFailed {
         run_id: RunId,
         error: ErrorCode,
+        release_confirmed: bool,
     },
 }
 
@@ -1277,7 +1280,37 @@ impl CoordinatorState {
         }
     }
 
+    fn fault_affects_foreground(&self) -> bool {
+        let Some(CoordinatorFault::FinalizeFailed {
+            run_id,
+            release_confirmed: true,
+            ..
+        }) = self.fault
+        else {
+            return self.fault.is_some();
+        };
+        // Unknown provider release and shared logical ownership remain fail-closed.
+        if self
+            .processing_jobs
+            .values()
+            .any(|job| matches!(job.state, ProcessingState::ReleaseUnconfirmed { .. }))
+            || self
+                .continuation
+                .is_some_and(|route| route.key.logical_run_id == run_id)
+        {
+            return true;
+        }
+        let foreground_run = self
+            .capture
+            .run()
+            .map(|run| run.run_id)
+            .or_else(|| self.processing_jobs.keys().next_back().copied())
+            .or(self.terminal_status_run);
+        foreground_run.map_or(true, |foreground| foreground == run_id)
+    }
+
     pub fn projection(&self) -> RecordingStatusProjection {
+        let fault_affects_foreground = self.fault_affects_foreground();
         let status = match self.capture {
             CaptureState::StopUncertain { .. } => ProjectionStatus::Error,
             CaptureState::Preparing { .. } | CaptureState::Buffering { .. }
@@ -1295,7 +1328,7 @@ impl CoordinatorState {
             CaptureState::Starting { .. } => ProjectionStatus::Starting,
             CaptureState::Recording { .. } => ProjectionStatus::Recording,
             CaptureState::Stopping { .. } => ProjectionStatus::Processing,
-            CaptureState::Idle if self.fault.is_some() => ProjectionStatus::Error,
+            CaptureState::Idle if fault_affects_foreground => ProjectionStatus::Error,
             CaptureState::Idle if !self.processing_jobs.is_empty() => ProjectionStatus::Processing,
             CaptureState::Idle => ProjectionStatus::Idle,
         };
@@ -1352,6 +1385,7 @@ impl CoordinatorState {
             shutdown_requested: self.shutdown_requested,
             fault: self.fault.map(CoordinatorFault::projection),
             fault_run_id: self.fault.map(CoordinatorFault::run_id),
+            fault_affects_foreground,
         }
     }
 
@@ -1722,7 +1756,14 @@ fn apply_intent(state: &mut CoordinatorState, intent: RecordingIntent, phase: &m
                     _ => None,
                 })
         {
-            set_recoverable_fault(state, CoordinatorFault::FinalizeFailed { run_id, error });
+            set_recoverable_fault(
+                state,
+                CoordinatorFault::FinalizeFailed {
+                    run_id,
+                    error,
+                    release_confirmed: false,
+                },
+            );
             force_off_for_foreground_error(state, run_id);
             *phase = TracePhase::IntentRejected;
             return;
@@ -2563,7 +2604,14 @@ fn apply_finalize_finished(
         FinalizeOutcome::FailedReleased(error) => {
             state.processing_jobs.remove(&run_id);
             state.terminal_status_run = Some(run_id);
-            set_recoverable_fault(state, CoordinatorFault::FinalizeFailed { run_id, error });
+            set_recoverable_fault(
+                state,
+                CoordinatorFault::FinalizeFailed {
+                    run_id,
+                    error,
+                    release_confirmed: true,
+                },
+            );
             effects.push(CoordinatorEffect::ReleaseTranscriptBarrier { run_id });
         }
         FinalizeOutcome::ReleaseUnconfirmed(error) => {
@@ -2572,7 +2620,14 @@ fn apply_finalize_finished(
             }
             // Retain the provider ownership fence. Idle capture alone does not
             // prove that the previous provider can no longer consume audio.
-            set_recoverable_fault(state, CoordinatorFault::FinalizeFailed { run_id, error });
+            set_recoverable_fault(
+                state,
+                CoordinatorFault::FinalizeFailed {
+                    run_id,
+                    error,
+                    release_confirmed: false,
+                },
+            );
             if state
                 .continuation
                 .is_some_and(|route| route.key.logical_run_id == run_id)
@@ -2595,7 +2650,14 @@ fn apply_finalize_finished(
             } else {
                 state.processing_jobs.remove(&run_id);
                 state.terminal_status_run = Some(run_id);
-                set_recoverable_fault(state, CoordinatorFault::FinalizeFailed { run_id, error });
+                set_recoverable_fault(
+                    state,
+                    CoordinatorFault::FinalizeFailed {
+                        run_id,
+                        error,
+                        release_confirmed: false,
+                    },
+                );
                 state.blocked_start_revision = state.desired_recording.revision();
                 force_off_for_foreground_error(state, run_id);
                 effects.push(CoordinatorEffect::ReleaseTranscriptBarrier { run_id });
@@ -4476,14 +4538,22 @@ mod tests {
         let (replacement_start, replacement) = find_start(&finalized);
         assert_ne!(replacement.run_id, run.run_id);
         assert!(!state.processing_jobs.contains_key(&run.run_id));
+        // B is eligible immediately after release, while A's diagnosis remains.
+        assert!(!state.projection().fault_affects_foreground);
+        assert_eq!(state.projection().status, ProjectionStatus::Starting);
         complete_start(&mut state, replacement_start, replacement.run_id);
         assert_eq!(state.projection().fault_run_id, Some(run.run_id));
+        assert!(!state.projection().fault_affects_foreground);
+        assert_eq!(state.projection().status, ProjectionStatus::Recording);
+        assert_eq!(state.projection().status_run, Some(replacement.run_id));
         let stop_b = reduce(
             &mut state,
             intent(IntentKind::Stop, IntentSource::CarbonHotkey, 4),
         );
         let (stop_b_id, _) = find_stop(&stop_b);
-        reduce(
+        assert!(!state.projection().fault_affects_foreground);
+        assert_eq!(state.projection().status, ProjectionStatus::Processing);
+        let stopped_b = reduce(
             &mut state,
             CoordinatorEvent::CaptureStopped {
                 effect_id: stop_b_id,
@@ -4491,6 +4561,22 @@ mod tests {
                 outcome: CaptureStopOutcome::Inactive,
             },
         );
+        assert_eq!(state.projection().current_run, None);
+        assert!(!state.projection().fault_affects_foreground);
+        assert_eq!(state.projection().status, ProjectionStatus::Processing);
+        assert_eq!(state.projection().status_run, Some(replacement.run_id));
+        let (finalize_b_id, _) = find_finalize(&stopped_b);
+        reduce(
+            &mut state,
+            CoordinatorEvent::FinalizeFinished {
+                effect_id: finalize_b_id,
+                run_id: replacement.run_id,
+                outcome: FinalizeOutcome::Committed,
+            },
+        );
+        assert_eq!(state.projection().status, ProjectionStatus::Idle);
+        assert_eq!(state.projection().status_run, Some(replacement.run_id));
+        assert!(!state.projection().fault_affects_foreground);
         assert_eq!(state.projection().fault_run_id, Some(run.run_id));
         assert!(state.validate().is_ok());
     }
@@ -4563,6 +4649,8 @@ mod tests {
             .iter()
             .any(|effect| matches!(effect, CoordinatorEffect::StartRecording { .. })));
         assert!(state.processing_jobs.contains_key(&run.run_id));
+        assert!(state.projection().fault_affects_foreground);
+        assert_eq!(state.projection().fault_run_id, Some(run.run_id));
         assert!(state.validate().is_ok());
     }
 

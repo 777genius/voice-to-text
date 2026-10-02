@@ -2129,6 +2129,7 @@ fn execute_recording_coordinator_effect(
                     shutdown_requested: projection.shutdown_requested,
                     fault: projection.fault.map(coordinator_projection_fault),
                     fault_run_id: projection.fault_run_id.map(|run| run.get()),
+                    fault_affects_foreground: projection.fault_affects_foreground,
                 },
             );
             let session_id = projection.status_run.map_or(0, |run| run.get());
