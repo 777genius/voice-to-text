@@ -1,0 +1,135 @@
+name: macOS Signing Qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_version:
+        description: Candidate version matching the trusted commit, for example 0.16.11
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-signing-qualification-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  signing-custody:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require owner dispatch from the trusted signing workflow
+        shell: bash
+        env:
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_ACTOR" = "$REPOSITORY_OWNER"
+          test "$TRIGGERING_ACTOR" = "$REPOSITORY_OWNER"
+          test "$GITHUB_REF" = refs/heads/release/macos-signing
+          test "$GITHUB_WORKFLOW_REF" = "$GITHUB_REPOSITORY/.github/workflows/macos-signing-qualification.yml@refs/heads/release/macos-signing"
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+
+  qualify-macos:
+    needs: signing-custody
+    environment: macos-signing
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      VITE_API_URL: https://api.voicetext.site
+      VOICE_TO_TEXT_BACKEND_URL: wss://api.voicetext.site
+
+    steps:
+      - name: Recheck owner and trusted source before checkout
+        shell: bash
+        env:
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTOR" = "$REPOSITORY_OWNER"
+          test "$TRIGGERING_ACTOR" = "$REPOSITORY_OWNER"
+          test "$GITHUB_REF" = refs/heads/release/macos-signing
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+
+      - name: Checkout qualified source
+        uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate source and candidate version
+        shell: bash
+        env:
+          CANDIDATE_VERSION: ${{ inputs.candidate_version }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          [[ "$CANDIDATE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$(jq -er .version package.json)" = "$CANDIDATE_VERSION"
+          test "$(jq -er .version src-tauri/tauri.conf.json)" = "$CANDIDATE_VERSION"
+
+      - name: Prepare pinned Apple signing and API notarization
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+        run: bash scripts/ci/prepare-macos-signing.sh
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: lts/*
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6.0.8
+        with:
+          version: 9.15.9
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2.9.1
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build signed notarized candidate without publication
+        run: bash scripts/build-signed-macos.sh --target ${{ matrix.target }} --bundles app,dmg
+
+      - name: Verify strict signatures and transported notarized artifacts
+        run: bash scripts/ci/verify-macos-artifacts.sh "src-tauri/target/${{ matrix.target }}/release/bundle" macos-signing-custody.json
+
+      - name: Upload qualified macOS artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-signing-${{ matrix.target }}-${{ github.sha }}
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
+            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            macos-signing-custody.json
+          if-no-files-found: error
+          retention-days: 14

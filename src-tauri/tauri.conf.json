@@ -134,8 +134,9 @@
             "files": {
                 "Frameworks/libswift_Concurrency.dylib": "target/swift-runtime/libswift_Concurrency.dylib"
             },
-            "providerShortName": "6C84CW694S",
-            "signingIdentity": "Developer ID Application: Oleksii Zelenko (6C84CW694S)"
+            "providerShortName": "86399583GS",
+            "signingIdentity": "Developer ID Application: ILLIA ZELENKO (86399583GS)",
+            "hardenedRuntime": true
         },
         "windows": {
             "certificateThumbprint": null,
