@@ -161,12 +161,13 @@ test('audio gate is optional, verifies supplied evidence, and keeps quality gate
   assert.ok(!release.includes('waive_macos_audio_gate'));
 });
 
-test('release notes use the workflow revision while binaries stay pinned to the tag', () => {
+test('release notes use the workflow revision while binaries use the immutable resolved tag commit', () => {
   const release = readRepositoryFile('.github/workflows/release.yml');
 
   assert.ok(release.includes('ref: ${{ github.sha }}'));
-  assert.ok(release.includes('ref: ${{ env.RELEASE_TAG }}'));
-  assert.ok(release.includes('release_commit="$(git rev-list -n 1 "$tag")"') || release.includes('commit="$(git rev-list -n 1 "$tag")"'));
+  assert.ok(release.includes('ref: ${{ env.RELEASE_COMMIT }}'));
+  assert.ok(release.includes('commit="$(git rev-parse "refs/tags/${tag}^{commit}")"'));
+  assert.ok(release.includes('test "$commit" = "$GITHUB_SHA"'));
 });
 
 test('optional audio evidence does not transitively skip release builds or publication', () => {
