@@ -130,10 +130,7 @@
         "macOS": {
             "entitlements": "entitlements.plist",
             "exceptionDomain": null,
-            "frameworks": [],
-            "files": {
-                "Frameworks/libswift_Concurrency.dylib": "target/swift-runtime/libswift_Concurrency.dylib"
-            },
+            "frameworks": ["target/swift-runtime/libswift_Concurrency.dylib"],
             "providerShortName": "86399583GS",
             "signingIdentity": "Developer ID Application: ILLIA ZELENKO (86399583GS)",
             "hardenedRuntime": true
