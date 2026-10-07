@@ -20,7 +20,8 @@ macos_signing_preflight() {
         echo "Require API key ID, issuer UUID and readable absolute APPLE_API_KEY_PATH (.p8)" >&2; return 1
     fi
     local identity='Developer ID Application: ILLIA ZELENKO (86399583GS)'
-    if [ -n "${APPLE_SIGNING_IDENTITY:-}" ] && [ "$APPLE_SIGNING_IDENTITY" != "$identity" ]; then
+    if [ -n "${APPLE_SIGNING_IDENTITY:-}" ] && [ "$APPLE_SIGNING_IDENTITY" != "$identity" ] &&
+       [ "$APPLE_SIGNING_IDENTITY" != DBF74EF5BF85404EE5355248F22C883027857C94 ]; then
         echo "Unexpected APPLE_SIGNING_IDENTITY" >&2; return 1
     fi
     export APPLE_SIGNING_IDENTITY="$identity"
