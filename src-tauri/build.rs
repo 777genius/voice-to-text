@@ -12,12 +12,14 @@ const COPY_SWIFT_RUNTIME_TO_CARGO_PROFILE_ENV: &str =
     "VOICETEXT_COPY_SWIFT_RUNTIME_TO_CARGO_PROFILE";
 
 fn main() {
-    // Сначала запускаем стандартный билд Tauri
+    #[cfg(target_os = "macos")]
+    prepare_swift_runtime_for_cargo();
+
+    // Runtime должен существовать до проверки framework paths в Tauri.
     tauri_build::build();
 
     #[cfg(target_os = "macos")]
     {
-        prepare_swift_runtime_for_cargo();
         println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
         println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/Frameworks");
         println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
@@ -115,6 +117,10 @@ fn prepare_swift_runtime_for_cargo() {
     if let Some(target_dir) = profile_dir.parent() {
         copy_swift_runtime(&source_path, &target_dir.join("swift-runtime"));
     }
+
+    let manifest_dir =
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is not set"));
+    copy_swift_runtime(&source_path, &manifest_dir.join("target/swift-runtime"));
 }
 
 #[cfg(target_os = "macos")]
