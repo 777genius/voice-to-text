@@ -61,10 +61,12 @@ gh workflow run "macOS Audio Release Gate" \
 
 # Release без audio evidence
 gh workflow run Release \
+  --ref release/macos-signing \
   -f tag=v0.16.10
 
 # Либо со строгой проверкой optional audio evidence
 gh workflow run Release \
+  --ref release/macos-signing \
   -f tag=v0.16.10 \
   -f macos_audio_gate_run_id=<SUCCESSFUL_GATE_RUN_ID>
 ```
@@ -202,6 +204,58 @@ git push origin v0.9.4
 
 ---
 
+## macOS signing: новый Apple team и trusted source
+
+Developer ID Application использует team `86399583GS` и identity
+`Developer ID Application: ILLIA ZELENKO (86399583GS)`. CI принимает только
+сертификат `DBF74EF5BF85404EE5355248F22C883027857C94`. Apple credentials доступны
+только в environment `macos-signing` для ветки `release/macos-signing`.
+Исходный actor и инициатор rerun должны быть владельцем репозитория.
+
+После независимого review владелец fast-forward обновляет trusted branch до
+точного проверенного commit из `master` и проверяет remote SHA. Пример без
+публикации, замените `REVIEWED_MASTER_SHA` и версию проверенными значениями:
+
+```bash
+git fetch origin master
+git merge-base --is-ancestor REVIEWED_MASTER_SHA origin/master
+git push origin REVIEWED_MASTER_SHA:refs/heads/release/macos-signing
+test "$(git ls-remote origin refs/heads/release/macos-signing | cut -f1)" = "$(git rev-parse REVIEWED_MASTER_SHA^{commit})"
+gh workflow run macos-signing-qualification.yml --ref release/macos-signing -f candidate_version=0.16.11
+```
+
+Qualification собирает нативные Intel (`macos-15-intel`) и ARM (`macos-15`)
+приложения. Tauri подписывает и notarizes оба кандидата. Gate проверяет каждый
+Mach-O slice, team, Developer ID authority, hardened runtime внешнего bundle,
+stapled ticket и Gatekeeper на приложениях, извлечённых из updater `.app.tar.gz`
+и readonly DMG. Actions artifacts содержат исходные archives и receipt с source
+SHA, workflow SHA, run/attempt и SHA-256. Workflow не создаёт tag/release,
+не меняет updater manifest/channel и не запускает hardware/paid audio проверки.
+Зелёная qualification не подтверждает качество audio или ручные attestations.
+
+Environment secrets: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
+`APPLE_TEAM_ID`, `APPLE_API_KEY_BASE64`, `APPLE_API_KEY_ID`, `APPLE_API_ISSUER`.
+CI декодирует `.p8` в защищённый временный файл. Tauri требует `APPLE_API_KEY`
+как **ID**, `APPLE_API_KEY_PATH` как абсолютный путь `.p8`, `APPLE_API_ISSUER`
+как UUID. Apple ID/password не используются; старые secrets не восстанавливать.
+Ключ updater `TAURI_SIGNING_PRIVATE_KEY` и public key остаются прежними.
+
+Локальная подписанная сборка: после загрузки разрешённого release environment
+используйте `bash scripts/build-signed-macos.sh --target aarch64-apple-darwin
+--bundles app,dmg` (команда одной строкой). Preflight нормализует локальный
+`APPLE_API_KEY`-путь через `APPLE_API_KEY_ID` в Tauri ID/path variables и
+отклоняет отсутствие API credentials или другой team до запуска Tauri.
+
+Для настоящего Release нужно отдельное разрешение публикации и dispatch
+`gh workflow run Release --ref release/macos-signing -f tag=v<VERSION>`.
+Tagged commit должен совпадать с trusted workflow `GITHUB_SHA`: проверка
+выполняется до draft/build effects и повторяется до signer checkout. Переданный
+optional audio gate продолжает проходить все существующие строгие проверки;
+его отсутствие не заменяется fabricated evidence. Старые tags, не содержащие
+новый signing/custody contract, нельзя восстановить простым dispatch с tag/master:
+используйте уже квалифицированные assets либо отдельно reviewed recovery contract,
+без восстановления старых credentials или unsigned fallback.
+
 ## 6. Опционально запустить macOS Audio Release Gate
 
 Этот gate не блокирует обычный релиз. Если решено приложить audio evidence, перед запуском нужно реально проверить:
@@ -240,6 +294,7 @@ Release workflow всегда повторяет keyless quality gates, созд
 
 ```bash
 gh workflow run Release \
+  --ref release/macos-signing \
   -f tag=v0.16.9
 
 gh run list --workflow Release --limit 3
@@ -253,6 +308,7 @@ gh run watch <RELEASE_RUN_ID>
 ```bash
 # Обычный релиз без optional audio evidence
 gh workflow run Release \
+  --ref release/macos-signing \
   -f tag=v0.16.9
 ```
 
@@ -318,10 +374,12 @@ gh workflow run "macOS Audio Release Gate" \
 
 # 5. Запустить Release workflow без audio evidence
 gh workflow run Release \
+  --ref release/macos-signing \
   -f tag="v$VERSION"
 
 # Либо передать успешный optional audio gate
 gh workflow run Release \
+  --ref release/macos-signing \
   -f tag="v$VERSION" \
   -f macos_audio_gate_run_id=<SUCCESSFUL_GATE_RUN_ID>
 ```
