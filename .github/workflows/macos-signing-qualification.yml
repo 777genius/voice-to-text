@@ -117,7 +117,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build signed notarized candidate without publication
-        run: bash scripts/build-signed-macos.sh --target ${{ matrix.target }} --bundles app,dmg
+        run: bash scripts/build-signed-macos.sh --verbose --target ${{ matrix.target }} --bundles app,dmg
 
       - name: Verify strict signatures and transported notarized artifacts
         run: bash scripts/ci/verify-macos-artifacts.sh "src-tauri/target/${{ matrix.target }}/release/bundle" macos-signing-custody.json
