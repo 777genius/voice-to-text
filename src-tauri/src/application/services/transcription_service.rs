@@ -3265,6 +3265,9 @@ impl TranscriptionService {
         // A close failure no longer leaves the old run owning an already destroyed
         // provider. The backend independently enforces its own admission/lease.
         if provider_release != crate::domain::ProviderRelease::Unconfirmed {
+            // Early finalize errors can bypass the inner status reset. A frozen
+            // release report also releases the service's provider phase.
+            *self.status.write().await = RecordingStatus::Idle;
             self.provider_run_id.store(0, Ordering::Release);
             self.last_finalized_run_id
                 .store(run_id as usize, Ordering::Release);
@@ -7357,8 +7360,10 @@ mod tests {
             .await
             .unwrap();
         // Cached finalization and a non-owner request must both leave B untouched.
+        let newer_status = service.get_status().await;
         service.finalize_provider_for_run(101).await.unwrap();
         assert!(service.finalize_provider_for_run(100).await.is_err());
+        assert_eq!(service.get_status().await, newer_status);
         assert_eq!(service.paused_continuation_snapshot().await, Some(newer));
         assert_eq!(
             service.provider_run_id.load(Ordering::Acquire),
@@ -10588,6 +10593,130 @@ mod tests {
             .await
             .expect("ready/live audio must be submitted without waiting for a packet to fill")
             .expect("test provider packet")
+    }
+
+    #[tokio::test]
+    async fn released_finalize_error_recovers_idle_and_preserves_pending_capture() {
+        let mut run = prepare_drain_test(DrainTestSend::Record, None).await;
+        connect_drain_test(&run).await;
+        let owner = ProcessorOwner {
+            token: run.token,
+            logical_run_id: run.token.run_id,
+            capture_run_id: run.service.capture_run_id.clone(),
+            capture_generation: run.service.capture_generation.clone(),
+            capture_meter_generation: run.service.capture_meter_generation.clone(),
+            provider_run_id: run.service.provider_run_id.clone(),
+        };
+        run.service
+            .stop_capture_for_run(run.token.run_id)
+            .await
+            .unwrap();
+        let next = run
+            .service
+            .prepare_recording_capture(
+                702,
+                SttConfig::default(),
+                Arc::new(|_, _| {}),
+                Arc::new(|_, _| {}),
+                Arc::new(|_| {}),
+            )
+            .await
+            .unwrap();
+        let next_ingress = run
+            .service
+            .prepared_capture
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .on_chunk
+            .clone();
+        next_ingress(AudioChunk::new(vec![321; 480], 16000, 1));
+        TranscriptionService::cleanup_failed_processor_session(
+            &run.service.status,
+            &run.service.audio_capture,
+            &run.service.stt_provider,
+            &owner,
+            "processor failure after capture release",
+        )
+        .await;
+        assert_eq!(run.service.get_status().await, RecordingStatus::Processing);
+        assert!(run.service.stt_provider.read().await.is_none());
+        assert_eq!(run.service.logical_provider_run_id(), run.token.run_id);
+
+        let error = run
+            .service
+            .finalize_provider_for_run(run.token.run_id)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Provider disappeared"));
+        let report = run
+            .service
+            .completed_report_for_run(run.token.run_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            report.provider_release,
+            crate::domain::ProviderRelease::Released
+        );
+        assert!(report.error.is_some());
+        assert_eq!(run.service.logical_provider_run_id(), 0);
+        assert_eq!(run.service.get_status().await, RecordingStatus::Idle);
+        assert!(run.service.capture_is_active_for_run(next.run_id).await);
+        assert_eq!(
+            run.service
+                .prepared_capture
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .token,
+            next
+        );
+        let frozen = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            run.service
+                .finalize_provider_for_run(run.token.run_id)
+                .await
+                .unwrap_err()
+                .to_string(),
+            error
+        );
+        assert_eq!(
+            serde_json::to_value(
+                run.service
+                    .completed_report_for_run(run.token.run_id)
+                    .await
+                    .unwrap()
+            )
+            .unwrap(),
+            frozen
+        );
+
+        run.service
+            .connect_prepared_recording(
+                next,
+                Arc::new(|_| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_, _| {}),
+                Arc::new(|_, _| {}),
+                Arc::new(|_| {}),
+                Arc::new(|_, _| {}),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(run.service.get_status().await, RecordingStatus::Recording);
+        assert_eq!(next_drain_test_packet(&mut run).await.data, vec![321; 480]);
+        assert!(run.service.finalize_provider_for_run(700).await.is_err());
+        assert_eq!(run.service.get_status().await, RecordingStatus::Recording);
+        run.service.stop_capture_for_run(next.run_id).await.unwrap();
+        run.service
+            .finalize_provider_for_run(next.run_id)
+            .await
+            .unwrap();
+        assert_eq!(run.service.get_status().await, RecordingStatus::Idle);
     }
 
     #[tokio::test(start_paused = true)]
